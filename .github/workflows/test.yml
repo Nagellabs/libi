@@ -69,19 +69,15 @@ jobs:
       # browsers) skip loudly when their inputs are absent — see
       # __tests__/integration/tracking/fixture-guard.ts. A rising SKIP count here
       # is expected; a rising FAIL count is not.
-      # Bounded workers and explicit timeouts, because this suite had never run
-      # anywhere but an 18-core/48GB workstation. The runner is 4 cores; 1203
-      # files across an unbounded pool starved it, and vitest's DEFAULTS
-      # (testTimeout 5s, hookTimeout 10s) are calibrated for a machine that
-      # fast. Fourteen test files spawn external binaries — ffmpeg among them —
-      # and those are the ones that failed.
-      #
-      # Note the defaults are also why the first run hung rather than failed: a
-      # 5s test timeout never fired, which means nothing was stuck INSIDE a test
-      # or hook. That points at a starved or dead worker whose file could never
-      # report, not at a slow assertion.
+      # Ran once with --maxWorkers=2 and 30s timeouts to test whether the
+      # runner's 4 cores were starving the suite. They are not: the same tests
+      # failed, in 96ms / 8ms / 7ms / 4ms. Deterministic assertion failures, not
+      # timeouts — and the constrained run cost 10+ extra minutes for nothing.
+      # Reverted. The real signal from that run was the runner reaping ORPHAN
+      # `sh` and `node` processes at the end, which fits a worker held open by a
+      # live child and explains why no test-level timeout ever fired.
       - name: Test
-        run: npm test -- --maxWorkers=2 --testTimeout=30000 --hookTimeout=30000
+        run: npm test
 
       # The suite must not mutate the checkout. This is the CI half of the
       # regression guard inside worktree-bootstrap-cli.test.ts: that test asserts
