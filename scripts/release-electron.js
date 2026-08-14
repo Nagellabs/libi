@@ -40,7 +40,7 @@
  *  10. publish the GitHub Release (tag v<version>, all four artifacts)
  */
 const { spawnSync } = require("node:child_process");
-const { existsSync, readFileSync } = require("node:fs");
+const { existsSync, readFileSync, rmSync } = require("node:fs");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
 
@@ -152,6 +152,26 @@ if (skipChecks) {
 }
 
 // ── 5–8. build chain ───────────────────────────────────────────────────────
+// Empty `release/` first. Step 9 proves the artifacts exist BY NAME and step 10
+// uploads those names to the GitHub Release — so a leftover from an earlier
+// build satisfies the check and ships instead. The names that matter are
+// version-free or reused across runs (`Libi-arm64.dmg`, `latest-mac.yml`,
+// `Libi-<v>-arm64-mac.zip`), which is exactly the set a re-run would inherit.
+//
+// Not hypothetical: on 2026-08-14, going into the first shell release, this
+// directory still held an Aug-13 `Libi-arm64.dmg`, an Aug-13 zip + blockmap and
+// an Aug-13 `latest-mac.yml` alongside Jul-29 Linux/Windows output. Had the
+// build produced nothing, every existence check would have passed, `stapler
+// validate` would have validated the OLD (already stapled) dmg, and users would
+// have been served a signed binary from a different commit.
+//
+// Deliberately after the preflight: a failed gate should not destroy artifacts.
+const releaseDir = path.join(ROOT, "release");
+if (existsSync(releaseDir)) {
+  rmSync(releaseDir, { recursive: true, force: true });
+  console.log("\n▶ cleared release/ — artifacts are verified by name, so leftovers could ship");
+}
+
 run("compile the shell", "npm", ["run", "compile:electron"]);
 run("release build (.next + manifest + dist-cli)", "node", ["scripts/next-build-release.js"]);
 run("runtime bundle from the registry", "node", [
