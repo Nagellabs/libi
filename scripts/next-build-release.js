@@ -10,8 +10,32 @@
 //
 // Cross-platform replacement for an inline `VAR=value next build`.
 const { spawnSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
 const { writeExternalsManifest } = require("./write-next-externals-manifest.js");
 const { buildCli, assertCliBundleFresh } = require("./build-cli.js");
+
+const ROOT = path.resolve(__dirname, "..");
+
+// Start from an empty `.next`. This is the RELEASE path — the artifact users
+// receive — so reproducibility beats incremental-build speed, and inheriting
+// whatever a previous `npm run dev` left behind is exactly how a release build
+// stops describing its own commit.
+//
+// 2026-08-14, the first real `npm publish`: `.next` held a Turbopack `cache/`
+// from Jul 28, a `dev/` from a dev-server run hours earlier, and partial output
+// from an interrupted build. `next build` then failed inside the Google-fonts
+// loader with a completely misdirecting error — "Can't resolve
+// '@vercel/turbopack-next/internal/font/google/font' … next/font/google queries
+// have exactly one entry", tracing to app/layout.tsx's Fraunces import. Nothing
+// was wrong with the font config; `rm -rf .next` fixed it outright.
+//
+// `npm run build` (the dev-facing production build) deliberately does NOT do
+// this — incremental is the right default there.
+if (fs.existsSync(path.join(ROOT, ".next"))) {
+  fs.rmSync(path.join(ROOT, ".next"), { recursive: true, force: true });
+  console.log("[next-build-release] cleared .next — release builds start cold, never from a dev cache.");
+}
 
 // Org + project slugs are committed defaults in next.config.ts, so the only
 // thing this build still needs for source-map upload is the secret auth token.

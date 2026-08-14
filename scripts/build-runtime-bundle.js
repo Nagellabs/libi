@@ -137,8 +137,8 @@ function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf-8"));
 }
 
-function repoPkg() {
-  return readJson(path.join(ROOT, "package.json"));
+function repoPkg(root = ROOT) {
+  return readJson(path.join(root, "package.json"));
 }
 
 function log(msg) {
@@ -912,9 +912,16 @@ async function buildRuntimeBundle({ fromRegistry = null, registry = null, outDir
  *     the property that lets a packaged boot verify instead of writing into
  *     the signed .app. Last, so it can never mask (5)-(8).
  *
+ * `treeRoot` is the tree checks (5) and (6) measure against; it defaults to this
+ * repo, which is what every caller wants. It exists so the tests can supply a
+ * fixture tree instead: reading the real repo made them pass or fail on whether
+ * the machine running them happened to have built, and an unbuilt tree stops
+ * verification at "working tree is not built" before the drift check it was
+ * meant to exercise ever runs.
+ *
  * Returns `{ ok, stamp }` / `{ ok: false, reason }`.
  */
-function verifyRuntimeBundle({ outDir } = {}) {
+function verifyRuntimeBundle({ outDir, treeRoot = ROOT } = {}) {
   const target = outDir ?? path.join(ROOT, OUT_DIRNAME);
   const stampPath = path.join(target, STAMP_NAME);
   let stamp;
@@ -923,7 +930,7 @@ function verifyRuntimeBundle({ outDir } = {}) {
   } catch {
     return { ok: false, reason: `no runtime bundle: ${stampPath} is missing or unreadable` };
   }
-  const pkg = repoPkg();
+  const pkg = repoPkg(treeRoot);
   if (stamp.package !== PKG_NAME) {
     return { ok: false, reason: `stamp names ${stamp.package}, expected ${PKG_NAME}` };
   }
@@ -987,13 +994,13 @@ function verifyRuntimeBundle({ outDir } = {}) {
         reason: `bundle is ${PKG_NAME}@${stamp.version}, package.json says ${pkg.version}`,
       };
     }
-    const treeCli = verifyCliBundle({ root: ROOT });
+    const treeCli = verifyCliBundle({ root: treeRoot });
     if (!treeCli.ok) {
       return { ok: false, reason: `dist-cli is stale: ${treeCli.reason}` };
     }
     let tree;
     try {
-      tree = readRuntimeFacts(ROOT);
+      tree = readRuntimeFacts(treeRoot);
     } catch (err) {
       return { ok: false, reason: `working tree is not built: ${err.message}` };
     }

@@ -29,7 +29,7 @@ interface VerifyResult {
   stamp?: Record<string, unknown>;
 }
 interface RuntimeBundleModule {
-  verifyRuntimeBundle: (opts: { outDir: string }) => VerifyResult;
+  verifyRuntimeBundle: (opts: { outDir: string; treeRoot?: string }) => VerifyResult;
   runtimeRootFor: (prefix: string) => string;
   electronAbi: () => string;
 }
@@ -301,12 +301,38 @@ describe("verifyRuntimeBundle — origin decides what freshness means", () => {
   });
 
   it("holds a working-tree bundle to the working tree as well", () => {
-    // Stamp and bundle agree with each other, and neither matches this repo —
-    // the case that says "packed from a tree that has since moved on".
+    // Stamp and bundle agree with each other, and neither matches the tree they
+    // claim to describe — the case that says "packed from a tree that has since
+    // moved on".
+    //
+    // `treeRoot` points at a fixture rather than at this repo ON PURPOSE.
+    // Reading the real working tree made the assertion depend on whether
+    // whoever ran the suite happened to have built: with no `.next/BUILD_ID`,
+    // verification stops one step earlier — "working tree is not built" — and
+    // never reaches the drift check this test exists to pin. That is exactly
+    // how it failed during the first `npm publish` (2026-08-14, after a
+    // `rm -rf .next`), and it would fail the same way on any fresh clone. No CI
+    // runs this suite, so "passes on my machine" was the only thing holding it
+    // up. The case below covers the not-built path deliberately instead.
     const prefix = makeBundle("working-tree");
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const treeRoot = runtimeRootFor(
+      makeBundle("working-tree", { runtime: { buildId: "A-TREE-THAT-MOVED-ON" } }),
+    );
+    const result = verifyRuntimeBundle({ outDir: prefix, treeRoot });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("different tree state");
+  });
+
+  it("reports an unbuilt working tree as such, rather than as drift", () => {
+    // The path the test above used to hit by accident. A tree with no
+    // `.next/BUILD_ID` cannot be compared to anything, and saying "different
+    // tree state" there would send someone hunting a drift that does not exist.
+    const prefix = makeBundle("working-tree");
+    const unbuilt = runtimeRootFor(makeBundle("working-tree"));
+    fs.rmSync(path.join(unbuilt, ".next", "BUILD_ID"), { force: true });
+    const result = verifyRuntimeBundle({ outDir: prefix, treeRoot: unbuilt });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("working tree is not built");
   });
 });
 
