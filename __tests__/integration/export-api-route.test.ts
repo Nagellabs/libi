@@ -25,13 +25,14 @@ import { createTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
-import { probe, audioMeanVolumeDb, hasFfmpeg, listTmpExportDirs, extractFrameRgba, sampleRegionMean } from "@/__tests__/helpers/media";
+import { probe, audioMeanVolumeDb, hasFfmpeg, FFMPEG_SKIP_REASON, listTmpExportDirs, extractFrameRgba, sampleRegionMean } from "@/__tests__/helpers/media";
 
 const FIXTURE_DIR = path.resolve(__dirname, "..", "helpers", "fixtures", "video");
 const VIDEO_FIXTURE = path.join(FIXTURE_DIR, "clip-red-3s.mp4");
 const LOGO_FIXTURE = path.join(FIXTURE_DIR, "logo-64.png");
 const TONE_FIXTURE = path.join(FIXTURE_DIR, "tone-5s.m4a");
 
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
 const skipIf = hasFfmpeg() ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;

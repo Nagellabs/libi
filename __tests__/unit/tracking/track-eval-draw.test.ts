@@ -23,12 +23,19 @@ describe("drawTrackBox", () => {
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, 100, 100);
+    // The bbox (and the sampled pixel) sit BELOW the 24px caption bar
+    // drawTrackBox always paints at the top. The bar holds white text in
+    // "16px sans-serif", and which exact pixels a glyph covers is a
+    // font-fallback decision the platform makes — on Linux CI a bright glyph
+    // landed on the old (20,10) probe and failed this test even though no
+    // box was drawn. Sampling at (20,40) still catches a regression (a
+    // wrongly-drawn stroke at y=40 would cover it) without betting on fonts.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    drawTrackBox(ctx as any, { t: 0, x: 10, y: 10, w: 20, h: 20, confidence: 0, visible: false }, {
+    drawTrackBox(ctx as any, { t: 0, x: 10, y: 40, w: 20, h: 20, confidence: 0, visible: false }, {
       segmentLabel: "skip", segmentStatus: "skipped",
     });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const px = (ctx as any).getImageData(20, 10, 1, 1).data;
+    const px = (ctx as any).getImageData(20, 40, 1, 1).data;
     expect(px[0]).toBeLessThan(50);
   });
 });

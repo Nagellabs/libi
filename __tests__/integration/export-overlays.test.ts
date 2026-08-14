@@ -5,24 +5,15 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
-import { execSync } from "child_process";
 import { createTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
 import { probeDuration } from "@/__tests__/helpers/ffprobe";
+import { hasFfmpeg, hasDrawtext, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(__dirname, "..", "helpers", "fixtures", "tiny.mp4");
-function hasFfmpeg(): boolean {
-  try { execSync("ffmpeg -version", { stdio: "ignore", timeout: 2000 }); return true; }
-  catch { return false; }
-}
-function hasDrawtext(): boolean {
-  try {
-    const out = execSync("ffmpeg -hide_banner -filters", { timeout: 3000 }).toString();
-    return /\bdrawtext\b/.test(out);
-  } catch { return false; }
-}
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
 const skipIf = hasFfmpeg() ? describe : describe.skip;
 const skipIfNoDrawtext = hasDrawtext() ? it : it.skip;
 

@@ -2,8 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, isAbsolute } from "node:path";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 
-describe("fake-elevenlabs placeholders", () => {
+// writeAudioPlaceholder synthesizes a REAL sine-wave WAV through ffmpeg.
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+
+describe.skipIf(!hasFfmpeg())("fake-elevenlabs placeholders", () => {
   let home: string;
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "libi-el-ph-")); process.env.LIBI_HOME = home; });
   afterEach(() => { delete process.env.LIBI_HOME; rmSync(home, { recursive: true, force: true }); });

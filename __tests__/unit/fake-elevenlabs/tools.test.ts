@@ -2,6 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
+
+// The audio-producing tools write a REAL sine-wave WAV via ffmpeg
+// (writeAudioPlaceholder → runFfmpeg). Skip only those tests when ffmpeg is
+// absent; validation/error paths never spawn it and always run.
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+const itWithFfmpeg = it.skipIf(!hasFfmpeg());
 
 async function load() { return import("@/mcp/dev/fake-elevenlabs/tools"); }
 function readCalls(home: string) {
@@ -15,7 +22,7 @@ describe("fake-elevenlabs tools", () => {
   beforeEach(() => { home = mkdtempSync(join(tmpdir(), "libi-el-tools-")); process.env.LIBI_HOME = home; });
   afterEach(() => { delete process.env.LIBI_HOME; rmSync(home, { recursive: true, force: true }); });
 
-  it("text_to_speech returns faithful prose + records effective model_id", async () => {
+  itWithFfmpeg("text_to_speech returns faithful prose + records effective model_id", async () => {
     const t = await load();
     const res = await t.text_to_speech({ text: "Hello there", voice_id: "v123" });
     const text = res.content[0].text;
@@ -28,7 +35,7 @@ describe("fake-elevenlabs tools", () => {
     expect(call.model_id).toBe("eleven_multilingual_v2"); // effective default
   });
 
-  it("text_to_speech with no voice uses DEFAULT_VOICE_ID", async () => {
+  itWithFfmpeg("text_to_speech with no voice uses DEFAULT_VOICE_ID", async () => {
     const t = await load();
     const res = await t.text_to_speech({ text: "Hi" });
     expect(res.content[0].text).toMatch(/Voice used: cgSgspJ2msm6clMCkdW9$/);
@@ -41,7 +48,7 @@ describe("fake-elevenlabs tools", () => {
     expect(dual.error).toBe("voice_id and voice_name cannot both be provided.");
   });
 
-  it("text_to_sound_effects returns default success message; validates duration", async () => {
+  itWithFfmpeg("text_to_sound_effects returns default success message; validates duration", async () => {
     const t = await load();
     const ok = await t.text_to_sound_effects({ text: "whoosh", duration_seconds: 2 });
     expect(ok.content[0].text).toMatch(/^Success\. File saved as: .+\.wav$/);
@@ -49,7 +56,7 @@ describe("fake-elevenlabs tools", () => {
       .toBe("Duration must be between 0.5 and 5 seconds");
   });
 
-  it("compose_music requires exactly one of prompt/plan", async () => {
+  itWithFfmpeg("compose_music requires exactly one of prompt/plan", async () => {
     const t = await load();
     const ok = await t.compose_music({ prompt: "lofi", music_length_ms: 8000 });
     expect(ok.content[0].text).toMatch(/^Success\. File saved as: .+\.wav$/);
@@ -57,7 +64,7 @@ describe("fake-elevenlabs tools", () => {
       .toBe("Either prompt or composition_plan must be provided. Prompt: None");
   });
 
-  it("isolate_audio reads input, errors on missing file", async () => {
+  itWithFfmpeg("isolate_audio reads input, errors on missing file", async () => {
     const t = await load();
     const input = join(home, "in.wav");
     writeFileSync(input, "RIFFxxxx");

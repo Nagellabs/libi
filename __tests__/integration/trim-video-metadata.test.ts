@@ -9,6 +9,7 @@ import { files, pieces } from "@/lib/db/schema";
 import { getDb } from "@/lib/db/client";
 import { eq } from "drizzle-orm";
 import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 import { getLibiStorageDir } from "@/lib/libi-home";
 
 /**
@@ -16,7 +17,9 @@ import { getLibiStorageDir } from "@/lib/libi-home";
  * mediaWidth / mediaHeight on the new files row so libi.add_overlay
  * doesn't reject it with "has no duration metadata - re-upload the file".
  */
-describe("trimVideo persists media metadata on the output file row", () => {
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+
+describe.skipIf(!hasFfmpeg())("trimVideo persists media metadata on the output file row", () => {
   const pieceId = "p1";
   const sourceFileId = "src-1";
 

@@ -47,23 +47,40 @@ jobs:
         run: npm ci --ignore-scripts
 
       # better-sqlite3 ships no prebuild for every runner/Node pairing, and
-      # `npm ci --ignore-scripts` leaves it unbuilt regardless. Build it for the
-      # ABI this job actually runs.
-      - name: Build better-sqlite3 for this Node
-        run: npm rebuild better-sqlite3
+      # `npm ci --ignore-scripts` leaves it unbuilt regardless. node-pty is in
+      # the same boat: its install script is what compiles pty.node, so with
+      # scripts skipped the ws-origin/ws-port suites fail to even load
+      # ("Failed to load native module: pty.node"). Build both for the ABI
+      # this job actually runs.
+      - name: Build native modules for this Node
+        run: npm rebuild better-sqlite3 node-pty
 
       - name: Lint
         run: npm run lint
 
-      # TEMPORARY (2026-08-14): the first CI run found the fake-elevenlabs
-      # suites failing and hanging on Linux, and the hang meant vitest never
-      # printed WHY the others failed. Running just that directory first, with
-      # its own timeout, produces a complete, readable failure block instead of
-      # a truncated log. Delete this step once those suites are green.
-      - name: Diagnose fake-elevenlabs (Linux-only failures under investigation)
-        timeout-minutes: 4
-        continue-on-error: true
-        run: npx vitest run __tests__/unit/fake-elevenlabs --reporter=verbose
+      # The ubuntu-latest image ships WITHOUT ffmpeg (`/bin/sh: 1: ffmpeg: not
+      # found` in run 31818058607). In production, Category A install puts
+      # ffmpeg in `~/.libi/bin`; tests point LIBI_HOME at empty temp dirs, so
+      # `resolveBin` (lib/ffmpeg/exec.ts) falls back to `ffmpeg` on PATH —
+      # present on every dev macOS, absent here. That absence, not cross-file
+      # pollution, is what failed the 6 fake-elevenlabs tests that spawn real
+      # ffmpeg (writeAudioPlaceholder).
+      #
+      # It cost a day to find, for a reason worth remembering: a temporary
+      # diagnostic step ran that directory in isolation and carried
+      # `continue-on-error: true`, so the STEP reported success while the
+      # command inside it failed with these very errors. Reading the step's
+      # conclusion instead of its output turned "ffmpeg is missing" into a
+      # hunt for cross-file pollution that did not exist. Read the log.
+      #
+      # Every real-ffmpeg test also carries a hasFfmpeg() skip guard
+      # (__tests__/helpers/media.ts), so a clone without ffmpeg skips loudly
+      # instead of erroring. Do NOT remove this install on the theory that the
+      # guard covers it: without ffmpeg here those tests would silently SKIP in
+      # CI and their coverage would be gone. Guard = correct everywhere;
+      # install = the tests actually run where it matters.
+      - name: Install ffmpeg (not in the runner image; real-ffmpeg tests must run here, not skip)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       # Fixture-dependent suites (tracking footage, MediaPipe models, Playwright
       # browsers) skip loudly when their inputs are absent — see

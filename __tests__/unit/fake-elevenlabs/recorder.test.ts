@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -30,7 +30,19 @@ describe("fake-elevenlabs recorder", () => {
 
   it("never throws even if the dir is unwritable", async () => {
     const { recordCall } = await import("@/mcp/dev/fake-elevenlabs/recorder");
-    process.env.LIBI_HOME = "/proc/nonexistent-unwritable";
+    // An unwritable home whose failure mode is a fast ENOTDIR on every
+    // platform: a path that routes THROUGH a regular file. The previous
+    // choice, "/proc/nonexistent-unwritable", hung the entire suite on Linux
+    // CI: procfs answers mkdir in its root with ENOENT, which Node's
+    // `mkdirSync(..., { recursive: true })` treats as "create the parent
+    // first" — and since the parent (/proc) already exists, the native
+    // retry walk spins forever. A synchronous native loop services no
+    // timers and no signals, so the vitest fork burned CPU until the CI job
+    // timeout, the file never reported, and no failure output was ever
+    // printed for the whole run.
+    const fileAsDir = join(home, "not-a-dir");
+    writeFileSync(fileAsDir, "");
+    process.env.LIBI_HOME = join(fileAsDir, "nested");
     expect(() => recordCall({ tool: "compose_music", prompt: "x" })).not.toThrow();
   });
 });

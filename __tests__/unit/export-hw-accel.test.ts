@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { pickEncoder, parseAvailableEncoders } from "@/lib/export/hw-accel";
+import {
+  pickEncoder,
+  parseAvailableEncoders,
+  buildEncoderProbeArgs,
+  HW_ENCODER_CANDIDATES,
+} from "@/lib/export/hw-accel";
 
 describe("parseAvailableEncoders", () => {
   it("extracts encoder names from ffmpeg -encoders output", () => {
@@ -34,5 +39,34 @@ describe("pickEncoder", () => {
 
   it("returns null when even libx264 is missing", () => {
     expect(pickEncoder("h264", new Set(), "darwin")).toBe(null);
+  });
+});
+
+describe("hardware-encoder usability probe", () => {
+  // Every hardware encoder pickEncoder can prefer must be in the probe list —
+  // a hardware name that is preferred but never probed reintroduces the
+  // GPU-less-Linux failure (h264_nvenc listed by apt ffmpeg, unusable without
+  // libcuda) that broke every ffmpeg-overlay export on such machines.
+  it("probes every hardware encoder pickEncoder can prefer", () => {
+    for (const target of ["h264", "hevc"] as const) {
+      for (const platform of ["darwin", "linux", "win32"] as const) {
+        // With every candidate available, whatever wins that isn't a lib*
+        // software encoder must be a probed candidate.
+        const all = new Set([...HW_ENCODER_CANDIDATES, "libx264", "libx265"]);
+        const winner = pickEncoder(target, all, platform);
+        if (winner && !winner.startsWith("lib")) {
+          expect(HW_ENCODER_CANDIDATES).toContain(winner);
+        }
+      }
+    }
+  });
+
+  it("probe encodes one tiny synthetic frame to the null muxer with the candidate encoder", () => {
+    const args = buildEncoderProbeArgs("h264_nvenc");
+    expect(args).toContain("h264_nvenc");
+    expect(args.join(" ")).toContain("-frames:v 1");
+    expect(args.join(" ")).toContain("-f null");
+    // lavfi source, so the probe needs no input media on disk.
+    expect(args.join(" ")).toContain("-f lavfi");
   });
 });

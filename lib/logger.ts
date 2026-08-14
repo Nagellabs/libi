@@ -89,7 +89,12 @@ const importTimeLogPath = deferLogPathResolution
 let destination: ReturnType<typeof pino.destination> | null = null;
 
 function openDestination(): ReturnType<typeof pino.destination> {
-  if (deferLogPathResolution) ensureLibiDirs();
+  // Always re-assert the directory tree, not only in the Electron-main
+  // deferred case: the first write can happen long after import, and the log
+  // dir may have been deleted in between (tests point LIBI_HOME at temp dirs
+  // they remove; a user can clear ~/.libi/logs). mkdirSync is a no-op when it
+  // already exists.
+  ensureLibiDirs();
   const logPath = importTimeLogPath ?? path.join(getLibiLogDir(), "libi.log");
 
   // Rotate: truncate if over 1MB
@@ -98,15 +103,25 @@ function openDestination(): ReturnType<typeof pino.destination> {
     if (stat.size > 1_000_000) fs.truncateSync(logPath, 0);
   } catch { /* doesn't exist yet */ }
 
-  // `sync: false` batches writes via setImmediate so we don't block the
-  // event loop on every log. The file is still flushed at exit.
-  const dest = pino.destination({ dest: logPath, append: true, sync: false, mkdir: true });
+  // Open the fd SYNCHRONOUSLY, here, and hand it to SonicBoom — never let
+  // SonicBoom open a path itself. With `{ dest: path, sync: false }` its
+  // mkdir+open runs asynchronously and RACES the caller's environment: if the
+  // directory is deleted before that open lands (vitest workers whose tests
+  // point LIBI_HOME at a temp dir and delete it in afterEach), the stream is
+  // left permanently latched on fd -1, every later write throws
+  // ERR_OUT_OF_RANGE from fs.write, and pino's registered exit hooks operate
+  // on a stream that can never become ready. A synchronous openSync either
+  // succeeds — after which writes to the already-open fd stay valid even if
+  // the directory is later removed (POSIX) — or throws right here, which the
+  // getDestination() latch below turns into "log to stderr once, drop lines".
+  // `sync: false` still batches the actual writes off the hot path.
+  const fd = fs.openSync(logPath, "a");
+  const dest = pino.destination({ dest: fd, sync: false });
 
-  // The async destination opens its fd off the main thread. If that open —
-  // or any later write — fails (log dir deleted, disk full, EMFILE), SonicBoom
-  // emits 'error'; with no listener that becomes an uncaughtException and
-  // takes the whole process down. Logging must never kill the server: report
-  // to stderr and keep running (subsequent log lines are dropped).
+  // If any later write fails (fd revoked, disk full), SonicBoom emits
+  // 'error'; with no listener that becomes an uncaughtException and takes the
+  // whole process down. Logging must never kill the server: report to stderr
+  // and keep running (subsequent log lines are dropped).
   dest.on("error", (err: Error) => {
     try {
       process.stderr.write(`[libi-logger] log destination error (logs dropped): ${err?.message ?? err}\n`);

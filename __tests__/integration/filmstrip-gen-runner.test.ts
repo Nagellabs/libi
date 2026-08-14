@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 import { getLibiStorageDir } from "@/lib/libi-home";
 import { getDb } from "@/lib/db/client";
 import { files, pieces } from "@/lib/db/schema/sqlite";
@@ -38,7 +39,9 @@ function fakeCtx<P>(params: P): JobContext<P> {
   };
 }
 
-describe("filmstrip_gen runner (real ffmpeg)", () => {
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+
+describe.skipIf(!hasFfmpeg())("filmstrip_gen runner (real ffmpeg)", () => {
   beforeEach(() => {
     createTestDb();
     createTempStorageDir();

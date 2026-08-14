@@ -124,6 +124,40 @@ describe("log destination in every other process", () => {
     expect(fs.existsSync(path.join(homeB, "logs", "libi.log"))).toBe(false);
   });
 
+  it("recreates a log dir deleted between import and first write — the open is synchronous, never a latent async race", async () => {
+    // Regression for the CI suite hang (2026-08-14): the destination used to
+    // be opened by SonicBoom asynchronously (`{ dest: path, sync: false,
+    // mkdir: true }`), so a directory deleted after `pino.destination()`
+    // returned but before the async mkdir+open landed left the stream latched
+    // on fd -1 forever — every later write threw ERR_OUT_OF_RANGE and pino's
+    // exit hooks ran against a stream that could never become ready. Vitest
+    // workers hit exactly that window (tests point LIBI_HOME at a temp dir
+    // and delete it in afterEach) and wedged instead of exiting.
+    // `openDestination()` now re-runs ensureLibiDirs() and opens the fd with
+    // openSync BEFORE handing it to SonicBoom: either the write lands, or the
+    // failure is synchronous and latched. No in-between state exists.
+    process.env.LIBI_HOME = homeA;
+    const { serverLogger } = await import("@/lib/logger");
+
+    // Import already created homeA/logs; simulate the deletion window before
+    // the first write opens the destination.
+    fs.rmSync(homeA, { recursive: true, force: true });
+
+    expect(() => serverLogger.info({ tag: "test", op: "race_first" }, "first")).not.toThrow();
+    expect(await readLogEventually(homeA), "write after dir deletion must land").toContain(
+      "race_first",
+    );
+
+    expect(() => serverLogger.info({ tag: "test", op: "race_second" }, "second")).not.toThrow();
+    const deadline = Date.now() + 3000;
+    let body = "";
+    while (Date.now() < deadline && !body.includes("race_second")) {
+      body = await readLogEventually(homeA);
+      if (!body.includes("race_second")) await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(body).toContain("race_second");
+  });
+
   it("never throws out of a log call when its destination is gone", async () => {
     process.env.LIBI_HOME = homeA;
     const { serverLogger } = await import("@/lib/logger");

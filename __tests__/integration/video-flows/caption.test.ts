@@ -10,9 +10,16 @@
  *   - No stray libi-export-* tmp dirs remain in os.tmpdir() after run.
  *
  * Skipped when ffmpeg lacks the drawtext filter (common on homebrew builds
- * compiled without libfreetype). Thresholds are calibrated for a 48px
- * "HELLO" center-aligned across a 320×60 band on solid red — see the plan
- * doc for the brightness-delta derivation.
+ * compiled without libfreetype). The caption pins its font to the repo's
+ * Geist-Regular.ttf through the real `fontFileId` → `fontfile=` path, so
+ * glyph coverage — and therefore the brightness assertion — is deterministic
+ * across platforms instead of riding on whatever face the OS substitutes
+ * for "sans" (macOS's substitute measured ≥ +60 over the red base; Linux's
+ * DejaVu measured +42.6 and failed the old macOS-calibrated +60 bound).
+ * Geist 48px "HELLO" centered in the 320×60 band rasterizes to ~10.1% glyph
+ * coverage ⇒ a band-mean sum-of-channels delta of ≈ +43; no text at all
+ * measures ≈ +0 within codec noise. The +30 bound sits 30% under the pinned
+ * signal and an order of magnitude above the noise.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
@@ -28,6 +35,7 @@ import {
   listTmpExportDirs,
   hasFfmpeg,
   hasDrawtext,
+  FFMPEG_SKIP_REASON,
 } from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(
@@ -40,6 +48,7 @@ const FIXTURE = path.resolve(
   "clip-red-3s.mp4",
 );
 
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
 const skipIf = hasFfmpeg() && hasDrawtext() ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;
@@ -50,10 +59,23 @@ vi.mock("@/lib/storage", () => ({ getStorage: async () => new LocalFileStorage(t
 import { FfmpegOverlayBackend } from "@/lib/export/backends/ffmpeg-overlay";
 import type { Composition } from "@/lib/engine/types";
 
+const FONT_FIXTURE = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "..",
+  "public",
+  "fonts",
+  "3d",
+  "Geist-Regular.ttf",
+);
+
 skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
   const PIECE_ID = "p-caption";
   const FILE_ID = "f-caption";
+  const FONT_ID = "f-caption-font";
   const SRC_NAME = "src.mp4";
+  const FONT_NAME = "Geist-Regular.ttf";
 
   beforeEach(() => {
     tempDir = createTempStorageDir();
@@ -61,7 +83,9 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
     seedPiece(testDb, { id: PIECE_ID });
     fs.mkdirSync(path.join(tempDir, PIECE_ID), { recursive: true });
     fs.copyFileSync(FIXTURE, path.join(tempDir, PIECE_ID, SRC_NAME));
+    fs.copyFileSync(FONT_FIXTURE, path.join(tempDir, PIECE_ID, FONT_NAME));
     const stat = fs.statSync(path.join(tempDir, PIECE_ID, SRC_NAME));
+    const fontStat = fs.statSync(path.join(tempDir, PIECE_ID, FONT_NAME));
     testDb
       .insert(files)
       .values({
@@ -74,6 +98,20 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
         storagePath: `${PIECE_ID}/${SRC_NAME}`,
         contentType: "video/mp4",
         size: stat.size,
+      })
+      .run();
+    testDb
+      .insert(files)
+      .values({
+        id: FONT_ID,
+        pieceId: PIECE_ID,
+        filename: FONT_NAME,
+        name: FONT_NAME,
+        description: "",
+        type: "font",
+        storagePath: `${PIECE_ID}/${FONT_NAME}`,
+        contentType: "font/ttf",
+        size: fontStat.size,
       })
       .run();
   });
@@ -114,7 +152,11 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
           kind: "text",
           content: "HELLO",
           color: "#ffffff",
+          // Size comes from the shorthand; the FACE is pinned via fontFileId
+          // (drawtext `fontfile=`) so rasterization doesn't depend on the
+          // platform's "sans" substitution — see the header comment.
           font: "48px sans",
+          fontFileId: FONT_ID,
           align: "center",
           opacity: 1,
           rect: { x: 0, y: 0, width: 320, height: 60 },
@@ -153,12 +195,15 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
     const outBottom = sampleRegionMean(outFrame, bottomRect);
 
     // Overlay region brightened meaningfully — white glyphs on red base.
-    // The red fixture's sum-of-channels ≈ 254; adding white text pushes the
-    // mean up by ≥60 depending on glyph coverage. See plan doc for the
-    // derivation — +60 is a conservative lower bound.
+    // The face is pinned (Geist via fontFileId), so the expected delta is a
+    // property of THIS repo, not of the host OS: 48px "HELLO" centered in
+    // the 320×60 band covers ~10.1% of it, lifting the band-mean
+    // sum-of-channels by ≈ +43 over the ≈254 red base. No text measures
+    // ≈ +0 within codec noise. +30 = pinned signal minus 30% headroom for
+    // rasterizer/encoder differences, still 10× above the noise floor.
     const inTopSum = inTop[0] + inTop[1] + inTop[2];
     const outTopSum = outTop[0] + outTop[1] + outTop[2];
-    expect(outTopSum).toBeGreaterThan(inTopSum + 60);
+    expect(outTopSum).toBeGreaterThan(inTopSum + 30);
 
     // Bottom band unchanged — per-channel delta below 10 proves the overlay
     // is spatially contained to its declared rect.

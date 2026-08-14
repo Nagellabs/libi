@@ -1,4 +1,5 @@
-import { execFile, execSync } from "child_process";
+import { execFile, execFileSync } from "child_process";
+import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
@@ -156,19 +157,42 @@ export async function listTmpExportDirs(): Promise<string[]> {
   return entries.filter((e) => e.startsWith("libi-export-")).map((e) => path.join(os.tmpdir(), e));
 }
 
-/** Cheap on-demand guard — matches the existing skip pattern in integration tests. */
+/**
+ * Skip guard for tests that shell out to REAL ffmpeg. Resolves the binary the
+ * same way the code under test does — `resolveFfmpegPath()` checks
+ * `<LIBI_HOME>/bin/ffmpeg` (Category A provisioning) before falling back to
+ * PATH — so a dev whose only ffmpeg lives under `~/.libi/bin` is not falsely
+ * skipped, and a machine with neither skips loudly instead of failing with
+ * `spawn ffmpeg ENOENT` (which is what every ubuntu CI runner did until the
+ * workflow started installing ffmpeg — see .github/workflows/test.yml).
+ *
+ * Consumers follow the fixture-guard pattern:
+ *   if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+ *   describe.skipIf(!hasFfmpeg())(…)
+ */
+let ffmpegPresent: boolean | null = null;
+
 export function hasFfmpeg(): boolean {
+  if (ffmpegPresent !== null) return ffmpegPresent;
   try {
-    execSync("ffmpeg -version", { stdio: "ignore", timeout: 2000 });
-    return true;
+    execFileSync(resolveFfmpegPath(), ["-version"], { stdio: "ignore", timeout: 2000 });
+    ffmpegPresent = true;
   } catch {
-    return false;
+    ffmpegPresent = false;
   }
+  return ffmpegPresent;
 }
+
+export const FFMPEG_SKIP_REASON =
+  `ffmpeg unavailable (resolved to "${resolveFfmpegPath()}" via <LIBI_HOME>/bin, then PATH) — ` +
+  "install it (brew install ffmpeg / apt-get install ffmpeg) or run libi once so " +
+  "Category A provisioning fetches it";
 
 export function hasDrawtext(): boolean {
   try {
-    const out = execSync("ffmpeg -hide_banner -filters", { timeout: 3000 }).toString();
+    const out = execFileSync(resolveFfmpegPath(), ["-hide_banner", "-filters"], {
+      timeout: 3000,
+    }).toString();
     return /\bdrawtext\b/.test(out);
   } catch {
     return false;
