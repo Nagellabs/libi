@@ -6,6 +6,28 @@
 conventions, and the Electron/CDP workflow. Keep it short; add to it rather than to this
 file. Everything below applies only to Claude Code.
 
+## Never work directly on `main`
+
+Branch first, always. `main` is what the public sees and what `release:electron`
+verifies against — it is not a scratchpad.
+
+- Start any change on its own branch, however small.
+- When the work is finished and verified, **squash-merge** it into `main` as ONE
+  commit, then push. One change, one commit, one message that explains it.
+- Delete the branch afterwards.
+
+Squashing matters beyond tidiness: it is also what gives the merged commit a
+genuine timestamp at merge time, which the weekend-publishing policy depends on.
+
+The one exception is a change the release path structurally requires on `main`
+before it can run — `release:electron` refuses unless `HEAD` is an ancestor of
+`origin/main`. Say so out loud when taking it.
+
+This rule exists because the 2026-08-14 release went straight to `main` for eight
+commits, including an experiment pushed on a theory that was disproven twenty
+minutes later and reverted in the next commit. Both are permanent public history
+now. A branch would have made that one reviewable commit, or none.
+
 ## Skills and commands
 
 - `/feature-testing` (`.claude/skills/feature-testing/`) — the test-mode playbook. Force it
