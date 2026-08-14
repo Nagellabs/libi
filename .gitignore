@@ -105,3 +105,8 @@ skill-eval/runs/
 
 # Ad-hoc QA screenshots — evidence for a session, never repo content.
 /sbqa-*.png
+
+# Which commit the release gates last passed on (scripts/lib/gate-provenance.js).
+# Machine-local proof, written by release:npm and read by
+# `release:electron --skip-checks`; meaningless in anyone else's checkout.
+/.libi-release-gates.json

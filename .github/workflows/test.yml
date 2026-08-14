@@ -1,0 +1,75 @@
+name: Tests
+
+# Until 2026-08-14 nothing in CI ran the suite — `license-check.yml` was the only
+# workflow. Two defects survived on exactly that gap, both found by hand during
+# the first public release:
+#
+#   * `runtime-bundle-stamp.test.ts` read the real repo to decide its assertion,
+#     so it passed only on a machine that happened to have run a build. On a
+#     fresh clone — which is what this workflow is — it always failed.
+#   * an integration test cut a `git worktree` from the checkout itself, so every
+#     `npm test` rewrote a TRACKED file with absolute machine paths and hid the
+#     change behind git's skip-worktree bit.
+#
+# Both are fixed. This exists so the next one is caught by a machine that has
+# never built anything, rather than by someone reading a release log.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Unit + integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `postinstall` runs `electron-builder install-app-deps`, which rebuilds
+      # better-sqlite3 against ELECTRON's ABI — the exact state that SIGKILLs
+      # vitest workers (AGENTS.md → Testing). `pretest` repairs it via
+      # ensure-native-modules.js, so let the install skip scripts and leave the
+      # native module to that.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # better-sqlite3 ships no prebuild for every runner/Node pairing, and
+      # `npm ci --ignore-scripts` leaves it unbuilt regardless. Build it for the
+      # ABI this job actually runs.
+      - name: Build better-sqlite3 for this Node
+        run: npm rebuild better-sqlite3
+
+      - name: Lint
+        run: npm run lint
+
+      # Fixture-dependent suites (tracking footage, MediaPipe models, Playwright
+      # browsers) skip loudly when their inputs are absent — see
+      # __tests__/integration/tracking/fixture-guard.ts. A rising SKIP count here
+      # is expected; a rising FAIL count is not.
+      - name: Test
+        run: npm test
+
+      # The suite must not mutate the checkout. This is the CI half of the
+      # regression guard inside worktree-bootstrap-cli.test.ts: that test asserts
+      # its own isolation, this catches any OTHER test that starts writing to the
+      # repo — including changes hidden by skip-worktree, which `git status`
+      # cannot see.
+      - name: Assert the suite left the checkout clean
+        run: |
+          dirty="$(git status --porcelain)"
+          flags="$(git ls-files -v | grep -v '^H ' || true)"
+          if [ -n "$dirty" ] || [ -n "$flags" ]; then
+            echo "::error::the test suite modified the working tree or the index"
+            [ -n "$dirty" ] && { echo "--- git status ---"; echo "$dirty"; }
+            [ -n "$flags" ] && { echo "--- non-H index flags (skip-worktree/assume-unchanged) ---"; echo "$flags"; }
+            git diff -- . | head -100
+            exit 1
+          fi
+          echo "checkout clean, no index flags set"

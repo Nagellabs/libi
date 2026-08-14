@@ -11,6 +11,7 @@
 // Cross-platform replacement for an inline `VAR=value next build`.
 const { spawnSync } = require("node:child_process");
 const fs = require("node:fs");
+const { readFileSync } = fs;
 const path = require("node:path");
 const { writeExternalsManifest } = require("./write-next-externals-manifest.js");
 const { buildCli, assertCliBundleFresh } = require("./build-cli.js");
@@ -42,6 +43,28 @@ if (fs.existsSync(path.join(ROOT, ".next"))) {
 // If it's missing we DON'T fail the build (capture still works) — but we emit a
 // loud warning so whoever runs the release build on this machine remembers to
 // set it; otherwise production stack traces stay minified in Sentry.
+//
+// Read `.env.sentry-build-plugin` before deciding what to print. The Sentry
+// build plugin loads that file ITSELF, so judging by `process.env` alone made
+// this message untrue in both directions — it could announce "DISABLED" while
+// maps uploaded fine, or the reverse. On 2026-08-14 the truth had to be
+// established afterwards by querying Sentry's artifact-bundle API, and even
+// then the timestamps were ambiguous. A release log that cannot be trusted
+// about its own artifacts is worse than no log.
+if (!process.env.SENTRY_AUTH_TOKEN) {
+  try {
+    const envFile = readFileSync(path.join(ROOT, ".env.sentry-build-plugin"), "utf-8");
+    const match = envFile.match(/^\s*SENTRY_AUTH_TOKEN\s*=\s*(.+?)\s*$/m);
+    if (match && match[1]) {
+      process.env.SENTRY_AUTH_TOKEN = match[1];
+      console.log(
+        "[next-build-release] SENTRY_AUTH_TOKEN read from .env.sentry-build-plugin (the file the plugin itself loads).",
+      );
+    }
+  } catch {
+    // Absent is the normal case outside a release machine — say nothing.
+  }
+}
 if (process.env.SENTRY_AUTH_TOKEN) {
   console.log(
     "[next-build-release] Sentry source-map upload: ENABLED (maps will upload, tagged by release).",

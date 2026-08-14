@@ -46,6 +46,7 @@ const { existsSync, readFileSync, rmSync, statSync, writeFileSync } = require("n
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
+const { gatesPassedOnHead, recordGatesPassed } = require("./lib/gate-provenance");
 
 const ROOT = path.resolve(__dirname, "..");
 const skipChecks = process.argv.includes("--skip-checks");
@@ -143,7 +144,19 @@ console.log(`\n📦 building the shell around published @nagellabs/libi@${versio
 
 // ── 4. gates ───────────────────────────────────────────────────────────────
 if (skipChecks) {
-  console.log("⚠  --skip-checks: trusting that tests/lint/licences ran on this exact commit.");
+  // This used to print "trusting that tests/lint/licences ran on this exact
+  // commit" and verify nothing — a claim in the release log that no one could
+  // check. `release:npm` now records the commit its gates passed on, so the
+  // claim is testable; refuse when it does not hold.
+  const provenance = gatesPassedOnHead();
+  if (!provenance.ok) {
+    console.error(`❌ --skip-checks cannot be honoured: ${provenance.reason}`);
+    process.exit(1);
+  }
+  console.log(
+    `✔ --skip-checks: gates [${provenance.record.gates.join(", ")}] passed on this exact\n` +
+      `  commit at ${provenance.record.at}.`,
+  );
 } else {
   run("tests", "npm", ["test"]);
   run("lint", "npm", ["run", "lint"]);
@@ -152,6 +165,7 @@ if (skipChecks) {
   // this chain calls compile:electron + electron-builder directly, so the
   // `prebuild:electron` hook that normally runs this check never fires here.
   run("notices freshness", "npm", ["run", "notices:check"]);
+  recordGatesPassed(["test", "lint", "check:licenses", "notices:check"]);
 }
 
 // ── 5–8. build chain ───────────────────────────────────────────────────────
@@ -271,6 +285,19 @@ if (stapled.status !== 0) {
   }
   writeFileSync(feedPath, after);
   console.log("[release] re-digested the stapled dmg in latest-mac.yml");
+
+  // The dmg's blockmap was generated from the PRE-staple bytes, so it now
+  // describes a file that no longer exists. It is not in `feedArtifacts` and is
+  // not uploaded, so nothing is broken today — but a stale blockmap sitting
+  // beside a shipped artifact is a trap waiting for whoever adds it to the
+  // upload list, and differential downloads would fail silently. Delete it
+  // rather than leave a lie on disk; electron-updater uses the ZIP's blockmap,
+  // which stapling never touches.
+  const dmgBlockmap = `${dmg}.blockmap`;
+  if (existsSync(dmgBlockmap)) {
+    rmSync(dmgBlockmap, { force: true });
+    console.log("[release] removed the pre-staple dmg blockmap (it described the unstapled file)");
+  }
 }
 
 run("staple check", "xcrun", ["stapler", "validate", dmg]);

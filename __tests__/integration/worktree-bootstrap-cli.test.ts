@@ -36,11 +36,49 @@ function initRepo(dir: string): void {
   execSync("git add . && git commit -qm init", { cwd: dir });
 }
 
+/** The repo's own launch config + its index flags, for the isolation assertion. */
+function realLaunchState(): { body: string | null; flag: string } {
+  const file = path.join(REPO_ROOT, ".claude", "launch.json");
+  let body: string | null = null;
+  try {
+    body = fs.readFileSync(file, "utf-8");
+  } catch {
+    body = null;
+  }
+  const flag = spawnSync("git", ["ls-files", "-v", "--", ".claude/launch.json"], {
+    cwd: REPO_ROOT,
+    encoding: "utf-8",
+  }).stdout.trim();
+  return { body, flag };
+}
+
 describe("worktree-bootstrap CLI banner", () => {
   it("prints the dev banner when run from a linked worktree", () => {
+    // The worktree is cut from a THROWAWAY repo, never from this one.
+    //
+    // Booting libi inside a worktree makes `registerCanonicalLaunchConfigs`
+    // write `Libi (<key>)` entries — carrying absolute machine paths — into the
+    // CANONICAL repo's `.claude/launch.json`, and mark the file
+    // `--skip-worktree` so the edit stays out of `git status`. That is correct
+    // behaviour for real dev use and completely wrong to aim at this checkout:
+    // for as long as this test cut its worktree from REPO_ROOT, every `npm test`
+    // silently rewrote a TRACKED file with paths like
+    // `/private/var/folders/.../T/libi-wb-cli-xxxx/wt/bin/libi.js`, invisible to
+    // `git status`, one `git add -A` away from being committed — and, the repo
+    // now being public, published. It also left a `libi-bootstrap-cli-test`
+    // branch behind whenever a run was interrupted.
+    //
+    // Pointing the worktree at a throwaway repo makes canonical resolve there
+    // instead. The banner is a fact about the worktree, so the assertions are
+    // unchanged; the blast radius is a temp directory.
+    const canonical = path.join(tmp, "canonical");
+    fs.mkdirSync(canonical, { recursive: true });
+    initRepo(canonical);
+    const before = realLaunchState();
+
     const wt = path.join(tmp, "wt");
     execSync(`git worktree add -q "${wt}" -B libi-bootstrap-cli-test`, {
-      cwd: REPO_ROOT,
+      cwd: canonical,
     });
     try {
       const fakeHome = path.join(tmp, "home");
@@ -64,11 +102,17 @@ describe("worktree-bootstrap CLI banner", () => {
       expect(combined).toMatch(/port=\d+/);
       expect(combined).toMatch(/home=\/[^ ]+\/worktrees\/wt /);
       expect(combined).not.toMatch(/home=\(env override\)/);
+
+      // The isolation guard. Booting libi in a worktree registers launch
+      // configs in the canonical repo — assert that landed in the throwaway,
+      // and that THIS repo's tracked file and its index flags never moved.
+      const after = realLaunchState();
+      expect(after.body, "npm test rewrote this repo's .claude/launch.json").toBe(before.body);
+      expect(after.flag, "npm test changed the index flags on .claude/launch.json").toBe(
+        before.flag,
+      );
     } finally {
-      execSync(`git worktree remove --force "${wt}"`, { cwd: REPO_ROOT });
-      execSync(`git branch -D libi-bootstrap-cli-test`, {
-        cwd: REPO_ROOT,
-      }).toString();
+      execSync(`git worktree remove --force "${wt}"`, { cwd: canonical });
     }
   }, 60_000);
 });

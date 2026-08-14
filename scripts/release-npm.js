@@ -31,11 +31,18 @@
  *   8. verify what the registry actually serves (npm view)
  */
 const { spawnSync } = require("node:child_process");
-const { readFileSync } = require("node:fs");
+const { existsSync, readFileSync } = require("node:fs");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
+const { recordGatesPassed } = require("./lib/gate-provenance");
 
 const ROOT = path.resolve(__dirname, "..");
+const PKG_NAME = "@nagellabs/libi";
+
+/** Portable synchronous sleep — no `sleep(1)` dependency, works on Windows. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
 const bump = args.find((a) => !a.startsWith("--"));
@@ -98,6 +105,57 @@ if (dirty === null || dirty !== "") {
     process.exit(1);
   }
 }
+// `dist-electron/` blocks the pack — but the guard that says so lives in
+// `prepack`, which runs inside `registry:e2e`, which is step 6. Discovering it
+// there costs the whole gate run first; it cost exactly that on 2026-08-14.
+// Deliberately refuses rather than deleting: a running `npm run electron` loads
+// its entire process tree from that directory.
+if (existsSync(path.join(ROOT, "dist-electron"))) {
+  console.error(
+    "❌ dist-electron/ is present — `npm pack` would refuse (npm force-includes\n" +
+      "   whatever package.json#main points at, even against the `files`\n" +
+      "   allowlist, so the Electron main-process build would ship inside the\n" +
+      "   npm CLI tarball).\n\n" +
+      "   Stop anything using it, then: rm -rf dist-electron\n" +
+      "   (Regenerate any time with `npm run compile:electron`.)",
+  );
+  process.exit(1);
+}
+
+// Publish credentials, checked in seconds rather than after ~12 minutes of
+// gates. `release-electron.js` already fails fast on signing and `gh`; this is
+// the same idea for the one thing that can only fail at the very last step.
+{
+  const who = capture("npm", ["whoami"]);
+  if (!who) {
+    console.error(
+      "❌ not logged in to npm (`npm whoami` failed) — the publish at step 7\n" +
+        "   would fail after every gate has run. Run `npm login` first.",
+    );
+    process.exit(1);
+  }
+  console.log(`  npm user: ${who}`);
+  // npm requires a publish to be backed by EITHER a 2FA one-time password OR a
+  // granular token with "bypass 2FA" enabled. With neither, it does not prompt
+  // — it just returns E403 at the end, which is how 2026-08-14 was lost. We
+  // cannot tell a granular bypass token from a classic one here, so this warns
+  // rather than refusing; a bypass token is a legitimate (if riskier) setup.
+  const profile = capture("npm", ["profile", "get"]) ?? "";
+  if (/two-factor auth:\s*disabled/i.test(profile)) {
+    console.warn(
+      "\n⚠  npm reports `two-factor auth: disabled` on this account.\n" +
+        "   If this machine authenticates with a classic token, the publish will\n" +
+        "   fail at the very end with:\n" +
+        "     E403 … Two-factor authentication or granular access token with\n" +
+        "     bypass 2fa enabled is required to publish packages.\n" +
+        "   Fix by enabling 2FA (npmjs.com → Account → Two-factor authentication,\n" +
+        "   then `npm logout && npm login`), or by using a granular access token\n" +
+        "   scoped to @nagellabs/* with 2FA-bypass. Continuing — a bypass token\n" +
+        "   is indistinguishable from here.\n",
+    );
+  }
+}
+
 if (!process.env.SENTRY_AUTH_TOKEN) {
   console.warn(
     "⚠  SENTRY_AUTH_TOKEN is not set — the build will succeed but production\n" +
@@ -114,6 +172,10 @@ run("licence gate", "npm", ["run", "check:licenses"]);
 // never touches. A dep bump without `notices:generate` would otherwise ship
 // stale attributions.
 run("notices freshness", "npm", ["run", "notices:check"]);
+
+// Record what just passed, and on which commit, so a same-day
+// `release:electron --skip-checks` can VERIFY that claim instead of asserting it.
+recordGatesPassed(["test", "lint", "check:licenses", "notices:check"]);
 
 // ── 4. version ─────────────────────────────────────────────────────────────
 if (bump !== "none") {
@@ -142,17 +204,64 @@ if (dryRun) {
   console.log("\n✅ dry run complete — nothing was published.");
   process.exit(0);
 }
-const served = capture("npm", ["view", "@nagellabs/libi", "version"]);
-const latest = capture("npm", ["view", "@nagellabs/libi", "dist-tags.latest"]);
-const shellApi = capture("npm", ["view", "@nagellabs/libi", "libi.shellApiVersion"]);
-console.log(`\n  registry serves : ${served}\n  dist-tags.latest: ${latest}\n  shellApiVersion : ${shellApi}`);
-if (served !== version || latest !== version) {
-  console.error("❌ the registry does not serve the version just published — investigate before announcing.");
-  process.exit(1);
+// A publish's WRITES land before its READS do. npm serves the per-version
+// document and the aggregated packument from different caches, and a brand-new
+// scoped package's packument lags: on 2026-08-14 `npm view` answered E404 for
+// about four minutes after `npm publish` had returned PUT 200. This check used
+// to be a single `npm view` that exited 1 on mismatch, so a perfectly good
+// first publish reported itself as a failure.
+//
+// Poll instead, and lead with the per-version document — it is authoritative
+// and updates first. Only give up after the packument has had time to catch up.
+const VERIFY_ATTEMPTS = 20;
+const VERIFY_DELAY_MS = 15_000;
+function versionDocExists() {
+  const res = spawnSync(
+    "curl",
+    ["-s", "-o", "/dev/null", "-w", "%{http_code}",
+      `https://registry.npmjs.org/${encodeURIComponent(PKG_NAME)}/${version}`],
+    { encoding: "utf-8" },
+  );
+  return res.stdout.trim() === "200";
 }
+let served = null;
+let latest = null;
+for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
+  served = capture("npm", ["view", PKG_NAME, "version"]);
+  latest = capture("npm", ["view", PKG_NAME, "dist-tags.latest"]);
+  if (served === version && latest === version) break;
+  const doc = versionDocExists();
+  console.log(
+    `  [${attempt}/${VERIFY_ATTEMPTS}] packument ${served ?? "404"} · ` +
+      `version document ${doc ? "200 (published ✓)" : "not yet"} — waiting for the CDN…`,
+  );
+  if (attempt === VERIFY_ATTEMPTS) {
+    if (doc) {
+      console.log(
+        `\n✅ ${PKG_NAME}@${version} IS published — registry.npmjs.org serves its\n` +
+          "   version document. Only the aggregated packument is still catching up,\n" +
+          "   which is normal for a first publish and needs no action.",
+      );
+      break;
+    }
+    console.error(
+      `❌ ${PKG_NAME}@${version} is not being served, and its version document is\n` +
+        "   absent too — this is a real failure, not CDN lag. Check\n" +
+        "   ~/.npm/_logs for the PUT status before announcing or re-publishing.",
+    );
+    process.exit(1);
+  }
+  sleepSync(VERIFY_DELAY_MS);
+}
+const shellApi = capture("npm", ["view", PKG_NAME, "libi.shellApiVersion"]);
+console.log(`\n  registry serves : ${served}\n  dist-tags.latest: ${latest}\n  shellApiVersion : ${shellApi}`);
 console.log(
-  `\n✅ @nagellabs/libi@${version} is live.\n` +
+  `\n✅ ${PKG_NAME}@${version} is live.\n` +
     "   Desktop installs see it via the in-app update check (within ~6h);\n" +
-    "   `npx @nagellabs/libi` picks it up on next invocation.\n" +
-    "   Don't forget: git push the version commit + tag.",
+    "   `npx @nagellabs/libi` picks it up on next invocation." +
+    // Only true when `npm version` actually ran. Under `none` — the mode a
+    // first release and any re-publish use — there is no commit and no tag,
+    // and telling someone to push them sends them looking for something that
+    // does not exist.
+    (bump === "none" ? "" : "\n   Don't forget: git push the version commit + tag."),
 );

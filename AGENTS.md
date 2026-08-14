@@ -198,6 +198,10 @@ no flags has confidently tracked the wrong person before.
   `docs/` directory. Source comments may cite a `docs-local/…` path as provenance; that
   path simply won't resolve in a clone.
 - Pull requests are closed during beta (`CONTRIBUTING.md`). Issues are welcome.
+- **The repo is public** (since 2026-08-14) and `main` is protected: force-push
+  and branch deletion are blocked, for admins too. PR creation is restricted to
+  collaborators; forking is open. Anything you commit is published — there is no
+  longer a private-repo backstop between a mistake and the world.
 
 ## Desktop shell vs runtime
 
