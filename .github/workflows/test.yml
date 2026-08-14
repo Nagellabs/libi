@@ -29,7 +29,7 @@ jobs:
     # and had to be cancelled by hand after 19 minutes — and because the run
     # never reached vitest's summary, the failure details for the OTHER files
     # that failed were never printed either. Fail fast, keep the log.
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -69,8 +69,19 @@ jobs:
       # browsers) skip loudly when their inputs are absent — see
       # __tests__/integration/tracking/fixture-guard.ts. A rising SKIP count here
       # is expected; a rising FAIL count is not.
+      # Bounded workers and explicit timeouts, because this suite had never run
+      # anywhere but an 18-core/48GB workstation. The runner is 4 cores; 1203
+      # files across an unbounded pool starved it, and vitest's DEFAULTS
+      # (testTimeout 5s, hookTimeout 10s) are calibrated for a machine that
+      # fast. Fourteen test files spawn external binaries — ffmpeg among them —
+      # and those are the ones that failed.
+      #
+      # Note the defaults are also why the first run hung rather than failed: a
+      # 5s test timeout never fired, which means nothing was stuck INSIDE a test
+      # or hook. That points at a starved or dead worker whose file could never
+      # report, not at a slow assertion.
       - name: Test
-        run: npm test
+        run: npm test -- --maxWorkers=2 --testTimeout=30000 --hookTimeout=30000
 
       # The suite must not mutate the checkout. This is the CI half of the
       # regression guard inside worktree-bootstrap-cli.test.ts: that test asserts
