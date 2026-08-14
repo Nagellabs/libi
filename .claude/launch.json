@@ -1,0 +1,73 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Libi",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "bin/libi.js"
+      ],
+      "port": 3456,
+      "autoPort": false
+    },
+    {
+      "name": "Libi Electron",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/dev-electron.js"
+      ],
+      "port": 9222,
+      "autoPort": false
+    },
+    {
+      "name": "Libi Electron (no devtools)",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "LIBI_NO_DEVTOOLS=1",
+        "node",
+        "scripts/dev-electron.js"
+      ],
+      "port": 9222,
+      "autoPort": false
+    },
+    {
+      "name": "Drizzle Studio",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "db:studio"
+      ],
+      "port": 4983
+    },
+    {
+      "name": "Libi (Sentry live)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/dev-sentry-live.js"
+      ],
+      "port": 3456,
+      "autoPort": false
+    },
+    {
+      "name": "Libi (Sentry live, isolated home)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "scripts/dev-sentry-live.js",
+        "--isolated"
+      ],
+      "port": 3458,
+      "autoPort": false
+    },
+    {
+      "name": "Splash preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "serve",
+        "-p",
+        "3459",
+        "scripts"
+      ],
+      "port": 3459
+    }
+  ]
+}

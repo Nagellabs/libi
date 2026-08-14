@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- V8 compiles JS to native code at runtime. Without this, Electron
+       crashes immediately under the hardened runtime. -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+
+  <!-- V8 also writes to pages it later executes. Electron on macOS needs
+       this in addition to allow-jit. -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+
+  <!-- libi dlopen()s native libraries in the bundle (better-sqlite3,
+       node-pty, @img/sharp + libvips, @resvg, @napi-rs/canvas, @next/swc,
+       @rollup). Library validation demands every loaded library share our
+       Team ID; these do not. Standard for Electron apps with native
+       modules. Omitting it fails at RUNTIME, not at notarization.
+
+       ALSO LOAD-BEARING FOR THE FETCHED RUNTIME: the app can boot a runtime
+       downloaded after install (<LIBI_HOME>/runtime/<v>/), whose
+       better-sqlite3 binding is fetched from GitHub releases at install
+       time — never signed by us, never seen by the notary service. Without
+       this entitlement that binding cannot load and every fetched runtime
+       is dead on arrival. Do not remove it on the theory that it only
+       covers bundled modules. -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

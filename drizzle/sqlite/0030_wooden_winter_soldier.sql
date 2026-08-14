@@ -1,0 +1,1 @@
+ALTER TABLE `skills` ADD `tags` text DEFAULT '[]' NOT NULL;

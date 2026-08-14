@@ -1,0 +1,385 @@
+"use client";
+
+import * as React from "react";
+import Link from "next/link";
+import { Blocks, BookOpen, Loader2, Plus, Settings } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+
+import { ThemeToggle } from "@/components/layout/theme-toggle";
+import { LibiMark } from "@/components/brand/libi-mark";
+import AgentSelector from "@/components/sessions/agent-selector";
+import SidebarSessionList from "@/components/sessions/sidebar-session-list";
+import CliPresetSelector from "@/components/terminal/cli-preset-selector";
+import { CodexConnectNudge } from "@/components/sessions/codex-connect-nudge";
+import { useEditorState } from "@/lib/editor-state-context";
+import { useRuntimeInfo } from "@/lib/queries/runtime";
+import {
+  isInstallInFlight,
+  isShellInstallInFlight,
+  updateOffer,
+  useRuntimeUpdate,
+} from "@/lib/queries/runtime-update";
+import {
+  useCreateTerminal,
+  useTerminalSessions,
+} from "@/lib/queries/terminals";
+import { MAX_TERMINAL_SESSIONS } from "@/lib/terminal/types";
+import { readinessMessage } from "@/lib/agents/agent-readiness";
+import type { TerminalRemedy } from "@/lib/agents/terminal-remedy";
+import { useRunRemedyInTerminal } from "@/hooks/agents/use-run-remedy-in-terminal";
+import { toast } from "sonner";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarGroup,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarRail,
+  useSidebar,
+} from "@/components/ui/sidebar";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+
+type AppSidebarProps = React.ComponentProps<typeof Sidebar>;
+
+/** How long to wait for a freshly-created terminal's xterm to mount and attach
+ *  before pasting the remedy into it. The insert listener is registered in a
+ *  `useEffect` keyed on the terminal id (components/terminal/terminal-view.tsx),
+ *  so it cannot exist until React has committed that subtree. */
+
+export function AppSidebar(props: AppSidebarProps) {
+  const { toggleSidebar } = useSidebar();
+  const {
+    agentProviders,
+    activeProviderId,
+    isAgentConnecting,
+    selectAgent,
+    sessionList,
+    terminalCliId,
+    setActiveTerminalId,
+  } = useEditorState();
+  const pathname = usePathname();
+  const router = useRouter();
+  const { data: runtime } = useRuntimeInfo();
+  // Shared with Settings → General via one React Query key, so the dot and the
+  // card can never disagree about whether an update exists.
+  const { data: runtimeUpdate } = useRuntimeUpdate();
+  // Either channel: a runtime install job, or the shell downloading itself.
+  const installingUpdate =
+    isInstallInFlight(runtimeUpdate) || isShellInstallInFlight(runtimeUpdate);
+  const updateAvailable =
+    !installingUpdate &&
+    updateOffer(runtimeUpdate) !== null &&
+    !runtimeUpdate?.pendingVersion;
+  // Real fraction when the runner reports one; null renders indeterminate.
+  const installJob = runtimeUpdate?.install;
+  const shellPercent = runtimeUpdate?.shell?.percent ?? null;
+  const installFraction = !installingUpdate
+    ? null
+    : isShellInstallInFlight(runtimeUpdate)
+      ? shellPercent !== null
+        ? Math.min(1, shellPercent / 100)
+        : null
+      : installJob && installJob.progressTotal > 0
+        ? Math.min(1, installJob.progressDone / installJob.progressTotal)
+        : null;
+  const worktreeName = runtime?.worktreeName ?? null;
+
+  const isTerminalSurface = activeProviderId === "terminal";
+  const { data: terminalSessions } = useTerminalSessions(isTerminalSurface);
+  const createTerminal = useCreateTerminal();
+  const runRemedyInTerminal = useRunRemedyInTerminal();
+  const terminalAtCapacity =
+    (terminalSessions?.length ?? 0) >= MAX_TERMINAL_SESSIONS;
+
+  const activeProvider = agentProviders.find((p) => p.id === activeProviderId);
+
+  // Readiness of the agent the server actually has active — see
+  // lib/agents/agent-readiness.ts. `needs-auth` is only ever set from an
+  // OBSERVED auth rejection, so when it is present we know something concrete
+  // and are obliged to say it rather than imply progress.
+  const readiness = sessionList.readiness;
+  const needsAuth = readiness.state === "needs-auth";
+  const authRemedy: TerminalRemedy | null = needsAuth ? readiness.remedy : null;
+  const readinessNote = readinessMessage(readiness);
+
+  // The dot used to go green the instant `_activeAgentId` was set, which is
+  // before anything has been proven — that is how an agent that could never
+  // open a session still looked connected. Green now requires a session that
+  // exists or one the server says it can hand over immediately.
+  const agentProven =
+    isTerminalSurface ||
+    sessionList.sessions.length > 0 ||
+    sessionList.canCreate;
+  const agentDotClass = isAgentConnecting
+    ? "bg-amber-400 animate-pulse"
+    : needsAuth
+      ? "bg-amber-400"
+      : readiness.state === "not-installed"
+        ? "bg-destructive"
+        : activeProviderId && agentProven
+          ? "bg-emerald-500"
+          : "bg-muted-foreground/40";
+  const agentTitle = isAgentConnecting
+    ? "Connecting agent…"
+    : readinessNote
+      ? `${activeProvider ? `${activeProvider.name}: ` : ""}${readinessNote} (click to expand)`
+      : activeProvider
+        ? `Agent: ${activeProvider.name} (click to expand)`
+        : "No agent selected (click to expand)";
+
+  const handleNewChat = async () => {
+    if (isTerminalSurface) {
+      try {
+        const meta = await createTerminal.mutateAsync(terminalCliId);
+        setActiveTerminalId(meta.id);
+        if (pathname !== "/editor") router.push("/editor");
+      } catch (err) {
+        toast.error(
+          err instanceof Error ? err.message : "Failed to open terminal",
+        );
+      }
+      return;
+    }
+
+    // A session cannot be created while the agent is unauthenticated, so don't
+    // fire a POST we know will 500. Do the thing that actually helps instead.
+    if (needsAuth) {
+      if (authRemedy) {
+        await runRemedyInTerminal(authRemedy);
+        return;
+      }
+      toast.error(readinessNote ?? "This agent needs to be signed in.");
+      return;
+    }
+
+    const { sessionId, error } = await sessionList.createSessionWithResult();
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    if (sessionId && pathname !== "/editor") {
+      router.push("/editor");
+    }
+  };
+
+  const canCreate = isTerminalSurface
+    ? !createTerminal.isPending && !terminalAtCapacity
+    : // `needs-auth` deliberately ENABLES the button: it now opens the sign-in
+      // remedy. A dead control with an explanation nobody can reach is what we
+      // are removing.
+      sessionList.canCreate || needsAuth;
+  const newButtonLabel = isTerminalSurface ? "New terminal" : "New chat";
+
+  /** What the tooltip says when the button can't (or shouldn't) start a chat.
+   *  It must never assert progress for a state that will not finish. */
+  const newButtonBlockedLabel = (() => {
+    if (isTerminalSurface) {
+      return terminalAtCapacity
+        ? `Terminal limit reached (${MAX_TERMINAL_SESSIONS}) — close one first`
+        : "Opening terminal…";
+    }
+    if (readinessNote) return readinessNote;
+    return "Preparing a new chat session…";
+  })();
+
+  /** The tooltip actually rendered — an enabled `needs-auth` button still has
+   *  to explain itself, so "enabled" and "nothing to say" are not the same. */
+  const newButtonTooltip = (() => {
+    if (needsAuth) {
+      const problem = readinessNote ?? "This agent needs to be signed in.";
+      return authRemedy ? `${problem} — ${authRemedy.label}` : problem;
+    }
+    return canCreate ? newButtonLabel : newButtonBlockedLabel;
+  })();
+
+  return (
+    <Sidebar collapsible="icon" {...props}>
+      {/* Brand header. Drag region for the window is owned by the
+          layout-level <TopBar /> — this row is plain UI. */}
+      <SidebarHeader className="px-2">
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              onClick={toggleSidebar}
+              tooltip={worktreeName ? `libi · worktree: ${worktreeName}` : "libi"}
+              className="cursor-pointer group-data-[collapsible=icon]:!p-1.5"
+            >
+              <LibiMark className="size-5 text-primary shrink-0" />
+              <span className="font-brand text-[17px] font-semibold">libi</span>
+              {worktreeName ? (
+                <span
+                  className="ml-1 inline-flex max-w-[180px] items-center rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase tracking-wide text-amber-400 group-data-[collapsible=icon]:hidden"
+                  title={`Worktree: ${worktreeName}`}
+                >
+                  <span className="truncate">{worktreeName}</span>
+                </span>
+              ) : null}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+
+      <SidebarContent className="gap-1">
+        {/* Agent selector — scopes the sessions list below */}
+        <SidebarGroup>
+          <SidebarGroupLabel className="group-data-[collapsible=icon]:hidden">
+            Agent
+          </SidebarGroupLabel>
+          {/* Expanded: full dropdown */}
+          <div className="px-2 pb-1 group-data-[collapsible=icon]:hidden">
+            <AgentSelector />
+          </div>
+          {/* Terminal surface: "Launch CLI" preset for NEW terminals */}
+          {isTerminalSurface ? (
+            <div className="px-2 pb-1 group-data-[collapsible=icon]:hidden">
+              <CliPresetSelector />
+            </div>
+          ) : null}
+          {/* First-use nudge: only when Codex is selected (agent or terminal
+              preset) on the canonical instance; self-suppresses otherwise. */}
+          <CodexConnectNudge />
+          {/* Icon-collapsed: colored status dot that expands the sidebar */}
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            title={agentTitle}
+            aria-label={agentTitle}
+            className="hidden cursor-pointer mx-auto my-1 size-6 items-center justify-center rounded-full hover:ring-2 hover:ring-primary/40 group-data-[collapsible=icon]:flex"
+          >
+            <span className={`size-2 rounded-full ${agentDotClass}`} />
+          </button>
+        </SidebarGroup>
+
+        {/* Sessions header + New chat button */}
+        <SidebarGroup>
+          <div className="flex items-center justify-between px-2 group-data-[collapsible=icon]:justify-center">
+            <span className="text-xs font-medium text-muted-foreground group-data-[collapsible=icon]:hidden">
+              {isTerminalSurface ? "Terminals" : "Sessions"}
+            </span>
+            {/* Themed Tooltip (components/ui/tooltip). The trigger renders
+                as a span so hover is detected even when the inner button
+                is disabled — Chromium suppresses pointer events on
+                `<button disabled>`. Provider has delay={0} → no 5s native-
+                tooltip wait. */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger render={<span className="inline-flex" />}>
+                  <button
+                    type="button"
+                    onClick={handleNewChat}
+                    disabled={!canCreate}
+                    aria-label={newButtonTooltip}
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+                  >
+                    <Plus className="h-4 w-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent>{newButtonTooltip}</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+        </SidebarGroup>
+
+        {/* Sessions list (grouped by day) */}
+        <SidebarSessionList />
+      </SidebarContent>
+
+      <SidebarFooter className="border-t border-sidebar-border">
+        {/* One menu for all footer rows so they're evenly spaced. Splitting
+            these across multiple <SidebarMenu>s reintroduces the footer's
+            gap-2 between groups and breaks the alignment. */}
+        <SidebarMenu>
+          <ThemeToggle />
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              render={<Link href="/instructions" />}
+              tooltip="Instructions"
+              isActive={pathname.startsWith("/instructions")}
+              className="cursor-pointer"
+            >
+              <BookOpen className="size-4" />
+              <span>Instructions</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              render={<Link href="/mcps-skills" />}
+              tooltip="MCPs & Skills"
+              isActive={pathname.startsWith("/mcps-skills")}
+              className="cursor-pointer"
+            >
+              <Blocks className="size-4" />
+              <span>MCPs & Skills</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              render={<Link href="/settings" />}
+              tooltip={installingUpdate ? "Installing update…" : "Settings"}
+              isActive={pathname === "/settings"}
+              className="cursor-pointer relative"
+            >
+              <Settings className="size-4" />
+              <span>Settings</span>
+              {/* While an update installs: a spinner plus (when the runner
+                  reports one) a real progress bar along the row's bottom edge
+                  — visible from every page, so navigating away from Settings
+                  never hides that an install is running. */}
+              {installingUpdate && (
+                <>
+                  <Loader2
+                    aria-label="Installing update"
+                    className="ml-auto size-3 shrink-0 animate-spin text-primary"
+                  />
+                  <span
+                    aria-hidden
+                    className="absolute inset-x-2 bottom-0 h-0.5 overflow-hidden rounded-full bg-primary/20"
+                  >
+                    <span
+                      className={
+                        installFraction === null
+                          ? "block h-full w-1/3 animate-pulse rounded-full bg-primary"
+                          : "block h-full rounded-full bg-primary transition-[width] duration-500"
+                      }
+                      style={
+                        installFraction === null
+                          ? undefined
+                          : { width: `${Math.round(installFraction * 100)}%` }
+                      }
+                    />
+                  </span>
+                </>
+              )}
+              {/* The persistent update indicator. The louder surface is the
+                  app-wide dismissible toast (components/layout/update-toast.tsx);
+                  this dot is what remains after a dismiss, so a waved-away
+                  update stays discoverable. It renders only when there is an
+                  actual OFFER (either channel — a newer npm runtime or a newer
+                  desktop shell) and disappears once the new runtime is on disk
+                  waiting for a restart — a check that could not reach its feed
+                  shows nothing at all. */}
+              {updateAvailable && (
+                <span
+                  aria-label="Update available"
+                  title="Update available"
+                  className="ml-auto size-2 shrink-0 rounded-full bg-primary"
+                />
+              )}
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
+
+      <SidebarRail />
+    </Sidebar>
+  );
+}

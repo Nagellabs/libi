@@ -1,0 +1,1 @@
+DROP TABLE `seam_caches`;

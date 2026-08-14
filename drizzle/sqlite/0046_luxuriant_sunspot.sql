@@ -1,0 +1,1 @@
+ALTER TABLE `pieces` ADD `last_opened_at` integer;

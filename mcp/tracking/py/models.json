@@ -1,0 +1,77 @@
+[
+  {
+    "id": "transnetv2",
+    "file": "transnetv2_open_fp16.onnx",
+    "url": "https://download.shotai.io/model/shot-detection/transnetv2_open_fp16.onnx",
+    "sha256": "8bd15d2bec656878658699a84da90706bcf05ef3a2d7a88575adf0ead50356b7",
+    "sizeBytes": 16484036,
+    "dest": "transnetv2.onnx",
+    "acquisition": "direct-download",
+    "notes": "TransNetV2 shot/scene-cut detector. Downloaded verbatim from the shot-detection PyPI package's DEFAULT_MODEL_URL (shot-detection==0.1.1). Input frames_uint8 [1,100,27,48,3] uint8; output frame_probabilities [1,100] float (per-frame cut probability over a 100-frame sliding window). Host this exact byte stream as a libi release asset; the upstream URL is third-party and not version-pinned."
+  },
+  {
+    "id": "yoloe11",
+    "file": "yoloe-11s-seg.onnx",
+    "url": "BUILD-AT-INSTALL: exported locally by the tracking-pyenv installer (export_yoloe11.py) from the sha-pinned yoloe_vp checkpoint -- never downloaded, never redistributed by libi (every input is AGPL-3.0: ultralytics, the YOLOE weights, the ultralytics/CLIP fork)",
+    "sha256": "",
+    "sha256_note": "Intentionally empty: the ONNX export embeds non-deterministic metadata, so the OUTPUT sha is host-specific. Integrity is anchored on the sha-pinned INPUTS in `build` (the yoloe_vp .pt, the mobileclip text encoder, the immutable CLIP commit archive) plus a post-export onnxruntime tensor-shape validation in export_yoloe11.py. The installer records the produced sha/size in <dest>.build-info.json and rebuilds when the declared inputs change.",
+    "sizeBytes": 40513426,
+    "sizeBytes_note": "Advisory only (observed with ultralytics==8.4.51 on macOS arm64); build-at-install verification does NOT gate on it.",
+    "dest": "yoloe11.onnx",
+    "acquisition": "build-at-install",
+    "build": {
+      "sourceModelId": "yoloe_vp",
+      "classes": ["person"],
+      "imgsz": 640,
+      "opset": 17,
+      "clipRequirement": "clip @ https://github.com/ultralytics/CLIP/archive/81ff68ed7ffcac3b40484c914f104f816757308d.tar.gz",
+      "textEncoder": {
+        "file": ".build/mobileclip_blt.ts",
+        "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/mobileclip_blt.ts",
+        "sha256": "a67804d1b0f07b8b9a20c1761ec0847f34660f5fa338ec70e8f3fce68ed95e54",
+        "sizeBytes": 599764649
+      }
+    },
+    "notes": "YOLOE-11s open-vocabulary detector, text-prompt re-parameterized for the frozen class set [\"person\"] and exported to ONNX ON THE USER'S MACHINE at install time (mcp/registry/installers/tracking-pyenv.ts#ensureBuiltModel -> export_yoloe11.py). The class vocabulary is BAKED INTO the ONNX at export time -- output0 channel dim = 4 + nClasses + 32 (here 37 for 1 class). All export inputs are pinned: the source .pt is the same sha-pinned yoloe_vp entry below (immutable release tag), the 572MB mobileclip_blt.ts text encoder is sha-pinned above and cached at <modelsDir>/.build/ (export-time-only, NOT a runtime dep), the CLIP tokenizer package is an immutable commit-archive URL supplied via `uv run --with` (the locked sidecar venv is never mutated), and ultralytics==8.4.51 is already a locked runtime dep of the venv. Inputs: images [1,3,640,640] float. Outputs: output0 [1, 4+nc+32, 8400] float (det head: 4 bbox + nc class scores + 32 mask coeffs over 8400 anchors), output1 [1,32,160,160] float (mask prototypes). ReID note: there is deliberately NO shipped ReID artifact -- boxmot 19 downloads osnet_x0_25_msmt17.pt itself at runtime and libitrack/associate.py runs its PyTorch backend directly (best-effort, motion-only fallback)."
+  },
+  {
+    "id": "sot_vittrack",
+    "file": "vittrack.onnx",
+    "url": "https://github.com/opencv/opencv_zoo/raw/fef72f8fa7c52eaf116d3df358d24e6e959ada0e/models/object_tracking_vittrack/object_tracking_vittrack_2023sep.onnx",
+    "sha256": "2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d",
+    "sizeBytes": 714726,
+    "dest": "sot.onnx",
+    "acquisition": "direct-download",
+    "notes": "OpenCV VitTrack single-object tracker (the TrackerVit head, 2023sep). SOT fallback for segments where YOLOE+BoxMOT loses an object. Downloaded from the opencv_zoo repo (Git LFS-backed raw URL; resolves via 302 to media.githubusercontent.com). Inputs: template [1,3,128,128] float, search [1,3,256,256] float (RGB CHW). Outputs: output1 [1,1,16,16] float (confidence map, sigmoid 0..1; peak threshold ~0.4-0.5), output2 [1,2,16,16] float (size w,h), output3 [1,2,16,16] float (offset x,y) -- a 16x16 response grid. URL is pinned to opencv_zoo commit fef72f8f ('upload a better vittrack model', #212) -- the last commit to touch this path -- so the bytes cannot drift; verified byte-identical to the previous raw/main/ URL (sha256 2990f0b7..., 714726 B). To adopt a newer upstream model, bump the SHA in the URL and re-measure sha256/sizeBytes together. No re-hosting needed."
+  },
+  {
+    "id": "yoloe_vp",
+    "file": "yoloe-11s-seg.pt",
+    "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yoloe-11s-seg.pt",
+    "sha256": "8e439445c87338b79d9ce21dec109f4621e26df67e94d26ea1a98c1e64dce3e3",
+    "sizeBytes": 27803986,
+    "dest": "yoloe-11s-seg.pt",
+    "acquisition": "direct-download",
+    "notes": "YOLOE-11s-seg PyTorch checkpoint for the EAGER generalized visual-prompt detector backend (Family A). Used at runtime (not exported to ONNX \u2014 dynamic per-anchor VP prompts are baked at ONNX export, so the eager path is PyTorch-runtime only; see SPIKE-NOTES-yoloe-vp.md). Provisioned by the existing tracking-pyenv installer alongside the 4 ONNX artifacts; ~28 MB. SAVPE visual-prompt is in-checkpoint (no MobileCLIP runtime dep). The upstream filename is already canonical, so file==dest intentionally (unlike the ONNX entries whose dest is shortened)."
+  },
+  {
+    "id": "matanyone_config",
+    "file": "config.json",
+    "url": "https://huggingface.co/PeiqingYang/MatAnyone/resolve/d3395d72e3baa4508521ab8a6ae9a7d41f873dc4/config.json",
+    "sha256": "99160532e1f9ce3ca41b89d59949aebaa902ffbb67f30b23caff642201e6f32b",
+    "sizeBytes": 2898,
+    "dest": "matanyone/config.json",
+    "acquisition": "direct-download",
+    "notes": "MatAnyone (CVPR 2025) model config \u2014 the PyTorchModelHubMixin from_pretrained layout: libitrack/matte.py loads <modelsDir>/matanyone/ as a local pretrained dir (offline). Paired with matanyone_weights. URL is pinned to the IMMUTABLE HF revision d3395d72e3baa4508521ab8a6ae9a7d41f873dc4 (not `main`), so the bytes can never change under us \u2014 verified 2026-07-19 to serve the exact sha256 below. No re-hosting needed; same immutability class as yoloe_vp's v8.4.0 release-tag URL. To adopt a newer upstream revision, bump the SHA in the URL AND re-measure sha256/sizeBytes together."
+  },
+  {
+    "id": "matanyone_weights",
+    "file": "model.safetensors",
+    "url": "https://huggingface.co/PeiqingYang/MatAnyone/resolve/d3395d72e3baa4508521ab8a6ae9a7d41f873dc4/model.safetensors",
+    "sha256": "07f2a00683e6aec3d62f1cb0b13b7bbe45622d06355443f2861767074a6ec7b1",
+    "sizeBytes": 141199924,
+    "dest": "matanyone/model.safetensors",
+    "acquisition": "direct-download",
+    "notes": "MatAnyone mask-guided video-matting weights (torch/safetensors). Consumed by libitrack/matte.py via MatAnyone.from_pretrained(<modelsDir>/matanyone). Seeded by the YOLOE-seg first-frame instance mask; runs CPU or MPS. URL is pinned to the IMMUTABLE HF revision d3395d72e3baa4508521ab8a6ae9a7d41f873dc4 (not `main`) \u2014 verified 2026-07-19 that the pinned revision serves this exact sha256 (HF x-linked-etag) and byte size. No re-hosting needed. To adopt a newer upstream revision, bump the SHA in the URL AND re-measure sha256/sizeBytes together."
+  }
+]

@@ -1,0 +1,1 @@
+ALTER TABLE `files` ADD `fal_uploaded_url` text;

@@ -1,0 +1,45 @@
+name: License check
+
+# libi ships under GPL-3.0-only. This gate fails the build if any production
+# dependency arrives under a license that cannot be combined into a GPL work
+# (SSPL, BUSL, Elastic-2.0, FSL, Commons-Clause, CC-BY-NC, proprietary…).
+#
+# The allowlist and the two documented exceptions live in scripts/check-licenses.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  licenses:
+    name: GPL-compatibility of production dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # --ignore-scripts: we only need the dependency tree and its metadata,
+      # not native builds (which are slow and can fail on CI runners).
+      - name: Install root dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Check licenses
+        run: bash scripts/check-licenses.sh
+
+      - name: Generate SBOM
+        if: always()
+        run: npx --yes @cyclonedx/cyclonedx-npm --omit dev --output-file libi-sbom.json || true
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libi-sbom
+          path: libi-sbom.json
+          if-no-files-found: ignore

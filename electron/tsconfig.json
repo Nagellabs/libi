@@ -1,0 +1,32 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "esModuleInterop": true,
+    "outDir": "../dist-electron",
+    "rootDir": "..",
+    "baseUrl": "..",
+    "paths": {
+      "@/*": ["./*"]
+    },
+    "strict": false,
+    "noEmitOnError": false,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM"]
+  },
+  "include": ["./**/*.ts"],
+  "exclude": [
+    "../node_modules",
+    "../dist-electron",
+    "../release",
+    "../.next",
+    "../__tests__",
+    "../e2e",
+    "../scripts",
+    "../tests",
+    "../**/*.test.ts",
+    "../**/*.test.tsx",
+    "../**/*.spec.ts"
+  ]
+}

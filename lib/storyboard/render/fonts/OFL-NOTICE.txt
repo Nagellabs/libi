@@ -1,0 +1,5 @@
+Geist (Geist-Regular.ttf) is licensed under the SIL Open Font License 1.1.
+Copyright Vercel, Inc. https://github.com/vercel/geist-font
+Vendored so the storyboard Satori renderer has deterministic font data.
+
+Full license text: OFL.txt (in this directory).

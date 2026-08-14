@@ -1,0 +1,8 @@
+{
+  "text": "And so my fellow Americans ask not what your country can do for you",
+  "voice": "af_heart",
+  "sampleRate": 24000,
+  "minSeconds": 1.5,
+  "maxSeconds": 15,
+  "maxRoundTripWER": 0.3
+}

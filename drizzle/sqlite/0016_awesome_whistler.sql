@@ -1,0 +1,1 @@
+ALTER TABLE `pieces` ADD `script` text;

@@ -1,0 +1,324 @@
+{
+  "language_code": "eng",
+  "language_probability": 0.8161193132400513,
+  "text": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. (applause)",
+  "words": [
+    {
+      "text": "And",
+      "start": 0.359,
+      "end": 0.539,
+      "type": "word",
+      "logprob": -0.03488617762923241
+    },
+    {
+      "text": " ",
+      "start": 0.539,
+      "end": 0.659,
+      "type": "spacing",
+      "logprob": -0.00011955977242905647
+    },
+    {
+      "text": "so,",
+      "start": 0.659,
+      "end": 0.919,
+      "type": "word",
+      "logprob": -0.053507238830206916
+    },
+    {
+      "text": " ",
+      "start": 0.919,
+      "end": 1.059,
+      "type": "spacing",
+      "logprob": -0.000058530047681415454
+    },
+    {
+      "text": "my",
+      "start": 1.059,
+      "end": 1.22,
+      "type": "word",
+      "logprob": -0.000058530047681415454
+    },
+    {
+      "text": " ",
+      "start": 1.22,
+      "end": 1.36,
+      "type": "spacing",
+      "logprob": -0.0004996005445718765
+    },
+    {
+      "text": "fellow",
+      "start": 1.36,
+      "end": 1.62,
+      "type": "word",
+      "logprob": -0.0004996005445718765
+    },
+    {
+      "text": " ",
+      "start": 1.62,
+      "end": 1.679,
+      "type": "spacing",
+      "logprob": -0.0007886160165071487
+    },
+    {
+      "text": "Americans,",
+      "start": 1.679,
+      "end": 2.319,
+      "type": "word",
+      "logprob": -0.001543677132576704
+    },
+    {
+      "text": " ",
+      "start": 2.319,
+      "end": 2.319,
+      "type": "spacing",
+      "logprob": -0.0005347490659914911
+    },
+    {
+      "text": "ask",
+      "start": 3.439,
+      "end": 3.819,
+      "type": "word",
+      "logprob": -0.0005347490659914911
+    },
+    {
+      "text": " ",
+      "start": 3.819,
+      "end": 4.019,
+      "type": "spacing",
+      "logprob": -0.0015704215038567781
+    },
+    {
+      "text": "not",
+      "start": 4.019,
+      "end": 4.42,
+      "type": "word",
+      "logprob": -0.0015704215038567781
+    },
+    {
+      "text": " ",
+      "start": 4.42,
+      "end": 4.42,
+      "type": "spacing",
+      "logprob": -0.00004100715523236431
+    },
+    {
+      "text": "what",
+      "start": 5.44,
+      "end": 5.619,
+      "type": "word",
+      "logprob": -0.00004100715523236431
+    },
+    {
+      "text": " ",
+      "start": 5.619,
+      "end": 5.699,
+      "type": "spacing",
+      "logprob": -0.00037305548903532326
+    },
+    {
+      "text": "your",
+      "start": 5.699,
+      "end": 5.839,
+      "type": "word",
+      "logprob": -0.00037305548903532326
+    },
+    {
+      "text": " ",
+      "start": 5.839,
+      "end": 5.959,
+      "type": "spacing",
+      "logprob": -0.000036954195820726454
+    },
+    {
+      "text": "country",
+      "start": 5.96,
+      "end": 6.399,
+      "type": "word",
+      "logprob": -0.000036954195820726454
+    },
+    {
+      "text": " ",
+      "start": 6.399,
+      "end": 6.499,
+      "type": "spacing",
+      "logprob": -0.0000011920922133867862
+    },
+    {
+      "text": "can",
+      "start": 6.5,
+      "end": 6.679,
+      "type": "word",
+      "logprob": -0.0000011920922133867862
+    },
+    {
+      "text": " ",
+      "start": 6.679,
+      "end": 6.739,
+      "type": "spacing",
+      "logprob": 0
+    },
+    {
+      "text": "do",
+      "start": 6.739,
+      "end": 6.859,
+      "type": "word",
+      "logprob": 0
+    },
+    {
+      "text": " ",
+      "start": 6.859,
+      "end": 6.999,
+      "type": "spacing",
+      "logprob": -3.576278118089249e-7
+    },
+    {
+      "text": "for",
+      "start": 7,
+      "end": 7.139,
+      "type": "word",
+      "logprob": -3.576278118089249e-7
+    },
+    {
+      "text": " ",
+      "start": 7.139,
+      "end": 7.199,
+      "type": "spacing",
+      "logprob": -0.000005602820692729438
+    },
+    {
+      "text": "you,",
+      "start": 7.199,
+      "end": 7.5,
+      "type": "word",
+      "logprob": -0.00014989300950674078
+    },
+    {
+      "text": " ",
+      "start": 7.5,
+      "end": 8.319,
+      "type": "spacing",
+      "logprob": -0.00033682872890494764
+    },
+    {
+      "text": "ask",
+      "start": 8.319,
+      "end": 8.619,
+      "type": "word",
+      "logprob": -0.00033682872890494764
+    },
+    {
+      "text": " ",
+      "start": 8.619,
+      "end": 8.659,
+      "type": "spacing",
+      "logprob": -0.0004215544031467289
+    },
+    {
+      "text": "what",
+      "start": 8.659,
+      "end": 8.88,
+      "type": "word",
+      "logprob": -0.0004215544031467289
+    },
+    {
+      "text": " ",
+      "start": 8.88,
+      "end": 8.96,
+      "type": "spacing",
+      "logprob": -0.00011169286881340668
+    },
+    {
+      "text": "you",
+      "start": 8.96,
+      "end": 9.119,
+      "type": "word",
+      "logprob": -0.00011169286881340668
+    },
+    {
+      "text": " ",
+      "start": 9.119,
+      "end": 9.239,
+      "type": "spacing",
+      "logprob": -0.0000032186455882765586
+    },
+    {
+      "text": "can",
+      "start": 9.239,
+      "end": 9.42,
+      "type": "word",
+      "logprob": -0.0000032186455882765586
+    },
+    {
+      "text": " ",
+      "start": 9.42,
+      "end": 9.46,
+      "type": "spacing",
+      "logprob": -1.1920928244535389e-7
+    },
+    {
+      "text": "do",
+      "start": 9.46,
+      "end": 9.599,
+      "type": "word",
+      "logprob": -1.1920928244535389e-7
+    },
+    {
+      "text": " ",
+      "start": 9.599,
+      "end": 9.719,
+      "type": "spacing",
+      "logprob": -1.1920928244535389e-7
+    },
+    {
+      "text": "for",
+      "start": 9.719,
+      "end": 9.8,
+      "type": "word",
+      "logprob": -1.1920928244535389e-7
+    },
+    {
+      "text": " ",
+      "start": 9.8,
+      "end": 9.859,
+      "type": "spacing",
+      "logprob": -0.000029444261599564925
+    },
+    {
+      "text": "your",
+      "start": 9.859,
+      "end": 9.979,
+      "type": "word",
+      "logprob": -0.000029444261599564925
+    },
+    {
+      "text": " ",
+      "start": 9.979,
+      "end": 10.099,
+      "type": "spacing",
+      "logprob": -0.000023483953555114567
+    },
+    {
+      "text": "country.",
+      "start": 10.099,
+      "end": 10.439,
+      "type": "word",
+      "logprob": -0.00007103829739207868
+    },
+    {
+      "text": " ",
+      "start": 10.439,
+      "end": 10.659,
+      "type": "spacing",
+      "logprob": -0.08484486490488052
+    },
+    {
+      "text": "(applause)",
+      "start": 10.659,
+      "end": 10.94,
+      "type": "audio_event",
+      "logprob": -0.057859906422284745
+    }
+  ],
+  "transcription_id": "z9QGgX2QKDaLQc2ofNvi",
+  "audio_duration_secs": 11
+}

@@ -1,0 +1,161 @@
+{
+  "language_code": "eng",
+  "language_probability": 0.8161193132400513,
+  "text": "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. (applause)",
+  "words": [
+    {
+      "text": "And",
+      "start": 0.359,
+      "end": 0.539,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "so,",
+      "start": 0.659,
+      "end": 0.919,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "my",
+      "start": 1.059,
+      "end": 1.22,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "fellow",
+      "start": 1.36,
+      "end": 1.62,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "Americans,",
+      "start": 1.679,
+      "end": 2.319,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "ask",
+      "start": 3.439,
+      "end": 3.819,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "not",
+      "start": 4.019,
+      "end": 4.42,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "what",
+      "start": 5.44,
+      "end": 5.619,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "your",
+      "start": 5.699,
+      "end": 5.839,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "country",
+      "start": 5.96,
+      "end": 6.399,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "can",
+      "start": 6.5,
+      "end": 6.679,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "do",
+      "start": 6.739,
+      "end": 6.859,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "for",
+      "start": 7,
+      "end": 7.139,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "you,",
+      "start": 7.199,
+      "end": 7.5,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "ask",
+      "start": 8.319,
+      "end": 8.619,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "what",
+      "start": 8.659,
+      "end": 8.88,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "you",
+      "start": 8.96,
+      "end": 9.119,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "can",
+      "start": 9.239,
+      "end": 9.42,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "do",
+      "start": 9.46,
+      "end": 9.599,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "for",
+      "start": 9.719,
+      "end": 9.8,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "your",
+      "start": 9.859,
+      "end": 9.979,
+      "type": "word",
+      "speaker_id": null
+    },
+    {
+      "text": "country.",
+      "start": 10.099,
+      "end": 10.439,
+      "type": "word",
+      "speaker_id": null
+    }
+  ]
+}

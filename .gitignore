@@ -1,0 +1,107 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production build OUTPUTS. Deliberately not the whole of /build — that
+# directory also holds tracked build INPUTS (electron-builder auto-detects
+# build/entitlements.mac.plist + build/entitlements.mac.inherit.plist, and a
+# future build/icon.icns). Ignore the generated artifacts by name instead.
+/build/libi-bundle/
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+!.env.example
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# superpowers brainstorming
+.superpowers/
+
+# electron
+/dist-electron/
+/release/
+
+# compiled CLI/MCP entry chains (scripts/build-cli.js) — regenerated on every
+# release build and by `prepack`; never committed.
+/dist-cli/
+
+# playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# claude code local artifacts
+.claude/worktrees/
+.claude/settings.local.json
+.claude/plans/
+
+# python (mcp/tracking sidecar)
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# track-eval harness generated output (annotated MP4s, frame PNGs, metrics)
+track-eval-out/
+
+# python __pycache__ for whisper/tts/music sidecars (also covered by __pycache__/ above, kept explicit for clarity)
+mcp/whisper/__pycache__/
+mcp/tts/__pycache__/
+mcp/music/__pycache__/
+.electron-smoke/
+
+# Playwright MCP console/trace artifacts
+.playwright-mcp/
+
+# skill-eval run reports (regenerated; not committed)
+skill-eval/runs/
+
+# local-only working docs (plans, specs, QA notes) — never committed
+/docs-local/
+
+# macOS signing material — NEVER commit
+*.p12
+*.p8
+*.cer
+*.certSigningRequest
+
+# machine-local release window (scripts/lib/release-window.js) — personal to
+# the maintainer's machine, not part of the project
+/scripts/release-window.local.json
+
+# Tracking fixtures are real footage of real people — kept on the maintainer's
+# machine, never committed. The six tests under __tests__/integration/tracking/
+# that use them skip loudly when the file is absent (see that directory's README).
+/__tests__/fixtures/tracking/*.mp4
+
+# Ad-hoc QA screenshots — evidence for a session, never repo content.
+/sbqa-*.png

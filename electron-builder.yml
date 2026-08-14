@@ -1,0 +1,194 @@
+appId: "studio.libi.app"
+productName: "Libi"
+directories:
+  output: "release"
+# The shell's OWN update feed (electron-updater in electron/shell-updater.ts).
+# Declaring it does two load-bearing things at BUILD time even when nothing is
+# uploaded: electron-builder writes `app-update.yml` into Resources/ (the file
+# the packaged updater reads its feed config from) and emits `latest-mac.yml`
+# next to the artifacts. A GitHub Release must therefore ship latest-mac.yml +
+# the .zip (+ its .blockmap) alongside the dmg, or every installed shell's
+# update check 404s — release:electron verifies they exist. Uploading is never
+# done by the build itself: release scripts pass `--publish never`.
+publish:
+  provider: github
+  owner: Nagellabs
+  repo: libi
+# Post-pack licence gate. The `!node_modules/@anthropic-ai/**` exclusion below
+# is a TOP-LEVEL glob and does not match a nested
+# `node_modules/<x>/node_modules/@anthropic-ai/**`, and check-licenses.sh only
+# scans `--production` while this artifact ships devDependencies too — so a
+# future dep that nests proprietary Anthropic code would evade both gates.
+# This hook scans what was ACTUALLY packed and fails the build on any hit.
+afterPack: "scripts/afterpack-license-guard.js"
+# Pre-pack gate. The packaged shell ships no product code of its own, so a
+# missing or stale `build/libi-bundle/` yields an app that opens a splash and
+# can never start. Fail the build instead — see the script header for why an
+# electron-builder hook is safe here while an npm lifecycle hook would not be.
+beforePack: "scripts/beforepack-runtime-bundle-guard.js"
+# The `deb` target is an `ar` archive, and fpm shells out to whatever `ar` is on
+# PATH. macOS ships BSD `ar`, which writes a 96-byte `__.SYMDEF` stub instead of
+# the package, drops all three members, and EXITS 0 — a green build handing you a
+# corrupt artifact. These two hooks are one module (app-builder-lib resolves the
+# export whose name matches the config key): the first puts a verified GNU `ar`
+# in front of fpm or fails with instructions, the second reads the produced bytes
+# and refuses anything that is not a real three-member deb. The second is the
+# actual guarantee — see the script header. Both no-op for non-deb artifacts.
+artifactBuildStarted: "scripts/deb-target-guards.js"
+artifactBuildCompleted: "scripts/deb-target-guards.js"
+# ── What the SHELL ships ──────────────────────────────────────────────────
+# Almost nothing. The product — `.next`, `lib/`, `mcp/`, `app/`, `components/`,
+# `hooks/`, `drizzle/`, `public/`, and ~775 dependencies — is no longer copied
+# out of the working tree at all. It ships as an INSTALLED
+# `@nagellabs/libi` snapshot under `extraResources` (see below), and
+# `electron/runtime-loader.ts` picks between that snapshot and a newer one
+# fetched into `<LIBI_HOME>/runtime/<version>/`. That is what lets a feature
+# release be `npm publish` alone, with the shell re-shipping only for Chromium
+# CVEs, native ABI bumps and `shellApiVersion` majors.
+#
+# So this allowlist is now just the Electron host itself.
+files:
+  - "dist-electron/**/*"
+  # Electron reads `main` from here to find dist-electron/electron/main.js.
+  - "package.json"
+  # The shell requires NOTHING from node_modules: after the runtime-loader
+  # refactor, `dist-electron/electron/main.js` imports only `electron` and node
+  # builtins (`lib/server/lifecycle`, `mcp/notify`, `lib/sentry/native-crash`,
+  # `next` and friends all moved behind `runtime.api`). Shipping ~1GB of
+  # dependencies twice — once here, once inside the runtime snapshot — would be
+  # pure duplication.
+  #
+  # The two proprietary-code exclusions are kept ABOVE the blanket one and are
+  # deliberately NOT deleted as redundant. They are a licence position, not a
+  # size optimisation, and if this allowlist ever has to re-admit part of
+  # node_modules they must already be in place rather than remembered:
+  #
+  # "© Anthropic PBC. All rights reserved." libi is GPL-3.0 and holds NO licence
+  # to redistribute it: the Commercial Terms grant a right to USE the Services
+  # (§A.1) and explicitly grant no IP rights "by implication or otherwise" (§F).
+  # Both arrive transitively via @agentclientprotocol/claude-agent-acp, which is
+  # why the adapter is excluded too and installed into
+  # ~/.libi/agents/node_modules at first run instead
+  # (lib/agents/runtime-install.ts). That is the `agents` npm root — NOT
+  # ~/.libi/node_modules (bundled MCPs) and NOT ~/.libi/agent (the agent
+  # workspace), both of which exist and are one glance away from a misdiagnosis.
+  #
+  # NB: @agentclientprotocol/codex-acp is Apache-2.0 and stays bundled — inside
+  # the runtime snapshot, where it is a production dependency. It shares the
+  # @agentclientprotocol scope with the EXCLUDED claude adapter, which is why
+  # the exclusion below names `claude-agent-acp` explicitly rather than the
+  # scope: widening it to `@agentclientprotocol/**` would silently unship Codex.
+  # Its engine (@openai/codex + @openai/codex-<platform>-<arch>) is Apache-2.0
+  # too, so the whole codex chain is redistributable.
+  #
+  # The runtime snapshot enforces the same invariant STRUCTURALLY rather than by
+  # glob: it is an `npm install --omit=dev`, so the adapter is excluded by the
+  # dependency graph. `scripts/build-runtime-bundle.js` asserts it on the built
+  # artifact anyway, and `scripts/afterpack-license-guard.js` now scans BOTH
+  # `Resources/app/node_modules` and `Resources/libi-bundle/node_modules`.
+  - "!node_modules/@anthropic-ai/**"
+  - "!node_modules/@agentclientprotocol/claude-agent-acp/**"
+  - "!node_modules/**/*"
+# ── The RUNTIME snapshot ──────────────────────────────────────────────────
+# `build/libi-bundle/` is produced by `scripts/build-runtime-bundle.js`: an
+# `npm install --omit=dev` of the very tarball `npm publish` would upload, with
+# better-sqlite3's Electron-ABI prebuild fetched (never compiled) and a
+# `.libi-runtime.json` stamp recording version / shellApiVersion / ABI /
+# .next BUILD_ID. `beforePack` (below) refuses to package a missing or stale
+# one — without it the app has nothing to boot.
+#
+# TWO entries, and the second one is not redundant — it is the whole reason the
+# bundle arrives intact. electron-builder's file filter has a HARDCODED
+# `if (relative === "node_modules") return false` at the root of every matcher
+# (`app-builder-lib/out/util/filter.js#createFilter`). No pattern, negation or
+# `filter:` list can override it, so a single `from: build/libi-bundle` entry
+# copies the stamp and package.json and SILENTLY DROPS all 775 dependencies —
+# verified directly: the packed `Resources/libi-bundle/` contained exactly
+# `package.json` + `package-lock.json`.
+#
+# Pointing a second matcher AT the node_modules directory makes it that
+# matcher's root, so `relative` is never the literal string "node_modules" and
+# the check no longer fires. Nested `<pkg>/node_modules` (npm vendors its own)
+# take the `endsWith("/node_modules")` branch, which only appends a slash and
+# still matches `**/*` — checked against minimatch rather than assumed.
+#
+# This is the same class of trap the `.next/node_modules` entry in `files`
+# documents above: electron-builder special-cases that directory name
+# everywhere, and every time it does, it does so silently.
+extraResources:
+  - from: "build/libi-bundle"
+    to: "libi-bundle"
+  - from: "build/libi-bundle/node_modules"
+    to: "libi-bundle/node_modules"
+mac:
+  target: [dmg, zip]
+  category: "public.app-category.video"
+# Version-free dmg name so libi-site's download buttons can link to
+# releases/latest/download/Libi-arm64.dmg permanently — GitHub resolves
+# `latest` dynamically but matches asset names literally. Scoped to `dmg:`,
+# NOT `mac:`: mac.artifactName would also rename the zip, which is the
+# electron-updater feed artifact resolved by name from inside latest-mac.yml
+# and must stay versioned (identical names across versions break blockmap
+# differential downloads and CDN caching).
+dmg:
+  artifactName: "Libi-${arch}.dmg"
+win:
+  target: [nsis]
+linux:
+  target: [AppImage, deb]
+  category: "AudioVideo"
+  # Without this, `LinuxPackager` derives the executable from the NPM REGISTRY
+  # name: `appInfo.sanitizedName.toLowerCase()` turned `@nagellabs/libi` into
+  # `@nagellabslibi` — the on-disk binary, the `.desktop` entry, the icon
+  # filenames and the AppImage launcher all carried it. Same class of defect as
+  # the macOS userData relocation that `electron/libi-home-bootstrap.ts` pins
+  # against: a packaging identity derived from a registry identity.
+  #
+  # LINUX-ONLY ON PURPOSE. `AppInfo` is constructed per-platform, and a
+  # TOP-LEVEL `executableName` would also rewrite `appInfo.productFilename` on
+  # macOS — renaming `Libi.app` to `libi.app` and its inner Mach-O binary. Keep
+  # it nested under `linux:`.
+  executableName: "libi"
+# Per-target overrides for the fpm-built deb. `FpmTarget` merges
+# `config.deb` over `config.linux`, so these apply to the deb only and leave the
+# AppImage's naming (`Libi-0.1.0.AppImage`, from `${productName}`) alone.
+deb:
+  # The default deb pattern is `${name}_${version}_${arch}.${ext}`, and `${name}`
+  # is the raw package.json name — so electron-builder aimed the artifact at
+  # `release/@nagellabs/libi_0.1.0_amd64.deb` and fpm refuses to create the
+  # `@nagellabs/` path component. Fatal, and nothing about a scoped npm name
+  # belongs in a Debian filename anyway.
+  artifactName: "libi_${version}_${arch}.${ext}"
+  # Explicit rather than inherited. `appInfo.linuxPackageName` already
+  # special-cases scoped names to `sanitizedProductName` ("Libi") and fpm then
+  # lowercases it to satisfy Debian's lowercase-only rule — two implicit
+  # transforms that happen to agree today. Pin the value the filename above
+  # assumes.
+  packageName: "libi"
+# asar packing is DISABLED, and this was verified empirically rather than
+# assumed. It originally broke the app at boot: main.ts chdir'd into the app
+# root, and under asar that path is the archive FILE itself, so the app died
+# with
+#   ENOTDIR: not a directory, chdir '/' -> '.../Resources/app.asar'
+# That specific chdir now targets the RUNTIME root under `extraResources`
+# (which asar never touches), so the original failure would not recur — but the
+# reasons not to turn it on stand: it delivered no size win (the artifact's
+# bulk was never the shell), and it would still need an asarUnpack list for
+# every native .node binding (dlopen'd) plus the agent binaries libi spawns as
+# subprocesses. `asar: true` is also a precondition for the `onlyLoadAppFromAsar`
+# fuse below, which is the only reason to revisit this.
+asar: false
+# RC-G: harden the packaged Electron binary via @electron/fuses. electron-builder
+# flips these AFTER packing and re-signs the app, so no afterPack script is needed.
+# - runAsNode: refuse ELECTRON_RUN_AS_NODE=1 (can't repurpose the app binary as a
+#   raw Node.js runtime to execute arbitrary scripts with app entitlements).
+# - enableNodeCliInspectArguments: ignore --inspect / --inspect-brk / SIGUSR1 so a
+#   local attacker can't attach a debugger to the main process.
+# - enableNodeOptionsEnvironmentVariable: ignore NODE_OPTIONS / NODE_EXTRA_CA_CERTS
+#   so env-var injection can't preload modules or trust rogue CAs.
+# NB: onlyLoadAppFromAsar is intentionally NOT enabled — it requires `asar: true`
+# (currently false). Re-enable it here if/when asar packing is turned on.
+electronFuses:
+  runAsNode: false
+  enableNodeCliInspectArguments: false
+  enableNodeOptionsEnvironmentVariable: false

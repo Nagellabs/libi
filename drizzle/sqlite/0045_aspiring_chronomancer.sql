@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `crash_reports` text;
