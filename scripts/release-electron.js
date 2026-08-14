@@ -35,12 +35,15 @@
  *      → installs the PUBLISHED runtime into build/libi-bundle
  *   8. npx electron-builder --mac --publish never — signs, notarizes,
  *      staples (via the keychain profile), licence guard in afterPack
- *   9. verify: feed artifacts exist, stapler validate, Gatekeeper
- *      assessment on the .app inside the dmg
+ *   9. verify: feed artifacts exist, notarize + staple the DMG ITSELF
+ *      (electron-builder only staples the .app, then wraps it), re-digest it
+ *      in latest-mac.yml, stapler validate, Gatekeeper assessment on the
+ *      .app inside the dmg
  *  10. publish the GitHub Release (tag v<version>, all four artifacts)
  */
 const { spawnSync } = require("node:child_process");
-const { existsSync, readFileSync, rmSync } = require("node:fs");
+const { existsSync, readFileSync, rmSync, statSync, writeFileSync } = require("node:fs");
+const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
 
@@ -220,6 +223,54 @@ if (missingFeed.length > 0) {
       "\n   check the `publish:` section of electron-builder.yml.",
   );
   process.exit(1);
+}
+
+// ── 9a. notarize and staple the DMG ITSELF ─────────────────────────────────
+// electron-builder notarizes and staples the .app, then builds the dmg AROUND
+// the stapled app. The dmg container therefore carries no ticket of its own —
+// `stapler validate <dmg>` fails with "does not have a ticket stapled to it"
+// even though the app inside is perfectly notarized. Observed on the first
+// shell release, 2026-08-14: notarization succeeded, the app validated and
+// assessed as Notarized Developer ID, and this script still died at the staple
+// check below.
+//
+// It matters beyond the check passing. The .app's ticket only covers the app
+// once extracted; the DMG is what the user downloads and opens first, and
+// without its own ticket Gatekeeper has to reach Apple to clear it. Offline or
+// behind a captive portal, that is exactly the "damaged / cannot be opened"
+// experience notarization exists to prevent. So submit the dmg too, and staple
+// it, before anything validates it.
+const stapled = spawnSync("xcrun", ["stapler", "validate", dmg], { cwd: ROOT });
+if (stapled.status !== 0) {
+  run("notarize the dmg", "xcrun", [
+    "notarytool", "submit", dmg,
+    "--keychain-profile", process.env.APPLE_KEYCHAIN_PROFILE,
+    "--wait",
+  ]);
+  run("staple the dmg", "xcrun", ["stapler", "staple", dmg]);
+
+  // Stapling REWRITES the dmg — it grew 2416 bytes on the first release — so
+  // the digest electron-builder recorded for it in latest-mac.yml is now a lie.
+  // The updater downloads the zip (`path:`), which stapling never touches, so
+  // updates would still work; shipping a feed with a wrong checksum in it
+  // would not be defensible anyway.
+  const feedPath = path.join(ROOT, "release", "latest-mac.yml");
+  const sha512 = createHash("sha512").update(readFileSync(dmg)).digest("base64");
+  const size = statSync(dmg).size;
+  const before = readFileSync(feedPath, "utf-8");
+  const after = before.replace(
+    /(- url: Libi-arm64\.dmg\n\s+sha512: )[^\n]+(\n\s+size: )\d+/,
+    (_m, head, mid) => `${head}${sha512}${mid}${size}`,
+  );
+  if (after === before) {
+    console.error(
+      "❌ could not update the dmg's digest in latest-mac.yml — the feed would\n" +
+        "   advertise a checksum the stapled dmg no longer has. Fix by hand before shipping.",
+    );
+    process.exit(1);
+  }
+  writeFileSync(feedPath, after);
+  console.log("[release] re-digested the stapled dmg in latest-mac.yml");
 }
 
 run("staple check", "xcrun", ["stapler", "validate", dmg]);
