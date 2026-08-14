@@ -24,6 +24,12 @@ jobs:
   test:
     name: Unit + integration
     runs-on: ubuntu-latest
+    # A hung test otherwise burns the job's full 6-hour default. The first run
+    # of this workflow (2026-08-14) hung in `fake-elevenlabs/recorder.test.ts`
+    # and had to be cancelled by hand after 19 minutes — and because the run
+    # never reached vitest's summary, the failure details for the OTHER files
+    # that failed were never printed either. Fail fast, keep the log.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +54,16 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      # TEMPORARY (2026-08-14): the first CI run found the fake-elevenlabs
+      # suites failing and hanging on Linux, and the hang meant vitest never
+      # printed WHY the others failed. Running just that directory first, with
+      # its own timeout, produces a complete, readable failure block instead of
+      # a truncated log. Delete this step once those suites are green.
+      - name: Diagnose fake-elevenlabs (Linux-only failures under investigation)
+        timeout-minutes: 4
+        continue-on-error: true
+        run: npx vitest run __tests__/unit/fake-elevenlabs --reporter=verbose
 
       # Fixture-dependent suites (tracking footage, MediaPipe models, Playwright
       # browsers) skip loudly when their inputs are absent — see
