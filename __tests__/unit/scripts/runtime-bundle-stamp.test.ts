@@ -29,27 +29,30 @@ interface VerifyResult {
   stamp?: Record<string, unknown>;
 }
 interface RuntimeBundleModule {
-  verifyRuntimeBundle: (opts: { outDir: string; treeRoot?: string }) => VerifyResult;
+  verifyRuntimeBundle: (opts: {
+    outDir: string;
+    treeRoot?: string;
+    abi?: string;
+  }) => VerifyResult;
   runtimeRootFor: (prefix: string) => string;
-  electronAbi: () => string;
 }
-const { verifyRuntimeBundle, runtimeRootFor, electronAbi } =
+const { verifyRuntimeBundle, runtimeRootFor } =
   runtimeBundleModule as unknown as RuntimeBundleModule;
 
-// The two cases that must get PAST the ABI check to assert anything need the
-// real one. Asking the Electron binary is how the script itself does it, and it
-// is unavailable on a checkout where `electron` was never downloaded — those
-// two tests skip there rather than asserting something weaker.
-let realAbi: string | null = null;
-try {
-  realAbi = electronAbi();
-} catch {
-  realAbi = null;
-}
-if (realAbi === null)
-  console.info(
-    "[skip] runtime-bundle-stamp ABI tests — Electron binary not downloaded on this checkout (7 tests skip; the rest of the file still runs)",
-  );
+/**
+ * The ABI these fixtures claim, and the one injected into `verifyRuntimeBundle`
+ * so check (7) compares like with like. The exact number is irrelevant — what
+ * matters is that both sides agree WITHOUT executing Electron.
+ *
+ * This used to be `electronAbi()`, which runs `node_modules/electron`. On any
+ * checkout where Electron was never downloaded — CI installs with
+ * `--ignore-scripts`, so always there — it throws, check (7) fails first, and
+ * the licence (8) and symlink-farm (9) gates behind it become unreachable. The
+ * seven tests covering those gates skipped on that, meaning the licence
+ * invariant and the farm checks were verified on nobody's machine but this
+ * one. Injecting the ABI runs them everywhere.
+ */
+const FIXTURE_ABI = "137";
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 const repoPkg = JSON.parse(
@@ -161,10 +164,10 @@ function makeBundle(
     package: "@nagellabs/libi",
     version: repoPkg.version,
     shellApiVersion: repoPkg.libi.shellApiVersion,
-    // A deliberately impossible default: cases that are designed to fail
-    // BEFORE the ABI probe runs never need a real Electron. Cases that must
-    // get past it override this with `realAbi` and skip when Electron was
-    // never downloaded.
+    // A deliberately impossible default: cases designed to fail BEFORE check
+    // (7) never reach it, so the value is irrelevant to them. Cases that must
+    // get PAST it override this with `FIXTURE_ABI` and pass the same value to
+    // `verifyRuntimeBundle`.
     abi: "0",
     electronVersion: "36.9.5",
     buildId,
@@ -293,13 +296,13 @@ describe("verifyRuntimeBundle — origin decides what freshness means", () => {
     expect(result.reason).toContain(repoPkg.version);
   });
 
-  it.skipIf(realAbi === null)("accepts a DELIBERATELY pinned older registry bundle", () => {
+  it("accepts a DELIBERATELY pinned older registry bundle", () => {
     const pinned = "0.0.1";
     const prefix = makeBundle("registry", {
-      stamp: { version: pinned, requestedVersion: pinned, versionPinned: true, abi: realAbi },
+      stamp: { version: pinned, requestedVersion: pinned, versionPinned: true, abi: FIXTURE_ABI },
       runtime: { version: pinned },
     });
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.reason ?? "(ok)").toBe("(ok)");
     expect(result.ok).toBe(true);
   });
@@ -357,14 +360,27 @@ describe("verifyRuntimeBundle — structural checks", () => {
     expect(result.reason).toContain("shell-api.js");
   });
 
-  it.skipIf(realAbi === null)("fails a bundle carrying code libi may not redistribute", () => {
-    const prefix = makeBundle("registry", { stamp: { abi: realAbi } });
+  it("fails a bundle carrying code libi may not redistribute", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: FIXTURE_ABI } });
     fs.mkdirSync(path.join(prefix, "node_modules", "@anthropic-ai", "claude-agent-sdk"), {
       recursive: true,
     });
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("LICENCE VIOLATION");
+  });
+
+  // Check (7) itself. A bundle's native deps are resolved for ONE
+  // NODE_MODULE_VERSION; ship it against a shell built on another and the app
+  // dies on first `require` of better-sqlite3. Never covered deliberately
+  // before — the fixtures could only mismatch by accident, and only on a
+  // machine that happened to have Electron downloaded.
+  it("fails a bundle built for a different Electron ABI", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: "115" } });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("NODE_MODULE_VERSION 115");
+    expect(result.reason).toContain(FIXTURE_ABI);
   });
 });
 
@@ -373,53 +389,54 @@ describe("verifyRuntimeBundle — structural checks", () => {
 // it. All three of these ship SILENTLY otherwise: the app boots, binds its
 // port, and 500s every route that touches an externalised package.
 //
-// These need `realAbi` because (9) runs LAST — deliberately, so it can never
-// mask the licence/ABI gates, which is exactly what it did when it ran early.
+// These inject `FIXTURE_ABI` because (9) runs LAST — deliberately, so it can
+// never mask the licence/ABI gates, which is exactly what it did when it ran
+// early. Reaching it therefore means getting past check (7) first.
 describe("verifyRuntimeBundle — the externals symlink farm", () => {
   const farmDirOf = (prefix: string): string =>
     path.join(runtimeRootFor(prefix), ".next", "node_modules");
 
-  it.skipIf(realAbi === null)("accepts a bundle whose farm is present and relative", () => {
-    const result = verifyRuntimeBundle({ outDir: makeBundle("registry", { stamp: { abi: realAbi } }) });
+  it("accepts a bundle whose farm is present and relative", () => {
+    const result = verifyRuntimeBundle({ outDir: makeBundle("registry", { stamp: { abi: FIXTURE_ABI } }), abi: FIXTURE_ABI });
     expect(result.reason ?? "(none)").toBe("(none)");
     expect(result.ok).toBe(true);
   });
 
-  it.skipIf(realAbi === null)("fails a bundle with no farm at all", () => {
-    const prefix = makeBundle("registry", { stamp: { abi: realAbi } });
+  it("fails a bundle with no farm at all", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: FIXTURE_ABI } });
     fs.rmSync(farmDirOf(prefix), { recursive: true, force: true });
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("no Next.js externals symlink farm");
   });
 
-  it.skipIf(realAbi === null)("fails a farm whose targets are ABSOLUTE", () => {
-    const prefix = makeBundle("registry", { stamp: { abi: realAbi } });
+  it("fails a farm whose targets are ABSOLUTE", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: FIXTURE_ABI } });
     const farm = farmDirOf(prefix);
     // Resolves fine HERE, and dangles the moment the bundle is copied into
     // Contents/Resources — the failure that must not reach a user.
     fs.rmSync(path.join(farm, "pino-abc123"));
     fs.symlinkSync(path.join(prefix, "node_modules", "pino"), path.join(farm, "pino-abc123"), "dir");
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("ABSOLUTE target");
   });
 
-  it.skipIf(realAbi === null)("fails a farm whose links dangle", () => {
-    const prefix = makeBundle("registry", { stamp: { abi: realAbi } });
+  it("fails a farm whose links dangle", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: FIXTURE_ABI } });
     fs.rmSync(path.join(prefix, "node_modules", "pino"), { recursive: true, force: true });
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("does not resolve");
   });
 
-  it.skipIf(realAbi === null)("reports the LICENCE violation, not the farm, when both are wrong", () => {
-    const prefix = makeBundle("registry", { stamp: { abi: realAbi } });
+  it("reports the LICENCE violation, not the farm, when both are wrong", () => {
+    const prefix = makeBundle("registry", { stamp: { abi: FIXTURE_ABI } });
     fs.rmSync(farmDirOf(prefix), { recursive: true, force: true });
     fs.mkdirSync(path.join(prefix, "node_modules", "@anthropic-ai", "claude-agent-sdk"), {
       recursive: true,
     });
-    const result = verifyRuntimeBundle({ outDir: prefix });
+    const result = verifyRuntimeBundle({ outDir: prefix, abi: FIXTURE_ABI });
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("LICENCE VIOLATION");
   });

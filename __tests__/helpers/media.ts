@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "child_process";
-import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
+import { resolveFfmpegPath, resolveFfprobePath } from "@/lib/ffmpeg/exec";
 import { promisify } from "util";
 import fs from "fs";
 import os from "os";
@@ -32,7 +32,7 @@ interface FfprobeOutput {
 
 export async function probe(filePath: string): Promise<MediaProbe> {
   const { stdout } = await execFileAsync(
-    "ffprobe",
+    resolveFfprobePath(),
     ["-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", filePath],
     { timeout: 10_000 },
   );
@@ -80,7 +80,7 @@ export async function extractFrameRgba(
   if (!info.videoStream) throw new Error(`No video stream in ${videoPath}`);
   const { width, height } = info.videoStream;
   const { stdout } = await execFileAsync(
-    "ffmpeg",
+    resolveFfmpegPath(),
     [
       "-v", "error",
       "-ss", String(timeSeconds),
@@ -134,7 +134,7 @@ export function sampleRegionMean(
 export async function audioMeanVolumeDb(filePath: string): Promise<number | null> {
   try {
     const { stderr } = await execFileAsync(
-      "ffmpeg",
+      resolveFfmpegPath(),
       ["-hide_banner", "-nostats", "-i", filePath, "-filter:a", "volumedetect", "-f", "null", "-"],
       { timeout: 20_000 },
     );
@@ -155,6 +155,26 @@ export async function sha256(filePath: string): Promise<string> {
 export async function listTmpExportDirs(): Promise<string[]> {
   const entries = await fs.promises.readdir(os.tmpdir());
   return entries.filter((e) => e.startsWith("libi-export-")).map((e) => path.join(os.tmpdir(), e));
+}
+
+/**
+ * Export scratch dirs that appeared since `before` — i.e. the ones the code
+ * under test is actually responsible for.
+ *
+ * `listTmpExportDirs()` scans the SHARED OS tmpdir, so asserting it is empty
+ * asserts something about the whole machine, not about this test. Any process
+ * or earlier test file whose temp dir happens to start with `libi-export-`
+ * fails it. That is not hypothetical: `export-render-runner.test.ts` names its
+ * isolated homes `libi-export-runner-*`, which the prefix matches, so a run of
+ * that file made the trim and caption leak assertions fail on the NEXT run —
+ * an order-dependent flake that stayed hidden only because caption was skipped
+ * and the survivors happened to be scheduled first.
+ *
+ * Snapshot before, diff after: the invariant each test means to pin.
+ */
+export async function newTmpExportDirsSince(before: string[]): Promise<string[]> {
+  const seen = new Set(before);
+  return (await listTmpExportDirs()).filter((d) => !seen.has(d));
 }
 
 /**
@@ -188,13 +208,31 @@ export const FFMPEG_SKIP_REASON =
   "install it (brew install ffmpeg / apt-get install ffmpeg) or run libi once so " +
   "Category A provisioning fetches it";
 
+/**
+ * Does the resolved ffmpeg carry the `drawtext` filter? It is a build-time
+ * option (libfreetype), not a runtime one, so two ffmpeg binaries on the same
+ * machine can disagree — Homebrew's commonly lacks it while the one Category A
+ * provisions into `<LIBI_HOME>/bin` has it. That disagreement is exactly why
+ * the vitest global setup links the provisioned binaries into the isolated
+ * home: probe and code under test must resolve the SAME binary, or these
+ * tests skip over a filter the shipping product supports.
+ */
+let drawtextPresent: boolean | null = null;
+
 export function hasDrawtext(): boolean {
+  if (drawtextPresent !== null) return drawtextPresent;
   try {
     const out = execFileSync(resolveFfmpegPath(), ["-hide_banner", "-filters"], {
       timeout: 3000,
     }).toString();
-    return /\bdrawtext\b/.test(out);
+    drawtextPresent = /\bdrawtext\b/.test(out);
   } catch {
-    return false;
+    drawtextPresent = false;
   }
+  return drawtextPresent;
 }
+
+export const DRAWTEXT_SKIP_REASON =
+  `ffmpeg at "${resolveFfmpegPath()}" was built without the drawtext filter ` +
+  "(needs libfreetype) — run libi once so Category A provisions a full build " +
+  "into <LIBI_HOME>/bin, or install one with drawtext";

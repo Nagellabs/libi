@@ -21,12 +21,15 @@ afterAll(() => {
   restore?.();
 });
 
-describe("runEngineSelftest", () => {
+// Reported PASS while asserting nothing when the env was absent: the test
+// body opened with `if (env.missing) return;`, so on every machine without a
+// provisioned tracking venv — CI included — this file was a green tick over
+// zero coverage, which is strictly worse than a skip because nothing in the
+// summary distinguishes it. Skip honestly and say why.
+if (env.missing) console.info(`[skip] runEngineSelftest — ${env.missing}`);
+
+describe.skipIf(env.missing !== null)("runEngineSelftest", () => {
   it("returns ok + onnxruntime version when the uv env is synced", async () => {
-    if (env.missing) {
-      console.warn("SKIP:", env.missing);
-      return;
-    }
     const r = await runEngineSelftest();
     expect(r.ok).toBe(true);
     expect(r.versions.onnxruntime).toBeTruthy();

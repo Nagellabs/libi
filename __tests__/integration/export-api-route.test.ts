@@ -19,13 +19,14 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { eq } from "drizzle-orm";
 import { createTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
-import { probe, audioMeanVolumeDb, hasFfmpeg, FFMPEG_SKIP_REASON, listTmpExportDirs, extractFrameRgba, sampleRegionMean } from "@/__tests__/helpers/media";
+import { probe, audioMeanVolumeDb, hasFfmpeg, FFMPEG_SKIP_REASON, listTmpExportDirs, newTmpExportDirsSince, extractFrameRgba, sampleRegionMean } from "@/__tests__/helpers/media";
 
 const FIXTURE_DIR = path.resolve(__dirname, "..", "helpers", "fixtures", "video");
 const VIDEO_FIXTURE = path.join(FIXTURE_DIR, "clip-red-3s.mp4");
@@ -58,7 +59,22 @@ const LOGO_NAME = "logo.png";
 const TONE_NAME = "tone.m4a";
 
 skipIf("Layer-2: /api/export/ffmpeg route", () => {
-  beforeEach(() => {
+  /** Export scratch dirs present before the route ran — see the check below. */
+  let tmpExportDirsBefore: string[] = [];
+  let savedTmpdir: string | undefined;
+
+  beforeEach(async () => {
+    // The route is the ONLY thing that creates `os.tmpdir()/libi-export-*`
+    // (app/api/export/ffmpeg/route.ts). Left in the shared OS tmpdir those
+    // dirs are visible to every parallel vitest worker, so the identical
+    // leak assertions in trim.test.ts and caption.test.ts saw THIS test's
+    // in-flight scratch and failed. `os.tmpdir()` reads TMPDIR on each call,
+    // so redirecting it confines the route's scratch to this worker — and
+    // `listTmpExportDirs()` below resolves the same way, so the check still
+    // sees exactly what the route created.
+    savedTmpdir = process.env.TMPDIR;
+    process.env.TMPDIR = fs.mkdtempSync(path.join(savedTmpdir ?? os.tmpdir(), "libi-route-tmp-"));
+    tmpExportDirsBefore = await listTmpExportDirs();
     tempDir = createTempStorageDir();
     testDb = createTestDb();
     seedPiece(testDb, { id: PIECE_ID });
@@ -115,6 +131,12 @@ skipIf("Layer-2: /api/export/ffmpeg route", () => {
 
   afterEach(() => {
     cleanupTempDir(tempDir);
+    const routeTmp = process.env.TMPDIR;
+    if (savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = savedTmpdir;
+    if (routeTmp && routeTmp !== savedTmpdir) {
+      fs.rmSync(routeTmp, { recursive: true, force: true });
+    }
   });
 
   async function seedManifestDims(): Promise<void> {
@@ -212,7 +234,7 @@ skipIf("Layer-2: /api/export/ffmpeg route", () => {
 
     // Tmp-dir cleanup is fire-and-forget — give the promise a moment.
     await new Promise((r) => setTimeout(r, 100));
-    const leftover = await listTmpExportDirs();
+    const leftover = await newTmpExportDirsSince(tmpExportDirsBefore);
     if (leftover.length > 0) {
       // Cleanup race with the fire-and-forget fs.rm. Don't fail the test.
       // TODO: tighten the route to await cleanup (see docs-local/follow-ups.md).

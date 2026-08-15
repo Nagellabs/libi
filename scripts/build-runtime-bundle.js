@@ -919,9 +919,19 @@ async function buildRuntimeBundle({ fromRegistry = null, registry = null, outDir
  * verification at "working tree is not built" before the drift check it was
  * meant to exercise ever runs.
  *
+ * `abi` is check (7)'s expected NODE_MODULE_VERSION. It defaults to asking the
+ * real Electron binary, which is what every production caller wants and what
+ * `main()` uses. It exists for the same reason `treeRoot` does: `electronAbi()`
+ * EXECUTES `node_modules/electron`, so on any checkout where Electron was never
+ * downloaded — notably CI, which installs with `--ignore-scripts` — it throws
+ * and check (7) fails first, taking the licence (8) and symlink-farm (9) gates
+ * down with it. Seven tests covering those two gates skipped on exactly that.
+ * Injecting the ABI lets them run everywhere, and lets the MISMATCH branch be
+ * exercised deterministically instead of only the accidental-mismatch case.
+ *
  * Returns `{ ok, stamp }` / `{ ok: false, reason }`.
  */
-function verifyRuntimeBundle({ outDir, treeRoot = ROOT } = {}) {
+function verifyRuntimeBundle({ outDir, treeRoot = ROOT, abi: expectedAbi } = {}) {
   const target = outDir ?? path.join(ROOT, OUT_DIRNAME);
   const stampPath = path.join(target, STAMP_NAME);
   let stamp;
@@ -1037,10 +1047,14 @@ function verifyRuntimeBundle({ outDir, treeRoot = ROOT } = {}) {
 
   // (7) The ABI the native deps were resolved for.
   let abi;
-  try {
-    abi = electronAbi();
-  } catch (err) {
-    return { ok: false, reason: `could not read Electron's ABI: ${err.message}` };
+  if (expectedAbi !== undefined) {
+    abi = expectedAbi;
+  } else {
+    try {
+      abi = electronAbi();
+    } catch (err) {
+      return { ok: false, reason: `could not read Electron's ABI: ${err.message}` };
+    }
   }
   if (String(stamp.abi) !== String(abi)) {
     return {

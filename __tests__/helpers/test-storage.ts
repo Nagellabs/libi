@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { linkProvisionedBinaries } from "./provisioned-bin";
 
 // Stateful storage for no-arg usage pattern
 let _currentTempDir: string | undefined;
@@ -21,6 +22,11 @@ let _currentTempDir: string | undefined;
 export function createTempStorageDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-test-"));
   _currentTempDir = dir;
+  // This overrides the global setup's LIBI_HOME, so the provisioned media
+  // binaries have to be linked in again — otherwise every ffmpeg-backed test
+  // resolves a DIFFERENT ffmpeg off PATH than the one libi ships. See
+  // ./provisioned-bin.ts.
+  linkProvisionedBinaries(dir);
   process.env.LIBI_HOME = dir;
   // NOTE: do not auto-reset the storage singleton here — many tests
   // `vi.mock("@/lib/storage")` without a `resetStorage` export, and calling it

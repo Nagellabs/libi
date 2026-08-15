@@ -18,16 +18,22 @@
  * Individual tests that need their own LIBI_HOME (e.g. libi-home.test.ts)
  * can still override `process.env.LIBI_HOME` inside `beforeEach` — this
  * setup just establishes a safe default for everyone else.
+ *
+ * `bin/` is populated rather than left empty — see
+ * `__tests__/helpers/provisioned-bin.ts` for why an empty one silently
+ * substituted a different ffmpeg for the one libi ships.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { linkProvisionedBinaries } from "../helpers/provisioned-bin";
 
 let tempRoot: string | null = null;
 
 export async function setup(): Promise<void> {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "libi-vitest-"));
   fs.mkdirSync(path.join(tempRoot, "agent"), { recursive: true });
+  linkProvisionedBinaries(tempRoot);
 
   process.env.LIBI_HOME = tempRoot;
 }

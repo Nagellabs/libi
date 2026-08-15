@@ -10,10 +10,17 @@ import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-s
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
 import { probeDuration } from "@/__tests__/helpers/ffprobe";
-import { hasFfmpeg, hasDrawtext, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
+import {
+  hasFfmpeg,
+  hasDrawtext,
+  FFMPEG_SKIP_REASON,
+  DRAWTEXT_SKIP_REASON,
+} from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(__dirname, "..", "helpers", "fixtures", "tiny.mp4");
 if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+else if (!hasDrawtext())
+  console.info(`[skip] text-overlay render — ${DRAWTEXT_SKIP_REASON}`);
 const skipIf = hasFfmpeg() ? describe : describe.skip;
 const skipIfNoDrawtext = hasDrawtext() ? it : it.skip;
 

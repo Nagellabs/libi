@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -62,11 +62,25 @@ describe("exportRenderRunner", () => {
     __resetRunnerRegistryForTests();
     __resetRegistryForTests();
     registerRunner(exportRenderRunner);
-    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "libi-export-runner-"));
+    // NOT "libi-export-*": that prefix is what `listTmpExportDirs()` scans
+    // for, so an isolated home named that way looked like a leaked export
+    // scratch dir to trim.test.ts and caption.test.ts running in parallel
+    // workers. Deliberately outside their namespace.
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "libi-jobtest-render-"));
     process.env.LIBI_HOME = tmp;
     fs.mkdirSync(path.join(tmp, "jobs"), { recursive: true });
     vi.mocked(getDb).mockReturnValue(createTestDb() as never);
     delete (globalThis as { __libiJobManager?: unknown }).__libiJobManager;
+  });
+
+  // Without this, every test leaked its isolated home into the OS tmpdir.
+  // Those dirs are named `libi-export-runner-*`, which the `libi-export-`
+  // prefix in `listTmpExportDirs()` matches — so the leak made the export
+  // leak-assertions in trim.test.ts and caption.test.ts fail on the NEXT
+  // run, an order-dependent flake. Both ends are fixed: the assertions are
+  // now scoped to dirs they caused, and nothing is left behind here.
+  afterEach(() => {
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 
   it("happy path: invokes driver.runJob, awaits registry resolution, returns the output", async () => {

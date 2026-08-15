@@ -23,7 +23,14 @@ import { createTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
-import { probe, sha256, listTmpExportDirs, hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
+import {
+  probe,
+  sha256,
+  listTmpExportDirs,
+  newTmpExportDirsSince,
+  hasFfmpeg,
+  FFMPEG_SKIP_REASON,
+} from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(
   __dirname,
@@ -51,14 +58,17 @@ skipIf("Layer-1: StreamCopyTrimBackend trim flow", () => {
   const FILE_ID = "f-trim";
   const SRC_NAME = "src.mp4";
 
+  /** Export scratch dirs present before the backend ran — see below. */
+  let tmpExportDirsBefore: string[] = [];
+
   beforeEach(async () => {
-    // Pre-clean any leftover libi-export-* dirs from concurrent tests so the
-    // trailing invariant check at the end of each test is deterministic.
-    const { listTmpExportDirs: list } = await import("@/__tests__/helpers/media");
-    const leftovers = await list();
-    for (const d of leftovers) {
-      fs.rmSync(d, { recursive: true, force: true });
-    }
+    // Snapshot the shared tmpdir instead of pre-cleaning it. The previous
+    // version rm -rf'd every `libi-export-*` dir it found, which reaches
+    // outside this test: vitest runs files in parallel workers, and
+    // `export-render-runner.test.ts` names its isolated LIBI_HOMEs
+    // `libi-export-runner-*` — so this could delete a sibling file's home
+    // mid-run. Diffing a snapshot pins the same invariant and touches nothing.
+    tmpExportDirsBefore = await listTmpExportDirs();
 
     tempDir = createTempStorageDir();
     testDb = createTestDb();
@@ -168,8 +178,8 @@ skipIf("Layer-1: StreamCopyTrimBackend trim flow", () => {
 
     // Trailing invariant: the direct-backend path should not leave stray
     // libi-export-* dirs in os.tmpdir(). Regression guard in case the
-    // backend ever starts using os.tmpdir() directly.
-    const leftover = await listTmpExportDirs();
-    expect(leftover).toEqual([]);
+    // backend ever starts using os.tmpdir() directly. Scoped to dirs THIS
+    // test caused, so a sibling worker's temp dirs can't fail it.
+    expect(await newTmpExportDirsSince(tmpExportDirsBefore)).toEqual([]);
   });
 });

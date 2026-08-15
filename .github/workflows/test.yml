@@ -14,11 +14,30 @@ name: Tests
 # Both are fixed. This exists so the next one is caught by a machine that has
 # never built anything, rather than by someone reading a release log.
 
+# Every branch, not just main. Scoped to `main` this workflow could not verify
+# a change until AFTER it had been merged — a feature-branch push triggered
+# nothing, so the only pre-merge signal was a PR or a hand-fired
+# `workflow_dispatch`, and a branch could sit "green" on a developer's machine
+# and untested by any runner right up to the merge commit.
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# A branch that is ALSO open as a pull request matches both triggers above and
+# gets two runs of the same commit. They are distinct refs (refs/heads/x vs
+# refs/pull/N/merge), so no concurrency group can collapse them — the cost is
+# accepted deliberately in exchange for every push being verified.
+#
+# What this DOES collapse is the pile-up from pushing repeatedly to one branch:
+# each new push cancels the still-running check of the commit it just replaced,
+# which is never the answer anyone is waiting for. `main` is excluded by the
+# `github.ref` in the group key being unique per branch, and cancel-in-progress
+# is safe there for the same reason — a superseded run tells you about a commit
+# that is no longer the tip.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -79,6 +98,14 @@ jobs:
       # guard covers it: without ffmpeg here those tests would silently SKIP in
       # CI and their coverage would be gone. Guard = correct everywhere;
       # install = the tests actually run where it matters.
+      #
+      # WHICH ffmpeg this is matters, not just that one exists. Tests resolve
+      # it the way the product does — `<LIBI_HOME>/bin` first, then PATH — and
+      # the isolated LIBI_HOME links in the Category-A binaries when the
+      # machine has them (__tests__/helpers/provisioned-bin.ts). This runner
+      # has no provisioned home, so everything falls through to the apt build
+      # installed here. It must carry `drawtext` (libfreetype) or the caption
+      # burn-in and text-overlay tests skip.
       - name: Install ffmpeg (not in the runner image; real-ffmpeg tests must run here, not skip)
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 

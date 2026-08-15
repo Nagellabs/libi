@@ -5,15 +5,18 @@ import { join } from "node:path";
 import { renderAnnotatedVideo } from "@/scripts/track-eval/render";
 import { normalizeTrack } from "@/lib/tracking/segments";
 import type { Track } from "@/lib/tracking/types";
-import { hasFaceFixture, FIXTURE_SKIP_REASON } from "./fixture-guard";
+import { SYNTHETIC_VIDEO_FIXTURE } from "./fixture-guard";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 
-const fixture = "__tests__/fixtures/tracking/non-selfie-face-5s.mp4";
+// Draws boxes from a hand-built track over arbitrary pixels — no face needed,
+// so this uses the committed synthetic clip and runs everywhere.
+const fixture = SYNTHETIC_VIDEO_FIXTURE;
 let outDir = "";
 
-if (!hasFaceFixture) console.info(`[skip] ${FIXTURE_SKIP_REASON}`);
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
 
-describe.skipIf(!hasFaceFixture)("renderAnnotatedVideo", () => {
-  it("produces an annotated mp4 from a real track over the fixture", async () => {
+describe.skipIf(!hasFfmpeg())("renderAnnotatedVideo", () => {
+  it("produces an annotated mp4 from a hand-built track over the fixture", async () => {
     outDir = await mkdtemp(join(tmpdir(), "track-eval-"));
     const out = join(outDir, "annotated.mp4");
     const track: Track = normalizeTrack({

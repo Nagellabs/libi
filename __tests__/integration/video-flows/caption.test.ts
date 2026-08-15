@@ -33,9 +33,11 @@ import {
   extractFrameRgba,
   sampleRegionMean,
   listTmpExportDirs,
+  newTmpExportDirsSince,
   hasFfmpeg,
   hasDrawtext,
   FFMPEG_SKIP_REASON,
+  DRAWTEXT_SKIP_REASON,
 } from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(
@@ -49,6 +51,7 @@ const FIXTURE = path.resolve(
 );
 
 if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
+else if (!hasDrawtext()) console.info(`[skip] caption burn-in — ${DRAWTEXT_SKIP_REASON}`);
 const skipIf = hasFfmpeg() && hasDrawtext() ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;
@@ -77,7 +80,11 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
   const SRC_NAME = "src.mp4";
   const FONT_NAME = "Geist-Regular.ttf";
 
-  beforeEach(() => {
+  /** Export scratch dirs present before the backend ran — see the assertion. */
+  let tmpExportDirsBefore: string[] = [];
+
+  beforeEach(async () => {
+    tmpExportDirsBefore = await listTmpExportDirs();
     tempDir = createTempStorageDir();
     testDb = createTestDb();
     seedPiece(testDb, { id: PIECE_ID });
@@ -212,8 +219,8 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
     expect(Math.abs(outBottom[2] - inBottom[2])).toBeLessThan(10);
 
     // Direct-backend path must not leak tmp dirs (API route's concern, but
-    // we pin the invariant here too as a forward guard).
-    const leftover = await listTmpExportDirs();
-    expect(leftover).toEqual([]);
+    // we pin the invariant here too as a forward guard). Scoped to dirs THIS
+    // test caused — the shared tmpdir also holds sibling workers' dirs.
+    expect(await newTmpExportDirsSince(tmpExportDirsBefore)).toEqual([]);
   });
 });

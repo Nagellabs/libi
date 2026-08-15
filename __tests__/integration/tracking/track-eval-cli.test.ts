@@ -7,11 +7,15 @@ import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-s
 import { pieces, files } from "@/lib/db/schema/sqlite";
 import { saveTrackSamples } from "@/lib/tracking/save-track";
 import { runTrackEval } from "@/scripts/track-eval/index";
-import { hasFaceFixture, FIXTURE_SKIP_REASON } from "./fixture-guard";
+import { SYNTHETIC_VIDEO_FIXTURE } from "./fixture-guard";
+import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 
-if (!hasFaceFixture) console.info(`[skip] ${FIXTURE_SKIP_REASON}`);
+// Resolves a saved `manual` track and renders it — the file only has to be a
+// decodable video, so this uses the committed synthetic clip rather than the
+// uncommitted face footage, and runs everywhere.
+if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
 
-describe.skipIf(!hasFaceFixture)("runTrackEval", () => {
+describe.skipIf(!hasFfmpeg())("runTrackEval", () => {
   let out = "";
   beforeEach(async () => {
     createTestDb();
@@ -26,9 +30,11 @@ describe.skipIf(!hasFaceFixture)("runTrackEval", () => {
     const { cpSync, mkdirSync } = await import("node:fs");
     const { getLibiStorageDir } = await import("@/lib/libi-home");
     mkdirSync(join(getLibiStorageDir(), "p1"), { recursive: true });
-    cpSync("__tests__/fixtures/tracking/non-selfie-face-5s.mp4", join(getLibiStorageDir(), "p1", "v.mp4"));
+    cpSync(SYNTHETIC_VIDEO_FIXTURE, join(getLibiStorageDir(), "p1", "v.mp4"));
+    // Dimensions and duration must match the fixture actually copied above —
+    // the clip is 320×240 / 3s (see __tests__/helpers/fixtures/video/).
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await db.insert(files).values({ id: "f1", pieceId: "p1", filename: "v.mp4", name: "v", description: "", type: "video", storagePath: "", contentType: "video/mp4", createdAt: new Date(), mediaWidth: 1280, mediaHeight: 720, mediaDuration: 5 } as any);
+    await db.insert(files).values({ id: "f1", pieceId: "p1", filename: "v.mp4", name: "v", description: "", type: "video", storagePath: "", contentType: "video/mp4", createdAt: new Date(), mediaWidth: 320, mediaHeight: 240, mediaDuration: 3 } as any);
     await saveTrackSamples({
       trackId: "trk-1", fileId: "f1", framerate: 5, method: "manual",
       samples: Array.from({ length: 6 }, (_, i) => ({ t: i / 5, x: 40, y: 40, w: 80, h: 80, confidence: 1, visible: true })),
