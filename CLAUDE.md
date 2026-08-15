@@ -57,3 +57,13 @@ when nothing has changed.
 Update the tests that the change touches, cover any new code path, and keep
 `docs-local/test-registry.json` in sync — then run `npm test` and report what it actually
 printed (re-read the ABI trap in `AGENTS.md` → Testing before trusting the summary).
+
+## After a release
+
+Verify the *published* artifacts as a fresh user would receive them — not the working
+tree. The procedure is `docs-local/release/release-verification-playbook.md` (local to
+this machine): the SMALL tier (~30 min — artifact integrity, npx cold boot under a fresh
+`LIBI_HOME`, dmg fresh boot, one agent round-trip) for routine releases, FULL when the
+release touched install, provisioning, onboarding, or agents. Never run QA against
+`~/.libi` (npx shares it with this checkout), and judge the dmg by staple + mount + app
+assessment — the container is unsigned by design, so `spctl -t open` always rejects it.
