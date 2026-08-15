@@ -42,6 +42,9 @@ const LOGO_FIXTURE = path.join(FIXTURE_DIR, "logo-64.png");
 // integration test is implemented. This test still uses the old
 // AudioTrack / VideoScene.audio shape which has been removed from the
 // engine types. Skipping to keep the build green.
+console.info(
+  "[skip] audio-mix flow — hard-disabled pending the Task-19 AudioClip conversion (still drives the removed AudioTrack shape; see TODO above)",
+);
 const skipIf = describe.skip;
 // const skipIf = hasFfmpeg() ? describe : describe.skip;
 

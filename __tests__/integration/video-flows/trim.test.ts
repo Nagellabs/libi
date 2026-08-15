@@ -23,7 +23,7 @@ import { createTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
-import { probe, sha256, listTmpExportDirs, hasFfmpeg } from "@/__tests__/helpers/media";
+import { probe, sha256, listTmpExportDirs, hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 
 const FIXTURE = path.resolve(
   __dirname,
@@ -35,7 +35,9 @@ const FIXTURE = path.resolve(
   "clip-red-3s.mp4",
 );
 
-const skipIf = hasFfmpeg() ? describe : describe.skip;
+const ffmpegPresent = hasFfmpeg();
+if (!ffmpegPresent) console.info(`[skip] StreamCopyTrimBackend trim flow — ${FFMPEG_SKIP_REASON}`);
+const skipIf = ffmpegPresent ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;
 vi.mock("@/lib/db/client", () => ({ getDb: () => testDb }));

@@ -5,6 +5,11 @@ import path from "path";
 
 const RUN = process.env.LIBI_TEST_INTEGRATION === "1";
 
+if (!RUN)
+  console.info(
+    "[skip] install-deps roundtrip — set LIBI_TEST_INTEGRATION=1 to run (real uv; downloads the ~50 MB librosa env)",
+  );
+
 (RUN ? describe : describe.skip)("install-deps roundtrip (real uv)", () => {
   let tmp: string;
   beforeEach(() => {

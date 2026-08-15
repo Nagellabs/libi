@@ -24,6 +24,7 @@ function hasFfmpeg(): boolean {
   }
 }
 const skipAll = !hasFfmpeg();
+if (skipAll) console.info("[skip] ffmpeg MCP tools — ffmpeg not on PATH");
 const skipIf = skipAll ? describe.skip : describe;
 
 let testDb: ReturnType<typeof createTestDb>;

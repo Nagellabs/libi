@@ -14,14 +14,16 @@ import {
   sampleRegionMean,
   audioMeanVolumeDb,
   sha256,
-  hasFfmpeg,
+  hasFfmpeg, FFMPEG_SKIP_REASON,
 } from "@/__tests__/helpers/media";
 
 const FIXTURES = path.resolve(__dirname, "..", "helpers", "fixtures", "video");
 const RED = path.join(FIXTURES, "clip-red-3s.mp4");
 const GREEN = path.join(FIXTURES, "clip-green-3s.mp4");
 
-const skipIf = hasFfmpeg() ? describe : describe.skip;
+const ffmpegPresent = hasFfmpeg();
+if (!ffmpegPresent) console.info(`[skip] media helpers — ${FFMPEG_SKIP_REASON}`);
+const skipIf = ffmpegPresent ? describe : describe.skip;
 
 skipIf("media helpers", () => {
   it("probe() describes clip-red-3s.mp4", async () => {

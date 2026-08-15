@@ -46,6 +46,10 @@ try {
 } catch {
   realAbi = null;
 }
+if (realAbi === null)
+  console.info(
+    "[skip] runtime-bundle-stamp ABI tests — Electron binary not downloaded on this checkout (7 tests skip; the rest of the file still runs)",
+  );
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 const repoPkg = JSON.parse(

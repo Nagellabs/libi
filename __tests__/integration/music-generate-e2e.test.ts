@@ -49,6 +49,11 @@ afterAll(() => {
   else process.env.LIBI_HOME = prevLibiHome;
 });
 
+if (!RUN)
+  console.info(
+    "[skip] real ACE-Step music E2E — set LIBI_MUSIC_E2E=1 to run (downloads the ~5.5 GB ACE-Step model)",
+  );
+
 describe.skipIf(!RUN)("real ACE-Step music E2E", () => {
   it("generates a valid non-silent WAV of the requested length", async () => {
     const expected = JSON.parse(

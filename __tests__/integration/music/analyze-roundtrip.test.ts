@@ -3,6 +3,11 @@ import path from "path";
 
 const RUN = process.env.LIBI_TEST_INTEGRATION === "1";
 
+if (!RUN)
+  console.info(
+    "[skip] analyze.py roundtrip — set LIBI_TEST_INTEGRATION=1 to run (needs the provisioned librosa env)",
+  );
+
 (RUN ? describe : describe.skip)("analyze.py roundtrip (real librosa)", () => {
   const FIX = path.resolve("__tests__/fixtures/music/test-clip-12s.wav");
 

@@ -61,6 +61,11 @@ afterAll(() => {
   else process.env.LIBI_HOME = prevLibiHome;
 });
 
+if (!RUN)
+  console.info(
+    "[skip] real faster-whisper E2E — set LIBI_WHISPER_E2E=1 to run (downloads the faster-whisper wheels + tiny model)",
+  );
+
 describe.skipIf(!RUN)("real faster-whisper E2E (tiny)", () => {
   it("transcribes jfk.wav within tolerance of the ElevenLabs golden", async () => {
     const expected = JSON.parse(

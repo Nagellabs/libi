@@ -21,7 +21,9 @@ function hasFfmpeg(): boolean {
   try { execSync("ffmpeg -version", { stdio: "ignore", timeout: 2000 }); return true; }
   catch { return false; }
 }
-const skipIf = hasFfmpeg() ? describe : describe.skip;
+const ffmpegPresent = hasFfmpeg();
+if (!ffmpegPresent) console.info("[skip] export parity — ffmpeg not on PATH");
+const skipIf = ffmpegPresent ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;
 vi.mock("@/lib/db/client", () => ({ getDb: () => testDb }));

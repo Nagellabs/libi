@@ -56,6 +56,11 @@ afterAll(() => {
   else process.env.LIBI_HOME = prevLibiHome;
 });
 
+if (!RUN)
+  console.info(
+    "[skip] real Kokoro TTS E2E — set LIBI_TTS_E2E=1 to run (downloads the Kokoro model + faster-whisper for the round-trip)",
+  );
+
 describe.skipIf(!RUN)("real Kokoro TTS E2E (round-trip via Whisper)", () => {
   it("synthesizes intelligible speech of the requested text", async () => {
     const expected = JSON.parse(

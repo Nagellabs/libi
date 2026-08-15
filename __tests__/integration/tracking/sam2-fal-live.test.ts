@@ -161,6 +161,11 @@ function makeLiveFalClientWithPublicVideo(key: string): FalClient {
 // Tests
 // ---------------------------------------------------------------------------
 
+if (!SHOULD_RUN)
+  console.info(
+    "[skip] sam2-fal live E2E — set LIBI_FAL_LIVE_TEST=1 to run (live fal.ai call: needs a FAL key and spends ~$0.10 of credits)",
+  );
+
 describe.skipIf(!SHOULD_RUN)("sam2-fal live E2E", () => {
   let falKey: string | null = null;
 

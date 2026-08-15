@@ -31,14 +31,16 @@ import {
   sha256,
   extractFrameRgba,
   samplePixel,
-  hasFfmpeg,
+  hasFfmpeg, FFMPEG_SKIP_REASON,
 } from "@/__tests__/helpers/media";
 
 const FIXTURE_DIR = path.resolve(__dirname, "..", "..", "helpers", "fixtures", "video");
 const RED_FIXTURE = path.join(FIXTURE_DIR, "clip-red-3s.mp4");
 const GREEN_FIXTURE = path.join(FIXTURE_DIR, "clip-green-3s.mp4");
 
-const skipIf = hasFfmpeg() ? describe : describe.skip;
+const ffmpegPresent = hasFfmpeg();
+if (!ffmpegPresent) console.info(`[skip] concatVideos flow — ${FFMPEG_SKIP_REASON}`);
+const skipIf = ffmpegPresent ? describe : describe.skip;
 
 let testDb: ReturnType<typeof createTestDb>;
 vi.mock("@/lib/db/client", () => ({ getDb: () => testDb }));
