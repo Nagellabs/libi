@@ -256,13 +256,27 @@ export function useSessionList(): UseSessionList {
 
   const switchSession = useCallback(
     (sessionId: string): void => {
+      // Clicking the ALREADY-selected session used to be a pure client-side
+      // no-op (a same-value setState fires no effects), which left the user
+      // with no recovery when the server-side session had been quietly
+      // deactivated — e.g. after switching agents away and back. Re-trigger
+      // server-side activation through the same endpoint the chat panel's
+      // history fetch uses; `activateSession` returns the warm cache
+      // immediately when the session is genuinely active, so the healthy
+      // case stays a cheap no-op.
+      if (sessionId === activeSessionId) {
+        void fetch(
+          `/api/agent/messages?sessionId=${encodeURIComponent(sessionId)}`,
+        ).catch(() => {});
+        return;
+      }
       // Just set the active session. The chat panel's message fetch will
       // activate the session on the server (GET /api/agent/messages calls
       // activateSession under the hood with dedup), so we don't need a
       // separate POST /activate round-trip and the race it introduced.
       setActiveSessionId(sessionId);
     },
-    [],
+    [activeSessionId],
   );
 
   const groups = useMemo(() => groupSessionsByDay(sessions), [sessions]);

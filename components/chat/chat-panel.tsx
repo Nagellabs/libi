@@ -1,7 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { loadDraft, saveDraft } from "@/lib/chat/draft-store";
 import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import { useAgentChat } from "@/hooks/sessions/use-agent-chat";
 import { useEditorState } from "@/lib/editor-state-context";
@@ -92,7 +93,26 @@ function ChatPanel({ sessionId, pieceId, onToolResult, onNavigate, onRefreshQuer
   const { containerRef, isAtBottom, scrollToBottom, restoreSavedPosition } = useScrollToBottom(sessionId ?? undefined);
   const { upload } = useFileUpload(pieceId);
 
-  const [inputValue, setInputValue] = useState("");
+  // The composer draft survives a page reload: every change mirrors into the
+  // per-session draft store, and a failed send backs its text up there too
+  // (see use-agent-chat) — so reloading after a stuck send no longer destroys
+  // what the user typed.
+  const [inputValue, setInputValueState] = useState(() => loadDraft(sessionId));
+  const setInputValue = useCallback(
+    (value: string) => {
+      setInputValueState(value);
+      saveDraft(sessionId, value);
+    },
+    [sessionId],
+  );
+
+  // Restore the persisted draft when the session changes. The outgoing
+  // session's draft is already saved (mirrored on every change), so this is
+  // a pure swap.
+  useEffect(() => {
+    setInputValueState(loadDraft(sessionId));
+  }, [sessionId]);
+
   const { activeProviderId, prefilledMessage, setPrefilledMessage, onboardingDemoOffer, setOnboardingDemoOffer } =
     useEditorState();
 

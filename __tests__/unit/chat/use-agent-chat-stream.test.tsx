@@ -11,6 +11,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { StrictMode, type ReactNode } from "react";
 import { renderHook, act, cleanup } from "@testing-library/react";
 import { useAgentChat } from "@/hooks/sessions/use-agent-chat";
+import { loadDraft } from "@/lib/chat/draft-store";
 
 const SESSION = "sess-test-1";
 
@@ -42,6 +43,9 @@ function emit(event: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  // Failed sends back their text up into the per-session draft store —
+  // start every test with a clean slate so backups can't leak across tests.
+  window.sessionStorage.clear();
   FakeEventSource.instances = [];
   vi.stubGlobal("EventSource", FakeEventSource as unknown as typeof EventSource);
   vi.stubGlobal(
@@ -284,5 +288,27 @@ describe("useAgentChat send failure", () => {
     expect((sendCalls[1].body as { text: string }).text).toBe("retry me");
     // Second send is in flight normally.
     expect(result.current.status).toBe("thinking");
+  });
+
+  it("backs up a failed send's text so a reload can restore it, and clears the backup once the retry delivers", async () => {
+    stubSendFailures(1, "http500");
+    const { result } = renderHook(() => useAgentChat(SESSION));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.sendMessage("precious words");
+    });
+
+    // The sendFailed bubble lives only in client memory; the draft store is
+    // what survives a reload.
+    expect(loadDraft(SESSION)).toBe("precious words");
+
+    const failed = result.current.messages.find((m) => m.role === "user");
+    await act(async () => {
+      result.current.retryMessage(failed!.id);
+    });
+
+    // Delivered — the backup must not resurface in the composer later.
+    expect(loadDraft(SESSION)).toBe("");
   });
 });

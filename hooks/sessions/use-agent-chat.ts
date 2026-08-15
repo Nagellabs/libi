@@ -11,6 +11,10 @@ import type {
 import { toast } from "sonner";
 import { sanitizeInspectorGroup } from "@/lib/editor-state-context";
 import {
+  backupFailedSend,
+  clearBackupOnDelivery,
+} from "@/lib/chat/draft-store";
+import {
   applyAgentEvent,
   applyHistory,
   appendLocalUserMessage,
@@ -812,10 +816,18 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
           body: JSON.stringify({ text, sessionId, attachments: fileAttachments }),
         });
         if (!res.ok) throw new Error(`send failed: HTTP ${res.status}`);
+        // A retry that succeeds must clear the backup its failure wrote —
+        // otherwise the delivered text would resurface in the composer on
+        // the next reload.
+        clearBackupOnDelivery(sessionId, text);
       } catch {
         stateRef.current = markLocalUserMessageFailed(stateRef.current, userMessage.id);
         publish();
         setStatus("connected");
+        // The `sendFailed` bubble lives only in client memory — persist the
+        // text so a reload restores it into the composer instead of
+        // silently destroying it.
+        backupFailedSend(sessionId, text);
         toast.error("Message failed to send", {
           description: "The libi server didn't receive it. Use the retry button on the message.",
         });

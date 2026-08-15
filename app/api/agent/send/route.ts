@@ -42,11 +42,37 @@ export async function POST(request: Request) {
   }
 
   const sm = getSessionManager();
-  if (!sm.hasActiveSession(sessionId)) {
+  if (!sm.getSession(sessionId)) {
     return NextResponse.json(
-      { error: "No active session" },
-      { status: 400 },
+      { error: "Unknown session" },
+      { status: 404 },
     );
+  }
+
+  // Known but not attached — switching agents away and back clears the
+  // session map and re-lists every persisted session as INACTIVE, while the
+  // chat panel keeps displaying one of them. This used to be a dead-end 400
+  // ("No active session") that the per-message Retry could never escape.
+  // Reattach on demand through the ONE activation path — `activateSession`
+  // dedupes against any concurrent activation (e.g. the sidebar's
+  // GET /api/agent/messages) and is a warm-cache no-op when a race already
+  // activated it.
+  if (!sm.hasActiveSession(sessionId)) {
+    try {
+      await sm.activateSession(sessionId);
+    } catch (err) {
+      logger.warn(
+        { tag: "session-manager", op: "send_reactivate_failed", sessionId, err },
+        `Could not re-activate ${sessionId} for send`,
+      );
+      // Non-OK so the client flags the optimistic message `sendFailed` and
+      // offers Retry — which comes back through this same path and succeeds
+      // once activation does.
+      return NextResponse.json(
+        { error: "Could not reconnect this chat session — try sending again." },
+        { status: 503 },
+      );
+    }
   }
 
   let messageText = text ?? "";

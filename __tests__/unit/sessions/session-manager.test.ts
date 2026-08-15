@@ -824,6 +824,54 @@ describe("SessionManager", () => {
         "No process manager set"
       );
     });
+
+    /**
+     * The agent-switch stranding repro (released 0.1.0): switching away and
+     * back re-lists the previous agent's sessions as INACTIVE while the chat
+     * panel keeps displaying one of them. Every send then died with a 400
+     * because nothing ever re-activated the displayed session. This test
+     * pins the state the bug arises from AND the on-demand recovery
+     * `/api/agent/send` now performs.
+     */
+    it("re-lists the previous agent's sessions as inactive after switching away and back, and on-demand activation revives them for sending", async () => {
+      // A claude-code session, loaded and ACTIVE (the one on screen).
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: "cc-old", title: "On screen", updatedAt: null }],
+        nextCursor: null,
+      });
+      await sm.loadInitialSessions("claude-code");
+      await sm.activateSession("cc-old");
+      expect(sm.hasActiveSession("cc-old")).toBe(true);
+
+      // Switch to codex (whether its standby succeeds is incidental to the
+      // bug)…
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [],
+        nextCursor: null,
+      });
+      await sm.switchAgent("codex");
+      expect(sm.getSession("cc-old")).toBeUndefined();
+
+      // …and back. The old session is re-listed but NOT re-activated.
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: "cc-old", title: "On screen", updatedAt: null }],
+        nextCursor: null,
+      });
+      await sm.switchAgent("claude-code");
+
+      expect(sm.getSession("cc-old")).toBeDefined();
+      expect(sm.hasActiveSession("cc-old")).toBe(false); // ← the stranded state
+
+      // On-demand activation (what the send route does now) revives it…
+      await sm.activateSession("cc-old");
+      expect(sm.hasActiveSession("cc-old")).toBe(true);
+
+      // …and a send reaches the agent instead of dying at the gate.
+      await sm.sendMessage("cc-old", "hello again");
+      expect(mockConnection.prompt).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "cc-old" }),
+      );
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -755,6 +755,15 @@ export class SessionManager {
 
     const agentId = entry.agentId;
 
+    // Log the unload symmetrically with load_session_start/done. The
+    // agent-switch stranding bug (send → 400 after switching away and back)
+    // was needlessly hard to diagnose because sessions left the active set
+    // with no trace in the log.
+    logger.info(
+      { tag: "session-manager", op: "session_deactivate", agentId, sessionId },
+      `Deactivating session ${sessionId}`,
+    );
+
     // Drain any pending permission requests as cancelled — covers LRU
     // eviction, switchAgent teardown, and explicit deactivation. The agent
     // is about to lose its connection so any held promises would dangle.
