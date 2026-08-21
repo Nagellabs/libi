@@ -136,8 +136,17 @@ describe("storeFile auto-probes hasAudio for videos", () => {
     expect(mockStorage.localPath).not.toHaveBeenCalled();
   });
 
-  it("does NOT probe non-video uploads", async () => {
+  // This test used to assert the opposite — "does NOT probe non-video
+  // uploads", with audio landing at hasAudio=false. That was the bug, not
+  // the contract. An audio file with hasAudio=false is an outright lie, and
+  // it is the same misleading-the-agent failure this whole probe exists to
+  // prevent, one category over. Reproduced against the running server: a 3s
+  // .m4a posted to /api/upload with a correct audio/mp4 content type landed
+  // with mediaDuration=null and hasAudio=false, and the transcription
+  // pipeline then refused the file.
+  it("probes audio uploads too, rather than claiming they have no audio", async () => {
     vi.mocked(mockStorage.save).mockResolvedValue("test-piece-1/song.mp3");
+    vi.mocked(mockStorage.localPath).mockReturnValue("/storage/test-piece-1/song.mp3");
 
     const record = await storeFile({
       pieceId: "test-piece-1",
@@ -146,9 +155,45 @@ describe("storeFile auto-probes hasAudio for videos", () => {
       contentType: "audio/mpeg",
     });
 
-    // Audio category — probe is skipped, hasAudio defaults to false.
-    expect(record.hasAudio).toBe(false);
     expect(record.type).toBe("audio");
+    expect(record.hasAudio).toBe(true);
+    expect(record.mediaDuration).toBeCloseTo(10.5);
+    // No video stream means no alpha; the default stands rather than a probe
+    // result being invented for it.
+    expect(record.hasAlpha).toBe(false);
+  });
+
+  it("skips the audio probe when the caller already knows both facts", async () => {
+    vi.mocked(mockStorage.save).mockResolvedValue("test-piece-1/song.mp3");
+
+    const record = await storeFile({
+      pieceId: "test-piece-1",
+      filename: "song.mp3",
+      buffer: Buffer.from("audio-bytes"),
+      contentType: "audio/mpeg",
+      hasAudio: true,
+      mediaDuration: 42,
+    });
+
+    expect(record.mediaDuration).toBe(42);
     expect(mockStorage.localPath).not.toHaveBeenCalled();
+  });
+
+  it("still never probes a document, image or font", async () => {
+    for (const [filename, contentType] of [
+      ["notes.txt", "text/plain"],
+      ["logo.png", "image/png"],
+      ["Inter.ttf", "font/ttf"],
+    ] as const) {
+      vi.mocked(mockStorage.localPath).mockClear();
+      vi.mocked(mockStorage.save).mockResolvedValue(`test-piece-1/${filename}`);
+      await storeFile({
+        pieceId: "test-piece-1",
+        filename,
+        buffer: Buffer.from("bytes"),
+        contentType,
+      });
+      expect(mockStorage.localPath).not.toHaveBeenCalled();
+    }
   });
 });

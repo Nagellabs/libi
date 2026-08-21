@@ -338,24 +338,37 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
     contentType ?? undefined,
   );
 
-  // For video uploads where the caller didn't pre-probe (UI uploads via
-  // the `/api/(pieces/:id/)upload` routes), run ffprobe now that the bytes
-  // are on disk. Without this, every UI-uploaded video lands with
-  // hasAudio=false because the browser-side `probeMediaMetadata` doesn't
-  // expose audio-track presence — which then misleads the agent.
+  // For media the caller didn't pre-probe (UI uploads via the
+  // `/api/(pieces/:id/)upload` routes, and anything posting to those routes
+  // directly), run ffprobe now that the bytes are on disk. Without this,
+  // every UI-uploaded video lands with hasAudio=false because the
+  // browser-side `probeMediaMetadata` doesn't expose audio-track presence —
+  // which then misleads the agent.
   // Alpha presence is probed under the same roof: an alpha-bearing video
   // (matte_gen cutout, fal transparent WebM) must land with hasAlpha=true so
   // the proxy pipeline skips it and pickVideoUrl never serves a proxy for it.
+  //
+  // AUDIO is probed too, and used not to be. The gate read "video only", so
+  // an audio file that arrived without client-side metadata landed with
+  // mediaDuration=null AND hasAudio=false — the second one an outright lie
+  // about an audio file, and exactly the misleading-the-agent case the
+  // paragraph above exists to prevent. Reproduced with a 3s .m4a posted to
+  // /api/upload with a correct audio/mp4 content type: both fields wrong,
+  // and the transcription pipeline then refuses the file.
   let resolvedHasAudio = hasAudio;
   let resolvedHasAlpha = params.hasAlpha;
   let resolvedDuration = mediaDuration;
   let resolvedWidth = mediaWidth;
   let resolvedHeight = mediaHeight;
   let probedVideoCodec: string | undefined;
-  if (
-    categorizeFileType(contentType) === "video" &&
-    (resolvedHasAudio === undefined || resolvedHasAlpha === undefined)
-  ) {
+  const category = categorizeFileType(contentType);
+  const needsProbe =
+    category === "video"
+      ? resolvedHasAudio === undefined || resolvedHasAlpha === undefined
+      : category === "audio"
+        ? resolvedHasAudio === undefined || resolvedDuration === undefined
+        : false;
+  if (needsProbe) {
     const probed = await probeMedia(storage.localPath(pieceId, sanitizedFilename));
     resolvedHasAudio ??= probed.hasAudio;
     resolvedHasAlpha ??= probed.hasAlpha;
@@ -377,7 +390,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
       filename: sanitizedFilename,
       name: name ?? sanitizedFilename,
       description: description ?? "",
-      type: categorizeFileType(contentType),
+      type: category,
       storagePath,
       contentType: contentType ?? null,
       size: buffer.byteLength,
