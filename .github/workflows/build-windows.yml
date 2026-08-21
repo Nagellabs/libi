@@ -91,7 +91,21 @@ jobs:
 
   build:
     name: NSIS installer
-    runs-on: windows-latest
+    # PINNED, and it must stay pinned. `windows-latest` resolved to the
+    # `windows-2025-vs2026` image on 2026-08-21, which ships Visual Studio
+    # 2026 — and node-gyp 11.5.0 (what the lockfile carries) predates it and
+    # cannot detect it at all. `electron-builder install-app-deps` rebuilds
+    # node-pty from source on Windows (better-sqlite3 finds a prebuild;
+    # node-pty does not), so node-gyp runs, fails to find ANY Visual Studio,
+    # and the whole build dies at `npm ci`:
+    #
+    #   Error: Could not find any Visual Studio installation to use
+    #     at VisualStudioFinder.fail (node_modules/node-gyp/lib/find-visualstudio.js)
+    #
+    # windows-2022 ships VS2022, which this node-gyp understands. Moving back
+    # to `windows-latest` re-breaks the build the moment the image rolls
+    # forward — bump node-gyp first and prove it on a dispatch run.
+    runs-on: windows-2022
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
