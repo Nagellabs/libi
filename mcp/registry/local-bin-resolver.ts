@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getLibiNodeModulesRoot } from "@/lib/libi-home";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
+import { adapterBinFileNames } from "@/lib/agents/runtime-install";
 import { packageRoot } from "@/lib/runtime/package-root";
 import {
   entryResolutionDiagnostic,
@@ -124,7 +125,26 @@ export function resolveBundledSpawn(def: BundledMcpDef): ResolvedSpawn {
 
   const root = getLibiNodeModulesRoot();
   const binName = def.binName ?? lastSegment(def.npmPackage);
-  const binPath = path.join(root, "node_modules", ".bin", binName);
+  // `resolveBinIn`, not `path.join(.bin, binName)`. On Windows npm's cmd-shim
+  // writes THREE files per bin: an extensionless `<name>` that is a BASH
+  // script, plus `<name>.cmd` and `<name>.ps1`. The extensionless one exists,
+  // so a bare existsSync passes and we would hand `spawn()` a bash script it
+  // cannot execute (ENOEXEC) — and the `def.command` fallback is a bare `npx`,
+  // which is `npx.cmd` on Windows and equally unspawnable without a shell. So
+  // the failure was silent and total: every npm-backed bundled MCP down, with
+  // a resolver that believed it had found the binary.
+  // Windows-only widening. `adapterBinFileNames` supplies the shim names
+  // (`.cmd`/`.exe` on win32, the bare name elsewhere); the EXISTENCE check is
+  // kept exactly as it was, deliberately. `resolveBinIn` — the sibling helper
+  // that shares the name list — additionally requires X_OK on Unix, and
+  // swapping to it here would have quietly tightened a shipped code path from
+  // "exists" to "exists and is executable" on mac and Linux. That is a
+  // different change, with its own risk, and it is not this one.
+  const binDirPath = path.join(root, "node_modules", ".bin");
+  const binPath =
+    adapterBinFileNames(binName, process.platform)
+      .map((f) => path.join(binDirPath, f))
+      .find((c) => fs.existsSync(c)) ?? null;
   const pkgJsonPath = path.join(
     root,
     "node_modules",
@@ -149,7 +169,7 @@ export function resolveBundledSpawn(def: BundledMcpDef): ResolvedSpawn {
   }
 
   if (installedVersion !== def.pinnedVersion) return fallback;
-  if (!fs.existsSync(binPath)) return fallback;
+  if (!binPath) return fallback;
 
   return { command: binPath, args: [], source: "local" };
 }
