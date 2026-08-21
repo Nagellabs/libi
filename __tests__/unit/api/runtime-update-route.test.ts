@@ -259,4 +259,35 @@ describe("POST shell restart", () => {
     expect(res.status).toBe(409);
     expect(restart).not.toHaveBeenCalled();
   });
+
+  // A0: an install that cannot replace its own bundle. The shell refuses
+  // these itself, but the route is reachable by anything posting to loopback
+  // — including an OLD runtime's UI, which has never heard of `blocked` —
+  // so it must refuse rather than answer 200 for work that will not happen.
+  it("refuses to install or restart while the install is blocked", async () => {
+    const blocked = shellStatus({
+      phase: "blocked",
+      percent: null,
+      blockedReason: "translocated",
+      blockedPath: "/private/var/AppTranslocation/x/Libi.app",
+    });
+    const restart = vi.fn();
+    shellUpdater = {
+      getStatus: () => blocked,
+      checkNow: vi.fn(async () => {}),
+      download: vi.fn(),
+      restart,
+    };
+    const { POST } = await loadRoute();
+
+    const install = await POST(post({ version: "0.2.0", target: "shell" }));
+    expect(install.status).toBe(409);
+    expect(shellUpdater.download).not.toHaveBeenCalled();
+
+    const applied = await POST(
+      post({ version: "0.2.0", target: "shell", action: "restart" }),
+    );
+    expect(applied.status).toBe(409);
+    expect(restart).not.toHaveBeenCalled();
+  });
 });

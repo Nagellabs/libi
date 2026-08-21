@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import {
+  blockedShellUpdate,
   isShellInstallInFlight,
   restartOffer,
   updateOffer,
@@ -35,6 +37,12 @@ import {
  *  - Legacy path: an OLD desktop shell (no autoDownload) cannot download a
  *    shell update itself, so a shell offer from one keeps the click-to-
  *    install toast ("Install & restart") this component always had.
+ *  - Blocked: an update exists that this install cannot apply from where it
+ *    is running. The toast says so and links to the explanation — it must
+ *    NOT offer an install, because offering an action that cannot succeed is
+ *    the bug this whole change exists to fix, wearing a nicer hat. Dismiss
+ *    is session-only here as everywhere; the Settings card and the sidebar
+ *    dot are the surfaces that don't go away until the user fixes it.
  */
 
 /** sessionStorage key holding the version dismissed this app launch. */
@@ -60,6 +68,7 @@ function rememberDismissed(version: string): void {
 
 export function UpdateToast() {
   const { data } = useRuntimeUpdate();
+  const router = useRouter();
   const restart = useRestartToApply();
   const install = useInstallRuntimeUpdate();
 
@@ -78,6 +87,7 @@ export function UpdateToast() {
     // dot), not as a toast at every launch.
     return offer?.target === "shell" ? offer : null;
   }, [data]);
+  const blocked = useMemo(() => blockedShellUpdate(data), [data]);
   const shellPhase = data?.shell?.phase ?? null;
   const shellPercent = data?.shell?.percent ?? null;
 
@@ -93,6 +103,24 @@ export function UpdateToast() {
           { id: UPDATE_TOAST_ID, duration: Infinity },
         );
       }
+      return;
+    }
+
+    // Blocked outranks both offers: there is nothing to restart into and
+    // nothing a click here could download.
+    if (blocked) {
+      if (readDismissedVersion() === blocked.version) return;
+      toast(`Libi ${blocked.version} is available`, {
+        id: UPDATE_TOAST_ID,
+        duration: Infinity,
+        closeButton: true,
+        description: "It can't be installed from where Libi is running.",
+        action: {
+          label: "Why can't I update?",
+          onClick: () => router.push("/settings?highlight=version"),
+        },
+        onDismiss: () => rememberDismissed(blocked.version),
+      });
       return;
     }
 
@@ -134,7 +162,18 @@ export function UpdateToast() {
       },
       onDismiss: () => rememberDismissed(legacyOffer!.version),
     });
-  }, [ready, legacyOffer, data, shellPhase, shellPercent, actedHere, restart, install]);
+  }, [
+    ready,
+    legacyOffer,
+    blocked,
+    data,
+    shellPhase,
+    shellPercent,
+    actedHere,
+    restart,
+    install,
+    router,
+  ]);
 
   return null;
 }

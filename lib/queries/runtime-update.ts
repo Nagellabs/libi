@@ -42,7 +42,19 @@ export type ShellUpdatePhase =
   | "update-available"
   | "downloading"
   | "ready"
+  /**
+   * An update exists and this install can't apply it — it's running from
+   * somewhere its own bundle can't be replaced. Nothing was downloaded. The
+   * one update state the user MUST see, because only they can fix it.
+   */
+  | "blocked"
   | "error";
+
+export type ShellUpdateBlockedReason =
+  | "translocated"
+  | "running-from-dmg"
+  | "not-in-applications"
+  | "read-only-location";
 
 export interface ShellUpdateStatusDto {
   phase: ShellUpdatePhase;
@@ -52,6 +64,10 @@ export interface ShellUpdateStatusDto {
   percent: number | null;
   error: string | null;
   checkedAt: number | null;
+  /** Which advice to show. Set only with `phase: "blocked"`. */
+  blockedReason?: ShellUpdateBlockedReason | null;
+  /** Where the app is running from — rendered verbatim; it is the evidence. */
+  blockedPath?: string | null;
   /**
    * True when the shell downloads updates itself and parks at "ready" for
    * an explicit restart. Absent on old shells, which only download from a
@@ -112,6 +128,33 @@ export function isShellInstallInFlight(dto: RuntimeUpdateDto | undefined): boole
 export interface UpdateOffer {
   target: "runtime" | "shell";
   version: string;
+}
+
+export interface BlockedShellUpdate {
+  version: string;
+  reason: ShellUpdateBlockedReason;
+  /** The path to show verbatim, or null if the shell didn't report one. */
+  path: string | null;
+}
+
+/**
+ * An update this install cannot apply from where it is running, or null.
+ *
+ * Unlike the two offers below, this is NOT dismissible in Settings or in the
+ * sidebar — the user is pinned to their current version until they move the
+ * app, and a message they can wave away is how the original bug (a log line
+ * nobody reads) felt from the inside.
+ */
+export function blockedShellUpdate(
+  dto: RuntimeUpdateDto | undefined,
+): BlockedShellUpdate | null {
+  const shell = dto?.shell;
+  if (!shell || shell.phase !== "blocked" || !shell.latestVersion) return null;
+  return {
+    version: shell.latestVersion,
+    reason: shell.blockedReason ?? "read-only-location",
+    path: shell.blockedPath ?? null,
+  };
 }
 
 /** A downloaded update waiting for a restart, or null. */

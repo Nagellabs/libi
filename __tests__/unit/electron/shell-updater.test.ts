@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { LoadedRuntime } from "@/electron/runtime-loader";
 
@@ -16,9 +19,13 @@ import type { LoadedRuntime } from "@/electron/runtime-loader";
 interface FakeApp {
   isPackaged: boolean;
   getVersion(): string;
+  getPath(name: string): string;
+  isInApplicationsFolder(): boolean;
 }
 
 let fakeApp: FakeApp;
+/** Stands in for /Applications — a directory the probe can really write to. */
+let writableDir: string;
 
 interface FakeAutoUpdater {
   forceDevUpdateConfig: boolean;
@@ -60,7 +67,14 @@ async function loadShellUpdater() {
 }
 
 beforeEach(() => {
-  fakeApp = { isPackaged: false, getVersion: () => "1.0.0" };
+  fakeApp = {
+    isPackaged: false,
+    getVersion: () => "1.0.0",
+    // A writable temp dir by default, so the write probe says "can update".
+    // The blocked tests below point this at somewhere that does not exist.
+    getPath: () => path.join(writableDir, "Libi.app", "Contents", "MacOS", "Libi"),
+    isInApplicationsFolder: () => true,
+  };
   fakeAutoUpdater = {
     forceDevUpdateConfig: false,
     autoDownload: true,
@@ -74,12 +88,14 @@ beforeEach(() => {
   };
   // initShellUpdater schedules a real first check via setTimeout; keep it
   // from ever firing during the test.
+  writableDir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-shell-updater-"));
   vi.useFakeTimers();
 });
 
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.LIBI_SHELL_UPDATE_FEED;
+  fs.rmSync(writableDir, { recursive: true, force: true });
 });
 
 describe("LIBI_SHELL_UPDATE_FEED", () => {
@@ -230,5 +246,157 @@ describe("auto-download behaviour", () => {
     emit("update-downloaded", { version: "2.0.0" });
     vi.advanceTimersByTime(60_000);
     expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The blocked contract (A0). During the 0.1.2 QA run the shell downloaded
+ * 481 MB and only THEN discovered it was running from a read-only
+ * AppTranslocation path. The user saw one log line, and a "Try again" button
+ * that re-downloaded 481 MB to fail identically, forever.
+ *
+ * These pin the two halves of the fix: the probe runs BEFORE the check, and
+ * a blocked install downloads nothing while saying loudly that it can't.
+ */
+describe("an install that cannot replace its own bundle", () => {
+  interface Bridge {
+    getStatus(): {
+      phase: string;
+      latestVersion: string | null;
+      blockedReason?: string | null;
+      blockedPath?: string | null;
+      error: string | null;
+    };
+    checkNow(): Promise<void>;
+    download(): void;
+    restart?(): void;
+  }
+
+  async function boot(): Promise<{
+    bridge: Bridge;
+    emit: (event: string, payload?: unknown) => void;
+  }> {
+    fakeApp.isPackaged = false;
+    process.env.LIBI_SHELL_UPDATE_FEED = "https://example.com/feed.yml";
+    const { initShellUpdater } = await loadShellUpdater();
+    const runtime = makeRuntime();
+    initShellUpdater(runtime, vi.fn());
+    const register = runtime.api.registerShellUpdater as ReturnType<typeof vi.fn>;
+    const bridge = register.mock.calls[0][0] as Bridge;
+    const emit = (event: string, payload?: unknown) => {
+      for (const [name, handler] of fakeAutoUpdater.on.mock.calls) {
+        if (name === event) (handler as (p: unknown) => void)(payload);
+      }
+    };
+    return { bridge, emit };
+  }
+
+  /** Point the app at a directory that does not exist, so the probe fails. */
+  function makeUnwritable(kind: "translocated" | "plain") {
+    const base =
+      kind === "translocated"
+        ? "/private/var/folders/gh/x8k/T/AppTranslocation/A1B2/d"
+        : path.join(writableDir, "gone");
+    fakeApp.getPath = () => path.join(base, "Libi.app", "Contents", "MacOS", "Libi");
+    fakeApp.isInApplicationsFolder = () => false;
+  }
+
+  it("turns autoDownload OFF before the check, so finding an update can't start one", async () => {
+    const { bridge } = await boot();
+    makeUnwritable("translocated");
+
+    await bridge.checkNow();
+
+    expect(fakeAutoUpdater.autoDownload).toBe(false);
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("reports blocked — not error — with the reason and the path as evidence", async () => {
+    const { bridge, emit } = await boot();
+    makeUnwritable("translocated");
+
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+
+    const status = bridge.getStatus();
+    // `error` is documented as silent in the UI; this must be loud.
+    expect(status.phase).toBe("blocked");
+    expect(status.latestVersion).toBe("0.1.2");
+    expect(status.blockedReason).toBe("translocated");
+    expect(status.blockedPath).toContain("AppTranslocation");
+  });
+
+  it("never downloads while blocked, however the click arrives", async () => {
+    const { bridge, emit } = await boot();
+    makeUnwritable("translocated");
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+
+    // An old runtime's UI knows nothing about `blocked` and sends this.
+    bridge.download();
+    bridge.restart!();
+    vi.advanceTimersByTime(60_000);
+
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+    expect(bridge.getStatus().phase).toBe("blocked");
+  });
+
+  // The condition is environmental: the user fixes it in Finder and the app
+  // cannot observe that. So nothing about the verdict may be cached.
+  it("clears the block on the next check once the location is writable", async () => {
+    const { bridge, emit } = await boot();
+    makeUnwritable("translocated");
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+    expect(bridge.getStatus().phase).toBe("blocked");
+
+    // The user drags Libi into Applications and presses "Check again".
+    fakeApp.getPath = () =>
+      path.join(writableDir, "Libi.app", "Contents", "MacOS", "Libi");
+    fakeApp.isInApplicationsFolder = () => true;
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+
+    expect(fakeAutoUpdater.autoDownload).toBe(true);
+    const status = bridge.getStatus();
+    expect(status.phase).toBe("update-available");
+    expect(status.blockedReason).toBeNull();
+  });
+
+  // A check failure must not overwrite the one update state the user has to
+  // act on — that would put them straight back in the original bug.
+  it("keeps the blocked verdict when a later check errors", async () => {
+    const { bridge, emit } = await boot();
+    makeUnwritable("translocated");
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+
+    emit("error", new Error("network gone"));
+
+    expect(bridge.getStatus().phase).toBe("blocked");
+    expect(bridge.getStatus().error).toBe("network gone");
+  });
+
+  it("says nothing when there is no update to be blocked from", async () => {
+    const { bridge, emit } = await boot();
+    makeUnwritable("plain");
+
+    await bridge.checkNow();
+    emit("update-not-available");
+
+    const status = bridge.getStatus();
+    expect(status.phase).toBe("up-to-date");
+    expect(status.blockedReason).toBeNull();
+  });
+
+  it("leaves a writable install completely alone", async () => {
+    const { bridge, emit } = await boot();
+
+    await bridge.checkNow();
+    emit("update-available", { version: "0.1.2" });
+
+    expect(fakeAutoUpdater.autoDownload).toBe(true);
+    expect(bridge.getStatus().phase).toBe("update-available");
   });
 });

@@ -1,16 +1,24 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { DownloadIcon, RefreshCwIcon, RotateCcwIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  ExternalLinkIcon,
+  RefreshCwIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import {
+  blockedShellUpdate,
   isInstallInFlight,
   isShellInstallInFlight,
   restartOffer,
   updateOffer,
+  type BlockedShellUpdate,
   useInstallRuntimeUpdate,
   useRecheckRuntimeUpdate,
   useRestartToApply,
@@ -43,6 +51,12 @@ import {
  *    IS the remedy); only when it isn't does the plain "update the desktop
  *    app" line render, with NO install button.
  *
+ * 2b. **…and never stay silent about an install that cannot work.** The one
+ *    exception to rule 1's "failures are invisible": when the app is running
+ *    from somewhere it cannot replace its own bundle, the update is not
+ *    merely unavailable — it is unavailable in a way only the user can fix,
+ *    and forever if they never find out. That card is NOT dismissible.
+ *
  * 3. **Never imply a live upgrade.** A runtime install writes a sibling
  *    directory and leaves the running runtime untouched; restarting is what
  *    applies it, and the restart is ALWAYS an explicit click — the download
@@ -50,6 +64,97 @@ import {
  *    user on a timer. (Old shells are the one exception: their downloads
  *    only start from a click, and that click consented to the self-restart.)
  */
+
+/** Where a user goes when the in-app path can't work. Always works. */
+export const RELEASES_URL = "https://github.com/Nagellabs/libi/releases/latest";
+
+/**
+ * What to tell a user whose app can't replace its own bundle.
+ *
+ * Name the cause first, then give the fix as steps they can follow without
+ * knowing what "translocation" means. The path is rendered separately and
+ * verbatim — it is the evidence, and the thing that makes any of this
+ * checkable from their side.
+ */
+function blockedCopy(blocked: BlockedShellUpdate): { body: string; steps: string[] } {
+  switch (blocked.reason) {
+    case "translocated":
+      return {
+        body:
+          "macOS is running Libi from a temporary read-only copy. That happens " +
+          "when the app hasn't been moved into Applications properly — Libi " +
+          `${blocked.version} is ready, but it can't be installed here.`,
+        steps: [
+          "Quit Libi.",
+          "Open the Libi disk image and drag Libi into Applications, replacing the old copy.",
+          "Open Libi from Applications.",
+        ],
+      };
+    case "running-from-dmg":
+      return {
+        body:
+          "Libi is running straight from its disk image, which can't be written " +
+          `to. Libi ${blocked.version} is ready, but it can't be installed there.`,
+        steps: [
+          "Quit Libi.",
+          "Drag Libi from the disk image into Applications.",
+          "Open Libi from Applications, then eject the disk image.",
+        ],
+      };
+    case "not-in-applications":
+      return {
+        body:
+          "Libi is running from a folder it isn't allowed to write to, so it " +
+          `can't replace itself with Libi ${blocked.version}.`,
+        steps: [
+          "Quit Libi.",
+          "Move Libi into your Applications folder.",
+          "Open Libi from Applications.",
+        ],
+      };
+    case "read-only-location":
+    default:
+      return {
+        body:
+          "Libi can't write to the folder it's running from, so it can't " +
+          `replace itself with Libi ${blocked.version}. On a managed Mac or PC ` +
+          "an administrator may need to do this for you.",
+        steps: [
+          "Quit Libi.",
+          "Move Libi somewhere you can write to — Applications is the usual place.",
+          "Open Libi again from there.",
+        ],
+      };
+  }
+}
+
+/**
+ * The blocked card. No dismiss, by design: the condition outlives any
+ * session, and the previous behaviour — a log line and a "Try again" button
+ * that re-downloaded 481 MB to fail identically — is what happens when this
+ * is left implicit.
+ */
+function BlockedCard({ blocked }: { blocked: BlockedShellUpdate }) {
+  const { body, steps } = blockedCopy(blocked);
+  return (
+    <div className="space-y-2 rounded-md border border-destructive/40 bg-destructive/5 p-3">
+      <p className="text-sm font-medium text-foreground">
+        Libi can&apos;t update itself from where it&apos;s running
+      </p>
+      <p className="text-sm text-muted-foreground">{body}</p>
+      <ol className="list-decimal space-y-0.5 pl-5 text-sm text-muted-foreground">
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      {blocked.path && (
+        <p className="break-all font-mono text-xs text-muted-foreground">
+          Running from: {blocked.path}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function sourceLabel(source: string): string {
   if (source === "user") return "installed by in-app update";
@@ -115,6 +220,7 @@ export function UpdatesSection() {
   // stable between identical polls.
   const ready = useMemo(() => restartOffer(data), [data]);
   const offer = useMemo(() => updateOffer(data), [data]);
+  const blocked = useMemo(() => blockedShellUpdate(data), [data]);
 
   if (isLoading) {
     return (
@@ -155,9 +261,12 @@ export function UpdatesSection() {
         {!ready && offer && !anyInstalling && (
           <Badge variant="default">Update available</Badge>
         )}
+        {blocked && <Badge variant="destructive">Can&apos;t update</Badge>}
       </div>
 
       <VersionLine dto={data} />
+
+      {blocked && <BlockedCard blocked={blocked} />}
 
       {/* ── Downloaded, waiting for the restart ───────────────────────── */}
       {ready &&
@@ -219,7 +328,10 @@ export function UpdatesSection() {
       )}
 
       {/* ── The check outcomes ────────────────────────────────────────── */}
-      {!anyInstalling && !ready && !offer && !failed && state === "up-to-date" && (
+      {/* Suppressed while blocked: the runtime channel being current says
+          nothing about the desktop app the user is stuck on, and the two
+          lines together read as a contradiction. */}
+      {!anyInstalling && !ready && !offer && !failed && !blocked && state === "up-to-date" && (
         <p className="text-sm text-muted-foreground">Libi is up to date.</p>
       )}
 
@@ -277,6 +389,21 @@ export function UpdatesSection() {
             <RefreshCwIcon className="size-4" />
             {recheck.isPending ? "Checking…" : "Check again"}
           </Button>
+        )}
+        {/* The always-works escape hatch. "Check again" above re-runs the
+            write probe, so a user who fixes the location while Libi is open
+            clears the block without restarting — this is for the ones who
+            would rather just download it. */}
+        {blocked && (
+          <a
+            href={RELEASES_URL}
+            target="_blank"
+            rel="noreferrer"
+            className={cn(buttonVariants({ variant: "outline" }), "cursor-pointer")}
+          >
+            <ExternalLinkIcon className="size-4" />
+            Download {blocked.version} manually
+          </a>
         )}
       </div>
 

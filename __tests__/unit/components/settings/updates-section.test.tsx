@@ -205,3 +205,74 @@ describe("UpdatesSection — auto-download and explicit restart", () => {
     expect(container.querySelector("[data-highlight]")).not.toBeInTheDocument();
   });
 });
+
+/**
+ * The blocked card (A0). Everything else in this component follows "a failed
+ * check is invisible"; this is the documented exception, because the user is
+ * pinned to their version until THEY move the app, and the old behaviour —
+ * a log line plus a "Try again" that re-downloaded 481 MB to fail
+ * identically — is what silence looks like from the inside.
+ */
+describe("UpdatesSection — an install that can't update itself", () => {
+  function blockedDto(
+    reason: NonNullable<NonNullable<RuntimeUpdateDto["shell"]>["blockedReason"]>,
+    blockedPath: string,
+  ): RuntimeUpdateDto {
+    return withShell("blocked", { blockedReason: reason, blockedPath });
+  }
+
+  it("names the cause, gives steps, and shows the path verbatim", () => {
+    dto = blockedDto(
+      "translocated",
+      "/private/var/folders/gh/x8k/T/AppTranslocation/A1B2/d/Libi.app",
+    );
+    render(<UpdatesSection />);
+
+    expect(screen.getByText(/can't update itself from where it's running/i)).toBeInTheDocument();
+    expect(screen.getByText(/temporary read-only copy/i)).toBeInTheDocument();
+    expect(screen.getByText(/drag Libi into Applications/i)).toBeInTheDocument();
+    // The path is the evidence — abbreviating it would defeat the point.
+    expect(
+      screen.getByText(
+        /\/private\/var\/folders\/gh\/x8k\/T\/AppTranslocation\/A1B2\/d\/Libi\.app/,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("offers a re-check and a manual download, and NO install button", () => {
+    dto = blockedDto("translocated", "/private/var/AppTranslocation/x/Libi.app");
+    render(<UpdatesSection />);
+
+    // "Check again" re-runs the write probe, so a fix made in Finder while
+    // Libi is open clears the block without a restart.
+    expect(screen.getByRole("button", { name: /check again/i })).toBeEnabled();
+    expect(
+      screen.getByRole("link", { name: /download 0\.4\.0 manually/i }),
+    ).toHaveAttribute("href", expect.stringContaining("releases"));
+    // Offering an action that cannot succeed IS the bug being fixed.
+    expect(screen.queryByRole("button", { name: /install/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /restart to apply/i })).not.toBeInTheDocument();
+  });
+
+  it("does not also claim Libi is up to date", () => {
+    // The runtime channel being current says nothing about the desktop app
+    // the user is stuck on; together the two lines read as a contradiction.
+    dto = blockedDto("translocated", "/private/var/AppTranslocation/x/Libi.app");
+    render(<UpdatesSection />);
+    expect(screen.queryByText(/libi is up to date/i)).not.toBeInTheDocument();
+  });
+
+  it("tailors the advice to each reason", () => {
+    const cases: Array<[NonNullable<NonNullable<RuntimeUpdateDto["shell"]>["blockedReason"]>, RegExp]> = [
+      ["running-from-dmg", /straight from its disk image/i],
+      ["not-in-applications", /isn't allowed to write to/i],
+      ["read-only-location", /an administrator may need to do this/i],
+    ];
+    for (const [reason, copy] of cases) {
+      dto = blockedDto(reason, "/somewhere/Libi.app");
+      const { unmount } = render(<UpdatesSection />);
+      expect(screen.getByText(copy)).toBeInTheDocument();
+      unmount();
+    }
+  });
+});

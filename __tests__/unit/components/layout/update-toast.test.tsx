@@ -26,6 +26,9 @@ vi.mock("sonner", () => ({
   toast: Object.assign(vi.fn(), { loading: vi.fn(), dismiss: vi.fn() }),
 }));
 
+const routerPush = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
+
 const installMutate = vi.fn();
 const restartMutate = vi.fn();
 
@@ -109,6 +112,7 @@ beforeEach(() => {
   restartMutate.mockClear();
   toastMock.mockClear();
   toastMock.loading.mockClear();
+  routerPush.mockClear();
   sessionStorage.clear();
 });
 
@@ -266,5 +270,57 @@ describe("UpdateToast", () => {
     }
     expect(toastMock).not.toHaveBeenCalled();
     expect(restartMutate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Blocked (A0): an update exists that this install cannot apply from where
+ * it is running. The toast must say so and point at the explanation — and it
+ * must NOT offer an install, because an action that cannot succeed is the
+ * bug being fixed with better manners.
+ */
+describe("UpdateToast — an install that can't update itself", () => {
+  function blockedDto(): RuntimeUpdateDto {
+    return shellDto("blocked", {
+      blockedReason: "translocated",
+      blockedPath: "/private/var/AppTranslocation/x/Libi.app",
+    });
+  }
+
+  it("announces the update and links to the explanation, never an install", () => {
+    dto = blockedDto();
+    render(<UpdateToast />);
+    expect(toastMock).toHaveBeenCalledWith(
+      "Libi 0.4.0 is available",
+      expect.objectContaining({
+        id: UPDATE_TOAST_ID,
+        duration: Infinity,
+        closeButton: true,
+        description: "It can't be installed from where Libi is running.",
+        action: expect.objectContaining({ label: "Why can't I update?" }),
+      }),
+    );
+    expect(installMutate).not.toHaveBeenCalled();
+    expect(restartMutate).not.toHaveBeenCalled();
+  });
+
+  it("sends the click to the Settings card that carries the fix", () => {
+    dto = blockedDto();
+    render(<UpdateToast />);
+    act(() => lastToastOpts().action.onClick());
+    expect(routerPush).toHaveBeenCalledWith("/settings?highlight=version");
+  });
+
+  // Dismissal is session-only here as everywhere. The surfaces that must
+  // survive it are the Settings card and the sidebar dot, not the toast.
+  it("dismissing silences THIS LAUNCH only", () => {
+    dto = blockedDto();
+    render(<UpdateToast />);
+    act(() => lastToastOpts().onDismiss());
+    expect(sessionStorage.getItem(UPDATE_TOAST_DISMISS_KEY)).toBe("0.4.0");
+
+    toastMock.mockClear();
+    render(<UpdateToast />);
+    expect(toastMock).not.toHaveBeenCalled();
   });
 });

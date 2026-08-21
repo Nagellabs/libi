@@ -43,6 +43,17 @@ export type ShellUpdatePhase =
   | "downloading"
   /** Downloaded and verified; waiting for a restart to apply it. */
   | "ready"
+  /**
+   * An update exists, and this installation cannot apply it — it is running
+   * from somewhere its own bundle can't be replaced (translocated, off a
+   * disk image, a read-only or administered location). Nothing was
+   * downloaded, and nothing will be until the user moves the app.
+   *
+   * DELIBERATELY not `error`: `error` is documented as silent, and this is
+   * the one update state the user has to be told about, because it is the
+   * one they have to fix themselves. See `electron/self-update-probe.ts`.
+   */
+  | "blocked"
   /** The last check or download failed. SILENT in the UI, like `unknown`. */
   | "error";
 
@@ -58,6 +69,23 @@ export interface ShellUpdateStatus {
   error: string | null;
   /** When the last check finished (epoch ms), or null before the first. */
   checkedAt: number | null;
+  /**
+   * Why the bundle can't be replaced. Set only with `phase: "blocked"`, and
+   * only to choose which advice to show — the verdict came from a write
+   * probe, not from this.
+   */
+  blockedReason?:
+    | "translocated"
+    | "running-from-dmg"
+    | "not-in-applications"
+    | "read-only-location"
+    | null;
+  /**
+   * Where the app is running from, shown to the user VERBATIM. It is the
+   * evidence, and the difference between an abstract message and one they
+   * can act on.
+   */
+  blockedPath?: string | null;
   /**
    * True when this shell downloads updates on its own and waits at "ready"
    * for an explicit restart. Absent (old shells): downloads start only from
