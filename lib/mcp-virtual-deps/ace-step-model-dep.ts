@@ -6,7 +6,7 @@ import {
 import { getJobManager } from "@/lib/jobs/manager";
 import { isInstalling } from "./in-flight";
 
-/** ACE-Step weights (~5.5 GB HF snapshot) gated as a Settings chip.
+/** ACE-Step weights (~8.3 GB HF snapshot) gated as a Settings chip.
  *
  *  Re-uses the existing `music_model_download` JobManager runner so the
  *  chip shares progress plumbing (bytesDownloaded/bytesTotal + cancel)

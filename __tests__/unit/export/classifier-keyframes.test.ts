@@ -6,7 +6,6 @@ import type { Composition, Overlay } from "@/lib/engine/types";
 function videoComp(overlays: Composition["overlays"]): Composition {
   return {
     id: "c", name: "c", width: 1280, height: 720, fps: 30,
-    scenes: [],
     overlays: [
       // Base video is an OVERLAY now; z:-1 keeps it below the fixtures' z:0
       // overlays so `resolveExportBase` still picks it as the base.

@@ -2,12 +2,10 @@ import { describe, it, expect, vi } from "vitest";
 
 // Mock the tools module so each tool returns a predictable result
 vi.mock("@/mcp/tools", () => ({
-  createScene: vi.fn().mockResolvedValue({ success: true, data: { sceneId: "mock-scene-1" } }),
-  updateScene: vi.fn().mockResolvedValue({ success: true, data: {} }),
-  deleteScene: vi.fn().mockResolvedValue({ success: true, data: {} }),
-  reorderScenes: vi.fn().mockResolvedValue({ success: true, data: {} }),
-  loadSceneData: vi.fn().mockResolvedValue({ success: true, data: { scene: {} } }),
-  getComposition: vi.fn().mockResolvedValue({ success: true, data: { manifest: {}, scenes: [] } }),
+  getComposition: vi.fn().mockResolvedValue({ success: true, data: { manifest: {} } }),
+  addOverlay: vi.fn().mockResolvedValue({ success: true, data: { overlayId: "code-1" } }),
+  updateOverlay: vi.fn().mockResolvedValue({ success: true, data: {} }),
+  getOverlays: vi.fn().mockResolvedValue({ success: true, data: { overlays: [] } }),
   updatePieceName: vi.fn().mockResolvedValue({ success: true, data: {} }),
   updatePieceDescription: vi.fn().mockResolvedValue({ success: true, data: {} }),
   saveAsset: vi.fn().mockResolvedValue({ success: true, data: {} }),
@@ -44,11 +42,9 @@ describe("MCP server integration", () => {
     const toolFns = Object.keys(tools);
 
     // Every tool function used by the MCP server should be importable
-    expect(toolFns).toContain("createScene");
-    expect(toolFns).toContain("updateScene");
-    expect(toolFns).toContain("deleteScene");
-    expect(toolFns).toContain("reorderScenes");
-    expect(toolFns).toContain("loadSceneData");
+    expect(toolFns).toContain("addOverlay");
+    expect(toolFns).toContain("updateOverlay");
+    expect(toolFns).toContain("getOverlays");
     expect(toolFns).toContain("getComposition");
     expect(toolFns).toContain("updatePieceName");
     expect(toolFns).toContain("updatePieceDescription");
@@ -59,17 +55,8 @@ describe("MCP server integration", () => {
     // Ensure the mocked tools return the shape the MCP server expects
     const ctx = { pieceId: "mcp-test-piece" };
 
-    const createResult = await tools.createScene(ctx, {
-      name: "Test",
-      duration: 1,
-      drawFunction: "// test",
-    } as never);
-    expect(createResult.success).toBe(true);
-    expect(createResult.data).toHaveProperty("sceneId");
-
     const compResult = await tools.getComposition(ctx);
     expect(compResult.success).toBe(true);
     expect(compResult.data).toHaveProperty("manifest");
-    expect(compResult.data).toHaveProperty("scenes");
   });
 });

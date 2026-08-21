@@ -25,7 +25,7 @@ import { serverLogger as logger } from "@/lib/logger";
 interface DispatchEntry {
   handler: (args: Record<string, unknown>) => Promise<unknown>;
   refresh: (args: Record<string, unknown>, result: unknown) =>
-    | { queryKey: string; pieceId?: string; sceneId?: string }
+    | { queryKey: string; pieceId?: string }
     | null;
 }
 

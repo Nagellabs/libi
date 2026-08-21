@@ -105,113 +105,7 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
     return JSON.parse(content[0].text) as Record<string, unknown>;
   }
 
-  it("libi.create_scene fires composition refresh with the new sceneId", async () => {
-    const r = await callTool("libi.create_scene", {
-      pieceId: PIECE_ID,
-      name: "Scene A",
-      duration: 3,
-      drawFunction: VALID_DRAW,
-    });
-    expect(r.success).toBe(true);
-    const sceneId = (r.data as { sceneId: string }).sceneId;
-
-    await waitForNotify();
-
-    expect(captured).toHaveLength(1);
-    expect(captured[0].body).toEqual({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: PIECE_ID,
-      sceneId,
-    });
-  });
-
-  it("libi.update_scene fires composition refresh with the updated sceneId", async () => {
-    const created = await callTool("libi.create_scene", {
-      pieceId: PIECE_ID,
-      name: "Scene A",
-      duration: 3,
-      drawFunction: VALID_DRAW,
-    });
-    const sceneId = (created.data as { sceneId: string }).sceneId;
-    captured.length = 0;
-
-    const r = await callTool("libi.update_scene", {
-      pieceId: PIECE_ID,
-      sceneId,
-      name: "Scene A (v2)",
-    });
-    expect(r.success).toBe(true);
-
-    await waitForNotify();
-
-    expect(captured).toHaveLength(1);
-    expect(captured[0].body).toEqual({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: PIECE_ID,
-      sceneId,
-    });
-  });
-
-  it("libi.delete_scene fires composition refresh with the deleted sceneId", async () => {
-    const created = await callTool("libi.create_scene", {
-      pieceId: PIECE_ID,
-      name: "Scene X",
-      duration: 2,
-      drawFunction: VALID_DRAW,
-    });
-    const sceneId = (created.data as { sceneId: string }).sceneId;
-    captured.length = 0;
-
-    const r = await callTool("libi.delete_scene", {
-      pieceId: PIECE_ID,
-      sceneId,
-    });
-    expect(r.success).toBe(true);
-
-    await waitForNotify();
-
-    expect(captured).toHaveLength(1);
-    expect(captured[0].body.sceneId).toBe(sceneId);
-    expect(captured[0].body.queryKey).toBe("composition");
-  });
-
-  it("libi.reorder_scenes fires composition refresh with the first reordered id", async () => {
-    const a = await callTool("libi.create_scene", {
-      pieceId: PIECE_ID,
-      name: "A",
-      duration: 1,
-      drawFunction: VALID_DRAW,
-    });
-    const b = await callTool("libi.create_scene", {
-      pieceId: PIECE_ID,
-      name: "B",
-      duration: 1,
-      drawFunction: VALID_DRAW,
-    });
-    const aId = (a.data as { sceneId: string }).sceneId;
-    const bId = (b.data as { sceneId: string }).sceneId;
-    captured.length = 0;
-
-    const r = await callTool("libi.reorder_scenes", {
-      pieceId: PIECE_ID,
-      sceneIds: [bId, aId],
-    });
-    expect(r.success).toBe(true);
-
-    await waitForNotify();
-
-    expect(captured).toHaveLength(1);
-    expect(captured[0].body).toEqual({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: PIECE_ID,
-      sceneId: bId,
-    });
-  });
-
-  it("libi.update_piece_name fires piece refresh (no sceneId)", async () => {
+  it("libi.update_piece_name fires piece refresh", async () => {
     const r = await callTool("libi.update_piece_name", {
       pieceId: PIECE_ID,
       name: "Renamed",
@@ -229,11 +123,14 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
   });
 
   it("failed mutations do NOT fire refresh (eval() rejected by validator)", async () => {
-    const r = await callTool("libi.create_scene", {
+    const r = await callTool("libi.add_overlay", {
       pieceId: PIECE_ID,
-      name: "Evil",
+      kind: "code",
+      displayName: "Evil",
+      startTime: 0,
       duration: 1,
-      drawFunction: "eval('nope')",
+      rect: { x: 0, y: 0, width: 1920, height: 1080 },
+      body: "eval('nope')",
     });
     expect(r.success).toBe(false);
 

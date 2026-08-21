@@ -1,4 +1,5 @@
 import type { DuckSettings } from "@/lib/engine/types";
+import { duckReductionFloor } from "@/lib/audio/duck-params";
 
 /** A single ducked-pair Web Audio graph. */
 export interface DuckGraph {
@@ -130,7 +131,7 @@ export function applyDuckParams(
   sampleRate: number,
 ): void {
   const thresholdLinear = Math.pow(10, duck.thresholdDb / 20);
-  const reductionMin = Math.pow(10, duck.reductionDb / 20);
+  const reductionMin = duckReductionFloor(duck.reductionDb);
   // Convert ms time constants to one-pole coefficients.
   const attackCoeff = 1 - Math.exp(-1 / ((duck.attackMs / 1000) * sampleRate));
   const releaseCoeff = 1 - Math.exp(-1 / ((duck.releaseMs / 1000) * sampleRate));

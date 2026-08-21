@@ -47,7 +47,6 @@ const SETTINGS: ExportSettings = {
 };
 
 const PAYLOAD: RenderPayload = {
-  scenes: [],
   overlays: [],
   audioClips: [],
   width: 1920,

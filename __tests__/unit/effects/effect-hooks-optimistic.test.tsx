@@ -34,17 +34,18 @@ function setup() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   qc.setQueryData<CachedComposition>(pieceKeys.composition("p1"), {
     manifest: {
-      sceneOrder: [],
       width: 1920,
       height: 1080,
       fps: 30,
       overlays: [
-        { id: "o1", effects: { out: { effectId: "fade" } } },
+        {
+          id: "o1", kind: "code", startTime: 0, duration: 1, z: 0, opacity: 1,
+          rect: { x: 0, y: 0, width: 1920, height: 1080 }, drawFunction: "",
+          effects: { out: { effectId: "fade" } },
+        },
       ],
-      scenes: [],
       audioClips: [],
     },
-    scenes: [],
     audioClips: [],
   });
   const wrapper = ({ children }: { children: React.ReactNode }) =>

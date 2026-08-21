@@ -3,7 +3,7 @@ import { addOverlay, updateOverlay, removeOverlay } from "@/lib/engine/overlays"
 import type { Composition, TextOverlay } from "@/lib/engine/types";
 
 function mkComp(overlays: TextOverlay[] = []): Composition {
-  return { id: "c", name: "", width: 100, height: 100, fps: 30, scenes: [], overlays };
+  return { id: "c", name: "", width: 100, height: 100, fps: 30, overlays };
 }
 
 function mkText(overrides: Partial<TextOverlay>): TextOverlay {

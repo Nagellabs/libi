@@ -5,6 +5,7 @@ import type { AudioClip } from "@/lib/engine/types";
 import { Waveform } from "./waveform";
 import { useAudioClipPosition } from "@/hooks/preview/use-audio-clip-position";
 import { dragToTiming } from "@/lib/preview/audio-clip-drag";
+import { duckSidechainIds } from "@/lib/audio/duck-params";
 
 interface AudioClipRowProps {
   clip: AudioClip;
@@ -156,7 +157,7 @@ export default function AudioClipRow({
         {displayLabel}
       </span>
       {clip.duck && (
-        <span title={`Ducked by ${clip.duck.sidechainClipId}`} className="text-[10px] text-foreground/60">
+        <span title={`Ducked by ${duckSidechainIds(clip.duck).join(", ")}`} className="text-[10px] text-foreground/60">
           🔉
         </span>
       )}

@@ -7,14 +7,12 @@ import type { PreviewQuality } from "@/lib/preview/tuning";
 import { Eye, EyeOff, Lock, Unlock, Bot, Plus, FileText, Bookmark, Unlink, Link2 } from "lucide-react";
 import { classifySelection } from "@/lib/preview/selection-classify";
 import {
-  baseSceneDetails,
   assetSourceDetails,
   audioClipDetails,
   type AssetSourceDetails,
   type AudioClipDetails,
-  type SceneVideoDetails,
-} from "@/lib/preview/scene-details";
-import { getSceneAtFrame, getCompositionFrames } from "@/lib/engine/renderer";
+} from "@/lib/preview/layer-details";
+import { getCompositionFrames } from "@/lib/engine/renderer";
 import type { SelectionStore } from "@/lib/preview/selection-store";
 import type { FrameStore } from "@/lib/preview/frame-store";
 import { useSelectedOverlay, useSelectedOverlayIds } from "@/hooks/preview/use-selected-overlay";
@@ -35,7 +33,6 @@ import { TransformFields } from "@/components/preview/transform-fields";
 import { SizeField } from "@/components/preview/size-field";
 import { ThreeDFields } from "@/components/preview/three-d-fields";
 
-import { SceneDetailsBody } from "@/components/preview/scene-details-body";
 import type { OverlayTransformPatch } from "@/hooks/editor/use-overlay-transform-commit";
 import { useEditorState } from "@/lib/editor-state-context";
 import type { EffectsFamily } from "@/components/preview/effects-panel";
@@ -136,9 +133,9 @@ export default function LayersInspectorPanel({
   const selection = classifySelection(selectedId, composition);
   const selectedOverlay: Overlay | null = selection?.kind === "overlay" ? selection.overlay : null;
   const isAudio = selection?.kind === "audioClip";
-  // The live playhead frame is ONLY needed to describe the scene-under-playhead
-  // when nothing (or a scene) is selected. While an overlay/audio clip is
-  // selected we don't read it — so subscribe only then, otherwise this whole
+  // The live playhead frame is ONLY needed for caption timing. While an
+  // overlay/audio clip is selected we don't read it — so subscribe only then,
+  // otherwise this whole
   // 800-line inspector would re-render 30 Hz during playback (the measured
   // post-edit GC stutter, since editing leaves the overlay selected).
   // Phase 9: subscribe to the frame ALSO when a keyframed overlay is selected,
@@ -188,28 +185,13 @@ export default function LayersInspectorPanel({
     [isAudio, composition, selectedId, files],
   );
 
-  // Scene to describe: the selected scene, else the scene under the playhead.
-  // Skip the playhead fallback when an overlay OR an audio clip is selected.
-  const sceneDetails = useMemo(() => {
-    if (selection?.kind === "scene") {
-      return baseSceneDetails(composition, selection.index, files, previewQuality);
-    }
-    if (!selectedOverlay && !isAudio && composition && composition.scenes.length > 0) {
-      const { sceneIndex } = getSceneAtFrame(composition, frame);
-      return baseSceneDetails(composition, sceneIndex, files, previewQuality);
-    }
-    return null;
-  }, [selection, selectedOverlay, isAudio, composition, files, previewQuality, frame]);
-
   const headerLabel = isMulti
     ? `${selectedIds.length} layers selected`
     : selectedOverlay
     ? `${selectedOverlay.kind} layer`
     : audioDetails
       ? `Audio — ${audioDetails.clip.label ?? (audioDetails.clip.kind === "inline" ? "linked audio" : "clip")}`
-      : sceneDetails?.scene
-        ? `Scene — ${sceneDetails.scene.name}`
-        : "Nothing selected";
+      : "Nothing selected";
 
   return (
     <div
@@ -322,21 +304,6 @@ export default function LayersInspectorPanel({
               readOnly={effectsReadOnly}
             />
           </>
-        ) : sceneDetails?.scene && selection?.kind === "scene" ? (
-          <>
-            <SceneDetailsBody details={sceneDetails} composition={composition} />
-            <EffectsInspector
-              pieceId={pieceId}
-              layerId={selection.scene.id}
-              kind="scene"
-              effects={selection.scene.effects}
-              effectHighlightStore={effectHighlightStore}
-              onOpenPicker={onOpenEffects}
-              readOnly={effectsReadOnly}
-            />
-          </>
-        ) : sceneDetails?.scene ? (
-          <SceneDetailsBody details={sceneDetails} composition={composition} />
         ) : (
           <div className="text-[11px] text-muted-foreground">Select a layer to edit it.</div>
         )}
@@ -906,7 +873,7 @@ function AudioDetailsBody({
   pieceId: string;
   onTranscribe?: (audio: { fileId: string; fileName: string; label?: string }) => void;
 }) {
-  const { clip, linkedSceneName, linkedOverlayName, attached, relinkOverlayId, file } = details;
+  const { clip, linkedOverlayName, attached, relinkOverlayId, file } = details;
   const unlink = () =>
     void fetch(`/api/pieces/${pieceId}/audio-clips/${clip.id}/unlink`, { method: "POST" });
   const relink = () =>
@@ -944,10 +911,6 @@ function AudioDetailsBody({
                 <>
                   Attached to video{" "}
                   <span className="text-foreground/90">{linkedOverlayName}</span> — moves with it.
-                </>
-              ) : linkedSceneName ? (
-                <>
-                  Follows scene <span className="text-foreground/90">{linkedSceneName}</span>.
                 </>
               ) : (
                 "Attached — moves with its video."
@@ -1014,4 +977,3 @@ function AudioDetailsBody({
   );
 }
 
-export type { SceneVideoDetails };

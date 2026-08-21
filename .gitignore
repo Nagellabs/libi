@@ -110,3 +110,10 @@ skill-eval/runs/
 # Machine-local proof, written by release:npm and read by
 # `release:electron --skip-checks`; meaningless in anyone else's checkout.
 /.libi-release-gates.json
+
+# Cross-platform QA rig: the GCP project id and zone. Not secret, but this repo
+# is public and the infrastructure it names is not. The scripts under qa/cloud/
+# ARE committed; only this file is local. See qa/cloud/README.md.
+/qa/cloud/config.local.sh
+# Result bundles pulled back off the QA VMs — evidence for one run, not content.
+/qa/cloud/results/

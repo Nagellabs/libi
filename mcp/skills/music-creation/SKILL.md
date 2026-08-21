@@ -153,9 +153,9 @@ the user hears it under their visuals.
 Once a track exists, ask:
 
 > "Want a beat-synced visual? I can call `libi.music_detect_beats` on
-> the track and write a canvas scene that pulses on each beat."
+> the track and write a full-frame code overlay that pulses on each beat."
 
-If yes: call `libi.music_detect_beats({ fileId })`, then write a
-canvas scene with `const BEATS = [...]` inlined, using the
-`beatPulse(BEATS, time)` helper to drive a visual element. Keep the
-scene short (~12s for v1).
+If yes: call `libi.music_detect_beats({ fileId })`, then add a code
+overlay (`libi.add_overlay({ kind: "code" })`) and write `const BEATS =
+[...]` inlined in its `codeFilePath`, using the `beatPulse(BEATS, time)`
+helper to drive a visual element. Keep it short (~12s for v1).

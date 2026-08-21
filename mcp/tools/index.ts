@@ -1,4 +1,3 @@
-export * from "./scene-tools";
 export * from "./composition-tools";
 export * from "./piece-tools";
 export * from "./asset-folder-tools";

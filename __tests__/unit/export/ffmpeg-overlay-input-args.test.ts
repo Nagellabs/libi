@@ -116,7 +116,6 @@ describe("FfmpegOverlayBackend — inputOptionArgs stays index-parallel with inp
       width: 1080,
       height: 1920,
       fps: 30,
-      scenes: [],
       overlays: [
         {
           id: "s1",
@@ -213,7 +212,6 @@ describe("FfmpegOverlayBackend — inputOptionArgs stays index-parallel with inp
       width: 1080,
       height: 1920,
       fps: 30,
-      scenes: [],
       overlays: [
         {
           id: "s1", kind: "video", fileId: "base", videoUrl: "",

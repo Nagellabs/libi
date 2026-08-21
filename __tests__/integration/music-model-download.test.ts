@@ -67,13 +67,30 @@ describe("musicModelDownloadRunner", () => {
     expect(models.readInstalledToken()).toBe(models.ACESTEP_MODEL_VERSION);
   });
 
-  it("forwards granular per-file download progress to reportProgress", async () => {
+  // Progress is BYTES-ON-DISK (reported as MB), not files completed.
+  //
+  // The old contract here was `reportProgress(3, 12, "files")` — and the file
+  // counter was the bug. This repo's 12 files run from 639 bytes to 6.61 GB, so
+  // the bar sat at 11/12 for the 24 minutes the transformer transferred, and the
+  // ETA derived from the small files claimed about a minute for all of it
+  // (session 9c3ce4d0, 2026-08-17).
+  it("reports on-disk MB rather than a file count", async () => {
     const gen = await import("@/lib/music/generate");
     const models = await import("@/lib/music/models");
+    const totalMb = Math.round(models.ACESTEP_DOWNLOAD_BYTES / 1_000_000);
+
     vi.spyOn(gen, "downloadModel").mockImplementation(
       async (onProgress?: (d: number, t: number) => void) => {
-        onProgress?.(3, 12);
-        onProgress?.(12, 12);
+        // Land 3 MB, then tick the way snapshot_download does when a file
+        // finishes. The runner turns that tick into a measurement rather than
+        // into progress of its own.
+        const staged = path.join(models.aceStepModelsDir(), "staged.bin");
+        fs.mkdirSync(path.dirname(staged), { recursive: true });
+        fs.writeFileSync(staged, Buffer.alloc(3_000_000));
+        onProgress?.(1, 12);
+        // Let the poller's async walk finish before the runner stops it.
+        await new Promise((r) => setTimeout(r, 80));
+
         for (const p of models.aceStepModelFilePaths()) {
           fs.mkdirSync(path.dirname(p), { recursive: true });
           fs.writeFileSync(p, "x");
@@ -85,8 +102,56 @@ describe("musicModelDownloadRunner", () => {
     );
     const ctx = makeCtx();
     await musicModelDownloadRunner.run(ctx);
-    expect(ctx.reportProgress).toHaveBeenCalledWith(3, 12, "files");
-    expect(ctx.reportProgress).toHaveBeenCalledWith(12, 12, "files");
+
+    const calls = vi.mocked(ctx.reportProgress).mock.calls;
+    // Every report is in MB against the pinned total — one unit for the whole
+    // job, because a rolling ETA that averages ms-per-unit cannot survive the
+    // unit changing underneath it.
+    for (const [, total, unit] of calls) {
+      expect(unit).toBe("MB");
+      expect(total).toBe(totalMb);
+    }
+    expect(calls[0]).toEqual([0, totalMb, "MB"]);
+    expect(calls.some(([done]) => done === 3)).toBe(true);
+    expect(calls.at(-1)).toEqual([totalMb, totalMb, "MB"]);
+  });
+
+  // A RESUME must open at the bytes already on disk, never at 0.
+  //
+  // Regression from a real run (2026-08-17): with 7.1 GB of 8.3 GB present, the
+  // bar read 0/8276 MB for 64 seconds. An opening `reportProgress(0, total)`
+  // both asserted something false and consumed JobManager's 1s progress
+  // debounce, so the tracker's first measurement — the resume baseline — was
+  // dropped as too-soon; and since the tracker only re-emits on an INCREASE, it
+  // never came back. On a cold `uv` cache that is minutes of visible 0%.
+  it("opens at the on-disk baseline when resuming, not at 0", async () => {
+    const gen = await import("@/lib/music/generate");
+    const models = await import("@/lib/music/models");
+    const totalMb = Math.round(models.ACESTEP_DOWNLOAD_BYTES / 1_000_000);
+
+    // 40 MB already present, as a partial pull would leave behind.
+    const preexisting = path.join(models.aceStepModelsDir(), "already-fetched.bin");
+    fs.mkdirSync(path.dirname(preexisting), { recursive: true });
+    fs.writeFileSync(preexisting, Buffer.alloc(40_000_000));
+
+    vi.spyOn(gen, "downloadModel").mockImplementation(async () => {
+      // Long enough for the tracker's immediate measure to land and be recorded.
+      await new Promise((r) => setTimeout(r, 80));
+      for (const p of models.aceStepModelFilePaths()) {
+        fs.mkdirSync(path.dirname(p), { recursive: true });
+        fs.writeFileSync(p, "x");
+      }
+    });
+    const { musicModelDownloadRunner } = await import(
+      "@/lib/jobs/runners/music-model-download"
+    );
+    const ctx = makeCtx();
+    await musicModelDownloadRunner.run(ctx);
+
+    const calls = vi.mocked(ctx.reportProgress).mock.calls;
+    expect(calls[0]).toEqual([40, totalMb, "MB"]);
+    // Nothing anywhere in the run may claim 0 when 40 MB are on disk.
+    expect(calls.some(([done]) => done === 0)).toBe(false);
   });
 
   it("ctx.discardOutput clears the dir then re-downloads", async () => {

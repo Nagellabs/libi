@@ -14,7 +14,6 @@ function comp(over: Partial<Composition>): Composition {
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: [],
     overlays: [],
     audioClips: [],
     ...over,
@@ -67,19 +66,26 @@ type OverlayRow = {
 describe("buildTrackStackViewModel", () => {
   const flags = { selectedIds: new Set<string>(), hidden: {}, locked: {} };
 
-  it("emits ONE row per overlay, then Video, then Audio", () => {
+  it("emits ONE row per overlay, then Audio", () => {
     const c = comp({
-      scenes: [{ id: "s1", name: "S1", type: "canvas", duration: 2, drawFunction: "" } as never],
       overlays: [textOverlay("o1"), imageOverlay("o2", 1)],
       audioClips: [{ id: "c1", kind: "standalone", fileId: "f", startTime: 0, duration: 1, enabled: true } as never],
     });
     const vm = buildTrackStackViewModel(c, flags);
-    const kinds = vm.rows.map((r) => r.kind);
-    // two overlay rows (one per overlay), then video, then audio.
-    expect(kinds).toEqual(["overlay", "overlay", "video", "audio"]);
-    expect(vm.rows[2]).toMatchObject({ kind: "video", railLabel: "Video", railIcon: "ti-movie" });
-    expect((vm.rows[2] as { scenes: unknown[] }).scenes).toHaveLength(1);
-    expect(vm.rows[3]).toMatchObject({ kind: "audio", railLabel: "Audio" });
+    // two overlay rows (one per overlay), then audio. There is no scene rail.
+    expect(vm.rows.map((r) => r.kind)).toEqual(["overlay", "overlay", "audio"]);
+    expect(vm.rows[2]).toMatchObject({ kind: "audio", railLabel: "Audio" });
+  });
+
+  it("emits no video rail even for a composition that still carries scenes", () => {
+    // Fed a comp that DOES have scenes on purpose: this must pass because the
+    // row was removed, not because the fixture stopped supplying one.
+    const c = comp({
+      overlays: [textOverlay("o1")],
+    });
+    const vm = buildTrackStackViewModel(c, flags);
+    expect(vm.rows.some((r) => r.kind === "video")).toBe(false);
+    expect(vm.rows.map((r) => r.kind)).toEqual(["overlay"]);
   });
 
   it("each overlay row carries its overlay's kind/id and a one-layer LayerRowVM", () => {
@@ -90,7 +96,7 @@ describe("buildTrackStackViewModel", () => {
     expect(r.row.layers).toHaveLength(1);
   });
 
-  it("omits the Video row when there are no scenes and the Audio row when there are no clips", () => {
+  it("omits the Audio row when there are no clips", () => {
     const vm = buildTrackStackViewModel(comp({ overlays: [textOverlay("o1")] }), flags);
     expect(vm.rows.map((r) => r.kind)).toEqual(["overlay"]);
   });

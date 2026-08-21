@@ -28,7 +28,7 @@ beforeEach(() => {
   mkdirSync(join(storageRoot, "storage", PIECE_ID), { recursive: true });
   writeFileSync(
     join(storageRoot, "storage", PIECE_ID, "composition.json"),
-    JSON.stringify({ sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [] }),
+    JSON.stringify({ width: 1920, height: 1080, fps: 30, audioClips: [] }),
   );
 
   const db = createTestDb();
@@ -80,7 +80,7 @@ describe("audio clip HTTP routes", () => {
     writeFileSync(
       join(storageRoot, "storage", PIECE_ID, "composition.json"),
       JSON.stringify({
-        sceneOrder: [], width: 1920, height: 1080, fps: 30,
+        width: 1920, height: 1080, fps: 30,
         audioClips: [{ id: "c1", kind: "standalone", fileId: "f1", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true }],
       }),
     );
@@ -114,7 +114,7 @@ describe("audio clip HTTP routes", () => {
     writeFileSync(
       join(storageRoot, "storage", PIECE_ID, "composition.json"),
       JSON.stringify({
-        sceneOrder: [], width: 1920, height: 1080, fps: 30,
+        width: 1920, height: 1080, fps: 30,
         audioClips: [{ id: "c1", kind: "standalone", fileId: "f1", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true }],
       }),
     );
@@ -129,7 +129,7 @@ describe("audio clip HTTP routes", () => {
     writeFileSync(
       join(storageRoot, "storage", PIECE_ID, "composition.json"),
       JSON.stringify({
-        sceneOrder: [], width: 1920, height: 1080, fps: 30,
+        width: 1920, height: 1080, fps: 30,
         audioClips: [{ id: "c1", kind: "standalone", fileId: "f1", startTime: 0, duration: 10, trimStart: 0, volume: 1, enabled: true }],
       }),
     );

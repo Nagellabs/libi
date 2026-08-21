@@ -10,6 +10,17 @@ export const EVENT_NAMES = [
   "first_export",
   "persona_selected",
   "agent_connected",
+  // activation / onboarding (per-occurrence — NOT mark-once)
+  //
+  // The first-run demo film was built end to end (download + verify + write).
+  // Param is the definition version only — bounded by construction. This is
+  // the adoption signal for onboarding actually completing, as distinct from
+  // `persona_selected`, which fires before anything is built.
+  //
+  // Emitted by `lib/jobs/runners/onboarding-piece.ts` on every non-reused
+  // build, so a `force` rebuild fires it again; a dedupe hit fires nothing.
+  // That is why it sits below the mark-once group rather than in it.
+  "onboarding_piece_built",
   // core creation (UI-initiated; agent-driven creation is covered by tool_used)
   "piece_created",
   "export_started",

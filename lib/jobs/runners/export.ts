@@ -5,7 +5,7 @@ import os from "node:os";
 import { eq } from "drizzle-orm";
 import { z } from "zod/v3";
 import type { JobContext, JobRunner } from "@/lib/jobs/types";
-import type { CompositionManifest, PersistedScene } from "@/lib/composition/persistence";
+import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadComposition } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { classifyExportShape } from "@/lib/export/classifier";
@@ -20,7 +20,6 @@ import { ensureFolderExists } from "@/lib/export/folder";
 import { claimExportPath } from "@/lib/export/filename";
 import { getDb } from "@/lib/db/client";
 import { files as filesTable, pieces } from "@/lib/db/schema";
-import type { SceneData } from "@/lib/composition/build-composition";
 import type { RenderPayload } from "@/lib/export/render-jobs";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 import type {
@@ -117,14 +116,12 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
 
     // Load composition (draft or snapshot).
     let manifest: CompositionManifest;
-    let scenes: PersistedScene[];
     if (source === "snapshot") {
       const snap = await loadCurrentSnapshot(pieceId);
       if (!snap) throw new Error(`No committed snapshot for piece ${pieceId}`);
       manifest = snap;
-      scenes = snap.scenes ?? [];
     } else {
-      ({ manifest, scenes } = await loadComposition(pieceId));
+      ({ manifest } = await loadComposition(pieceId));
     }
 
     // Hidden layers (overlay.hidden — the persisted eye toggle) leave the
@@ -138,7 +135,7 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
       manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
     }
 
-    const composition = buildCompositionFromManifest(manifest, scenes);
+    const composition = buildCompositionFromManifest(manifest);
 
     // Resolve the actual ExportSettings shape — derive width/height from the
     // composition for "source" preset. The route should have already done
@@ -251,7 +248,7 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
         // chromium-render path: build the payload, run the existing backend
         // (which delegates to the export_render runner via JobManager), then
         // MOVE the temp file to outputPath.
-        const payload = buildRenderPayload(pieceId, manifest, scenes);
+        const payload = buildRenderPayload(pieceId, manifest);
         const backend = new ChromiumRenderBackend();
         const result = await backend.run({
           pieceId,
@@ -316,7 +313,6 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
 
 function buildCompositionFromManifest(
   manifest: CompositionManifest,
-  scenes: PersistedScene[],
 ): Composition {
   return {
     id: "composition-1",
@@ -324,15 +320,6 @@ function buildCompositionFromManifest(
     width: manifest.width,
     height: manifest.height,
     fps: manifest.fps,
-    scenes: scenes.map((s) => {
-      return {
-        id: s.id,
-        name: s.name,
-        type: "canvas" as const,
-        duration: s.duration,
-        draw: () => {},
-      };
-    }),
     // Source dims for video overlays — the classifier reads them to decide
     // whether `-c copy` would preserve the composition's framing.
     overlays: attachOverlaySourceDims((manifest.overlays ?? []) as Overlay[]),
@@ -343,12 +330,10 @@ function buildCompositionFromManifest(
 function buildRenderPayload(
   pieceId: string,
   manifest: CompositionManifest,
-  scenes: PersistedScene[],
 ): RenderPayload {
   const db = getDb();
   const files = db.select().from(filesTable).where(eq(filesTable.pieceId, pieceId)).all();
   return {
-    scenes: scenes as SceneData[],
     overlays: (manifest.overlays ?? []) as Overlay[],
     audioClips: (manifest.audioClips ?? []) as AudioClip[],
     width: manifest.width,

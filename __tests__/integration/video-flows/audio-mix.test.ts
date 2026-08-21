@@ -170,7 +170,6 @@ skipIf("Layer-1: FfmpegOverlayBackend audio-mix flow", () => {
       width: 320,
       height: 240,
       fps: 24,
-      scenes: [],
       overlays,
       ...(opts.withClip ? { audioClips: [toneClip()] } : {}),
     };

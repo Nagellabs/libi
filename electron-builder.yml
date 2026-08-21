@@ -132,6 +132,21 @@ mac:
 # differential downloads and CDN caching).
 dmg:
   artifactName: "Libi-${arch}.dmg"
+  # Sign the CONTAINER, not just the .app inside it. electron-builder defaults
+  # this to false, which is why `codesign -dv` on a shipped dmg reported "not
+  # signed at all" and `spctl -a -t open` answered "no usable signature" — an
+  # alarming pair of outputs on a perfectly good artifact, and an hour of the
+  # v0.1.0 QA run (finding F1). Nothing about the USER experience changes: the
+  # notarization ticket is stapled to the dmg either way by release-electron.js
+  # step 9a, and Gatekeeper has always assessed the app inside as Notarized.
+  # What changes is that those two checks become meaningful instead of false
+  # alarms.
+  #
+  # Ordering is what makes this safe: electron-builder signs during the pack
+  # (step 8), and the dmg is notarized + stapled afterwards (step 9a). Sign →
+  # notarize → staple is the required order; a signature applied AFTER the
+  # staple would invalidate the ticket.
+  sign: true
 win:
   target: [nsis]
 linux:

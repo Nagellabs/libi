@@ -1,39 +1,40 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import {
-  isInstallInFlight,
+  isShellInstallInFlight,
+  restartOffer,
   updateOffer,
   useInstallRuntimeUpdate,
+  useRestartToApply,
   useRuntimeUpdate,
 } from "@/lib/queries/runtime-update";
-import { useResetServer } from "@/lib/queries/server-status";
 
 /**
- * The app-wide update offer — a persistent, dismissible toast that appears
- * anywhere in the app when a newer Libi is installable, so an update is
- * visible without opening Settings. It complements, never replaces, the two
- * existing surfaces that read the same query: the sidebar indicator (passive)
- * and the Settings → General card (always available, including after a
- * dismiss).
+ * The app-wide update toast. Since the auto-download change, downloads run
+ * silently — the toast's normal job is to announce a FINISHED download:
+ *
+ *     "Libi X is ready — Restart to apply"  [Restart now]
+ *
+ * It complements, never replaces, the two other surfaces reading the same
+ * query: the sidebar indicator (passive) and the Settings → General card
+ * (always available, including after a dismiss). Nothing shows in dev / npx.
  *
  * Behaviour rules:
- *  - One offer, either channel. `updateOffer()` collapses "newer npm
- *    runtime" and "newer desktop shell" into a single "Libi X is available";
- *    the user doesn't care which half of the app got newer. Nothing shows in
- *    dev / npx (no offer is ever computed there).
+ *  - One offer, either channel. `restartOffer()` collapses "runtime staged
+ *    for next launch" and "shell downloaded and parked at ready" into one
+ *    "Libi X is ready"; the user doesn't care which half got newer.
  *  - Dismissing (the X) remembers THAT VERSION for THIS APP LAUNCH ONLY
  *    (sessionStorage): the toast stays gone for the rest of the session and
- *    comes back at the next launch, so a dismissed update nags gently
- *    instead of being forgotten forever. The Settings card is the immediate
- *    recovery path.
- *  - "Install & restart" means it: a runtime install started HERE
- *    auto-restarts the app when the download completes (the reset mutation's
- *    idle state is the fired-once guard, same as updates-section.tsx), and a
- *    shell install restarts itself from the main process once verified.
+ *    comes back at the next launch — which, for a runtime update, is also
+ *    the launch that applies it.
+ *  - "Restart now" means now: the runtime target resets the server (the app
+ *    reloads into the new version), the shell target quits-and-installs.
+ *  - Legacy path: an OLD desktop shell (no autoDownload) cannot download a
+ *    shell update itself, so a shell offer from one keeps the click-to-
+ *    install toast ("Install & restart") this component always had.
  */
 
 /** sessionStorage key holding the version dismissed this app launch. */
@@ -59,56 +60,67 @@ function rememberDismissed(version: string): void {
 
 export function UpdateToast() {
   const { data } = useRuntimeUpdate();
+  const restart = useRestartToApply();
   const install = useInstallRuntimeUpdate();
-  const reset = useResetServer();
-  const router = useRouter();
 
-  // Consent: true only when the install was started from THIS toast in THIS
-  // session — the same rule updates-section.tsx applies to its button.
-  const [installedHere, setInstalledHere] = useState(false);
+  // Set when a restart (or a legacy shell install) was started from THIS
+  // toast — from then on it only morphs through progress copy.
+  const [actedHere, setActedHere] = useState(false);
 
-  // Memoized so the effect below keys on the offer's CONTENT — updateOffer
-  // returns a fresh object every call, and React Query's structural sharing
+  // Memoized so the effect keys on the offers' CONTENT — both helpers
+  // return fresh objects per call while React Query's structural sharing
   // keeps `data` stable between identical polls.
-  const offer = useMemo(() => updateOffer(data), [data]);
-  const pendingVersion = data?.pendingVersion ?? null;
+  const ready = useMemo(() => restartOffer(data), [data]);
+  const legacyOffer = useMemo(() => {
+    const offer = updateOffer(data);
+    // The toast only carries the legacy click for the OLD-shell case; a
+    // failed runtime auto-download surfaces in Settings (and the sidebar
+    // dot), not as a toast at every launch.
+    return offer?.target === "shell" ? offer : null;
+  }, [data]);
   const shellPhase = data?.shell?.phase ?? null;
   const shellPercent = data?.shell?.percent ?? null;
-  const installing = isInstallInFlight(data) || install.isPending;
-
-  // Auto-restart once the RUNTIME install this toast started has landed on
-  // disk. Shell installs restart themselves from the main process.
-  useEffect(() => {
-    if (!pendingVersion || !installedHere || !reset.isIdle) return;
-    reset.mutate();
-  }, [pendingVersion, installedHere, reset]);
 
   useEffect(() => {
-    // Progress states for an install started here — keep the same toast id
-    // so the offer morphs in place instead of stacking.
-    if (installedHere) {
-      if (pendingVersion || shellPhase === "ready") {
+    if (actedHere) {
+      // Progress copy for an action started here, morphing in place.
+      if (restart.isPending || restart.isSuccess || shellPhase === "ready") {
         toast.loading("Restarting Libi…", { id: UPDATE_TOAST_ID, duration: Infinity });
       } else if (shellPhase === "downloading") {
+        // Legacy shell install: download, then the old shell restarts itself.
         toast.loading(
           `Downloading the new Libi${shellPercent !== null ? ` — ${shellPercent}%` : "…"}`,
-          { id: UPDATE_TOAST_ID, duration: Infinity },
-        );
-      } else if (installing) {
-        toast.loading(
-          "Downloading the new Libi… Libi keeps working and restarts when it's ready.",
           { id: UPDATE_TOAST_ID, duration: Infinity },
         );
       }
       return;
     }
 
-    if (!offer || pendingVersion || installing || shellPhase === "downloading" || shellPhase === "ready") {
-      return;
-    }
+    const offer = ready ?? legacyOffer;
+    if (!offer || isShellInstallInFlight(data)) return;
     if (readDismissedVersion() === offer.version) return;
 
-    toast(`Libi ${offer.version} is available`, {
+    if (ready) {
+      toast(`Libi ${ready.version} is ready`, {
+        id: UPDATE_TOAST_ID,
+        duration: Infinity,
+        closeButton: true,
+        description: "It downloaded in the background — restart to apply it.",
+        action: {
+          label: "Restart now",
+          onClick: () => {
+            setActedHere(true);
+            restart.mutate(ready);
+          },
+        },
+        // Fires on the X (and swipe) only — action clicks don't run it.
+        onDismiss: () => rememberDismissed(ready.version),
+      });
+      return;
+    }
+
+    // Legacy: an old shell offering a shell update it can't download itself.
+    toast(`Libi ${legacyOffer!.version} is available`, {
       id: UPDATE_TOAST_ID,
       duration: Infinity,
       closeButton: true,
@@ -116,20 +128,13 @@ export function UpdateToast() {
       action: {
         label: "Install & restart",
         onClick: () => {
-          setInstalledHere(true);
-          install.mutate(offer);
-          // Land the user where the action is visible: the Settings Version
-          // section, which flashes on arrival (see updates-section.tsx) and
-          // shows the live install state — so the click never feels like the
-          // toast just vanished.
-          router.push("/settings?highlight=version");
+          setActedHere(true);
+          install.mutate(legacyOffer!);
         },
       },
-      // Fires on the X (and swipe) only — action clicks don't run it, so an
-      // install is never mistaken for a dismissal.
-      onDismiss: () => rememberDismissed(offer.version),
+      onDismiss: () => rememberDismissed(legacyOffer!.version),
     });
-  }, [offer, pendingVersion, installing, shellPhase, shellPercent, installedHere, install, router]);
+  }, [ready, legacyOffer, data, shellPhase, shellPercent, actedHere, restart, install]);
 
   return null;
 }

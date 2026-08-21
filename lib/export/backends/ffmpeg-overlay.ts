@@ -1,4 +1,5 @@
 import fs from "fs";
+import { dirname } from "path";
 import { eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema/sqlite";
@@ -11,6 +12,8 @@ import { exportLogger as logger } from "@/lib/logger";
 import { detectAvailableEncoders, pickEncoder } from "../hw-accel";
 import { drawtextSpecFor, assetOverlaySegments } from "../overlay-filter";
 import { buildAudioMixGraph } from "../audio-mix";
+import { duckSidechainIds } from "@/lib/audio/duck-params";
+import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "../duck-envelopes";
 import { baseTimeRange, resolveExportBase } from "../export-base";
 import type { ExportBackend, ExportContext } from "../backend";
 import type {
@@ -189,11 +192,51 @@ export class FfmpegOverlayBackend implements ExportBackend {
     // the filter chain as extra audio inputs.
     const standaloneClips = audioClips.filter((c) => c.enabled && !isBaseInlineClip(c));
 
+    // Ducked clips multiply against a pre-rendered gain curve rather than
+    // running through an ffmpeg compressor, so the export applies the preview's
+    // own duck. See lib/export/duck-envelopes.ts. Envelopes append as inputs
+    // after every clip, so existing indices stay valid.
+    const clipById = new Map(audioClips.filter((c) => c.enabled).map((c) => [c.id, c]));
+    const envelopeInputs: DuckEnvelopeInput[] = [];
+    for (const c of standaloneClips) {
+      if (!c.duck) continue;
+      // Every resolvable sidechain drives the duck; they are summed into one
+      // envelope. A sidechain that is missing from the mix is skipped rather
+      // than failing — the clip still ducks under the ones that remain.
+      const sidechains: PlacedSidechain[] = [];
+      for (const scId of duckSidechainIds(c.duck)) {
+        const sc = clipById.get(scId);
+        const scFile = sc && fileById.get(sc.fileId);
+        if (!sc || !scFile) continue;
+        sidechains.push({
+          path: storage.localPath(scFile.pieceId, scFile.filename),
+          startTime: sc.startTime,
+          trimStart: sc.trimStart ?? 0,
+          duration: sc.duration,
+          volume: sc.volume,
+        });
+      }
+      if (sidechains.length === 0) continue; // no sidechain present — mixes undicked
+      envelopeInputs.push({ clipId: c.id, duck: c.duck, sidechains });
+    }
+    const envelopes = await renderDuckEnvelopes({
+      inputs: envelopeInputs,
+      timelineSeconds: duration,
+      outDir: dirname(ctx.outputPath),
+    });
+    const envelopeIndex = new Map<string, number>();
+    for (const [clipId, envPath] of envelopes) {
+      inputPaths.push(envPath);
+      inputOptionArgs.push([]);
+      envelopeIndex.set(clipId, inputPaths.length - 1);
+    }
+
     const audioChainBuild = buildAudioFilterChain({
       keepBaseAudio,
       baseVolume,
       clips: standaloneClips,
       inputIndex: clipInputIndex,
+      envelopeIndex,
       // base -ss/-to already trimmed [0:a], so clips use absolute times
       // relative to composition start (= 0).
       sceneDuration: duration,
@@ -236,7 +279,7 @@ export class FfmpegOverlayBackend implements ExportBackend {
     args.push("-c:v", encoder);
     applyVideoQualityFlags(args, encoder, ctx.settings.bitrate);
     args.push("-c:a", audioCodec);
-    args.push("-b:a", String(ctx.settings.audioBitrate ?? 192_000));
+    args.push("-b:a", String(ctx.settings.audioBitrate ?? 256_000));
     args.push("-pix_fmt", "yuv420p");
     // `+faststart` is mp4-only — meaningless to webm and ffmpeg ignores it,
     // but cleaner to omit. Same for libvpx-vp9, which has its own moov-equivalent.
@@ -430,6 +473,8 @@ export function buildAudioFilterChain(opts: {
   clips: AudioClip[];
   inputIndex: Map<string, number>;
   sceneDuration: number;
+  /** `clip.id` → input index of its pre-rendered duck envelope, if any. */
+  envelopeIndex?: Map<string, number>;
 }): { chain: string | null } {
   // Thin adapter over the shared `buildAudioMixGraph`. The single-video path's
   // base scene audio is already time-sliced by -ss/-to, so it maps to the
@@ -439,6 +484,7 @@ export function buildAudioFilterChain(opts: {
     baseAudio: opts.keepBaseAudio ? { volume: opts.baseVolume } : null,
     clips: opts.clips,
     inputIndex: opts.inputIndex,
+    envelopeIndex: opts.envelopeIndex,
     mixDuration: "first",
   });
 }

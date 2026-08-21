@@ -51,12 +51,10 @@ export function unlinkClip(
   // Detaching flips the clip to `standalone` but KEEPS `linkedOverlayId` — a
   // detached overlay-audio still REMEMBERS its source video so the timeline can
   // keep it parked under that video and name it "detached audio of video — X"
-  // (and offer one-click re-attach). Only the SCENE link is dropped (scene audio
-  // has no detached-but-remembered concept). The coupling read distinguishes by
-  // `kind`: inline+linkedOverlayId = coupled (moves together);
+  // (and offer one-click re-attach). The coupling read distinguishes by `kind`:
+  // inline+linkedOverlayId = coupled (moves together);
   // standalone+linkedOverlayId = detached (independent, parked under the video).
-  const { linkedSceneId, ...rest } = next[idx];
-  void linkedSceneId;
+  const rest = next[idx];
   // SNAP-ON-DETACH: a COUPLED strip renders positioned by the VIDEO's window,
   // while a DETACHED clip renders by its OWN startTime/duration/trimStart. If the
   // clip's persisted timing drifted from the video's (e.g. the video was moved
@@ -110,8 +108,7 @@ export function relinkClipToOverlay(
     | undefined;
   if (!overlay) return null;
   const next = [...clips];
-  const { linkedSceneId, timelineOrder, ...rest } = next[idx];
-  void linkedSceneId;
+  const { timelineOrder, ...rest } = next[idx];
   void timelineOrder;
   next[idx] = {
     ...rest,
@@ -158,16 +155,6 @@ export function splitClip(
   const next = [...clips];
   next.splice(idx, 1, head, tail);
   return { ...m, audioClips: next };
-}
-
-/** Find the inline AudioClip linked to a given scene id, or null. */
-export function findInlineClipForScene(
-  m: CompositionManifest,
-  sceneId: string,
-): PersistedAudioClip | null {
-  return (m.audioClips ?? []).find(
-    (c) => c.kind === "inline" && c.linkedSceneId === sceneId,
-  ) ?? null;
 }
 
 /** Find the inline AudioClip linked to a given video-overlay id, or null. */

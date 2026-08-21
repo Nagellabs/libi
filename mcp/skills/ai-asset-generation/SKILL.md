@@ -83,7 +83,7 @@ track.
    Duration defaults to ~30s. Pass `lyrics` for sung vocals or
    `instrumental: true` for a bed.
 2. If it returns `status: "needs_install"`, **tell the user the download
-   size from the payload (~5.5 GB) and get approval**, then call
+   size from the payload (~8.3 GB) and get approval**, then call
    `libi.get_install_plan({ mcpId: "local-music" })`, follow it (it calls
    `libi.music_download_model()`), and retry.
 3. If it returns `status: "confirm_duration"`, tell the user the

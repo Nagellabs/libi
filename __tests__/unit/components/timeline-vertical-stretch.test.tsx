@@ -100,7 +100,6 @@ function renderTimeline() {
         frameStore={frameStore}
         fps={30}
         onFrameChange={() => {}}
-        scenes={[{ id: "s1", name: "Base", duration: 3 }]}
         composition={composition}
         audioClips={composition.audioClips}
         markers={[]}
@@ -111,7 +110,6 @@ function renderTimeline() {
         onToggleRowCollapsed={() => {}}
         onCommitOverlayTiming={() => {}}
         onCrossRowOverlay={() => {}}
-        onSceneContextMenu={() => {}}
         pieceId="p1"
         resolveCtx={() => ({ startTime: 0, width: 1920, height: 1080, z: 1, totalDuration: 30 })}
         onCreateDirect={() => {}}
@@ -135,7 +133,6 @@ describe("Timeline per-kind row heights", () => {
     renderTimeline();
     const captions = screen.getByTestId("overlay-lane-captions"); // text → SHORT
     const stickers = screen.getByTestId("overlay-lane-stickers"); // media overlay → TALL
-    const video = screen.getByTestId("timeline-video-track");
     const audio = screen.getByTestId("timeline-audio-section");
 
     // Fixed per-kind heights: media (TALL) > text (SHORT).
@@ -144,11 +141,9 @@ describe("Timeline per-kind row heights", () => {
     expect(px(stickers)).toBeGreaterThan(px(captions));
     // Audio is SHORT-tier (fixed) and does NOT grow.
     expect(px(audio)).toBeLessThan(TRACK_H_TALL);
-    // The base Video (scene) track is now FIXED at the same TALL height as a
-    // media-overlay row — consistent, and it no longer stretches to absorb the
-    // panel's leftover space.
-    expect(px(video)).toBe(TRACK_H_TALL);
-    expect(px(video)).toBe(px(stickers));
+    // Nothing absorbs the panel's leftover space — every row reports weight 0,
+    // so the stack's total height stays below the panel it sits in.
+    expect(px(stickers) + px(captions) + px(audio)).toBeLessThan(stackHeight);
   });
 
   it("keeps the fixed per-kind heights even when the stack is too short to grow", () => {

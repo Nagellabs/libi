@@ -1,25 +1,10 @@
 import type {
   CompositionManifest,
-  PersistedScene,
   PersistedOverlay,
   PersistedAudioClip,
 } from "./persistence";
 
 export type ChangeKind = "added" | "removed" | "changed" | "unchanged";
-
-export interface SceneRef {
-  id: string;
-  name: string;
-  type: "canvas" | "video";
-  duration: number;
-  /** Source file for video scenes; null for canvas scenes. */
-  fileId: string | null;
-}
-
-export interface ChangedSceneRef extends SceneRef {
-  /** Cheap, human reasons: "renamed", "duration changed", "trim changed", "draw changed". */
-  reasons: string[];
-}
 
 export interface EntityRef {
   id: string;
@@ -28,41 +13,11 @@ export interface EntityRef {
   label: string;
 }
 
-export interface StripTile {
-  id: string;
-  name: string;
-  type: "canvas" | "video";
-  duration: number;
-  fileId: string | null;
-  changeKind: ChangeKind;
-}
-
 export interface EnrichedDiff {
-  scenes: { added: SceneRef[]; removed: SceneRef[]; changed: ChangedSceneRef[] };
   overlays: { added: EntityRef[]; removed: EntityRef[]; changed: EntityRef[] };
   audioClips: { added: EntityRef[]; removed: EntityRef[]; changed: EntityRef[] };
   /** Ordered scenes of `newer` (with per-tile changeKind), then removed scenes as ghost tiles. */
-  sceneStrip: StripTile[];
   totalChanges: number;
-}
-
-function sceneRef(s: PersistedScene): SceneRef {
-  return {
-    id: s.id,
-    name: s.name,
-    type: s.type,
-    duration: s.duration,
-    // Canvas scenes reference no file (video scenes, which did, were retired).
-    fileId: null,
-  };
-}
-
-function sceneReasons(a: PersistedScene, b: PersistedScene): string[] {
-  const reasons: string[] = [];
-  if (a.name !== b.name) reasons.push("renamed");
-  if (a.duration !== b.duration) reasons.push("duration changed");
-  if (a.drawFunction !== b.drawFunction) reasons.push("draw changed");
-  return reasons;
 }
 
 function overlayLabel(o: PersistedOverlay): string {
@@ -96,28 +51,6 @@ function entityDiff<T extends { id: string }>(
 }
 
 export function diffManifests(older: CompositionManifest, newer: CompositionManifest): EnrichedDiff {
-  const oScenes = older.scenes ?? [];
-  const nScenes = newer.scenes ?? [];
-  const oById = new Map(oScenes.map((s) => [s.id, s]));
-  const nById = new Map(nScenes.map((s) => [s.id, s]));
-
-  const added = nScenes.filter((s) => !oById.has(s.id)).map(sceneRef);
-  const removed = oScenes.filter((s) => !nById.has(s.id)).map(sceneRef);
-  const changed: ChangedSceneRef[] = nScenes
-    .filter((s) => oById.has(s.id))
-    .map((s) => ({ scene: s, reasons: sceneReasons(oById.get(s.id)!, s) }))
-    .filter((x) => x.reasons.length > 0)
-    .map((x) => ({ ...sceneRef(x.scene), reasons: x.reasons }));
-
-  const changedIds = new Set(changed.map((c) => c.id));
-  const addedIds = new Set(added.map((a) => a.id));
-
-  const sceneStrip: StripTile[] = nScenes.map((s) => ({
-    ...sceneRef(s),
-    changeKind: addedIds.has(s.id) ? "added" : changedIds.has(s.id) ? "changed" : "unchanged",
-  }));
-  for (const r of removed) sceneStrip.push({ ...r, changeKind: "removed" });
-
   const overlays = entityDiff(older.overlays ?? [], newer.overlays ?? [], (o) => ({
     id: o.id,
     kind: o.kind,
@@ -130,9 +63,8 @@ export function diffManifests(older: CompositionManifest, newer: CompositionMani
   }));
 
   const totalChanges =
-    added.length + removed.length + changed.length +
     overlays.added.length + overlays.removed.length + overlays.changed.length +
     audioClips.added.length + audioClips.removed.length + audioClips.changed.length;
 
-  return { scenes: { added, removed, changed }, overlays, audioClips, sceneStrip, totalChanges };
+  return { overlays, audioClips, totalChanges };
 }

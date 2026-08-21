@@ -17,6 +17,7 @@ import { remoteFetchRunner } from "@/lib/jobs/runners/remote-fetch";
 import { matteGenRunner } from "@/lib/jobs/runners/matte-gen";
 import { runtimeUpdateRunner } from "@/lib/jobs/runners/runtime-update";
 import { devSlowRunner } from "@/lib/jobs/runners/dev-slow";
+import { onboardingPieceRunner } from "@/lib/jobs/runners/onboarding-piece";
 
 /**
  * Process-local runner registry. Populated lazily on first
@@ -87,6 +88,7 @@ export function registerBuiltinRunners(): void {
     remoteFetchRunner,
     matteGenRunner,
     runtimeUpdateRunner,
+    onboardingPieceRunner,
     devSlowRunner,
   ]) {
     if (!getRunner(r.kind)) {

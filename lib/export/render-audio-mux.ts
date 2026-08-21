@@ -5,6 +5,8 @@ import { getStorage } from "@/lib/storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { buildAudioMixGraph } from "@/lib/export/audio-mix";
+import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "@/lib/export/duck-envelopes";
+import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { exportLogger as logger } from "@/lib/logger";
 
 /**
@@ -31,7 +33,7 @@ export function buildRenderMuxArgs(opts: {
   args.push("-map", "0:v:0", "-map", "[aout]");
   args.push("-c:v", "copy");
   args.push("-c:a", isWebm ? "libopus" : "aac");
-  args.push("-b:a", String(opts.audioBitrate ?? 192_000));
+  args.push("-b:a", String(opts.audioBitrate ?? 256_000));
   if (!isWebm) args.push("-movflags", "+faststart");
   args.push(opts.outPath);
   return args;
@@ -92,6 +94,45 @@ export async function muxAudioIntoRender(opts: {
   }
   if (usable.length === 0) return opts.videoPath;
 
+  // Ducked clips are multiplied by a pre-rendered gain curve rather than run
+  // through an ffmpeg compressor, so the export applies the preview's own duck.
+  // See lib/export/duck-envelopes.ts. Envelopes become inputs after the clips.
+  const clipById = new Map(usable.map((c) => [c.id, c]));
+  const envelopeInputs: DuckEnvelopeInput[] = [];
+  for (const c of usable) {
+    if (!c.duck) continue;
+    // Every resolvable sidechain drives the duck; they are summed into one
+    // envelope. A sidechain that is not in the mix is skipped rather than
+    // failing — the clip still ducks under the ones that remain.
+    const sidechains: PlacedSidechain[] = [];
+    for (const scId of duckSidechainIds(c.duck)) {
+      const sc = clipById.get(scId);
+      const scFile = sc && fileById.get(sc.fileId);
+      if (!sc || !scFile) continue;
+      sidechains.push({
+        path: storage.localPath(scFile.pieceId, scFile.filename),
+        startTime: sc.startTime,
+        trimStart: sc.trimStart ?? 0,
+        duration: sc.duration,
+        volume: sc.volume,
+      });
+    }
+    if (sidechains.length === 0) continue; // no sidechain in the mix — stays undicked
+    envelopeInputs.push({ clipId: c.id, duck: c.duck, sidechains });
+  }
+  const timelineSeconds =
+    opts.durationSeconds ?? Math.max(...usable.map((c) => c.startTime + c.duration), 0);
+  const envelopes = await renderDuckEnvelopes({
+    inputs: envelopeInputs,
+    timelineSeconds,
+    outDir: dirname(opts.videoPath),
+  });
+  const envelopeIndex = new Map<string, number>();
+  for (const [clipId, path] of envelopes) {
+    inputPaths.push(path);
+    envelopeIndex.set(clipId, inputPaths.length - 1);
+  }
+
   // No base audio — the rendered file is video-only. duration=longest covers
   // the latest-ending clip; the output container length stays the video length
   // (clips never extend past the composition).
@@ -99,6 +140,7 @@ export async function muxAudioIntoRender(opts: {
     baseAudio: null,
     clips: usable,
     inputIndex,
+    envelopeIndex,
     mixDuration: "longest",
   });
   if (!chain) return opts.videoPath;

@@ -15,7 +15,7 @@ import { getLibiStorageDir } from "@/lib/libi-home";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 
 const emptyManifest = (): CompositionManifest => ({
-  sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [], scenes: [],
+  width: 1920, height: 1080, fps: 30, audioClips: [], 
 });
 
 describe("snapshots — current.json", () => {
@@ -27,7 +27,7 @@ describe("snapshots — current.json", () => {
     await saveCurrentSnapshot(pieceId, emptyManifest());
     const loaded = await loadCurrentSnapshot(pieceId);
     expect(loaded).not.toBeNull();
-    expect(loaded?.sceneOrder).toEqual([]);
+    expect(loaded?.overlays ?? []).toEqual([]);
   });
 
   it("returns null when no snapshot exists", async () => {

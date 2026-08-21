@@ -14,11 +14,9 @@ const PIECE = "piece-tools-transform";
 
 async function seedEmptyManifest() {
   await saveManifest(PIECE, {
-    sceneOrder: [],
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: [],
     overlays: [],
   });
 }

@@ -398,7 +398,7 @@ export async function buildTextThreeInstance(
         // the SAME helper the 2D path uses — when there are no word times.
         const alphas = useTime
           ? fadeWordsAlphaByTime(words!, api.time)
-          : fadeWordsAlpha(wordCount, progress);
+          : fadeWordsAlpha(wordCount, progress, revFrac);
         for (const g of glyphs) {
           const a = alphas[g.wordIndex] ?? 1;
           g.obj.visible = a > 0;

@@ -93,7 +93,6 @@ describe("ChromiumRenderBackend", () => {
       pieceId: "p1",
       composition: { id: "c1" } as never,
       payload: {
-        scenes: [],
         overlays: [],
         audioClips: [],
         width: 1920,
@@ -128,7 +127,6 @@ describe("ChromiumRenderBackend", () => {
         pieceId: "p1",
         composition: { id: "c1" } as never,
         payload: {
-          scenes: [],
           overlays: [],
           audioClips: [],
           width: 1920,

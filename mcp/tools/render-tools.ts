@@ -40,8 +40,17 @@ export async function renderOverlayFrames(
         path: string;
         overflow: { touchesEdge: boolean; edges: string[] };
       }[];
+      unresolvedFonts: string[];
+      contactSheet?: string;
     };
-    return { success: true, data: { frames: data.frames } };
+    return {
+      success: true,
+      data: {
+        frames: data.frames,
+        unresolvedFonts: data.unresolvedFonts,
+        ...(data.contactSheet ? { contactSheet: data.contactSheet } : {}),
+      },
+    };
   } catch (err) {
     return {
       success: false,

@@ -14,12 +14,6 @@ import {
 } from "@/lib/overlays/layers-view-model";
 import { groupForOverlay } from "@/lib/overlays/lanes";
 
-export interface VideoTrackSceneVM {
-  id: string;
-  name: string;
-  type: "canvas";
-}
-
 /** A video overlay's COUPLED audio (`kind:"inline"` + linkedOverlayId → an
  *  existing video overlay), rendered as a slim row DIRECTLY UNDER the video. It
  *  always moves WITH the video (positioned by the video's window, reorders the
@@ -76,7 +70,6 @@ export type TrackRowVM =
        *  = nearer the top. Shared sort space with overlay `z`. */
       order: number;
     }
-  | { kind: "video"; railLabel: string; railIcon: string; scenes: VideoTrackSceneVM[] }
   | { kind: "audio"; railLabel: string; railIcon: string; clipIds: string[] };
 
 export interface TrackStackViewModel {
@@ -334,16 +327,6 @@ export function buildTrackStackViewModel(
   });
 
   const rows: TrackRowVM[] = [...overlayRows];
-
-  const scenes = composition?.scenes ?? [];
-  if (scenes.length > 0) {
-    rows.push({
-      kind: "video",
-      railLabel: "Video",
-      railIcon: "ti-movie",
-      scenes: scenes.map((s) => ({ id: s.id, name: s.name, type: s.type })),
-    });
-  }
 
   // The bottom Audio section shows only clips with NO live overlay link: free
   // standalone clips (and any clip whose remembered overlay was removed). Coupled

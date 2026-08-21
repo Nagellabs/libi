@@ -29,18 +29,17 @@ describe("persistence — audioClips", () => {
 
   it("round-trips audioClips through save + load", async () => {
     await saveManifest(PIECE_ID, {
-      sceneOrder: [],
       width: 1920,
       height: 1080,
       fps: 30,
       audioClips: [
         { id: "c1", kind: "standalone", fileId: "f1", startTime: 2, duration: 8, trimStart: 0.5, volume: 0.7, enabled: true },
-        { id: "c2", kind: "inline", linkedSceneId: "s1", fileId: "f2", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true },
+        { id: "c2", kind: "inline", linkedOverlayId: "vid-1", fileId: "f2", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true },
       ],
     });
     const m = await loadManifest(PIECE_ID);
     expect(m.audioClips).toHaveLength(2);
     expect(m.audioClips![0]).toMatchObject({ id: "c1", kind: "standalone", volume: 0.7 });
-    expect(m.audioClips![1]).toMatchObject({ id: "c2", kind: "inline", linkedSceneId: "s1" });
+    expect(m.audioClips![1]).toMatchObject({ id: "c2", kind: "inline", linkedOverlayId: "vid-1" });
   });
 });

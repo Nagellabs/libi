@@ -4,6 +4,25 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ── Bundled text fonts ───────────────────────────────────────────
+   The families libi ships for text overlays and canvas scenes. These MUST stay
+   in sync with BUNDLED_FONTS in lib/fonts/bundled.ts — if they drift, text
+   renders one way in preview and another on export, which is exactly the bug
+   this bundling exists to prevent. __tests__/unit/fonts/bundled-fonts.test.ts
+   fails when a face here is missing or extra.
+
+   font-display: block, not swap — a render pass that captures a frame before
+   the face loads would bake the fallback into the exported video.
+
+   SIL OFL 1.1, not covered by libi's GPL-3.0 grant. See THIRD-PARTY-NOTICES.md.
+   ─────────────────────────────────────────────────────────────── */
+/* NOTE: the @font-face rules live INSIDE `@layer base` below, not at the top
+   level of this file. Tailwind v4 (@tailwindcss/postcss 4.2.2) DROPS top-level
+   @font-face rules from a file that does `@import "tailwindcss"` — verified in
+   the running app: the compiled stylesheet contained the :root tokens from this
+   file but zero occurrences of "Inter" or "/fonts/2d/". Moving them into
+   @layer base makes them survive. Do not hoist them back out. */
+
 /* ── Libi Soft · Sage (light) ─────────────────────────────────── */
 :root {
   --background: #f7f4ef;
@@ -162,6 +181,13 @@
 }
 
 @layer base {
+  @font-face{font-family:"Inter";src:url("/fonts/2d/Inter-Regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:block;}
+  @font-face{font-family:"Inter";src:url("/fonts/2d/Inter-SemiBold.ttf") format("truetype");font-weight:600;font-style:normal;font-display:block;}
+  @font-face{font-family:"Inter";src:url("/fonts/2d/Inter-Bold.ttf") format("truetype");font-weight:700;font-style:normal;font-display:block;}
+  @font-face{font-family:"Inter";src:url("/fonts/2d/Inter-ExtraBold.ttf") format("truetype");font-weight:800;font-style:normal;font-display:block;}
+  @font-face{font-family:"JetBrains Mono";src:url("/fonts/2d/JetBrainsMono-Regular.ttf") format("truetype");font-weight:400;font-style:normal;font-display:block;}
+  @font-face{font-family:"JetBrains Mono";src:url("/fonts/2d/JetBrainsMono-Bold.ttf") format("truetype");font-weight:700;font-style:normal;font-display:block;}
+
   * {
     @apply border-border outline-ring/50;
   }

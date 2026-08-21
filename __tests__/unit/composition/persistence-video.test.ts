@@ -37,14 +37,10 @@ vi.mock("@/lib/storage", () => ({
 
 import {
   removeReferencesToFile,
-  loadScene,
-  saveScene,
   saveManifest,
   loadManifest,
-  saveSceneAndUpdateManifest,
 } from "@/lib/composition/persistence";
 import type {
-  PersistedCanvasScene,
   CompositionManifest,
 } from "@/lib/composition/persistence";
 
@@ -52,7 +48,6 @@ const PIECE_ID = "piece-test";
 
 function makeManifest(overrides: Partial<CompositionManifest> = {}): CompositionManifest {
   return {
-    sceneOrder: [],
     width: 1920,
     height: 1080,
     fps: 30,
@@ -75,7 +70,6 @@ describe("removeReferencesToFile", () => {
 
   it("removes audio clips with matching fileId", async () => {
     const manifest = makeManifest({
-      sceneOrder: [],
       audioClips: [
         { id: "track_1", kind: "standalone", fileId: "file-to-remove", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true },
         { id: "track_2", kind: "standalone", fileId: "other-file", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true },
@@ -99,7 +93,6 @@ describe("removeReferencesToFile", () => {
     // A video is an OVERLAY now, and its own audio is an inline clip bound by
     // `linkedOverlayId`. Deleting the source file must drop both.
     const manifest = makeManifest({
-      sceneOrder: [],
       overlays: [
         {
           id: "ov_video", kind: "video", fileId: "file-to-remove",
@@ -142,7 +135,6 @@ describe("removeReferencesToFile", () => {
 
   it("returns empty arrays when no references found", async () => {
     const manifest = makeManifest({
-      sceneOrder: [],
       audioClips: [{ id: "track_1", kind: "standalone" as const, fileId: "other-file", startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true }],
     });
     store.set(
@@ -156,37 +148,4 @@ describe("removeReferencesToFile", () => {
     expect(result.removedOverlays).toEqual([]);
   });
 
-});
-
-describe("loadScene backward compatibility", () => {
-  beforeEach(() => {
-    store.clear();
-    vi.clearAllMocks();
-  });
-
-  it("defaults type to 'canvas' for scenes without type field", async () => {
-    // Store a scene without the type field (old format)
-    const oldScene = {
-      id: "scene_old",
-      name: "Old Scene",
-      duration: 5,
-      drawFunction: "// legacy",
-    };
-    store.set(
-      "scene-scene_old.json",
-      Buffer.from(JSON.stringify(oldScene), "utf-8"),
-    );
-
-    const scene = await loadScene(PIECE_ID, "scene_old");
-
-    expect(scene).not.toBeNull();
-    expect(scene!.type).toBe("canvas");
-    expect(scene!.name).toBe("Old Scene");
-  });
-
-  it("returns null when scene file does not exist", async () => {
-    const scene = await loadScene(PIECE_ID, "nonexistent");
-
-    expect(scene).toBeNull();
-  });
 });

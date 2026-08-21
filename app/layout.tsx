@@ -3,6 +3,8 @@ import { Geist, Geist_Mono, Fraunces } from "next/font/google";
 import { QueryProvider } from "@/components/providers/query-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { UpdateToast } from "@/components/layout/update-toast";
+import { MediaConsoleNoiseFilter } from "@/components/providers/media-console-noise";
+import { BundledFonts } from "@/components/providers/bundled-fonts";
 import { getCrashReportSettings } from "@/lib/db/settings";
 import { SENTRY_KILL_SWITCHED } from "@/lib/sentry/config";
 import { crashReportSeedScript } from "@/lib/sentry/seed-script";
@@ -89,6 +91,10 @@ export default function RootLayout({
       </head>
       <body className="h-screen overflow-hidden bg-background text-foreground">
         <QueryProvider>
+          {/* Dev-only: keeps mediabunny's non-actionable diagnostics from
+              becoming blocking dev-overlay cards. See the module for why. */}
+          <MediaConsoleNoiseFilter />
+          <BundledFonts />
           {children}
           {/* App-wide update offer — must live inside QueryProvider (it reads
               the runtime-update query) and renders through the Toaster below. */}

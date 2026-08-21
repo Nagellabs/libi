@@ -125,6 +125,81 @@ const LICENSE_LABEL_OVERRIDES = [
   },
 ];
 
+// ── Vendored assets (not npm packages) ─────────────────────────────────────
+// Fonts committed under public/fonts/ ship inside the npm tarball (package.json
+// `files` includes `public/**/*`) and therefore inside the packaged desktop app.
+// license-checker never sees them: it walks node_modules, and these are neither
+// dependencies nor installed. They are enumerated by hand here so the notices
+// file covers everything libi actually redistributes, not just its npm tree.
+//
+// Every one is SIL Open Font License 1.1. OFL §2 permits bundling and
+// redistribution with software provided each copy carries the copyright notice
+// and the license, which is satisfied by the `licenseFile` shipped next to each
+// font. OFL §5 additionally requires the Font Software stay under OFL and not be
+// redistributed under any other license — so these files are NOT covered by
+// libi's own GPL-3.0-only grant, and this section is where that is stated.
+// None of them declares a Reserved Font Name.
+const VENDORED_FONTS = [
+  { family: "Inter", files: ["Inter-Regular.ttf", "Inter-SemiBold.ttf", "Inter-Bold.ttf", "Inter-ExtraBold.ttf"], dir: "public/fonts/2d", licenseFile: "public/fonts/2d/Inter-LICENSE.txt", url: "https://github.com/rsms/inter" },
+  { family: "JetBrains Mono", files: ["JetBrainsMono-Regular.ttf", "JetBrainsMono-Bold.ttf"], dir: "public/fonts/2d", licenseFile: "public/fonts/2d/JetBrainsMono-OFL.txt", url: "https://github.com/JetBrains/JetBrainsMono" },
+  { family: "Geist", files: ["Geist-Regular.ttf"], dir: "public/fonts/3d", licenseFile: "public/fonts/3d/geist-OFL.txt", url: "https://github.com/vercel/geist-font" },
+  { family: "Archivo Black", files: ["ArchivoBlack-Regular.ttf"], dir: "public/fonts/3d", licenseFile: "public/fonts/3d/archivoblack-OFL.txt", url: "https://github.com/Omnibus-Type/Archivo" },
+  { family: "Bungee", files: ["Bungee-Regular.ttf"], dir: "public/fonts/3d", licenseFile: "public/fonts/3d/bungee-OFL.txt", url: "https://github.com/djrrb/bungee" },
+  { family: "Anton", files: ["Anton-Regular.ttf"], dir: "public/fonts/3d", licenseFile: "public/fonts/3d/anton-OFL.txt", url: "https://github.com/googlefonts/AntonFont" },
+];
+
+/** First non-empty line of a font's license file — its copyright statement. */
+function fontCopyright(licenseFile) {
+  const abs = path.join(ROOT, licenseFile);
+  if (!fs.existsSync(abs)) return null;
+  for (const line of fs.readFileSync(abs, "utf8").split(/\r?\n/)) {
+    if (line.trim()) return line.trim();
+  }
+  return null;
+}
+
+/**
+ * Hash of the vendored-asset set: every font file's bytes plus its license
+ * file's bytes. This joins the lockfile hash in the staleness marker so that
+ * ADDING A FONT WITHOUT REGENERATING FAILS `notices:check` — the whole point of
+ * having the gate. Hashing only package-lock.json would leave vendored assets
+ * silently un-gated, which is the hole this closes.
+ */
+function computeVendoredHash() {
+  const h = crypto.createHash("sha256");
+  for (const f of VENDORED_FONTS) {
+    h.update(f.family);
+    for (const file of [...f.files.map((n) => path.join(f.dir, n)), f.licenseFile]) {
+      const abs = path.join(ROOT, file);
+      h.update(file);
+      h.update(fs.existsSync(abs) ? sha256File(abs) : "MISSING");
+    }
+  }
+  return h.digest("hex");
+}
+
+/**
+ * Every vendored font file referenced above must exist, and so must its license
+ * file. A font shipped without its license would breach OFL §2, so this is a
+ * hard failure rather than a warning.
+ */
+function assertVendoredFontsIntact() {
+  const missing = [];
+  for (const f of VENDORED_FONTS) {
+    for (const file of [...f.files.map((n) => path.join(f.dir, n)), f.licenseFile]) {
+      if (!fs.existsSync(path.join(ROOT, file))) missing.push(file);
+    }
+  }
+  if (missing.length > 0) {
+    console.error(
+      "[notices] vendored font files or their licenses are missing:\n" +
+        missing.map((m) => `  - ${m}`).join("\n") +
+        "\n  A bundled font MUST ship its license (SIL OFL 1.1 \u00a72).",
+    );
+    process.exit(1);
+  }
+}
+
 function isSentryCli(name) {
   return name === "@sentry/cli" || name.startsWith("@sentry/cli-");
 }
@@ -298,6 +373,7 @@ function renderMarkdown(entries, meta) {
   lines.push("  Regenerate: npm run notices:generate");
   lines.push("  Staleness check (no network, no write): npm run notices:check");
   lines.push(`  source-lockfile-sha256: ${meta.lockfileHash}`);
+  lines.push(`  vendored-assets-sha256: ${meta.vendoredHash}`);
   lines.push("-->");
   lines.push("");
   lines.push("# Third-Party Notices");
@@ -355,6 +431,36 @@ function renderMarkdown(entries, meta) {
     lines.push("");
   }
 
+  lines.push("## Bundled fonts");
+  lines.push("");
+  lines.push(
+    "These font files are committed under `public/fonts/` and ship inside the npm tarball " +
+      "(and therefore inside the packaged desktop app). They are not npm packages, so " +
+      "license-checker never sees them — they are enumerated by hand so this file covers " +
+      "everything libi redistributes, not only its dependency tree.",
+  );
+  lines.push("");
+  lines.push(
+    "**All of them are licensed under the SIL Open Font License, Version 1.1, and remain so.** " +
+      "OFL \u00a75 requires that the Font Software be distributed entirely under the OFL and not " +
+      "under any other license, so these files are **not** covered by libi's own GPL-3.0-only " +
+      "grant. None of them declares a Reserved Font Name. The full license text accompanies each " +
+      "font in the file named below, as OFL \u00a72 requires.",
+  );
+  lines.push("");
+  for (const f of VENDORED_FONTS) {
+    const copyright = fontCopyright(f.licenseFile);
+    lines.push(`### ${f.family}`);
+    lines.push("");
+    lines.push("**License:** SIL Open Font License 1.1");
+    lines.push(`**Upstream:** ${f.url}`);
+    lines.push(`**License file:** \`${f.licenseFile}\``);
+    lines.push(`**Files:** ${f.files.map((n) => `\`${f.dir}/${n}\``).join(", ")}`);
+    lines.push("");
+    if (copyright) lines.push(codeBlock(copyright));
+    lines.push("");
+  }
+
   lines.push("## All packages");
   lines.push("");
   for (const e of entries) {
@@ -381,7 +487,7 @@ function renderMarkdown(entries, meta) {
   return lines.join("\n").trimEnd() + "\n";
 }
 
-function checkStaleness(lockfileHash) {
+function checkStaleness(lockfileHash, vendoredHash) {
   if (!fs.existsSync(OUTPUT_PATH)) {
     console.error(
       `[notices] ${path.relative(ROOT, OUTPUT_PATH)} does not exist.\n` +
@@ -399,14 +505,30 @@ function checkStaleness(lockfileHash) {
     );
     process.exit(1);
   }
-  console.log(`[notices] ${path.relative(ROOT, OUTPUT_PATH)} is up to date with package-lock.json.`);
+  // Vendored assets get their own marker: a font added under public/fonts/
+  // does not touch package-lock.json, so the lockfile hash alone would let it
+  // ship unrecorded.
+  const vendoredMatch = existing.match(/vendored-assets-sha256:\s*([0-9a-f]{64})/);
+  if (!vendoredMatch || vendoredMatch[1] !== vendoredHash) {
+    console.error(
+      `[notices] ${path.relative(ROOT, OUTPUT_PATH)} is stale relative to the vendored assets under public/fonts/.\n` +
+        "  A font was added, removed, or changed without regenerating the notices.\n" +
+        "  Run: npm run notices:generate",
+    );
+    process.exit(1);
+  }
+  console.log(
+    `[notices] ${path.relative(ROOT, OUTPUT_PATH)} is up to date with package-lock.json and the vendored assets.`,
+  );
 }
 
 function main() {
   const lockfileHash = sha256File(LOCKFILE_PATH);
+  assertVendoredFontsIntact();
+  const vendoredHash = computeVendoredHash();
 
   if (CHECK_MODE) {
-    checkStaleness(lockfileHash);
+    checkStaleness(lockfileHash, vendoredHash);
     return;
   }
 
@@ -432,7 +554,7 @@ function main() {
     );
   }
 
-  const markdown = renderMarkdown(entries, { lockfileHash });
+  const markdown = renderMarkdown(entries, { lockfileHash, vendoredHash });
   fs.writeFileSync(OUTPUT_PATH, markdown);
   console.log(`[notices] Wrote ${path.relative(ROOT, OUTPUT_PATH)} (${entries.length} packages).`);
 }

@@ -41,7 +41,7 @@ export const notify = {
   }): void {
     send({ type: "navigate", ...event });
   },
-  refreshQuery(event: { queryKey: string; pieceId?: string; sceneId?: string; fileId?: string; trackId?: string }): void {
+  refreshQuery(event: { queryKey: string; pieceId?: string; fileId?: string; trackId?: string }): void {
     send({ type: "refresh_query", ...event });
   },
   refreshMcpConfig(): void {
@@ -108,6 +108,7 @@ export const notify = {
     total: number;
     unit: string;
     etaMs: number | null;
+    msSinceProgress?: number | null;
     toolName?: string;
     toolArgs?: unknown;
     progressLabel?: string;

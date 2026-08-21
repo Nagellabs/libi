@@ -91,7 +91,7 @@ describe("ScriptTabContent state machine", () => {
       id: "j", kind: "extra_analysis_model", status: "running",
       pieceId: null, fileId: "f",
       progressDone: 2, progressTotal: 4, progressUnit: "step",
-      etaMs: null, msPerUnit: null, error: null, resultJson: null,
+      etaMs: null, msPerUnit: null, msSinceProgress: null, error: null, resultJson: null,
       startedAt: new Date(), completedAt: null, lastProgressAt: null,
     };
     render(wrap(<ScriptTabContent {...props} />));
@@ -104,7 +104,7 @@ describe("ScriptTabContent state machine", () => {
       id: "j", kind: "extra_analysis_model", status: "failed",
       pieceId: null, fileId: "f",
       progressDone: 0, progressTotal: 0, progressUnit: "items",
-      etaMs: null, msPerUnit: null, error: "bad", resultJson: null,
+      etaMs: null, msPerUnit: null, msSinceProgress: null, error: "bad", resultJson: null,
       startedAt: new Date(), completedAt: new Date(), lastProgressAt: null,
     };
     render(wrap(<ScriptTabContent {...props} />));
@@ -123,7 +123,7 @@ describe("ScriptTabContent state machine", () => {
       id: "j", kind: "extra_analysis_model", status: "running",
       pieceId: null, fileId: "f",
       progressDone: 1, progressTotal: 5, progressUnit: "items",
-      etaMs: null, msPerUnit: null, error: null, resultJson: null,
+      etaMs: null, msPerUnit: null, msSinceProgress: null, error: null, resultJson: null,
       startedAt: new Date(), completedAt: null, lastProgressAt: null,
     };
     render(wrap(<ScriptTabContent {...props} />));

@@ -33,10 +33,8 @@ import {
   crossRowDeltaFromY,
   rowHeightForKind,
   TRACK_H_SHORT,
-  TRACK_H_TALL,
 } from "@/lib/preview/track-stack-view-model";
 import { TimelineOverlayRow } from "@/components/preview/timeline-overlay-row";
-import { TimelineVideoTrack } from "@/components/preview/timeline-video-track";
 import { TimelinePlayheadStrip } from "@/components/preview/timeline-playhead-strip";
 import { usePlayheadScrub } from "@/hooks/preview/use-playhead-scrub";
 import { TrackRail, RAIL_WIDTH } from "@/components/preview/track-rail";
@@ -63,23 +61,15 @@ import {
   type MediaPaint,
 } from "@/lib/preview/timeline-media";
 
-interface TimelineScene {
-  id: string;
-  name: string;
-  duration: number;
-}
-
 interface TimelineProps {
   totalFrames: number;
   frameStore: FrameStore;
   fps: number;
   onFrameChange: (frame: number) => void;
-  scenes: TimelineScene[];
   composition: Composition | null;
   audioClips?: AudioClip[];
   onToggleClipEnabled?: (clipId: string) => void;
   onClipContextMenu?: (clipId: string, x: number, y: number) => void;
-  onSceneContextMenu?: (sceneId: string, x: number, y: number) => void;
   onOverlayContextMenu?: (overlayId: string, x: number, y: number) => void;
   markers?: { time: number; id: string }[];
   onMarkerClick?: (time: number) => void;
@@ -190,12 +180,10 @@ function Timeline({
   frameStore,
   fps,
   onFrameChange,
-  scenes,
   composition,
   audioClips,
   onToggleClipEnabled,
   onClipContextMenu,
-  onSceneContextMenu,
   onOverlayContextMenu,
   markers,
   onMarkerClick,
@@ -363,10 +351,9 @@ function Timeline({
 
   // Per-overlay rows (Issue 3 refinement) have a FIXED, kind-based height:
   // media (image/video) → TALL filmstrip rows, text/code/three → SHORT labeled
-  // bars, audio → SHORT. Only the base Video (scene) track grows to fill the
-  // panel — overlay/audio rows report weight 0 so they keep their fixed height.
-  // distributeTrackHeights still runs so the Video track absorbs leftover space
-  // and the keyed map (used by each row below) stays the single source.
+  // bars, audio → SHORT. Every row reports weight 0, so none of them grow to
+  // absorb leftover panel space. distributeTrackHeights still runs so the keyed
+  // map (used by each row below) stays the single source of row heights.
   const rowHeights = useMemo(() => {
     const sizings = stackVM.rows.map((r) => {
       if (r.kind === "overlay") {
@@ -380,17 +367,10 @@ function Timeline({
         // Independent detached track — SHORT, fixed (matches a text/audio row).
         return { id: `track-${r.clipId}`, minHeight: TRACK_H_SHORT, weight: 0 };
       }
-      if (r.kind === "audio") {
-        // SHORT, fixed (weight 0); keep the multi-clip stacking floor so a
-        // many-clip audio row never overflows its allotment.
-        const base = rowSizing(r);
-        return { id: base.id, minHeight: Math.max(TRACK_H_SHORT, base.minHeight), weight: 0 };
-      }
-      // Base Video (scene) track — FIXED at the same tall filmstrip height as a
-      // video-overlay row (weight 0, never grows). Previously it was the only
-      // weighted row, so it absorbed all leftover panel space and ballooned; now
-      // every video track is one consistent height and the stack stays compact.
-      return { id: "video", minHeight: TRACK_H_TALL, weight: 0 };
+      // SHORT, fixed (weight 0); keep the multi-clip stacking floor so a
+      // many-clip audio row never overflows its allotment.
+      const base = rowSizing(r);
+      return { id: base.id, minHeight: Math.max(TRACK_H_SHORT, base.minHeight), weight: 0 };
     });
     return distributeTrackHeights({
       rows: sizings,
@@ -615,11 +595,6 @@ function Timeline({
     return map;
   }, [overlayList]);
   const labelById = labelByIdProp ?? fallbackLabelById;
-  const durations = useMemo(() => {
-    const map: Record<string, number> = {};
-    for (const s of scenes) map[s.id] = s.duration;
-    return map;
-  }, [scenes]);
   const laneView: LaneView = useMemo(
     () => ({ trackWidth: renderWidth, totalFrames, fps }),
     [renderWidth, totalFrames, fps],
@@ -627,7 +602,7 @@ function Timeline({
 
   // Media in bars (Plan C): collect the distinct video fileIds ONCE so we make
   // a single centralized filmstrip-status poll (never a hook-per-bar), then
-  // resolve each overlay/scene to a CSS background paint.
+  // resolve each overlay to a CSS background paint.
   const mediaById = useMemo(() => buildMediaById(composition), [composition]);
   const videoFileIds = useMemo(
     () => distinctVideoFileIds(mediaById),
@@ -654,7 +629,6 @@ function Timeline({
 
   const handleSelectOverlay = (id: string, mods?: SelectionModifiers) =>
     selectionStore.setAll(resolveSelection(id, selectionStore.getAll(), mods ?? {}));
-  const handleSelectScene = (id: string) => selectionStore.set(id);
   const handleSelectAudioClip = (id: string) => selectionStore.set(id);
 
   return (
@@ -849,26 +823,6 @@ function Timeline({
                         selectedKeyframe={selectedKeyframe}
                         onSelectKeyframe={onSelectKeyframe}
                         onKeyframeContextMenu={onKeyframeContextMenu}
-                      />
-                    </div>
-                  </div>
-                );
-              }
-              if (r.kind === "video") {
-                return (
-                  <div key="video" className="flex items-stretch">
-                    <TrackRail icon={Film} label="Video" />
-                    <div className="shrink-0" style={{ width: renderWidth }}>
-                      <TimelineVideoTrack
-                        scenes={r.scenes}
-                        fps={fps}
-                        totalFrames={totalFrames}
-                        durations={durations}
-                        selectedId={selectedId}
-                        onSelect={handleSelectScene}
-                        onContextMenu={onSceneContextMenu ?? (() => {})}
-                        onSeekFrame={onFrameChange}
-                        height={rowHeights["video"]}
                       />
                     </div>
                   </div>

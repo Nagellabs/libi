@@ -29,7 +29,7 @@ beforeEach(() => {
   mkdirSync(join(storageRoot, "storage", PIECE_ID), { recursive: true });
   writeFileSync(
     join(storageRoot, "storage", PIECE_ID, "composition.json"),
-    JSON.stringify({ sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [], scenes: [] }),
+    JSON.stringify({ width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [], scenes: [] }),
   );
   db = createTestDb();
   db.insert(pieces).values({ id: PIECE_ID, name: "Snap Test Piece" }).run();

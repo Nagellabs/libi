@@ -1,5 +1,6 @@
 import type { AudioClip } from "@/lib/engine/types";
 import { audioFadeSeconds } from "@/lib/effects/audio-envelope";
+import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
 
 /**
  * Shared, pure builder for the audio half of an ffmpeg `filter_complex` graph.
@@ -19,8 +20,9 @@ import { audioFadeSeconds } from "@/lib/effects/audio-envelope";
  *   - `volume={0..1}` — per-clip level.
  *   - `adelay={ms}|{ms}` — place the clip at `startTime` on the timeline
  *     (stereo-safe syntax).
- *   - optional `sidechaincompress` — sidechain ducking driven by another clip
- *     (`clip.duck`), dB→linear threshold + attack/release in SECONDS.
+ *   - optional `amultiply` against a pre-rendered duck envelope — sidechain
+ *     ducking (`clip.duck`) applied as the preview's own gain curve rather than
+ *     re-derived by an ffmpeg compressor. See `lib/export/duck-envelopes.ts`.
  *
  * Output label: `[aout]`. Returns `{ chain: null }` when nothing is in play.
  */
@@ -31,6 +33,13 @@ export interface AudioMixOptions {
   clips: AudioClip[];
   /** `clip.id` → ffmpeg input index. */
   inputIndex: Map<string, number>;
+  /**
+   * `clip.id` → ffmpeg input index of that clip's pre-rendered duck envelope
+   * (`lib/export/duck-envelopes.ts`). A ducked clip with no entry here is mixed
+   * UNDUCKED rather than failing the export — a missing envelope is a degraded
+   * mix, not a broken file.
+   */
+  envelopeIndex?: Map<string, number>;
   /**
    * `amix` duration policy:
    *  - `"first"` ties the mix length to the first input — correct when the
@@ -43,6 +52,7 @@ export interface AudioMixOptions {
 
 export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | null } {
   const { clips, inputIndex } = opts;
+  const envelopeIndex = opts.envelopeIndex ?? new Map<string, number>();
   const baseAudio = opts.baseAudio ?? null;
   const mixDuration = opts.mixDuration ?? "first";
 
@@ -82,25 +92,33 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
       segments.push(`adelay=${delayMs}|${delayMs}`);
     }
 
-    if (c.duck && inputIndex.has(c.duck.sidechainClipId)) {
-      // Ducked: pre-stage label, then sidechaincompress against the sidechain
-      // input. The sidechain clip ALSO plays normally in its own iteration.
+    const envelopeIdx = envelopeIndex.get(c.id);
+    if (c.duck && envelopeIdx !== undefined) {
+      // Ducked: multiply the clip by a PRE-RENDERED gain curve (see
+      // lib/export/duck-envelopes.ts). The curve comes from `duckGainCurve` —
+      // the same arithmetic the preview worklet runs — so the export applies
+      // the preview's duck literally rather than approximating it with a
+      // different compressor.
+      //
+      // This replaced `sidechaincompress`, which is a genuinely different
+      // compressor (RMS detector, soft knee) and ducked 5.2 dB less than the
+      // preview on real material, leaving voice-overs buried in every export.
+      // No parameter combination closed that gap — see duck-law.ts.
+      //
+      // Both sides are pinned to ENVELOPE_SAMPLE_RATE and stereo because
+      // `amultiply` requires identical rate and layout. The envelope uses `pan`
+      // rather than an implicit upmix: ffmpeg's mono->stereo conversion applies
+      // 0.7071x (-3 dB), which would quietly attenuate every ducked clip.
       chainSegments.push(`${segments.join(",")}[${label}_pre]`);
-      const sidechainIdx = inputIndex.get(c.duck.sidechainClipId)!;
-      const threshLinear = Math.pow(10, c.duck.thresholdDb / 20).toFixed(6);
-      // ffmpeg sidechaincompress takes attack/release in SECONDS, not ms.
-      const attackS = (c.duck.attackMs / 1000).toFixed(3);
-      const releaseS = (c.duck.releaseMs / 1000).toFixed(3);
-      const makeup = Math.max(0, -c.duck.reductionDb);
       chainSegments.push(
-        `[${label}_pre][${sidechainIdx}:a]sidechaincompress=` +
-          `threshold=${threshLinear}:` +
-          `ratio=${c.duck.ratio}:` +
-          `attack=${attackS}:` +
-          `release=${releaseS}:` +
-          `makeup=${makeup}` +
-          `[${label}]`,
+        `[${label}_pre]aformat=sample_fmts=fltp:sample_rates=${ENVELOPE_SAMPLE_RATE}:` +
+          `channel_layouts=stereo[${label}_fmt]`,
       );
+      chainSegments.push(
+        `[${envelopeIdx}:a]pan=stereo|c0=c0|c1=c0,` +
+          `aformat=sample_fmts=fltp:sample_rates=${ENVELOPE_SAMPLE_RATE}[${label}_env]`,
+      );
+      chainSegments.push(`[${label}_fmt][${label}_env]amultiply[${label}]`);
     } else {
       chainSegments.push(`${segments.join(",")}[${label}]`);
     }
@@ -126,9 +144,18 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
   if (amixInputs.length === 1) {
     // Sole producer (amix of 1 is a no-op): relabel its output to [apre], then
     // pass it through the resample stage to [aout].
-    const solo = chainSegments[0];
-    const last = solo.lastIndexOf("[");
-    return { chain: `${solo.slice(0, last)}[apre];[apre]${RESAMPLE}[aout]` };
+    //
+    // Relabel the LAST segment, and keep every earlier one. A ducked clip emits
+    // four segments (pre-stage, format, envelope, amultiply); taking only the
+    // first dropped the duck entirely whenever a composition had exactly one
+    // clip in the mix.
+    const segments = [...chainSegments];
+    const soloIndex = segments.length - 1;
+    const solo = segments[soloIndex];
+    const cut = solo.lastIndexOf("[");
+    segments[soloIndex] = `${solo.slice(0, cut)}[apre]`;
+    segments.push(`[apre]${RESAMPLE}[aout]`);
+    return { chain: segments.join(";") };
   }
 
   const inputsJoined = amixInputs.map((l) => `[${l}]`).join("");

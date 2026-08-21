@@ -30,7 +30,6 @@ export interface RefreshQueryEvent {
   pieceId?: string;
   /** Optional hint identifying the scene that was just created/updated/deleted.
    *  The client may use it to jump the preview to the first change. */
-  sceneId?: string;
   /** Set when queryKey === "analysis": the file whose analysis row changed. */
   fileId?: string;
   /** Set when queryKey === "track": the track whose sidecar changed. */

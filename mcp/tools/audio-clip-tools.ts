@@ -63,7 +63,6 @@ export async function audioAddClip(
     trimStart: params.trimStart ?? 0,
     volume: params.volume ?? 1,
     enabled: params.enabled ?? true,
-    linkedSceneId: params.linkedSceneId,
     linkedOverlayId: params.linkedOverlayId,
     label: params.label,
   });

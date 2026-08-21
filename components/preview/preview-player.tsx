@@ -38,6 +38,14 @@ import { useOverlayTracks } from "@/hooks/preview/use-overlay-tracks";
 import { useQueryClient } from "@tanstack/react-query";
 import { trackKeys } from "@/lib/queries/tracks";
 import { sampleTrack } from "@/lib/tracking/sample";
+import {
+  sampleTrackedOverlay,
+  resolveTrackedSpace,
+  trackedClipTime,
+  trackBoxToComposition,
+  compositionBoxToTrack,
+  type TrackedSpace,
+} from "@/lib/engine/tracked-space";
 import { resolveTrackedRect } from "@/lib/engine/overlay-renderer";
 import { offsetFromDrop } from "@/lib/preview/tracked-offset-drag";
 import {
@@ -673,17 +681,28 @@ export default function PreviewPlayer({
       /** The overlay's follow offset — the art the user grabbed renders with
        *  it, so recoverManualBbox must subtract it (see RecoverManualBboxOpts). */
       offset?: { x: number; y: number };
+      /** The overlay's source↔composition mapping, from its owning video. The
+       *  drop point is in composition pixels but a ManualAnchor's time and
+       *  bbox are in the SOURCE clip's space, so the whole gesture is computed
+       *  in composition pixels and converted back at the end. Identity for a
+       *  full-frame untrimmed video at t=0. */
+      space: TrackedSpace;
     }) => {
       const trackData = tracks[p.trackId] as Track | undefined;
-      const s = trackData ? sampleTrack(trackData, p.time, p.smoothing) : null;
+      const clipTime = trackedClipTime(p.space, p.time);
+      const raw = trackData ? sampleTrack(trackData, clipTime, p.smoothing) : null;
+      const s = raw ? { ...raw, ...trackBoxToComposition(p.space, raw) } : null;
 
       let fallbackSize: { w: number; h: number } | undefined;
       if (trackData) {
         const firstVisible = trackData.samples.find((q) => q.visible);
-        if (firstVisible) fallbackSize = { w: firstVisible.w, h: firstVisible.h };
+        if (firstVisible) {
+          const box = trackBoxToComposition(p.space, firstVisible);
+          fallbackSize = { w: box.w, h: box.h };
+        }
       }
 
-      const bbox = recoverManualBbox({
+      const compBbox = recoverManualBbox({
         sample: s && s.visible ? s : null,
         fit: p.fit,
         scale: p.scale,
@@ -693,11 +712,18 @@ export default function PreviewPlayer({
         fallbackSize,
         offset: p.offset,
       });
+      const src = compositionBoxToTrack(p.space, {
+        x: compBbox[0], y: compBbox[1], w: compBbox[2], h: compBbox[3],
+      });
+      const bbox: [number, number, number, number] = [src.x, src.y, src.w, src.h];
 
       // createdAt marks the pin newer than every existing manual segment so
       // the optimistic stamp applies until ITS re-track lands (consumption —
       // see isManualAnchorConsumed). The server re-stamps its own clock.
-      const anchor = { id: manualAnchorId(p.time), time: p.time, bbox, createdAt: Date.now() };
+      // `time` is CLIP time: a manual anchor pins the subject in the source
+      // file, and the re-track window the server derives from it is measured
+      // on the track's own clock (ManualAnchor.time).
+      const anchor = { id: manualAnchorId(clipTime), time: clipTime, bbox, createdAt: Date.now() };
 
       const key = trackKeys.detail(p.trackId);
       const prev = queryClient.getQueryData<Track>(key);
@@ -785,12 +811,13 @@ export default function PreviewPlayer({
       let moved = false;
 
       const td = tracks[o.trackId] as Track | undefined;
+      const space = resolveTrackedSpace(o, td, composition.overlays);
       const fv = td?.samples.find((s) => s.visible);
       let gW = 64;
       let gH = 64;
       if (fv) {
         const art = resolveTrackedRect(
-          { x: fv.x, y: fv.y, w: fv.w, h: fv.h },
+          trackBoxToComposition(space, fv),
           o,
           { width: composition.width, height: composition.height },
         );
@@ -849,6 +876,7 @@ export default function PreviewPlayer({
           frameW: composition.width,
           frameH: composition.height,
           offset: o.offset,
+          space,
         });
       };
 
@@ -1188,7 +1216,8 @@ export default function PreviewPlayer({
         // Capture the tracked subject's on-screen size now so the re-anchor
         // drag affordance is sized to the actual thing, not a fixed square.
         const trackData0 = tracks[trackId] as Track | undefined;
-        const s0 = trackData0 ? sampleTrack(trackData0, time, smoothing) : null;
+        const space = resolveTrackedSpace(hit, trackData0, composition.overlays);
+        const s0 = sampleTrackedOverlay(hit, trackData0, composition.overlays, time);
         let ghostW = 64;
         let ghostH = 64;
         if (s0 && s0.visible) {
@@ -1264,6 +1293,7 @@ export default function PreviewPlayer({
             frameW: composition.width,
             frameH: composition.height,
             offset: hit.offset,
+            space,
           });
         };
 
@@ -1373,10 +1403,9 @@ export default function PreviewPlayer({
 
   // Empty piece: a valid (black-background) composition with nothing on it yet.
   // Render the normal canvas surface so the black background shows, plus a
-  // centered, non-blocking hint. Any overlay (even with no scenes) suppresses
-  // the hint and renders the canvas as usual.
-  const isEmptyComposition =
-    composition.scenes.length === 0 && (composition.overlays?.length ?? 0) === 0;
+  // centered, non-blocking hint. Any overlay suppresses the hint and renders
+  // the canvas as usual.
+  const isEmptyComposition = (composition.overlays?.length ?? 0) === 0;
 
   const isExporting = exportFlow.status === "starting" || exportFlow.status === "running";
   const exportProgressRatio =
@@ -1534,7 +1563,7 @@ export default function PreviewPlayer({
           {activeTracked.map((o) => {
             if (o.kind !== "tracked") return null;
             const tr = tracks[o.trackId] as Track | undefined;
-            const s = tr ? sampleTrack(tr, time, o.smoothing) : null;
+            const s = sampleTrackedOverlay(o, tr, composition.overlays, time);
             const visible = !!(s && s.visible);
             const isSel = o.id === selectedTrackedOverlay?.id;
             const label = o.content.kind === "emoji" ? o.content.char : o.content.kind;
@@ -1775,7 +1804,7 @@ export default function PreviewPlayer({
               const o = transformSelectedOverlay as TrackedOverlay;
               const tr = tracks[o.trackId] as Track | undefined;
               if (!tr) return null;
-              const s = sampleTrack(tr, time, o.smoothing);
+              const s = sampleTrackedOverlay(o, tr, composition.overlays, time);
               if (!s || !s.visible) return null;
               const art = resolveTrackedRect(s, o, {
                 width: composition.width,
@@ -1903,7 +1932,7 @@ export default function PreviewPlayer({
               if (o.kind !== "tracked") return null;
               const tr = tracks[o.trackId];
               if (!tr) return null;
-              const s = sampleTrack(tr, time, o.smoothing);
+              const s = sampleTrackedOverlay(o, tr, composition.overlays, time);
               if (!s || !s.visible) return null;
               // resolveTrackedRect (not applyFitAndScale): the outline must land
               // on the actual art, which includes the user's follow offset.

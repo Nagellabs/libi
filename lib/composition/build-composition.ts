@@ -1,38 +1,11 @@
-import type {
-  Composition,
-  Scene,
-  CanvasScene,
-  DrawContext,
-  Overlay,
-  AudioClip,
-} from "@/lib/engine/types";
+import type { Composition, Overlay, AudioClip } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
-import type { LayerEffects } from "@/lib/effects/types";
-import { createDrawFunction } from "@/lib/ai/scene-validator";
-import { DRAW_HELPERS } from "@/lib/engine/draw-helpers";
 import { pickVideoUrl } from "@/lib/proxy/url";
 import { normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
 
 /** Composition frame width used for legacy-rect normalization. Matches the
  *  hardcoded width in the returned Composition below. */
 const FRAME_WIDTH = 1920;
-
-export interface CanvasSceneData {
-  id: string;
-  type: "canvas";
-  name: string;
-  duration: number;
-  drawFunction: string;
-  /** In/out/loop whole-frame animation effects (Ken Burns, etc.). */
-  effects?: LayerEffects;
-}
-
-/**
- * Persisted scene data as the hydrator receives it. Canvas-only — the video
- * variant was retired (2026-07-19); an imported video hydrates as a full-frame
- * `VideoOverlay` instead.
- */
-export type SceneData = CanvasSceneData;
 
 export interface BuildCompositionOpts {
   /**
@@ -48,52 +21,25 @@ export interface BuildCompositionOpts {
    */
   filesResolved?: boolean;
   /**
-   * Solid frame background (default "#000000"). Used by the empty-scenes
-   * path where a video-less piece renders bg + overlays.
+   * Solid frame background (default "#000000"). Painted under every overlay.
    */
   backgroundColor?: string;
 }
 
 /**
- * Hydrate persisted scene data (JSON on disk) into a runtime Composition
- * with compiled draw functions and resolved video URLs. Pure — all async
- * resources (images, compiled fns, proxy status) are attached elsewhere.
+ * Hydrate persisted overlay data (JSON on disk) into a runtime Composition
+ * with resolved video URLs. Pure — all async resources (images, compiled fns,
+ * proxy status) are attached elsewhere.
  *
- * An empty `scenes` array is valid: a video-less piece hydrates into a
- * Composition with `scenes: []` (solid background + overlays), NOT null.
+ * An empty `overlays` array is valid: the composition hydrates to its solid
+ * background, NOT null.
  */
 export function buildComposition(
-  scenes: SceneData[],
   filesById: Map<string, FileRecord>,
   overlays: Overlay[] = [],
   audioClips: AudioClip[] = [],
   opts: BuildCompositionOpts = {},
 ): Composition {
-  const builtScenes: Scene[] = scenes.map((s) => {
-    const cs = s;
-    let drawFn: CanvasScene["draw"];
-    try {
-      drawFn = createDrawFunction(cs.drawFunction, DRAW_HELPERS) as unknown as CanvasScene["draw"];
-    } catch {
-      drawFn = ({ ctx, width, height }: DrawContext) => {
-        ctx.fillStyle = "#1a1a2e";
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = "#ef4444";
-        ctx.font = "20px sans-serif";
-        ctx.textAlign = "center";
-        ctx.fillText("Error in scene code", width / 2, height / 2);
-      };
-    }
-
-    return {
-      id: cs.id,
-      type: "canvas" as const,
-      name: cs.name,
-      duration: cs.duration,
-      draw: drawFn,
-      effects: cs.effects,
-    } satisfies CanvasScene;
-  });
 
   // Hydrate-time guard: when an overlay carries a transform3d, ensure the
   // deprecated legacy orientation fields (rotation/flipH/flipV) never leak
@@ -170,7 +116,6 @@ export function buildComposition(
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: builtScenes,
     overlays: runtimeOverlays,
     audioClips,
     backgroundColor: opts.backgroundColor ?? "#000000",

@@ -1,6 +1,6 @@
 ---
 name: three-overlays
-description: Add a real 3D / WebGL (three.js) overlay — perspective captions (text laid on a ground plane, floating billboard text that moves with the camera) and simple animated 3D objects, composited over the base scene. Load this BEFORE calling `libi.add_overlay` with kind three. Use when a caption needs DEPTH/PERSPECTIVE that flat Canvas2D code overlays cannot express (text mapped onto a road/floor, 3D-positioned lyrics that play with the footage), or for a simple rotating/animated 3D object. NOT for flat animated text (typewriter, word reveal, kinetic 2D caption → animated-text-overlays); NOT for speech subtitles (→ speech-captions); NOT for character rigs, physics, or imported heavy 3D models.
+description: Add a real 3D / WebGL (three.js) overlay — perspective captions (text laid on a ground plane, floating billboard text that moves with the camera) and simple animated 3D objects, composited over the layers beneath. Load this BEFORE calling `libi.add_overlay` with kind three. Use when a caption needs DEPTH/PERSPECTIVE that flat Canvas2D code overlays cannot express (text mapped onto a road/floor, 3D-positioned lyrics that play with the footage), or for a simple rotating/animated 3D object. NOT for flat animated text (typewriter, word reveal, kinetic 2D caption → animated-text-overlays); NOT for speech subtitles (→ speech-captions); NOT for character rigs, physics, or imported heavy 3D models.
 tags: [overlays, 3d, animation]
 ---
 

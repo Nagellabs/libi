@@ -26,10 +26,11 @@ beforeEach(() => {
   writeFileSync(
     join(storageRoot, "storage", PIECE_ID, "composition.json"),
     JSON.stringify({
-      sceneOrder: [], width: 1920, height: 1080, fps: 30,
+      width: 1920, height: 1080, fps: 30,
       audioClips: [
         { id: "music", kind: "standalone", fileId: "fm", startTime: 0, duration: 60, trimStart: 0, volume: 1, enabled: true },
         { id: "vo",    kind: "standalone", fileId: "fv", startTime: 0, duration: 30, trimStart: 0, volume: 1, enabled: true },
+        { id: "vo2",   kind: "standalone", fileId: "fv2", startTime: 30, duration: 30, trimStart: 0, volume: 1, enabled: true },
       ],
     }),
   );
@@ -51,13 +52,13 @@ describe("/duck HTTP routes", () => {
     const req = new Request("http://test/api/pieces/p_duck_http/audio-clips/music/duck", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sidechainClipId: "vo", thresholdDb: -25, ratio: 6 }),
+      body: JSON.stringify({ sidechainClipIds: ["vo"], thresholdDb: -25, ratio: 6 }),
     });
     const res = await POST(req, { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) });
     expect(res.status).toBe(200);
     const m = readManifest();
     expect(m.audioClips.find((c: { id: string }) => c.id === "music").duck).toMatchObject({
-      sidechainClipId: "vo", thresholdDb: -25, ratio: 6,
+      sidechainClipIds: ["vo"], thresholdDb: -25, ratio: 6,
     });
   });
 
@@ -66,7 +67,7 @@ describe("/duck HTTP routes", () => {
     const req = new Request("http://test/api/pieces/p_duck_http/audio-clips/music/duck", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sidechainClipId: "music" }),
+      body: JSON.stringify({ sidechainClipIds: ["music"] }),
     });
     const res = await POST(req, { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) });
     expect(res.status).toBe(400);
@@ -80,7 +81,7 @@ describe("/duck HTTP routes", () => {
         new Request("http://test/x", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sidechainClipId: "vo" }),
+          body: JSON.stringify({ sidechainClipIds: ["vo"] }),
         }),
         { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
       );
@@ -105,7 +106,7 @@ describe("/duck HTTP routes", () => {
         new Request("http://test/x", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sidechainClipId: "vo" }),
+          body: JSON.stringify({ sidechainClipIds: ["vo"] }),
         }),
         { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
       );
@@ -117,5 +118,74 @@ describe("/duck HTTP routes", () => {
     );
     expect(res.status).toBe(200);
     expect(readManifest().audioClips.find((c: { id: string }) => c.id === "music").duck).toBeUndefined();
+  });
+
+  it("POST accepts several sidechains — the timeline dialog sends the whole set", async () => {
+    const { POST } = await import("@/app/api/pieces/[pieceId]/audio-clips/[clipId]/duck/route");
+    const res = await POST(
+      new Request("http://test/x", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sidechainClipIds: ["vo", "vo2"] }),
+      }),
+      { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
+    );
+    expect(res.status).toBe(200);
+    expect(
+      readManifest().audioClips.find((c: { id: string }) => c.id === "music").duck.sidechainClipIds,
+    ).toEqual(["vo", "vo2"]);
+  });
+
+  it("POST still accepts the deprecated single sidechainClipId", async () => {
+    const { POST } = await import("@/app/api/pieces/[pieceId]/audio-clips/[clipId]/duck/route");
+    const res = await POST(
+      new Request("http://test/x", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sidechainClipId: "vo" }),
+      }),
+      { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
+    );
+    expect(res.status).toBe(200);
+    expect(
+      readManifest().audioClips.find((c: { id: string }) => c.id === "music").duck.sidechainClipIds,
+    ).toEqual(["vo"]);
+  });
+
+  it("POST returns 400 when no sidechain is named at all", async () => {
+    const { POST } = await import("@/app/api/pieces/[pieceId]/audio-clips/[clipId]/duck/route");
+    const res = await POST(
+      new Request("http://test/x", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+      { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
+    );
+    expect(res.status).toBe(400);
+  });
+
+  it("PATCH replaces the sidechain set", async () => {
+    const { POST, PATCH } = await import("@/app/api/pieces/[pieceId]/audio-clips/[clipId]/duck/route");
+    await POST(
+      new Request("http://test/x", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sidechainClipIds: ["vo"] }),
+      }),
+      { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
+    );
+    const res = await PATCH(
+      new Request("http://test/x", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ sidechainClipIds: ["vo", "vo2"] }),
+      }),
+      { params: Promise.resolve({ pieceId: PIECE_ID, clipId: "music" }) },
+    );
+    expect(res.status).toBe(200);
+    expect(
+      readManifest().audioClips.find((c: { id: string }) => c.id === "music").duck.sidechainClipIds,
+    ).toEqual(["vo", "vo2"]);
   });
 });

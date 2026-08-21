@@ -102,7 +102,7 @@ describe("ScriptPanel", () => {
           id: "j", kind: "extra_analysis_model", status: "running",
           pieceId: null, fileId: "f",
           progressDone: 0, progressTotal: 0, progressUnit: "items",
-          etaMs: null, msPerUnit: null, error: null, resultJson: null,
+          etaMs: null, msPerUnit: null, msSinceProgress: null, error: null, resultJson: null,
           startedAt: new Date(), completedAt: null, lastProgressAt: null,
         }}
         onCancel={() => {}}

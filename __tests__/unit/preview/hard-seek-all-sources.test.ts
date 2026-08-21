@@ -18,7 +18,6 @@ function comp(partial: Partial<Composition>): Composition {
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: [],
     overlays: [],
     audioClips: [],
     ...partial,
@@ -30,7 +29,6 @@ describe("hardSeekAllSources", () => {
     const a = fakeSource(true);
     // One video overlay starting at t=0, trim.start=5 → local at playhead 2s is 7s.
     const composition = comp({
-      scenes: [],
       overlays: [
         {
           id: "s1",
@@ -98,7 +96,6 @@ describe("hardSeekAllSources", () => {
     const base = fakeSource(true);
     const ov = fakeSource(true);
     const composition = comp({
-      scenes: [],
       overlays: [
         { id: "s1", kind: "video", fileId: "f1", videoUrl: "/x", startTime: 0, duration: 10, z: 0, opacity: 1, rect: { x: 0, y: 0, width: 1920, height: 1080 } } as never,
         {

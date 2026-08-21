@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { ensureBundledFontsRegistered } from "@/lib/fonts/register-server";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { sampleTrack } from "@/lib/tracking/sample";
 import { resolveTrackedRect } from "@/lib/engine/overlay-renderer";
@@ -100,6 +101,7 @@ export async function renderVerifyFrames(
       continue;
     }
 
+    ensureBundledFontsRegistered();
     const canvas = createCanvas(input.frameW, input.frameH);
     const ctx = canvas.getContext("2d");
     ctx.drawImage(img, 0, 0, input.frameW, input.frameH);

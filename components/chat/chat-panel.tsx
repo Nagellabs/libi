@@ -26,7 +26,7 @@ interface ChatPanelProps {
   pieceId: string;
   onToolResult?: (toolId: McpToolId | null, rawTitle: string, result: unknown) => void;
   onNavigate?: (event: { target: string; pieceId: string; fileId?: string }) => void;
-  onRefreshQuery?: (event: { queryKey: string; pieceId?: string; sceneId?: string }) => void;
+  onRefreshQuery?: (event: { queryKey: string; pieceId?: string }) => void;
   onSessionsChanged?: () => void;
   /** Open a chat-message file attachment in the assets panel. The parent
    *  (editor page) switches to the file's piece, flips the editor to the

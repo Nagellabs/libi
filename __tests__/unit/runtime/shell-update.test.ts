@@ -13,7 +13,7 @@ import {
   type ShellUpdater,
   type ShellUpdateStatus,
 } from "@/lib/runtime/shell-update";
-import { updateOffer, type RuntimeUpdateDto } from "@/lib/queries/runtime-update";
+import { restartOffer, updateOffer, type RuntimeUpdateDto } from "@/lib/queries/runtime-update";
 
 function makeUpdater(status: Partial<ShellUpdateStatus> = {}): ShellUpdater {
   return {
@@ -53,6 +53,8 @@ describe("shell updater slot", () => {
 function dto(over: {
   state?: RuntimeUpdateDto["update"]["state"];
   latestVersion?: string | null;
+  pendingVersion?: string | null;
+  install?: RuntimeUpdateDto["install"];
   shell?: RuntimeUpdateDto["shell"];
 }): RuntimeUpdateDto {
   return {
@@ -65,11 +67,13 @@ function dto(over: {
       latestShellApiVersion: 1,
       checkedAt: 0,
     },
-    pendingVersion: null,
-    install: null,
+    pendingVersion: over.pendingVersion ?? null,
+    install: over.install ?? null,
     shell: over.shell ?? null,
   };
 }
+
+const failedInstall = { status: "failed" } as unknown as RuntimeUpdateDto["install"];
 
 const shellOffer: RuntimeUpdateDto["shell"] = {
   phase: "update-available",
@@ -80,21 +84,26 @@ const shellOffer: RuntimeUpdateDto["shell"] = {
   checkedAt: 0,
 };
 
-describe("updateOffer — the one thing the user is offered", () => {
+describe("updateOffer — updates that still need a CLICK to download", () => {
   it("returns null when neither channel has anything", () => {
     expect(updateOffer(undefined)).toBeNull();
     expect(updateOffer(dto({}))).toBeNull();
     expect(updateOffer(dto({ shell: { ...shellOffer!, phase: "error" } }))).toBeNull();
   });
 
-  it("offers the runtime channel", () => {
-    expect(updateOffer(dto({ state: "update-available", latestVersion: "0.2.0" }))).toEqual({
-      target: "runtime",
-      version: "0.2.0",
-    });
+  it("a fresh runtime update is NOT an offer — the server downloads it itself", () => {
+    expect(updateOffer(dto({ state: "update-available", latestVersion: "0.2.0" }))).toBeNull();
   });
 
-  it("offers the shell channel — including for `shell-update-required`, whose remedy it is", () => {
+  it("offers the runtime channel only after its auto-download failed", () => {
+    expect(
+      updateOffer(
+        dto({ state: "update-available", latestVersion: "0.2.0", install: failedInstall }),
+      ),
+    ).toEqual({ target: "runtime", version: "0.2.0" });
+  });
+
+  it("offers an OLD shell's update — including for `shell-update-required`, whose remedy it is", () => {
     expect(updateOffer(dto({ shell: shellOffer }))).toEqual({
       target: "shell",
       version: "0.4.0",
@@ -104,9 +113,51 @@ describe("updateOffer — the one thing the user is offered", () => {
     ).toEqual({ target: "shell", version: "0.4.0" });
   });
 
+  it("a NEW shell's update is NOT an offer — it downloads itself", () => {
+    expect(updateOffer(dto({ shell: { ...shellOffer!, autoDownload: true } }))).toBeNull();
+  });
+
   it("prefers the shell when both channels offer — the reverse could install a runtime the old shell can't run", () => {
     expect(
-      updateOffer(dto({ state: "update-available", latestVersion: "0.2.0", shell: shellOffer })),
+      updateOffer(
+        dto({
+          state: "update-available",
+          latestVersion: "0.2.0",
+          install: failedInstall,
+          shell: shellOffer,
+        }),
+      ),
     ).toEqual({ target: "shell", version: "0.4.0" });
+  });
+});
+
+describe("restartOffer — downloaded updates waiting for their restart", () => {
+  it("returns null when nothing is downloaded", () => {
+    expect(restartOffer(undefined)).toBeNull();
+    expect(restartOffer(dto({}))).toBeNull();
+    expect(restartOffer(dto({ shell: shellOffer }))).toBeNull();
+  });
+
+  it("offers a staged runtime download", () => {
+    expect(restartOffer(dto({ pendingVersion: "0.2.0" }))).toEqual({
+      target: "runtime",
+      version: "0.2.0",
+    });
+  });
+
+  it("offers a NEW shell's ready download, and prefers it over a staged runtime", () => {
+    const readyShell = { ...shellOffer!, phase: "ready" as const, autoDownload: true };
+    expect(restartOffer(dto({ shell: readyShell }))).toEqual({
+      target: "shell",
+      version: "0.4.0",
+    });
+    expect(restartOffer(dto({ pendingVersion: "0.2.0", shell: readyShell }))).toEqual({
+      target: "shell",
+      version: "0.4.0",
+    });
+  });
+
+  it("an OLD shell's ready state is a self-restart in progress, never an offer", () => {
+    expect(restartOffer(dto({ shell: { ...shellOffer!, phase: "ready" } }))).toBeNull();
   });
 });

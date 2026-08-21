@@ -37,13 +37,13 @@ const videoOverlay: Overlay = {
 
 describe("video overlay missing-file flag", () => {
   it("does NOT flag missing without opts (back-compat)", () => {
-    const comp = buildComposition([], new Map(), [videoOverlay]);
+    const comp = buildComposition(new Map(), [videoOverlay]);
     const o = comp.overlays!.find((x) => x.id === "vid-1") as { missing?: boolean };
     expect(o.missing).toBeFalsy();
   });
 
   it("does NOT flag missing while files are still loading (filesResolved false)", () => {
-    const comp = buildComposition([], new Map(), [videoOverlay], [], {
+    const comp = buildComposition(new Map(), [videoOverlay], [], {
       knownFileIds: new Set(),
       filesResolved: false,
     });
@@ -52,7 +52,7 @@ describe("video overlay missing-file flag", () => {
   });
 
   it("flags missing when resolved AND the id is absent from the known set", () => {
-    const comp = buildComposition([], new Map(), [videoOverlay], [], {
+    const comp = buildComposition(new Map(), [videoOverlay], [], {
       knownFileIds: new Set(["other"]),
       filesResolved: true,
     });
@@ -63,7 +63,7 @@ describe("video overlay missing-file flag", () => {
   it("does not mark one whose file is present (piece-scoped filesById)", () => {
     const files = new Map([["f1", mkFile("f1", "a.mp4")]]);
     const overlay: Overlay = { ...videoOverlay, fileId: "f1" };
-    const comp = buildComposition([], files, [overlay], [], {
+    const comp = buildComposition(files, [overlay], [], {
       knownFileIds: new Set(["f1"]),
       filesResolved: true,
     });
@@ -75,7 +75,7 @@ describe("video overlay missing-file flag", () => {
     // The file is global (not in the piece-scoped filesById) but exists —
     // knownFileIds carries it, so it must not be treated as deleted.
     const overlay: Overlay = { ...videoOverlay, fileId: "global-1" };
-    const comp = buildComposition([], new Map(), [overlay], [], {
+    const comp = buildComposition(new Map(), [overlay], [], {
       knownFileIds: new Set(["global-1"]),
       filesResolved: true,
     });

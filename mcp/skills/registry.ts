@@ -108,7 +108,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "using-effects",
     name: "using-effects",
     description:
-      "Apply tasteful in/out/loop animation effects to any layer — captions, stickers, logos, base scenes, audio.",
+      "Apply tasteful in/out/loop animation effects to any layer — captions, stickers, logos, backgrounds, audio.",
   },
   {
     id: "using-object-tracking",
@@ -222,7 +222,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "three-overlays",
     name: "three-overlays",
     description:
-      "Add a real 3D / WebGL (three.js) overlay — perspective captions (text laid on a ground plane, floating billboard text that moves with the camera) and simple animated 3D objects, composited over the base scene. Load BEFORE calling libi.add_overlay with kind three (which returns a scene.jsx file you then edit directly). Use when a caption needs DEPTH/PERSPECTIVE that flat Canvas2D code overlays cannot express, or for a simple rotating/animated 3D object. NOT for flat animated text (animated-text-overlays); NOT for speech subtitles (speech-captions); NOT for rigs, physics, or imported heavy 3D models.",
+      "Add a real 3D / WebGL (three.js) overlay — perspective captions (text laid on a ground plane, floating billboard text that moves with the camera) and simple animated 3D objects, composited over the layers beneath. Load BEFORE calling libi.add_overlay with kind three (which returns a scene.jsx file you then edit directly). Use when a caption needs DEPTH/PERSPECTIVE that flat Canvas2D code overlays cannot express, or for a simple rotating/animated 3D object. NOT for flat animated text (animated-text-overlays); NOT for speech subtitles (speech-captions); NOT for rigs, physics, or imported heavy 3D models.",
   },
   {
     id: "guiding-manual-edits",
@@ -234,6 +234,6 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "onboarding-libi-explainer-short",
     name: "onboarding-libi-explainer-short",
     description:
-      "Run ONLY during first-run onboarding when the user clicks \"show me how it works\" (or asks for the libi intro/demo). Builds a short pre-made explainer piece by importing 3 hosted demo clips, adding them as scenes with a title overlay, then transparently telling the user these clips were pre-created (downloaded, not generated live) and inviting them to start their own video.",
+      "Run ONLY during first-run onboarding when the user clicks \"show me how it works\" (or asks for the libi intro/demo). Builds libi's own 52-second explainer film into a real piece with a single call to libi.build_onboarding_piece (~15 MB download, no generation), reveals it, then tells the user honestly that the film is pre-made but was itself built in libi and is fully editable — and asks what they want to make.",
   },
 ];

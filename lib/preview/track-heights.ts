@@ -22,12 +22,11 @@ const SMALL = 1,
 /**
  * Pure classifier: map one track-stack row to its `{ minHeight, weight }`.
  * Small growth (weight 1): captions(text) + audio. Large growth (weight 5):
- * stickers(image/video) + graphics(code/three) + tracked + the base Video
- * track. Medium (3): custom/unknown overlay groups. Overlay row minHeight
- * reserves its stacked sub-lanes (`subLaneCount * 28`).
+ * stickers(image/video) + graphics(code/three) + tracked. Medium (3):
+ * custom/unknown overlay groups. Overlay row minHeight reserves its stacked
+ * sub-lanes (`subLaneCount * 28`).
  */
 export function rowSizing(row: TrackRowVM): TrackRowSizing {
-  if (row.kind === "video") return { id: "video", minHeight: SUB_LANE_BASE, weight: LARGE };
   if (row.kind === "coupledAudio") {
     // Slim strip attached under its video (Timeline sizes this directly, but
     // keep rowSizing total over the union). Never grows.

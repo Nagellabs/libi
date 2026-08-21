@@ -9,15 +9,18 @@
 // The UI lives in the runtime's Next server, so this file's job is to wrap
 // electron-updater in the small `ShellUpdater` bridge the runtime defines
 // (`lib/runtime/shell-update.ts`) and keep a status snapshot the update
-// route can poll. Two behavioural rules, both mirroring the runtime-update
-// flow the user already knows:
+// route can poll. Two behavioural rules, matching the runtime channel's
+// auto-download flow:
 //
-//  * **No download without a click.** `autoDownload` is off; `download()` is
-//    only ever called by the route handling the user's "Install & restart".
-//  * **That click is the consent for the restart.** Once the download is
-//    verified on disk we quit-and-install after a short beat (long enough
-//    for the UI's next poll to render "Restarting Libi…"). There is no
-//    lingering "downloaded, restart later" state to strand.
+//  * **Downloads are automatic.** `autoDownload` is on: finding an update IS
+//    starting its download. The user is never asked to approve a download —
+//    only a restart.
+//  * **Restarts are explicit.** A verified download parks at `ready` and
+//    stays there until the UI's "Restart to apply" calls `restart()` — or
+//    the user quits normally and `autoInstallOnAppQuit` applies it on the
+//    way out. The one exception is a `download()` call arriving when the
+//    download is already ready: that is an OLD runtime's "Install & restart"
+//    click, whose UI promises an immediate restart, so honor it.
 //
 // Failures are status, not dialogs: `phase: "error"` renders as nothing,
 // exactly like the npm check's `unknown` — a user on a plane (or on a
@@ -82,9 +85,9 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     return;
   }
 
-  autoUpdater.autoDownload = false;
-  // Belt-and-braces: if the user quits between "ready" and our own
-  // quitAndInstall beat, the update still applies on the way out.
+  autoUpdater.autoDownload = true;
+  // The quiet half of "restarts are explicit": a user who never clicks
+  // "Restart to apply" still gets the update at their next normal quit.
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = {
     info: (m: unknown) => log(`shell-updater: ${String(m)}`),
@@ -100,11 +103,15 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     percent: null as number | null,
     error: null as string | null,
     checkedAt: null as number | null,
+    // Tells the runtime UI this shell downloads on its own and parks at
+    // "ready" — old shells lack the field and keep the click-to-install UI.
+    autoDownload: true as const,
   };
-  // The user's Install click, remembered so `update-downloaded` knows the
-  // restart is consented. autoDownload is off, so this is the only way a
-  // download starts — the flag is documentation as much as a guard.
-  let installRequested = false;
+  // Restart consent: set by `restart()` (the UI's "Restart to apply") or by
+  // a `download()` call that arrives when the download is already ready (an
+  // old runtime's "Install & restart" click). Once set, `update-downloaded`
+  // — or the ready state it already reached — quits-and-installs.
+  let restartRequested = false;
 
   autoUpdater.on("checking-for-update", () => {
     if (status.phase === "idle" || status.phase === "up-to-date" || status.phase === "error") {
@@ -112,11 +119,13 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     }
   });
   autoUpdater.on("update-available", (info) => {
-    status.phase = installRequested ? status.phase : "update-available";
+    // autoDownload means electron-updater starts the download right after
+    // this event; "update-available" is a blink before "downloading".
+    status.phase = "update-available";
     status.latestVersion = info.version;
     status.error = null;
     status.checkedAt = Date.now();
-    log(`shell-updater: update available ${status.currentVersion} → ${info.version}`);
+    log(`shell-updater: update available ${status.currentVersion} → ${info.version} — auto-downloading`);
   });
   autoUpdater.on("update-not-available", () => {
     status.phase = "up-to-date";
@@ -128,25 +137,33 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     status.phase = "downloading";
     status.percent = Math.round(p.percent);
   });
+  const quitAndInstallSoon = (): void => {
+    setTimeout(() => {
+      log("shell-updater: quitAndInstall");
+      autoUpdater.quitAndInstall();
+    }, INSTALL_DELAY_MS);
+  };
+
   autoUpdater.on("update-downloaded", (info) => {
     status.phase = "ready";
     status.percent = 100;
-    log(`shell-updater: ${info.version} downloaded — restarting to install in ${INSTALL_DELAY_MS}ms`);
-    if (installRequested) {
-      setTimeout(() => {
-        log("shell-updater: quitAndInstall");
-        autoUpdater.quitAndInstall();
-      }, INSTALL_DELAY_MS);
+    if (restartRequested) {
+      // The restart was consented while the download was still running.
+      log(`shell-updater: ${info.version} downloaded — restart already requested, installing in ${INSTALL_DELAY_MS}ms`);
+      quitAndInstallSoon();
+    } else {
+      log(`shell-updater: ${info.version} downloaded — waiting for a restart to apply`);
     }
   });
   autoUpdater.on("error", (err) => {
-    // Mid-download failure returns to the OFFER, not to silence — the user
-    // already clicked Install, and "the button is back" beats "it vanished".
-    status.phase = installRequested && status.latestVersion ? "update-available" : "error";
+    // A failed auto-download is status, not a dialog: the 6h re-check (or
+    // "Check again") starts it over. `error` renders as nothing, like the
+    // npm check's `unknown`.
+    status.phase = "error";
     status.percent = null;
     status.error = err.message;
     status.checkedAt = Date.now();
-    installRequested = false;
+    restartRequested = false;
     log(`shell-updater: error — ${err.message}`);
   });
 
@@ -158,18 +175,34 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     }
   };
 
+  const restart = (): void => {
+    if (restartRequested) return; // already on its way down
+    restartRequested = true;
+    if (status.phase === "ready") quitAndInstallSoon();
+    // Not ready yet: `update-downloaded` sees the flag and installs then.
+  };
+
   runtime.api.registerShellUpdater({
     getStatus: () => ({ ...status }),
     checkNow: check,
     download: () => {
-      if (installRequested) return; // already in flight
-      installRequested = true;
+      // Back-compat path (old runtimes' "Install & restart" click). With
+      // autoDownload the download is usually already running or done: ready
+      // means the click's promised restart, anything in flight is a no-op,
+      // and only a shell sitting idle at update-available (e.g. right after
+      // an error) actually starts a download here.
+      if (status.phase === "ready") {
+        restart();
+        return;
+      }
+      if (status.phase === "downloading" || restartRequested) return;
       status.phase = "downloading";
       status.percent = 0;
       void autoUpdater.downloadUpdate().catch(() => {
         /* the error event above already recorded it */
       });
     },
+    restart,
   });
 
   setTimeout(() => void check(), FIRST_CHECK_DELAY_MS);

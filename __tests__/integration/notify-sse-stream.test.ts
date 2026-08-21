@@ -88,25 +88,7 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
     try { await stream.cancel(); } catch { /* ignore */ }
   });
 
-  it("forwards a refresh_query event with sceneId to the stream", async () => {
-    const res = await postNotify({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: "p1",
-      sceneId: "scene_abc",
-    });
-    expect(res.status).toBe(200);
-
-    const event = await readNextEvent(stream.reader);
-    expect(event).toEqual({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: "p1",
-      sceneId: "scene_abc",
-    });
-  });
-
-  it("forwards a piece-scoped refresh_query without sceneId", async () => {
+  it("forwards a piece-scoped refresh_query", async () => {
     const res = await postNotify({
       type: "refresh_query",
       queryKey: "piece",
@@ -119,7 +101,6 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
       type: "refresh_query",
       queryKey: "piece",
       pieceId: "p1",
-      sceneId: undefined,
     });
   });
 
@@ -151,7 +132,6 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
         type: "refresh_query",
         queryKey: "composition",
         pieceId: "p2",
-        sceneId: "s2",
       });
       expect(res.status).toBe(200);
 
@@ -164,7 +144,6 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
         type: "refresh_query",
         queryKey: "composition",
         pieceId: "p2",
-        sceneId: "s2",
       });
     } finally {
       await second.cancel();

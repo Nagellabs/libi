@@ -68,6 +68,18 @@
         "scripts"
       ],
       "port": 3459
+    },
+    {
+      "name": "Libi Electron (onboarding fixtures)",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "LIBI_NO_DEVTOOLS=1",
+        "LIBI_ONBOARDING_ASSET_BASE=http://127.0.0.1:51999",
+        "node",
+        "scripts/dev-electron.js"
+      ],
+      "port": 9222,
+      "autoPort": false
     }
   ]
 }

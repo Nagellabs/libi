@@ -68,8 +68,15 @@ describe("ffmpeg/ffprobe darwin download is arch-keyed", () => {
         expect(coreDep(binary).runCheck).toEqual(["-version"]);
       });
 
-      it("install token bumped to force existing wrong-arch installs to re-fetch", () => {
-        expect(coreDep(binary).pinnedInstallToken).toBe("2026-07-24");
+      it("install token is at or past the arch fix, so wrong-arch installs re-fetch", () => {
+        // A FLOOR, not an exact match. This test guards the arch fix: the token
+        // must not regress below the date that forced those re-installs. Pinning
+        // the exact value made every later, unrelated source change fail here —
+        // it broke when the Linux drawtext fix (2026-08-16) bumped it, which is
+        // a bump this test has no opinion about. ISO dates sort lexicographically.
+        const token = coreDep(binary).pinnedInstallToken;
+        expect(typeof token).toBe("string");
+        expect(token! >= "2026-07-24").toBe(true);
       });
     });
   }

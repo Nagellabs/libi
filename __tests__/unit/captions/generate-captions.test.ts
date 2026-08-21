@@ -25,11 +25,9 @@ describe("generateCaptions — build a caption track from word timings", () => {
   ) {
     fs.mkdirSync(path.join(getLibiStorageDir(), pieceId), { recursive: true });
     await saveManifest(pieceId, {
-      sceneOrder: [],
       width,
       height,
       fps: 30,
-      scenes: [],
       overlays: [],
     });
   }

@@ -77,14 +77,7 @@ describe("rowSizing", () => {
   it("a 2-sublane overlay row reserves its stacked lanes as minHeight", () => {
     expect(rowSizing(overlayRow("captions", 2)).minHeight).toBe(56);
   });
-  it("video row is large growth (weight 5), audio row small (weight 1)", () => {
-    const video = rowSizing({
-      kind: "video",
-      railLabel: "Video",
-      railIcon: "ti-movie",
-      scenes: [],
-    } as unknown as TrackRowVM);
-    expect(video).toEqual({ id: "video", minHeight: 28, weight: 5 });
+  it("audio row is small growth (weight 1)", () => {
     const audio = rowSizing({
       kind: "audio",
       railLabel: "Audio",

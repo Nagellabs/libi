@@ -9,6 +9,11 @@ import { setRelaunchHandler } from "@/lib/server/lifecycle/relaunch";
 import { ensureNextExternalSymlinks } from "@/lib/install/next-externals";
 import { findPackageRoot } from "@/lib/runtime/package-root";
 import { maybePrintUpdateNotice } from "@/lib/cli/update-notice";
+import {
+  openStudioInBrowser,
+  openStudioWhenReady,
+  shouldOpenBrowser,
+} from "@/lib/cli/open-browser";
 
 /** Walk up from `dir` looking for a `.git` entry — true if inside a git repo. */
 function isInsideGitRepo(dir: string): boolean {
@@ -141,7 +146,7 @@ async function runProductionServer(port: string, dir: string): Promise<void> {
 export async function startStudio(
   port: string,
   connectAgent?: string | boolean,
-  opts: { dirname?: string } = {},
+  opts: { dirname?: string; open?: boolean } = {},
 ): Promise<void> {
   port = resolvePort(port, process.env);
   const connectedAgentDir = resolveConnectAgentDir(connectAgent, process.env);
@@ -198,9 +203,23 @@ export async function startStudio(
     process.exit(1);
   }
 
+  // The URL is printed for every launch, before any browser is involved —
+  // auto-open is the convenience, this line is the contract. See
+  // lib/cli/open-browser.ts for the whole policy.
+  const studioUrl = `http://localhost:${port}`;
+  const autoOpen = shouldOpenBrowser({
+    flag: opts.open,
+    isDevCheckout,
+    connectAgent: Boolean(connectedAgentDir),
+  });
+
   if (!connectedAgentDir) {
     process.stdout.write(
-      `[libi] Starting server on port ${port}…\n[libi] Open http://localhost:${port}\n`,
+      `[libi] Starting server on port ${port}…\n` +
+        (autoOpen
+          ? `[libi] Opening ${studioUrl} in your browser…\n` +
+            `[libi] If it doesn't open by itself, visit ${studioUrl}\n`
+          : `[libi] Open ${studioUrl}\n`),
     );
   } else {
     process.stdout.write(
@@ -238,6 +257,11 @@ export async function startStudio(
       );
       process.exit(1);
     }
+    // `runProductionServer` resolves only once OUR server is listening, so the
+    // handoff needs no readiness polling and can't race a foreign process that
+    // already holds the port (that path exits 1 above). Fire and forget — the
+    // server keeps the process alive.
+    if (autoOpen) void openStudioInBrowser(studioUrl);
     return;
   }
 
@@ -256,6 +280,10 @@ export async function startStudio(
       ...(connectedAgentDir ? { LIBI_CONNECT_AGENT_DIR: connectedAgentDir } : {}),
     },
   });
+  // `next dev` is a child process: readiness is only observable from outside,
+  // so this branch polls for it. Only reached when a dev checkout opted in
+  // (`--open` / `LIBI_OPEN=1`) — the default there is off.
+  if (autoOpen) void openStudioWhenReady(studioUrl);
   child.on("exit", (code) => {
     if (code === 75) {
       process.stdout.write(

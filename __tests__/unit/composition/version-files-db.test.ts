@@ -13,7 +13,7 @@ import { createTestDb, resetTestDb } from "../../helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "../../helpers/test-storage";
 
 const base = (): CompositionManifest => ({
-  sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [], scenes: [],
+  width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [],
 });
 
 /** Full-frame video overlay — the manifest entity that references a video file. */
@@ -102,8 +102,7 @@ describe("detectMissingFiles", () => {
   it("returns [] for a manifest with no file references (canvas-only)", async () => {
     const manifest: CompositionManifest = {
       ...base(),
-      sceneOrder: ["s1"],
-      scenes: [{ id: "s1", type: "canvas", name: "Hook", duration: 2, drawFunction: "//" }],
+      overlays: [{ id: "code-s1", kind: "code" as const, displayName: "Hook", startTime: 0, duration: 2, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "//" }],
     };
     const result = await detectMissingFiles(manifest, "p1");
     expect(result).toEqual([]);

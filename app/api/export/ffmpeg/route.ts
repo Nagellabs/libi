@@ -3,7 +3,7 @@ import path from "path";
 import os from "os";
 import fs from "fs/promises";
 import { loadComposition } from "@/lib/composition/persistence";
-import type { PersistedScene, CompositionManifest } from "@/lib/composition/persistence";
+import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import type { AudioClip, Composition, ExportSettings, Overlay } from "@/lib/engine/types";
 import { classifyExportShape } from "@/lib/export/classifier";
@@ -37,16 +37,14 @@ export async function POST(req: Request): Promise<Response> {
   }
   // Load composition from persistence — draft or snapshot depending on source.
   let manifest: CompositionManifest;
-  let scenes: PersistedScene[];
   if (body.source === "snapshot") {
     const snap = await loadCurrentSnapshot(body.pieceId);
     if (!snap) {
       return NextResponse.json({ error: "No committed snapshot found for this piece" }, { status: 404 });
     }
     manifest = snap;
-    scenes = snap.scenes ?? [];
   } else {
-    ({ manifest, scenes } = await loadComposition(body.pieceId));
+    ({ manifest } = await loadComposition(body.pieceId));
   }
 
   // Hidden layers (overlay.hidden — the persisted eye toggle) leave the export
@@ -58,7 +56,7 @@ export async function POST(req: Request): Promise<Response> {
     manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
   }
 
-  const comp = buildCompositionFromManifest(manifest, scenes);
+  const comp = buildCompositionFromManifest(manifest);
 
   // Second-pass safety: confirm the client's shape still matches.
   // If the classifier disagrees (comp changed since client classified),
@@ -162,7 +160,6 @@ export async function POST(req: Request): Promise<Response> {
  */
 function buildCompositionFromManifest(
   manifest: CompositionManifest,
-  scenes: PersistedScene[],
 ): Composition {
   return {
     id: "composition-1",
@@ -170,15 +167,6 @@ function buildCompositionFromManifest(
     width: manifest.width,
     height: manifest.height,
     fps: manifest.fps,
-    scenes: scenes.map((s) => {
-      return {
-        id: s.id,
-        name: s.name,
-        type: "canvas" as const,
-        duration: s.duration,
-        draw: () => {},
-      };
-    }),
     // Source pixel dims for video overlays come from the `files` table — the
     // classifier needs them to know whether `-c copy` would preserve framing,
     // and the CLIENT already has them via `buildComposition`. Without this the

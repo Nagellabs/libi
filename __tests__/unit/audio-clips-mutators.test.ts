@@ -6,12 +6,10 @@ import {
   unlinkClip,
   relinkClipToOverlay,
   splitClip,
-  findInlineClipForScene,
 } from "@/lib/composition/audio-clips";
 import type { PersistedAudioClip, CompositionManifest } from "@/lib/composition/persistence";
 
 const manifest = (clips: PersistedAudioClip[] = []): CompositionManifest => ({
-  sceneOrder: [],
   width: 1920,
   height: 1080,
   fps: 30,
@@ -53,13 +51,6 @@ describe("audio-clips mutators", () => {
     const m = manifest([clip("a"), clip("b")]);
     const out = removeClip(m, "a");
     expect(out!.audioClips!.map((c) => c.id)).toEqual(["b"]);
-  });
-
-  it("unlinkClip removes linkedSceneId and changes kind to standalone", () => {
-    const m = manifest([clip("c1", { kind: "inline", linkedSceneId: "scene-x" })]);
-    const out = unlinkClip(m, "c1");
-    expect(out!.audioClips![0].kind).toBe("standalone");
-    expect(out!.audioClips![0].linkedSceneId).toBeUndefined();
   });
 
   it("unlinkClip KEEPS linkedOverlayId (detached audio remembers its source video)", () => {
@@ -162,12 +153,4 @@ describe("audio-clips mutators", () => {
     expect(splitClip(m, "c1", 15)).toBeNull();
   });
 
-  it("findInlineClipForScene returns the linked clip", () => {
-    const m = manifest([
-      clip("a", { kind: "inline", linkedSceneId: "s1" }),
-      clip("b", { kind: "standalone" }),
-    ]);
-    expect(findInlineClipForScene(m, "s1")?.id).toBe("a");
-    expect(findInlineClipForScene(m, "s2")).toBeNull();
-  });
 });

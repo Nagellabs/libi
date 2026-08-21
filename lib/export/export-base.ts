@@ -2,11 +2,10 @@
  * Resolve a composition's BASE VIDEO for the server-side ffmpeg export
  * backends — the single full-frame video layer that becomes ffmpeg input `[0:v]`.
  *
- * Historically the base was always `scenes[0]` (a video SCENE). Video scenes
- * were retired (2026-07-19) and a video is now an OVERLAY, so the base is
- * always the bottom full-frame, untransformed video overlay. This module is the
- * shared predicate + resolver both the classifier and the backends read, so
- * they can never disagree about what the base is.
+ * Every video is an OVERLAY, so the base is the bottom full-frame,
+ * untransformed video overlay. This module is the shared predicate + resolver
+ * both the classifier and the backends read, so they can never disagree about
+ * what the base is.
  *
  * Deliberately strict: any overlay the ffmpeg graph could not reproduce
  * pixel-for-pixel (partial opacity, contain-fit letterbox, rotation, keyframed
@@ -63,8 +62,6 @@ export function isBaseShapedVideoOverlay(o: Overlay, comp: Composition): boolean
  * caller must use chromium-render).
  */
 export function resolveExportBase(comp: Composition): ExportBase | null {
-  // Any canvas scene means a JS draw function the ffmpeg graph cannot run.
-  if (comp.scenes.length > 0) return null;
 
   const overlays = comp.overlays ?? [];
   // Additional video overlays above the base are FINE — the ffmpeg-overlay

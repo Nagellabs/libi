@@ -43,7 +43,7 @@ describe("getInstructionContent", () => {
   it("returns non-empty content", () => {
     const content = getInstructionContent();
     expect(content.length).toBeGreaterThan(0);
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
   });
 });
 
@@ -85,7 +85,7 @@ describe("upsertInstructions", () => {
     const content = fs.readFileSync(filePath, "utf-8");
     expect(content).toContain("<!-- libi-instructions-start");
     expect(content).toContain("<!-- libi-instructions-end -->");
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
   });
 
   it("replaces the block between existing markers", () => {
@@ -107,7 +107,7 @@ describe("upsertInstructions", () => {
     expect(content).not.toContain("OLD INSTRUCTIONS");
     expect(content).not.toContain("v0.0.1");
     // New instructions present
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
   });
 
   it("appends with separator when file exists without markers", () => {
@@ -125,7 +125,7 @@ describe("upsertInstructions", () => {
     expect(content).toContain("\n\n---\n\n");
     // New instructions appended
     expect(content).toContain("<!-- libi-instructions-start");
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
   });
 
   it("does not duplicate when called twice on a file with markers", () => {

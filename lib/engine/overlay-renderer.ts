@@ -5,7 +5,7 @@ import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
 import { unionRect } from "@/lib/engine/three-content-bounds";
 import { projectSpatialQuadBboxUnclamped } from "@/lib/engine/overlay-quad-projection";
 import { fitRect, coverRect } from "./letterbox";
-import { sampleTrack } from "@/lib/tracking/sample";
+import { sampleTrackedOverlay } from "@/lib/engine/tracked-space";
 import type { Track, TrackFit } from "@/lib/tracking/types";
 import { elementTiming } from "./overlay-timing";
 import { valueAt } from "@/lib/engine/animatable";
@@ -113,6 +113,12 @@ export interface DrawOverlayContext extends DrawContext {
   spatialQuads?: Record<string, OverlayQuadInstance>;
   /** For tracked overlays. Keyed by overlay.trackId (NOT overlay.id). */
   tracks?: Record<string, Track>;
+  /** The composition's FULL overlay list (not just the active ones). A tracked
+   *  overlay needs it to find the video overlay its track was computed on —
+   *  that video is what converts global time to the track's source-clip clock
+   *  and source pixels to composition pixels (see lib/engine/tracked-space.ts).
+   *  Absent ⇒ the identity space, i.e. the pre-fix behaviour. */
+  overlays?: readonly Overlay[];
   /** The composed base scene canvas — needed by effect overlays (blur/pixelate). */
   sourceCanvas?: HTMLCanvasElement | OffscreenCanvas;
 }
@@ -386,11 +392,14 @@ export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void
     case "tracked": {
       const track = drawCtx.tracks?.[overlay.trackId];
       if (!track) break;
-      // Track samples are in absolute clip time; visibility is windowed by
-      // startTime/duration upstream (overlaysActiveAt). Sampling at the raw
-      // clip time is what lets multiple overlays in different windows share
-      // ONE track and each follow the subject at its own time.
-      const sample = sampleTrack(track, drawCtx.time, overlay.smoothing);
+      // Track samples are timed on the SOURCE CLIP's clock and positioned in
+      // SOURCE VIDEO pixels — neither is the composition's. `drawCtx.time` is
+      // global composition time, so both have to be converted through the
+      // video overlay the track rides on (lib/engine/tracked-space.ts). That
+      // still lets several overlays in different windows share ONE track: each
+      // resolves the same clip clock and each follows the subject at its own
+      // time. With no owning video the conversion is the identity.
+      const sample = sampleTrackedOverlay(overlay, track, drawCtx.overlays, drawCtx.time);
       if (!sample || !sample.visible) break;
 
       const bbox = resolveTrackedRect(sample, overlay, {
@@ -930,7 +939,7 @@ function drawTextOverlay(
     reveal?.mode === "fade-words"
       ? hasWordTimes
         ? fadeWordsAlphaByTime(capWords!, elementTime)
-        : fadeWordsAlpha(countWords(overlay.content), progress)
+        : fadeWordsAlpha(countWords(overlay.content), progress, revealFraction(reveal, overlay.duration))
       : null;
   // Voice-synced typewriter: `visibleContent` is ALREADY the spoken-so-far
   // substring, so reveal all of it (the per-line slice below becomes a no-op).

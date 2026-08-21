@@ -77,10 +77,11 @@ vi.mock("@/lib/queries/runtime", () => ({ useRuntimeInfo: () => ({ data: null })
 vi.mock("@/lib/queries/runtime-update", () => ({
   useRuntimeUpdate: () => ({ data: null }),
   // The sidebar also imports these to drive the install spinner/progress bar
-  // and the update dot (either channel).
+  // and the update dot (either channel, offer or restart-ready).
   isInstallInFlight: () => false,
   isShellInstallInFlight: () => false,
   updateOffer: () => null,
+  restartOffer: () => null,
 }));
 vi.mock("@/lib/queries/terminals", () => ({
   useTerminalSessions: () => ({ data: [] }),

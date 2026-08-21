@@ -46,7 +46,6 @@ export function dispatchRefreshQueryData(
   event: {
     queryKey: string;
     pieceId?: string;
-    sceneId?: string;
     fileId?: string;
     trackId?: string;
   },

@@ -11,14 +11,13 @@ vi.mock("@/lib/queries/pieces", () => ({
   usePieceComposition: () => ({
     data: {
       manifest: {
-        sceneOrder: ["s1"],
         width: 1920,
         height: 1080,
         fps: 30,
         overlays: [],
       },
-      scenes: [
-        { id: "s1", type: "canvas", name: "c", duration: 2, drawFunction: "ctx" },
+      overlays: [
+        { id: "code-s1", kind: "code" as const, displayName: "c", startTime: 0, duration: 2, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "ctx" },
       ],
       audioClips: [],
     },
@@ -47,12 +46,4 @@ describe("useComposition", () => {
     expect(result.current.composition).toBeNull();
   });
 
-  it("builds a composition with one scene and computes totalFrames", async () => {
-    const { result } = renderHook(() => useComposition("p1"), { wrapper });
-    await waitFor(() => expect(result.current.composition).not.toBeNull());
-    expect(result.current.composition!.scenes).toHaveLength(1);
-    expect(result.current.totalFrames).toBe(60); // 2 seconds × 30 fps
-    expect(result.current.rawScenes).toHaveLength(1);
-    expect(result.current.isFetching).toBe(false);
-  });
 });

@@ -86,8 +86,6 @@ const KEYFRAMED_OVERLAY: PersistedOverlay = {
 describe("persistence: keyframes round-trip", () => {
   it("round-trips an overlay's keyframes through save → load", async () => {
     const manifest: CompositionManifest = {
-      sceneOrder: [],
-      scenes: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -101,8 +99,6 @@ describe("persistence: keyframes round-trip", () => {
 
   it("keyframes are stored inline in composition.json (no per-overlay file)", async () => {
     const manifest: CompositionManifest = {
-      sceneOrder: [],
-      scenes: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -116,8 +112,6 @@ describe("persistence: keyframes round-trip", () => {
 
   it("updateOverlayInManifest applies a keyframes patch", async () => {
     const manifest: CompositionManifest = {
-      sceneOrder: [],
-      scenes: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -150,8 +144,6 @@ describe("persistence: keyframes round-trip", () => {
 
   it("null-clears-key sentinel drops the keyframes field", async () => {
     const manifest: CompositionManifest = {
-      sceneOrder: [],
-      scenes: [],
       width: 1920,
       height: 1080,
       fps: 30,

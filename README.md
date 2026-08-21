@@ -43,7 +43,9 @@ General offers to install it, and it takes effect on the next restart.
 npx @nagellabs/libi
 ```
 
-Then open **http://localhost:3456**.
+It opens **http://localhost:3456** in your browser once the server is up. If nothing
+appears — over SSH, in a container, on a machine with no desktop — the URL is printed in
+the terminal; open it yourself.
 
 Today this is tested on macOS — that's where we build and use libi daily. Broader platform
 support is on the way.
@@ -58,6 +60,7 @@ Useful flags and environment variables:
 |---|---|
 | `npx @nagellabs/libi --port 4000` | Serve on a different port (default `3456`) |
 | `npx @nagellabs/libi --connect-agent [dir]` | **Bring your own CLI.** Serves headless and syncs agent config (instructions, MCP servers, skills) into that directory, so a Claude Code or Codex session started there gets libi's tools. Defaults to the directory you ran it from. |
+| `npx @nagellabs/libi --no-open` | Don't launch a browser — just print the URL (also `LIBI_OPEN=0`) |
 | `LIBI_HOME=/path/to/dir` | Move the data directory somewhere other than `~/.libi` |
 | `LIBI_DEBUG=1` | Verbose MCP transport logging |
 

@@ -5,15 +5,14 @@
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { ChromiumRenderBackend } from "@/lib/export/backends/chromium-render";
 import { loadComposition } from "@/lib/composition/persistence";
-import type { PersistedScene, CompositionManifest } from "@/lib/composition/persistence";
+import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import type { AudioClip, Composition, ExportSettings, Overlay } from "@/lib/engine/types";
 import { getDb } from "@/lib/db/client";
 import { files as filesTable } from "@/lib/db/schema";
-import type { SceneData } from "@/lib/composition/build-composition";
 import type { RenderPayload } from "@/lib/export/render-jobs";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { getLibiStorageDir } from "@/lib/libi-home";
@@ -57,7 +56,6 @@ export function computeVerifyDims(
  */
 function buildCompositionFromManifest(
   manifest: CompositionManifest,
-  scenes: PersistedScene[],
 ): Composition {
   return {
     id: "composition-1",
@@ -65,18 +63,28 @@ function buildCompositionFromManifest(
     width: manifest.width,
     height: manifest.height,
     fps: manifest.fps,
-    scenes: scenes.map((s) => {
-      return {
-        id: s.id,
-        name: s.name,
-        type: "canvas" as const,
-        duration: s.duration,
-        draw: () => {},
-      };
-    }),
     overlays: (manifest.overlays ?? []) as Overlay[],
     audioClips: (manifest.audioClips ?? []) as AudioClip[],
   };
+}
+
+/**
+ * Every file id an overlay mounts — the overlay's own `fileId` and the one on a
+ * tracked overlay's mounted image/video content, which is a second nesting
+ * level a `.map(o => o.fileId)` silently misses.
+ *
+ * Exported for the test that pins the payload contract: the render page can
+ * only hydrate source dimensions for files it was actually handed.
+ */
+export function overlayFileIds(overlays: readonly Overlay[]): string[] {
+  const ids = new Set<string>();
+  for (const o of overlays) {
+    const own = (o as { fileId?: unknown }).fileId;
+    if (typeof own === "string") ids.add(own);
+    const content = (o as { content?: { fileId?: unknown } }).content;
+    if (content && typeof content.fileId === "string") ids.add(content.fileId);
+  }
+  return [...ids];
 }
 
 /** Bitrate for the verify-only chromium render. The MP4 is a transient
@@ -107,7 +115,6 @@ export async function renderCompositionFrames(
 
   // Load manifest + scenes
   let manifest: CompositionManifest;
-  let scenes: PersistedScene[];
 
   if (opts.source === "snapshot") {
     const snap = await loadCurrentSnapshot(pieceId);
@@ -115,37 +122,71 @@ export async function renderCompositionFrames(
       throw new Error(`renderCompositionFrames: no committed snapshot found for piece ${pieceId}`);
     }
     manifest = snap;
-    scenes = snap.scenes ?? [];
-    if (scenes.length === 0) {
-      // Modern snapshots inline `scenes`; a legacy (pre-inline-scenes) snapshot
-      // can have none, which would render an empty (overlays-on-black) frame.
-      // Warn so that's diagnosable rather than silently wrong. Callers verifying
-      // overlays normally use the default "draft" source (full scene backfill).
-      logger.warn(
-        { tag: "render-verify", op: "render_frames", pieceId },
-        "render-verify: snapshot source has no inlined scenes — rendering overlays only",
-      );
-    }
   } else {
-    ({ manifest, scenes } = await loadComposition(pieceId));
+    ({ manifest } = await loadComposition(pieceId));
   }
 
   // Build the stub Composition (used only by classifier / ExportContext contract)
-  const stub = buildCompositionFromManifest(manifest, scenes);
+  const stub = buildCompositionFromManifest(manifest);
 
-  // Build RenderPayload — matches what app/api/export/chromium/route.ts does
+  // Build RenderPayload.
+  //
+  // WHAT THIS PATH OWES A TRACKED OVERLAY. Its samples are in SOURCE-VIDEO
+  // pixels, and `resolveTrackedSpace` (lib/engine/tracked-space.ts) needs the
+  // owning video's `sourceWidth`/`sourceHeight` to map them into composition
+  // space. Without them it falls back to "the source fills the rect", which
+  // puts the reticle somewhere it isn't. This module is what backs
+  // `libi.render_overlay_frames` — the tool the skills tell agents to use to
+  // LOOK at their own work — so a frame that lies here sends an agent off
+  // "fixing" code that was already right.
+  //
+  // THOSE DIMS COME FROM `files`, NOT FROM `overlays`. Wrapping the overlays in
+  // `attachOverlaySourceDims`, the way the chromium route does, achieves
+  // nothing here and it takes a measurement to see why: the render page
+  // hydrates with `buildComposition(payload.scenes, filesMap, payload.overlays,
+  // …)` (lib/export/render-entry.ts), which rebuilds every video overlay as
+  // `{ …o, sourceWidth: file?.mediaWidth ?? null }` — UNCONDITIONALLY. Anything
+  // attached upstream is overwritten, with `null` whenever the file is missing
+  // from `payload.files`. So the files list is the only seam that reaches the
+  // renderer, and an overlay-side attach is dead code that reads as a
+  // safeguard. (The route's own second call, on the composition it classifies,
+  // is a different thing and is load-bearing there.)
+  //
+  // Which is why the query is not piece-scoped alone. `files.piece_id` is
+  // nullable — the shared asset library — and a video overlay may mount a
+  // global file. Sending only the piece's rows hands the render page a clip
+  // with no dims and no source to decode: an empty panel, and any tracked art
+  // riding on it placed against a rect-fill guess.
+  const overlays = (manifest.overlays ?? []) as Overlay[];
+  const pieceFiles = getDb()
+    .select()
+    .from(filesTable)
+    .where(eq(filesTable.pieceId, pieceId))
+    .all();
+  const missingIds = new Set(overlayFileIds(overlays));
+  for (const f of pieceFiles) missingIds.delete(f.id);
+  const globalFiles =
+    missingIds.size > 0
+      ? getDb()
+          .select()
+          .from(filesTable)
+          .where(inArray(filesTable.id, [...missingIds]))
+          .all()
+      : [];
+  if (globalFiles.length > 0) {
+    logger.info(
+      { tag: "render-verify", op: "render_frames.global_files", pieceId, count: globalFiles.length },
+      "render-verify: including files mounted from outside the piece",
+    );
+  }
+
   const payload: RenderPayload = {
-    scenes: scenes as SceneData[],
-    overlays: (manifest.overlays ?? []) as Overlay[],
+    overlays,
     audioClips: (manifest.audioClips ?? []) as AudioClip[],
     width: manifest.width,
     height: manifest.height,
     fps: manifest.fps,
-    files: getDb()
-      .select()
-      .from(filesTable)
-      .where(eq(filesTable.pieceId, pieceId))
-      .all(),
+    files: [...pieceFiles, ...globalFiles],
   };
 
   // Compute output resolution (capped for speed, no upscale)

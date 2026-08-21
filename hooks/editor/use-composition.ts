@@ -7,24 +7,16 @@ import { useQuery } from "@tanstack/react-query";
 import { useFiles, useGlobalFiles } from "@/lib/queries/files";
 import {
   buildComposition,
-  type SceneData,
 } from "@/lib/composition/build-composition";
 import { useEditorState } from "@/lib/editor-state-context";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { getCompositionFrames } from "@/lib/engine/renderer";
 
 export interface UseCompositionResult {
-  /** Hydrated composition (scenes compiled + overlay array attached), or null when empty/loading. */
+  /** Hydrated composition (overlay array attached), or null when empty/loading. */
   composition: Composition | null;
-  /** Total frame count across every scene. Zero when composition is null. */
+  /** Total frame count — the end of the latest overlay or audio clip. Zero when composition is null. */
   totalFrames: number;
-  /**
-   * Raw persisted scene data straight off the manifest. Prefer
-   * `composition.scenes` (hydrated `Scene[]`) for rendering; this shape
-   * is kept for call sites that index into persistence (Timeline,
-   * pendingSeek auto-show).
-   */
-  rawScenes: SceneData[];
   /** True while the composition query is loading (matches the pre-extraction behavior). */
   isLoading: boolean;
   /** True while the composition query is re-fetching (for auto-show seek timing). */
@@ -65,8 +57,7 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
       const res = await fetch(`/api/pieces/${activePieceId}/snapshot/source`);
       if (!res.ok) {
         return {
-          manifest: { sceneOrder: [], width: 1920, height: 1080, fps: 30 } as CompositionManifest,
-          scenes: [] as SceneData[],
+          manifest: { width: 1920, height: 1080, fps: 30 } as CompositionManifest,
           audioClips: [] as AudioClip[],
         };
       }
@@ -76,7 +67,6 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
       const manifest = (await res.json()) as CompositionManifest;
       return {
         manifest,
-        scenes: (manifest.scenes ?? []) as SceneData[],
         audioClips: (manifest.audioClips ?? []) as AudioClip[],
       };
     },
@@ -90,11 +80,10 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
   // inactive is inert. We only include filesQuery here for the filesById
   // index that drives proxy URL selection inside buildComposition.
   const filesQuery = useFiles(activePieceId ?? "");
-  // Global files load app-wide (cached); needed so a video scene backed by a
+  // Global files load app-wide (cached); needed so a video overlay backed by a
   // GLOBAL file isn't mistaken for a deleted one in missing-file detection.
   const globalFilesQuery = useGlobalFiles();
 
-  const rawScenes = activeQuery.data?.scenes ?? [];
 
   const filesById = useMemo(
     () => new Map((filesQuery.data ?? []).map((f) => [f.id, f] as const)),
@@ -131,7 +120,7 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
   const composition = useMemo(
     () => {
       if (!activePieceId) return null;
-      const base = buildComposition(rawScenes, filesById, overlays, audioClips, {
+      const base = buildComposition(filesById, overlays, audioClips, {
         knownFileIds,
         filesResolved,
       });
@@ -148,7 +137,6 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
       };
     },
     [
-      rawScenes,
       activePieceId,
       filesById,
       knownFileIds,
@@ -169,7 +157,6 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
   return {
     composition,
     totalFrames,
-    rawScenes,
     // Matches the pre-extraction behavior: only the composition query gates
     // the skeleton. Files load in parallel and populate URLs progressively.
     isLoading: enabled && activeQuery.isLoading,

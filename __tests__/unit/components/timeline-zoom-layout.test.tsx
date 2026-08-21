@@ -86,10 +86,6 @@ function renderTimeline() {
       frameStore={frameStore}
       fps={30}
       onFrameChange={() => {}}
-      scenes={[
-        { id: "s1", name: "Base", duration: 2 },
-        { id: "s2", name: "Outro", duration: 1 },
-      ]}
       composition={composition}
       audioClips={[]}
       markers={[]}
@@ -100,7 +96,6 @@ function renderTimeline() {
       onToggleRowCollapsed={() => {}}
       onCommitOverlayTiming={() => {}}
       onCrossRowOverlay={() => {}}
-      onSceneContextMenu={() => {}}
       pieceId="p1"
       resolveCtx={() => ({ startTime: 0, width: 1920, height: 1080, z: 1, totalDuration: 30 })}
       onCreateDirect={() => {}}
@@ -139,7 +134,7 @@ describe("Timeline zoom layout", () => {
 
   it("keeps the track rails sticky at the left edge", () => {
     renderTimeline();
-    const rail = screen.getByTestId("track-rail-Video");
+    const rail = screen.getByTestId("track-rail-Text");
     expect(rail).toHaveStyle({ position: "sticky", left: "0px" });
   });
 

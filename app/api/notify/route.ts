@@ -34,7 +34,6 @@ export async function POST(request: Request): Promise<Response> {
       navigationEmitter.emit("refresh_query", {
         queryKey: body.queryKey,
         pieceId: body.pieceId,
-        sceneId: body.sceneId,
         fileId: body.fileId,
         trackId: body.trackId,
       });
@@ -123,6 +122,8 @@ export async function POST(request: Request): Promise<Response> {
         total: typeof body.total === "number" ? body.total : 0,
         unit: typeof body.unit === "string" ? body.unit : "",
         etaMs: typeof body.etaMs === "number" ? body.etaMs : null,
+        msSinceProgress:
+          typeof body.msSinceProgress === "number" ? body.msSinceProgress : null,
         toolName: typeof body.toolName === "string" ? body.toolName : undefined,
         toolArgs: "toolArgs" in body ? body.toolArgs : undefined,
         progressLabel:

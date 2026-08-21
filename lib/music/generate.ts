@@ -374,7 +374,7 @@ export async function downloadModel(onProgress?: ProgressCb): Promise<void> {
     modelDir: aceStepModelsDir(),
     downloadOnly: true,
   });
-  // 90 min: ~5.5 GB HF pull + wheel fetch on a cold cache. `onProgress`
+  // 90 min: ~8.3 GB HF pull + wheel fetch on a cold cache. `onProgress`
   // receives `PROGRESS <done>/<total>` file-count ticks from the Python
   // snapshot_download tqdm hook.
   await runUv(args, 90 * 60_000, onProgress);

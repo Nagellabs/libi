@@ -33,7 +33,7 @@ describe("pieceDupRunner", () => {
       type: "video", storagePath: "src/a.mp4", size: 3,
     }).run();
     await (await getStorage()).save("src", "a.mp4", Buffer.from("vid"), "video/mp4");
-    await saveManifest("src", { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [], audioClips: [], overlays: [] });
+    await saveManifest("src", { width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [] });
     db.insert(pieces).values({ id: "dst", name: "src (copy)" }).run();
 
     const progress: number[] = [];

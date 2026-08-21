@@ -57,12 +57,11 @@ const exportSettingsSchema = z
 
 // RenderPayload comes from the route which already validated/loaded it. We
 // accept it as a structurally-typed record here — re-running a deep Zod parse
-// would force us to mirror SceneData + Overlay + AudioClip + FileRecord just
+// would force us to mirror Overlay + AudioClip + FileRecord just
 // to re-serialize them. The downstream consumer (the render page) is the
 // source of truth for shape validation.
 const renderPayloadSchema = z
   .object({
-    scenes: z.array(z.unknown()),
     overlays: z.array(z.unknown()),
     audioClips: z.array(z.unknown()),
     width: z.number().int().positive(),

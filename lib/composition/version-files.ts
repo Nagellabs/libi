@@ -29,15 +29,10 @@ export function collectReferencedFileIds(manifest: CompositionManifest): FileRef
   }
   for (const c of manifest.audioClips ?? []) {
     // An inline clip is bound to a video OVERLAY (`linkedOverlayId`).
-    // `linkedSceneId` is the retired video-scene spelling, still resolved so a
-    // legacy snapshot names its clips honestly rather than falling back.
     const linkedOverlay = c.linkedOverlayId
       ? (manifest.overlays ?? []).find((o) => o.id === c.linkedOverlayId)
       : undefined;
-    const linkedScene = c.linkedSceneId
-      ? (manifest.scenes ?? []).find((s) => s.id === c.linkedSceneId)
-      : undefined;
-    const linkedName = linkedOverlay?.displayName ?? linkedScene?.name;
+    const linkedName = linkedOverlay?.displayName;
     const name =
       c.label ??
       (linkedName

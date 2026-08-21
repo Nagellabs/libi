@@ -9,6 +9,7 @@
 import type { ZodSchema } from "zod/v3";
 import type { JobRecord } from "@/lib/db/schema/types";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
+import { remainingMs } from "@/lib/jobs/eta";
 
 /** Lifecycle state of a job; mirrors the DB column type. */
 export type JobStatus =
@@ -34,9 +35,16 @@ export interface JobStatusSnapshot {
   progressDone: number;
   progressTotal: number;
   progressUnit: string;
-  /** Estimated remaining wallclock; null when total is 0 or msPerUnit not yet computed. */
+  /** Estimated remaining wallclock. Null when total is 0, when msPerUnit is not
+   *  yet computed, OR when the estimate has been outlived by the wait — see
+   *  `remainingMs`. Null therefore means "unknown", never "nearly done". */
   etaMs: number | null;
   msPerUnit: number | null;
+  /** Wall-clock ms since the last progress tick, for a running job; null when
+   *  the job never reported progress or has already finished. Lets a caller
+   *  distinguish "working, quiet for 12 minutes" from "working, ticking every
+   *  second" — the difference the frozen-ETA bug hid. */
+  msSinceProgress: number | null;
   error: string | null;
   resultJson: string | null;
   startedAt: Date | null;
@@ -53,6 +61,9 @@ export interface ProgressEvent {
   unit: string;
   etaMs: number | null;
   msPerUnit: number | null;
+  /** Set on heartbeat re-sends (`JobManager.emitHeartbeat`), absent on real
+   *  ticks — where by definition no time has passed since the last one. */
+  msSinceProgress?: number | null;
 }
 
 /** What a registered runner sees during execution. The JobManager constructs
@@ -217,17 +228,47 @@ export interface EnqueueOptions {
   discardOutput?: boolean;
 }
 
-/** Row → snapshot mapper, exported so route handlers + tests can reuse. */
-export function snapshotFromRow(row: JobRecord): JobStatusSnapshot {
-  const runningRemaining =
-    row.progressTotal > 0 && row.msPerUnit != null
-      ? Math.max(0, (row.progressTotal - row.progressDone) * row.msPerUnit)
-      : null;
+/** Row → snapshot mapper, exported so route handlers + tests can reuse.
+ *
+ *  The clock is injectable for tests only; production callers omit it. It exists
+ *  because the ETA is time-dependent (see `remainingMs`) — reading the same row
+ *  twenty minutes apart must not yield the same estimate.
+ *
+ *  Deliberately an OPTIONS OBJECT rather than a positional `now: number`, and
+ *  that is not style. `rows.map(snapshotFromRow)` is the natural way to write the
+ *  list endpoint, and `Array.prototype.map` passes the ELEMENT INDEX as the
+ *  second argument — so a positional clock silently became `now = 0` for the
+ *  first row, making every job report `msSinceProgress: 0` and an undecayed ETA.
+ *  That shipped into `GET /api/jobs`, which is what `libi.list_jobs` reads, and
+ *  was caught only by watching a live job (2026-08-17). With an object, a stray
+ *  numeric index is falsy-or-not-an-object either way and the default clock
+ *  wins. */
+export function snapshotFromRow(
+  row: JobRecord,
+  opts?: { now?: number },
+): JobStatusSnapshot {
+  const now = opts?.now ?? Date.now();
   // Terminal jobs never carry a stale nonzero ETA: a completed job is 0ms
   // away, a failed/cancelled job has no meaningful remaining time (null).
   const isCompleted = row.status === "completed";
   const isFailedOrCancelled =
     row.status === "failed" || row.status === "cancelled";
+  const isTerminal = isCompleted || isFailedOrCancelled;
+  // Only meaningful while running: a finished job's "time since last tick" just
+  // measures how long ago it finished.
+  const msSinceProgress =
+    !isTerminal && row.lastProgressAt
+      ? Math.max(0, now - row.lastProgressAt.getTime())
+      : null;
+  // Aged by msSinceProgress, so a job that has gone quiet stops quoting the
+  // estimate it made before it went quiet. This read path and the live emit
+  // path share `remainingMs` precisely so they cannot disagree.
+  const runningRemaining = remainingMs({
+    total: row.progressTotal,
+    done: row.progressDone,
+    msPerUnit: row.msPerUnit,
+    msSinceProgress,
+  });
   const etaMs = isCompleted ? 0 : isFailedOrCancelled ? null : runningRemaining;
   // A completed job reads as fully done even if the final tick under-reported.
   const progressDone =
@@ -243,6 +284,7 @@ export function snapshotFromRow(row: JobRecord): JobStatusSnapshot {
     progressUnit: row.progressUnit,
     etaMs,
     msPerUnit: row.msPerUnit,
+    msSinceProgress,
     error: row.error,
     resultJson: row.resultJson,
     startedAt: row.startedAt,

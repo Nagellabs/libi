@@ -28,7 +28,6 @@ function comp(overlays: Overlay[]): Composition {
     width: 1080,
     height: 1920,
     fps: 30,
-    scenes: [],
     overlays,
     audioClips: [],
   } as unknown as Composition;

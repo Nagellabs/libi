@@ -21,7 +21,6 @@ function makeFakeSource() {
 function oneVideoComp(id: string, durationSec: number): Composition {
   return {
     fps: 30,
-    scenes: [],
     overlays: [
       { id, kind: "video", startTime: 0, duration: durationSec, videoUrl: "x", fileId: "f", z: 0, opacity: 1, rect: { x: 0, y: 0, width: 1920, height: 1080 } },
     ],
@@ -51,7 +50,6 @@ describe("applyBudget idempotency", () => {
     // Active clip 'act' keeps the playhead occupied; 'w' starts soon → warm.
     const comp = {
       fps: 30,
-      scenes: [],
       overlays: [
         { id: "act", kind: "video", startTime: 0, duration: 10, videoUrl: "x", fileId: "f1", z: 0, opacity: 1, rect: { x: 0, y: 0, width: 1920, height: 1080 } },
         { id: "w", kind: "video", startTime: 10, duration: 10, videoUrl: "y", fileId: "f2", z: 1, opacity: 1, rect: { x: 0, y: 0, width: 1920, height: 1080 } },

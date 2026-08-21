@@ -68,7 +68,6 @@ function mkComp(videoUrl: string): Composition {
     width: 320,
     height: 240,
     fps: 30,
-    scenes: [],
     overlays: [
       {
         id: "scene-1",

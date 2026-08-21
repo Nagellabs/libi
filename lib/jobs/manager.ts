@@ -67,6 +67,17 @@ function parseTerminalResult(
 
 /** Throttle ms for DB writes + progress emissions per the CLAUDE.md contract. */
 const PROGRESS_DEBOUNCE_MS = 1000;
+/**
+ * How often a running job re-sends its last progress with a re-aged ETA.
+ *
+ * Runs for EVERY job, including those with the watchdog disabled
+ * (`noProgressTimeoutMs: null`) — which is precisely the set that can go silent
+ * for many minutes, and precisely where the frozen ETA was visible. 15s is
+ * frequent enough that a countdown never looks stuck and cheap enough to be
+ * irrelevant: it re-sends values already in memory and touches neither the DB
+ * nor `lastProgressAt`.
+ */
+const PROGRESS_HEARTBEAT_MS = 15_000;
 /** Default no-progress watchdog timeout when the runner doesn't specify. */
 const DEFAULT_NO_PROGRESS_MS = 60_000;
 
@@ -79,6 +90,12 @@ export class JobManager extends EventEmitter {
   private inflight = new Map<string, Promise<unknown>>();
   /** Last progress emit per jobId, for throttle. */
   private lastEmitAt = new Map<string, number>();
+  /** Last REAL progress tick per job, replayed by `emitHeartbeat` with a re-aged
+   *  ETA while the job is quiet. Cleared in `runWithSlot`'s finally. */
+  private lastProgress = new Map<
+    string,
+    { kind: string; done: number; total: number; unit: string }
+  >();
   /** Tracks jobs aborted by the no-progress watchdog so the catch path can
    *  reclassify them from "cancelled" to "failed" with a clear error. */
   private watchdogTripped = new Set<string>();
@@ -162,6 +179,28 @@ export class JobManager extends EventEmitter {
    *  the first progress event. */
   getJobIdForToolCallId(toolCallId: string): string | null {
     return this.jobIdByToolCallId.get(toolCallId) ?? null;
+  }
+
+  /**
+   * Emit a terminal event with the job's toolCallIds ATTACHED to the payload.
+   *
+   * The attachment is the whole point and it is not a convenience. `runWithSlot`'s
+   * `finally` clears `toolCallIdByJob`, and terminal listeners are async (the
+   * push-notification one awaits `getStatus`), so a listener that looks the ids up
+   * itself resumes after the map is already empty and silently finds nothing. Any
+   * listener that needs to reach the chat row must read them off the payload.
+   */
+  private emitTerminal(
+    event: "completed" | "failed" | "cancelled",
+    jobId: string,
+    extra: Record<string, unknown> = {},
+  ): void {
+    const ids = this.toolCallIdByJob.get(jobId);
+    this.emit(event, {
+      jobId,
+      ...extra,
+      toolCallIds: ids ? Array.from(ids) : [],
+    });
   }
 
   async enqueue<P>(
@@ -359,7 +398,7 @@ export class JobManager extends EventEmitter {
       const fresh = await getJobById(jobId);
       if (fresh?.status === "cancel-requested") {
         await markCancelled(jobId);
-        this.emit("cancelled", { jobId });
+        this.emitTerminal("cancelled", jobId);
         throw new CancelledError(jobId);
       }
       return await this.runWithSlot<R>(jobId, fresh ?? row, runner);
@@ -435,6 +474,21 @@ export class JobManager extends EventEmitter {
       }, pollMs);
     }
 
+    // ── ETA heartbeat ──
+    // Unconditional, unlike the watchdog: a runner that opts out of the
+    // watchdog (a 6 GB download) is the one that most needs its ETA to keep
+    // moving. Skips work until the job has emitted at least one real tick.
+    const heartbeat: ReturnType<typeof setInterval> = setInterval(() => {
+      try {
+        this.emitHeartbeat(jobId);
+      } catch (err) {
+        logger.warn({ err, jobId }, "jobs.heartbeat.failed");
+      }
+    }, PROGRESS_HEARTBEAT_MS);
+    // Never hold the process open for a heartbeat — it is pure UI polish, and a
+    // stray one must not keep `npx libi` alive after work is done.
+    heartbeat.unref?.();
+
     const stateFile = partialPathFor(jobId);
     let resumeState: unknown | null = null;
     if (row.partialPath && fs.existsSync(row.partialPath)) {
@@ -490,7 +544,7 @@ export class JobManager extends EventEmitter {
         }
       }
       await markCompleted(jobId, JSON.stringify(result));
-      this.emit("completed", { jobId, result });
+      this.emitTerminal("completed", jobId, { result });
       return result;
     } catch (err) {
       if (this.watchdogTripped.has(jobId)) {
@@ -505,7 +559,7 @@ export class JobManager extends EventEmitter {
           { jobId, kind: row.kind, watchdogMs },
           "jobs.run.watchdog_failed",
         );
-        this.emit("failed", { jobId, error: message });
+        this.emitTerminal("failed", jobId, { error: message });
         // Re-throw as a regular Error (not CancelledError) so callers don't
         // treat it like a graceful cancel.
         throw new Error(message);
@@ -516,7 +570,7 @@ export class JobManager extends EventEmitter {
         } catch (e) {
           logger.error({ err: e, jobId }, "jobs.run.mark_cancelled_throw");
         }
-        this.emit("cancelled", { jobId });
+        this.emitTerminal("cancelled", jobId);
         throw err instanceof CancelledError ? err : new CancelledError(jobId);
       }
       const message = err instanceof Error ? err.message : String(err);
@@ -526,13 +580,15 @@ export class JobManager extends EventEmitter {
         logger.error({ err: e, jobId }, "jobs.run.mark_failed_throw");
       }
       logger.error({ jobId, kind: row.kind, err: message }, "jobs.run.failed");
-      this.emit("failed", { jobId, error: message });
+      this.emitTerminal("failed", jobId, { error: message });
       throw err;
     } finally {
       if (watchdog) clearInterval(watchdog);
+      clearInterval(heartbeat);
       this.cancelFlags.delete(jobId);
       this.progressChains.delete(jobId);
       this.etaTrackers.delete(jobId);
+      this.lastProgress.delete(jobId);
       const tcIds = this.toolCallIdByJob.get(jobId);
       if (tcIds) {
         for (const tcid of tcIds) this.jobIdByToolCallId.delete(tcid);
@@ -573,6 +629,9 @@ export class JobManager extends EventEmitter {
       tracker.add(now, done);
       const msPerUnit = tracker.msPerUnit();
       await updateProgress(jobId, { done, total, unit, msPerUnit });
+      // Remember the last real tick so the heartbeat can re-emit it with a
+      // freshly aged ETA without inventing progress that didn't happen.
+      this.lastProgress.set(jobId, { kind, done, total, unit });
       const ev: ProgressEvent = {
         jobId,
         kind,
@@ -580,45 +639,95 @@ export class JobManager extends EventEmitter {
         total,
         unit,
         msPerUnit,
+        // No `now` argument: this IS the tick, so zero time has passed and
+        // there is nothing to age. The heartbeat passes `now` instead.
         etaMs: tracker.etaMs(total, done),
       };
       this.emit("progress", ev);
-      // `notify.jobProgress` is the in-process bridge used by the Settings UI
-      // (which polls /api/jobs/[id]/events SSE) and any future non-MCP listener.
-      // MCP tools forward progress directly via the standard
-      // `notifications/progress` mechanism — see `lib/jobs/progress-forwarder.ts`.
-      const toolCallIds = this.toolCallIdByJob.get(jobId);
-      const hint = this.toolHintByJob.get(jobId);
-      const baseEvent = {
-        jobId: ev.jobId,
-        kind: ev.kind,
-        done: ev.done,
-        total: ev.total,
-        unit: ev.unit,
-        etaMs: ev.etaMs,
-        ...(hint
-          ? {
-              toolName: hint.toolName,
-              toolArgs: hint.toolArgs,
-              ...(hint.progressLabel ? { progressLabel: hint.progressLabel } : {}),
-            }
-          : {}),
-      };
-      try {
-        if (toolCallIds && toolCallIds.size > 0) {
-          for (const tcid of toolCallIds) {
-            notify.jobProgress({ ...baseEvent, toolCallId: tcid });
-          }
-        } else {
-          notify.jobProgress({ ...baseEvent, toolCallId: undefined });
-        }
-      } catch (err) {
-        logger.warn({ err, jobId }, "jobs.progress.notify_failed");
-      }
+      this.notifyProgress(ev);
     }).catch((err) => {
       logger.warn({ err, jobId }, "jobs.progress.update_failed");
     });
     this.progressChains.set(jobId, next);
+  }
+
+  /**
+   * Fan a progress event out to `notify.jobProgress` — the in-process bridge
+   * used by the Settings UI (which polls /api/jobs/[id]/events SSE), the chat
+   * tool-call row, and any future non-MCP listener. MCP tools forward progress
+   * directly via the standard `notifications/progress` mechanism instead — see
+   * `lib/jobs/progress-forwarder.ts`.
+   *
+   * Split out of `handleProgress` so `emitHeartbeat` can re-send the last known
+   * progress with a re-aged ETA without also re-recording it as a new tick.
+   */
+  private notifyProgress(ev: ProgressEvent): void {
+    const toolCallIds = this.toolCallIdByJob.get(ev.jobId);
+    const hint = this.toolHintByJob.get(ev.jobId);
+    const baseEvent = {
+      jobId: ev.jobId,
+      kind: ev.kind,
+      done: ev.done,
+      total: ev.total,
+      unit: ev.unit,
+      etaMs: ev.etaMs,
+      msSinceProgress: ev.msSinceProgress ?? null,
+      ...(hint
+        ? {
+            toolName: hint.toolName,
+            toolArgs: hint.toolArgs,
+            ...(hint.progressLabel ? { progressLabel: hint.progressLabel } : {}),
+          }
+        : {}),
+    };
+    try {
+      if (toolCallIds && toolCallIds.size > 0) {
+        for (const tcid of toolCallIds) {
+          notify.jobProgress({ ...baseEvent, toolCallId: tcid });
+        }
+      } else {
+        notify.jobProgress({ ...baseEvent, toolCallId: undefined });
+      }
+    } catch (err) {
+      logger.warn({ err, jobId: ev.jobId }, "jobs.progress.notify_failed");
+    }
+  }
+
+  /**
+   * Re-send the last known progress with a freshly aged ETA.
+   *
+   * Why this exists: the chat row's progress line is a STRING baked at emit
+   * time, so a job that stops ticking leaves whatever countdown it last quoted
+   * frozen on screen. The ACE-Step download read "ETA 1m 12s" for fifteen
+   * minutes that way (session 9c3ce4d0, 2026-08-17) — one 6.2 GB file inside a
+   * file-counted job emits nothing at all while it transfers. Aging the ETA in
+   * `remainingMs` is only half the fix; something has to re-ask.
+   *
+   * Deliberately does NOT call `updateProgress` or `tracker.add`. Both would
+   * move `lastProgressAt`, which is exactly the timestamp the staleness rule and
+   * the no-progress watchdog measure from — a heartbeat that touched it would
+   * make every job look permanently healthy and silently defuse the watchdog.
+   * A heartbeat reports the passage of time, not the arrival of progress.
+   */
+  private emitHeartbeat(jobId: string): void {
+    const last = this.lastProgress.get(jobId);
+    if (!last) return; // nothing real to re-send yet
+    const tracker = this.etaTrackers.get(jobId);
+    if (!tracker) return;
+    const now = Date.now();
+    const lastSampleAt = tracker.lastSampleAt();
+    const ev: ProgressEvent = {
+      jobId,
+      kind: last.kind,
+      done: last.done,
+      total: last.total,
+      unit: last.unit,
+      msPerUnit: tracker.msPerUnit(),
+      etaMs: tracker.etaMs(last.total, last.done, now),
+      msSinceProgress: lastSampleAt !== null ? now - lastSampleAt : null,
+    };
+    this.emit("progress", ev);
+    this.notifyProgress(ev);
   }
 }
 

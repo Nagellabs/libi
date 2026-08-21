@@ -74,4 +74,97 @@ describe("snapshotFromRow", () => {
     expect(snap.etaMs).toBe(5000);
     expect(snap.progressDone).toBe(50);
   });
+
+  // This read path is what `libi.get_job_status` hands the agent, so a frozen
+  // number here becomes a confident wrong answer in chat.
+  it("ages a running job's ETA by the time since its last tick", () => {
+    const now = 1_000_000;
+    const snap = snapshotFromRow(
+      baseRow({
+        status: "running",
+        progressDone: 50,
+        progressTotal: 100,
+        msPerUnit: 100, // naive estimate: 5s
+        lastProgressAt: new Date(now - 2000),
+      }),
+      { now },
+    );
+    expect(snap.etaMs).toBe(3000);
+    expect(snap.msSinceProgress).toBe(2000);
+  });
+
+  it("withdraws a running job's ETA once the wait outlives it", () => {
+    const now = 1_000_000;
+    const snap = snapshotFromRow(
+      baseRow({
+        status: "running",
+        progressDone: 11,
+        progressTotal: 12,
+        msPerUnit: 65_000, // predicted ~1m 5s
+        lastProgressAt: new Date(now - 15 * 60_000), // quiet for 15 minutes
+      }),
+      { now },
+    );
+    expect(snap.etaMs).toBeNull();
+    expect(snap.msSinceProgress).toBe(15 * 60_000);
+  });
+
+  it("reports no msSinceProgress for a finished job", () => {
+    const now = 1_000_000;
+    const snap = snapshotFromRow(
+      baseRow({
+        status: "completed",
+        progressDone: 12,
+        progressTotal: 12,
+        msPerUnit: 65_000,
+        lastProgressAt: new Date(now - 60_000),
+      }),
+      { now },
+    );
+    // Would otherwise read as "quiet for 1m" on a job that simply ended.
+    expect(snap.msSinceProgress).toBeNull();
+    expect(snap.etaMs).toBe(0);
+  });
+
+  // Regression: the clock used to be a positional `now: number`, so the natural
+  // `rows.map(snapshotFromRow)` in GET /api/jobs passed the ELEMENT INDEX as the
+  // clock — `now = 0` for row 0. Every job then reported msSinceProgress 0 and an
+  // undecayed ETA, silently defeating the staleness rule on the very endpoint
+  // `libi.list_jobs` reads. Caught by watching a live job, not by a test.
+  //
+  // The options-object signature now makes that call a COMPILE error, which is
+  // the real fix — hence the cast below, which is the only way to still express
+  // the mistake. This asserts the runtime is also tolerant, so the same shape
+  // reached from untyped JS degrades to the default clock instead of to zero.
+  it("survives being used point-free in .map()", () => {
+    const realNow = Date.now();
+    const rows = [
+      baseRow({
+        id: "row-0",
+        status: "running",
+        progressDone: 11,
+        progressTotal: 12,
+        msPerUnit: 65_000,
+        lastProgressAt: new Date(realNow - 15 * 60_000),
+      }),
+      baseRow({
+        id: "row-1",
+        status: "running",
+        progressDone: 11,
+        progressTotal: 12,
+        msPerUnit: 65_000,
+        lastProgressAt: new Date(realNow - 15 * 60_000),
+      }),
+    ];
+    // The shape that broke it — index 0 and 1 land in the second parameter.
+    const pointFree = snapshotFromRow as unknown as (
+      row: (typeof rows)[number],
+      index: number,
+    ) => ReturnType<typeof snapshotFromRow>;
+    const snaps = rows.map(pointFree);
+    for (const s of snaps) {
+      expect(s.msSinceProgress).toBeGreaterThan(14 * 60_000);
+      expect(s.etaMs).toBeNull();
+    }
+  });
 });

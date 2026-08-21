@@ -21,8 +21,8 @@ describe("snapshot/draft end-to-end", () => {
 
     // Edit 1 → creates draft
     await saveManifest(piece.id, {
-      sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "v1", duration: 1, drawFunction: "" }],
+      width: 1920, height: 1080, fps: 30,
+      overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v1", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
     });
     state = await getPieceState(piece.id);
     expect(state.hasDraft).toBe(true);
@@ -31,28 +31,28 @@ describe("snapshot/draft end-to-end", () => {
     await commitDraft(piece.id, { summary: "v1", actor: "agent" });
     state = await getPieceState(piece.id);
     expect(state.hasDraft).toBe(false);
-    expect((await loadCurrentSnapshot(piece.id))?.scenes?.[0].name).toBe("v1");
+    expect((await loadCurrentSnapshot(piece.id))?.overlays?.[0].displayName).toBe("v1");
 
     // Edit 2 → new draft on top
     await saveManifest(piece.id, {
-      sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "v2", duration: 1, drawFunction: "" }],
+      width: 1920, height: 1080, fps: 30,
+      overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v2", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
     });
     state = await getPieceState(piece.id);
     expect(state.hasDraft).toBe(true);
-    expect((await loadManifest(piece.id)).scenes?.[0].name).toBe("v2");
-    expect((await loadCurrentSnapshot(piece.id))?.scenes?.[0].name).toBe("v1");
+    expect((await loadManifest(piece.id)).overlays?.[0].displayName).toBe("v2");
+    expect((await loadCurrentSnapshot(piece.id))?.overlays?.[0].displayName).toBe("v1");
 
     // Discard → back to snapshot
     await discardDraft(piece.id);
     state = await getPieceState(piece.id);
     expect(state.hasDraft).toBe(false);
-    expect((await loadManifest(piece.id)).scenes?.[0].name).toBe("v1");
+    expect((await loadManifest(piece.id)).overlays?.[0].displayName).toBe("v1");
 
     // Edit 3 + commit (so history has 2 entries: original v1 + this one)
     await saveManifest(piece.id, {
-      sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "v3", duration: 1, drawFunction: "" }],
+      width: 1920, height: 1080, fps: 30,
+      overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v3", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
     });
     const commit2 = await commitDraft(piece.id, { summary: "v3", actor: "agent" });
     expect(commit2.snapshotId).toBeTruthy();
@@ -62,6 +62,6 @@ describe("snapshot/draft end-to-end", () => {
     expect(state.recentSnapshots.length).toBeGreaterThanOrEqual(1);
     const oldSnapId = state.recentSnapshots[state.recentSnapshots.length - 1].id; // oldest
     await restoreSnapshot(piece.id, oldSnapId);
-    expect((await loadCurrentSnapshot(piece.id))?.scenes?.[0].name).toBe("v1");
+    expect((await loadCurrentSnapshot(piece.id))?.overlays?.[0].displayName).toBe("v1");
   });
 });

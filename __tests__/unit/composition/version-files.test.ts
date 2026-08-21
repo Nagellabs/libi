@@ -3,17 +3,15 @@ import { collectReferencedFileIds, computeMissingRefs } from "@/lib/composition/
 import type { CompositionManifest } from "@/lib/composition/persistence";
 
 const base = (): CompositionManifest => ({
-  sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [], scenes: [],
+  width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [],
 });
 
 describe("collectReferencedFileIds", () => {
   it("gathers fileIds from image/video overlays and audio clips (canvas scenes reference none)", () => {
     const m: CompositionManifest = {
       ...base(),
-      scenes: [
-        { id: "s2", type: "canvas", name: "Hook", duration: 2, drawFunction: "//" },
-      ],
       overlays: [
+        { id: "code-s2", kind: "code" as const, displayName: "Hook", startTime: 0, duration: 2, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "//" },
         { id: "v1", kind: "video", startTime: 0, duration: 5, rect: { x: 0, y: 0, width: 1, height: 1 }, z: 0, opacity: 1, fileId: "vid-1" },
         { id: "o1", kind: "image", startTime: 0, duration: 1, rect: { x: 0, y: 0, width: 1, height: 1 }, z: 1, opacity: 1, fileId: "img-1" },
         { id: "o2", kind: "text", startTime: 0, duration: 1, rect: { x: 0, y: 0, width: 1, height: 1 }, z: 0, opacity: 1, content: "x", font: "Inter", color: "#fff", align: "center" },

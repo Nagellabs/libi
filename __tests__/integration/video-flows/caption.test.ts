@@ -137,7 +137,6 @@ skipIf("Layer-1: FfmpegOverlayBackend caption burn-in", () => {
       width: 320,
       height: 240,
       fps: 24,
-      scenes: [],
       overlays: [
         {
           id: "scene-caption",

@@ -52,6 +52,13 @@ export interface ShellUpdateStatusDto {
   percent: number | null;
   error: string | null;
   checkedAt: number | null;
+  /**
+   * True when the shell downloads updates itself and parks at "ready" for
+   * an explicit restart. Absent on old shells, which only download from a
+   * click and restart themselves right after — the UI keeps the
+   * click-to-install offer for those.
+   */
+  autoDownload?: boolean;
 }
 
 export interface RuntimeUpdateDto {
@@ -77,30 +84,70 @@ export function isInstallInFlight(dto: RuntimeUpdateDto | undefined): boolean {
 
 /** True while the SHELL is downloading / about to restart into its update. */
 export function isShellInstallInFlight(dto: RuntimeUpdateDto | undefined): boolean {
-  const p = dto?.shell?.phase;
-  return p === "downloading" || p === "ready";
+  const shell = dto?.shell;
+  if (!shell) return false;
+  if (shell.phase === "downloading") return true;
+  // "ready" is only transient on OLD shells (they restart themselves moments
+  // later). On auto-download shells it is a stable waiting state — treating
+  // it as in-flight would leave the 2s poll running forever.
+  return shell.phase === "ready" && !shell.autoDownload;
 }
 
 /**
- * The one thing the user is offered, regardless of channel.
+ * Since the auto-download change there are two distinct things the UI can
+ * put in front of the user, and most of the time it is NEITHER — downloads
+ * run silently:
  *
- * The shell wins when both channels have something: a new shell bundles a
- * fresh runtime snapshot anyway, and the reverse order could install a
- * runtime the OLD shell can't run. It also covers `shell-update-required`
- * (a runtime this shell can't load) — the shell update IS that state's
- * remedy, turning its passive "go download a new Libi" copy into a button.
+ *  * `restartOffer()` — a downloaded update waiting for its restart. The
+ *    normal case; renders as "Libi X is ready — Restart to apply".
+ *  * `updateOffer()` — a download that still needs a CLICK to start: a
+ *    runtime auto-download that failed (Settings' "Try again"), or a shell
+ *    update surfaced by an old shell that can't auto-download. The
+ *    exception; renders as the legacy "Install & restart".
+ *
+ * Shell wins over runtime in both (a new shell bundles a fresh runtime
+ * snapshot anyway, and the reverse order could install a runtime the OLD
+ * shell can't run).
  */
 export interface UpdateOffer {
   target: "runtime" | "shell";
   version: string;
 }
 
-export function updateOffer(dto: RuntimeUpdateDto | undefined): UpdateOffer | null {
+/** A downloaded update waiting for a restart, or null. */
+export function restartOffer(dto: RuntimeUpdateDto | undefined): UpdateOffer | null {
   const shell = dto?.shell;
-  if (shell && shell.phase === "update-available" && shell.latestVersion) {
+  // Old shells (no autoDownload) restart themselves moments after "ready" —
+  // that state renders as "Restarting…", never as an offer.
+  if (shell && shell.phase === "ready" && shell.latestVersion && shell.autoDownload) {
     return { target: "shell", version: shell.latestVersion };
   }
-  if (dto?.update.state === "update-available" && dto.update.latestVersion) {
+  if (dto?.pendingVersion) {
+    return { target: "runtime", version: dto.pendingVersion };
+  }
+  return null;
+}
+
+/** An update that still needs a click to DOWNLOAD, or null. */
+export function updateOffer(dto: RuntimeUpdateDto | undefined): UpdateOffer | null {
+  const shell = dto?.shell;
+  if (
+    shell &&
+    shell.phase === "update-available" &&
+    shell.latestVersion &&
+    !shell.autoDownload
+  ) {
+    return { target: "shell", version: shell.latestVersion };
+  }
+  if (
+    dto?.update.state === "update-available" &&
+    dto.update.latestVersion &&
+    // The server auto-downloads; a click is only useful after its attempt
+    // failed. (While the download runs, `install` is queued/running and the
+    // UI shows progress instead.)
+    dto.install?.status === "failed" &&
+    dto.pendingVersion !== dto.update.latestVersion
+  ) {
     return { target: "runtime", version: dto.update.latestVersion };
   }
   return null;
@@ -142,6 +189,33 @@ export function useRecheckRuntimeUpdate() {
 export interface InstallUpdateResponse {
   jobId?: string;
   version: string;
+}
+
+/**
+ * "Restart to apply" — the click that applies a downloaded update.
+ * Runtime target: the same server reset the MCPs & Skills "Restart server"
+ * button uses (`app.relaunch()` in the packaged shell). Shell target: the
+ * update route relays to the shell's `restart()` and it quits-and-installs.
+ */
+export function useRestartToApply() {
+  return useMutation({
+    mutationFn: async (offer: UpdateOffer): Promise<void> => {
+      if (offer.target === "shell") {
+        const res = await fetch("/api/runtime/update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ version: offer.version, target: "shell", action: "restart" }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { message?: string };
+          throw new Error(body.message ?? `Restart failed to start (${res.status})`);
+        }
+        return;
+      }
+      const res = await fetch("/api/server-status/reset", { method: "POST" });
+      if (!res.ok) throw new Error(`Restart failed to start (${res.status})`);
+    },
+  });
 }
 
 export function useInstallRuntimeUpdate() {

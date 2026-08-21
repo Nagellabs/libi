@@ -12,8 +12,9 @@ Every code overlay's draw function receives an **element-local** context:
 | `width` / `height` | the overlay RECT's size (draw in rect-local coords). |
 | `ctx` | the Canvas2D context (already translated to the rect origin). |
 
-This is the SAME contract a canvas scene's draw function sees (scene-local), so
-a body that works in a scene works as an overlay unchanged.
+Timing is ELEMENT-LOCAL: the clock starts at the overlay's own `startTime`, not
+at the composition's zero. A body written against one overlay's window behaves
+identically in another.
 
 **Do:** `const n = Math.round(progress * TEXT.length);`
 **Never:** pace off composition frames, e.g. `frame / (totalFrames * 0.7)` while

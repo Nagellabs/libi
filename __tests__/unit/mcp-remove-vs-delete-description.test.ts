@@ -17,11 +17,4 @@ describe("MCP tool descriptions enforce Remove-vs-Delete", () => {
     expect(match![1]).toMatch(/stays in resources/i);
   });
 
-  it("delete_scene description says source file stays", async () => {
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync("mcp/server.ts", "utf-8");
-    const match = src.match(/"libi\.delete_scene"[\s\S]*?description:\s*"([^"]+)"/);
-    expect(match).toBeTruthy();
-    expect(match![1]).toMatch(/NOT deleted/i);
-  });
 });

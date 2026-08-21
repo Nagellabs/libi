@@ -58,6 +58,14 @@ Update the tests that the change touches, cover any new code path, and keep
 `docs-local/test-registry.json` in sync — then run `npm test` and report what it actually
 printed (re-read the ABI trap in `AGENTS.md` → Testing before trusting the summary).
 
+## Releases
+
+`docs-local/release/next-release.md` is the running queue for the next Friday/Saturday
+window: what must be published (npm, Electron, or both), what to verify afterwards, and
+a shipped log. **When a change lands that needs publishing, add it there in the same
+turn** — a merged feature nobody queued is a feature that misses the window. Read it at
+the start of any release, and empty it into the shipped log when the release is out.
+
 ## After a release
 
 Verify the *published* artifacts as a fresh user would receive them — not the working

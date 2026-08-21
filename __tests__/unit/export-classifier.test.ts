@@ -4,7 +4,7 @@ import type { Composition, VideoOverlay } from "@/lib/engine/types";
 
 function mkComp(overrides: Partial<Composition>): Composition {
   return {
-    id: "c", name: "", width: 1920, height: 1080, fps: 30, scenes: [],
+    id: "c", name: "", width: 1920, height: 1080, fps: 30, 
     ...overrides,
   };
 }
@@ -26,20 +26,8 @@ function baseVideo(overrides: Partial<VideoOverlay> = {}): VideoOverlay {
 }
 
 describe("classifyExportShape", () => {
-  it("empty composition (no scenes, overlays, or audio) → 'error'", () => {
-    expect(classifyExportShape(mkComp({ scenes: [] }))).toEqual({ tag: "error", reason: "nothing to export" });
-  });
-
-  it("all-canvas scenes → 'chromium-render'", () => {
-    expect(
-      classifyExportShape(
-        mkComp({
-          scenes: [
-            { id: "a", name: "a", type: "canvas", duration: 2, draw: () => {} },
-          ],
-        }),
-      ),
-    ).toEqual({ tag: "chromium-render" });
+  it("empty composition (no overlays or audio) → 'error'", () => {
+    expect(classifyExportShape(mkComp({ overlays: [] }))).toEqual({ tag: "error", reason: "nothing to export" });
   });
 
   it("single base video overlay, no other overlay, no trim → 'stream-copy-trim'", () => {
@@ -117,17 +105,6 @@ describe("classifyExportShape", () => {
         }),
       ),
     ).toEqual({ tag: "ffmpeg-overlay" });
-  });
-
-  it("any canvas scene present → 'chromium-render', even with a base-shaped video overlay", () => {
-    expect(
-      classifyExportShape(
-        mkComp({
-          scenes: [{ id: "a", name: "a", type: "canvas", duration: 1, draw: () => {} }],
-          overlays: [baseVideo()],
-        }),
-      ),
-    ).toEqual({ tag: "chromium-render" });
   });
 
   it("two full-frame video overlays at the same z → 'chromium-render' (ambiguous base)", () => {

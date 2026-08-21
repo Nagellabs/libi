@@ -1,15 +1,21 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { classifyExportShape } from "@/lib/export/classifier";
-import type { Composition, CanvasScene } from "@/lib/engine/types";
+import type { Composition, Overlay } from "@/lib/engine/types";
 
-function mkCanvasScene(overrides: Partial<CanvasScene> = {}): CanvasScene {
+/** A full-frame code overlay — a JS draw fn the ffmpeg graph cannot run, which
+ *  is what forces the chromium path. */
+function mkOverlay(overrides: Partial<Overlay> = {}): Overlay {
   return {
     id: "s1",
-    type: "canvas",
-    durationInFrames: 30,
+    kind: "code",
+    startTime: 0,
+    duration: 1,
+    z: 0,
+    opacity: 1,
+    rect: { x: 0, y: 0, width: 1920, height: 1080 },
     drawFunction: "() => {}",
     ...overrides,
-  } as CanvasScene;
+  } as Overlay;
 }
 
 function mkComp(overrides: Partial<Composition> = {}): Composition {
@@ -18,8 +24,7 @@ function mkComp(overrides: Partial<Composition> = {}): Composition {
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: [mkCanvasScene()],
-    overlays: [],
+    overlays: [mkOverlay()],
     ...overrides,
   } as Composition;
 }
@@ -31,12 +36,12 @@ describe("classifier — chromium-render shape", () => {
     else process.env.LIBI_EXPORT_USE_BROWSER_CANVAS = originalFlag;
   });
 
-  it("emits chromium-render for a canvas scene", () => {
+  it("emits chromium-render for a code overlay", () => {
     expect(classifyExportShape(mkComp())).toEqual({ tag: "chromium-render" });
   });
 
-  it("emits chromium-render for multi-scene compositions", () => {
-    const comp = mkComp({ scenes: [mkCanvasScene({ id: "a" }), mkCanvasScene({ id: "b" })] });
+  it("emits chromium-render for a composition of code overlays", () => {
+    const comp = mkComp({ overlays: [mkOverlay({ id: "a" }), mkOverlay({ id: "b" })] });
     expect(classifyExportShape(comp)).toEqual({ tag: "chromium-render" });
   });
 

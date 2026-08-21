@@ -1,6 +1,7 @@
 import { Input, UrlSource, ALL_FORMATS, CanvasSink } from "mediabunny";
 import type { VideoFrameSource } from "./video-frame-source";
 import { FrameRing } from "@/lib/preview/frame-ring";
+import { mediaFetchRetryDelay } from "./media-fetch-retry";
 import { pumpDecision } from "@/lib/preview/decode-ahead";
 import {
   RING_CAPACITY,
@@ -91,7 +92,12 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
   }
 
   private async init(url: string): Promise<void> {
-    const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS });
+    const input = new Input({
+      // Bounded retries: mediabunny's default retries a same-origin fetch
+      // failure forever. See media-fetch-retry.ts.
+      source: new UrlSource(url, { getRetryDelay: mediaFetchRetryDelay }),
+      formats: ALL_FORMATS,
+    });
     this.input = input;
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error("MediaBunnyFrameSource: no video track found in " + url);

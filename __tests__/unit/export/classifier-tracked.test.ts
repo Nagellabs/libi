@@ -22,7 +22,6 @@ describe("classifier tracked-overlay routing", () => {
   it("base video overlay + tracked overlay → fallback (chromium or canvas-source)", () => {
     const comp: Composition = {
       id: "c", name: "c", width: 1920, height: 1080, fps: 30,
-      scenes: [],
       overlays: [baseVideo, {
         id: "ov", kind: "tracked", startTime: 0, duration: 5,
         rect: { x: 0, y: 0, width: 100, height: 100 }, z: 1, opacity: 1,

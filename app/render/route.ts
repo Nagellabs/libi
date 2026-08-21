@@ -13,6 +13,8 @@
  * `window.__libiRender.runRender`, then invokes it.
  */
 
+import { bundledFontFaceCss } from "@/lib/fonts/bundled";
+
 function escapeForJs(s: string): string {
   // The value ends up inside a double-quoted JS string literal in HTML, so
   // we need to escape backslashes, both quote styles, and anything that could
@@ -45,6 +47,7 @@ export async function GET(req: Request): Promise<Response> {
     <meta charset="utf-8" />
     <title>Libi Render</title>
     <style>
+${bundledFontFaceCss()}
       html, body { margin: 0; padding: 0; background: #111; color: #fff; font-family: system-ui, sans-serif; }
       #status { padding: 16px; }
     </style>

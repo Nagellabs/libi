@@ -14,7 +14,6 @@
  */
 import { randomUUID } from "node:crypto";
 import type { ExportSettings, Overlay, AudioClip } from "@/lib/engine/types";
-import type { SceneData } from "@/lib/composition/build-composition";
 import type { FileRecord } from "@/lib/db/schema/types";
 
 /**
@@ -26,7 +25,6 @@ import type { FileRecord } from "@/lib/db/schema/types";
  * data that the client re-hydrates via `buildComposition(...)`.
  */
 export interface RenderPayload {
-  scenes: SceneData[];
   overlays: Overlay[];
   audioClips: AudioClip[];
   width: number;

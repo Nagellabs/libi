@@ -8,7 +8,6 @@ import { useEditorState } from "@/lib/editor-state-context";
 import LayersInspectorPanel from "@/components/preview/layers-inspector-panel";
 import type { AudioClip, Composition, TextOverlay } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
-import type { SceneData } from "@/lib/composition/build-composition";
 import { useWebAudioMaster } from "@/hooks/preview/use-web-audio-master";
 import { useTransport } from "@/hooks/preview/use-transport";
 import { usePreviewAssets } from "@/hooks/editor/use-preview-assets";
@@ -25,7 +24,6 @@ import PreviewPlayer from "@/components/preview/preview-player";
 import type { EffectsFamily } from "@/components/preview/effects-panel";
 import Timeline from "@/components/preview/timeline";
 // NOTE: all three menu/dialog components are DEFAULT exports.
-import SceneContextMenu from "@/components/preview/scene-context-menu";
 import AudioClipContextMenu from "@/components/preview/audio-clip-context-menu";
 import OverlayClipContextMenu from "@/components/preview/overlay-clip-context-menu";
 import KeyframeContextMenu from "@/components/preview/keyframe-context-menu";
@@ -83,7 +81,6 @@ interface PendingSeek {
 export interface PreviewSurfaceProps {
   composition: Composition | null;
   totalFrames: number;
-  scenes: SceneData[];
   pieceId: string;
   pieceName: string | null;
   files: FileRecord[];
@@ -122,7 +119,6 @@ export interface PreviewSurfaceProps {
 export default function PreviewSurface({
   composition,
   totalFrames,
-  scenes,
   pieceId,
   pieceName,
   files,
@@ -620,7 +616,7 @@ export default function PreviewSurface({
   // Snapshot view is read-only: drop-create + inline caption must be inert.
   const overlaysReadOnly = viewMode === "snapshot";
 
-  // ── Layers/inspector panel (third docked panel, sibling of scene-details) ──
+  // ── Layers/inspector panel (third docked panel) ──
   // Same docked-collapse-to-0 pattern as the details panel so PreviewPlayer is
   // never remounted: the layers Panel stays mounted and the group's layout is
   // driven imperatively via setLayout (main:100/layers:0 when undocked).
@@ -812,27 +808,11 @@ export default function PreviewSurface({
     keyframeSelectionStore.set(null);
   }, [pieceId, transport.seek, selectionStore, keyframeSelectionStore]);
 
-  // Auto-show seek: once the navigated piece's composition is loaded (and not
-  // mid-refetch), seek to the requested scene's start, then clear the request.
-  useEffect(() => {
-    if (!pendingSeek) return;
-    if (pendingSeek.pieceId !== pieceId) return;
-    if (isCompositionFetching) return;
-    if (scenes.length === 0) return;
-    const idx = scenes.findIndex((s) => s.id === pendingSeek.sceneId);
-    onPendingSeekConsumed();
-    if (idx === -1) return;
-    const fps = 30; // matches buildComposition
-    let f = 0;
-    for (let i = 0; i < idx; i++) f += Math.round(scenes[i].duration * fps);
-    transport.seek(f);
-  }, [pendingSeek, pieceId, scenes, isCompositionFetching, transport.seek, onPendingSeekConsumed]);
 
   // Timeline marker ticks (driven by PreviewPlayer's selected tracked anchors).
   const [timelineMarkers, setTimelineMarkers] = useState<{ time: number; id: string }[]>([]);
 
   // Context-menu + duck-dialog state (triggered from the Timeline).
-  const [sceneContextMenu, setSceneContextMenu] = useState<{ sceneId: string; x: number; y: number } | null>(null);
   const [contextMenu, setContextMenu] = useState<{ clipId: string; x: number; y: number } | null>(null);
   const [overlayContextMenu, setOverlayContextMenu] = useState<{ overlayId: string; x: number; y: number } | null>(null);
   // Keyframe-diamond right-click menu — separate from the clip menu so the
@@ -846,10 +826,6 @@ export default function PreviewSurface({
 
   // Stable Timeline props — recomputed only when their real inputs change, so
   // this component's 30 Hz re-render does not re-allocate them each frame.
-  const timelineScenes = useMemo(
-    () => scenes.map((s) => ({ id: s.id, name: s.name, duration: s.duration })),
-    [scenes],
-  );
   const timelineAudioClips = composition?.audioClips ?? EMPTY_AUDIO_CLIPS;
   const handleToggleClipEnabled = useCallback(
     (clipId: string) => {
@@ -902,10 +878,6 @@ export default function PreviewSurface({
       updateClip.mutate({ clipId, patch });
     },
     [updateClip],
-  );
-  const handleSceneContextMenu = useCallback(
-    (sceneId: string, x: number, y: number) => setSceneContextMenu({ sceneId, x, y }),
-    [],
   );
   const handleOverlayContextMenu = useCallback(
     (overlayId: string, x: number, y: number) => setOverlayContextMenu({ overlayId, x, y }),
@@ -1165,12 +1137,10 @@ export default function PreviewSurface({
               frameStore={transport.frameStore}
               fps={composition?.fps ?? 30}
               onFrameChange={transport.seek}
-              scenes={timelineScenes}
               composition={mergedComposition}
               audioClips={timelineAudioClips}
               onToggleClipEnabled={handleToggleClipEnabled}
               onClipContextMenu={handleClipContextMenu}
-              onSceneContextMenu={handleSceneContextMenu}
               onOverlayContextMenu={handleOverlayContextMenu}
               markers={timelineMarkers}
               onMarkerClick={seekToSeconds}
@@ -1206,34 +1176,6 @@ export default function PreviewSurface({
         </Panel>
       </Group>
 
-      {sceneContextMenu && composition && (() => {
-        const scene = composition.scenes.find((s) => s.id === sceneContextMenu.sceneId);
-        if (!scene) return null;
-        // Scene global start = Σ durations of the scenes ahead of it.
-        let sceneStart = 0;
-        for (const s of composition.scenes) {
-          if (s.id === scene.id) break;
-          sceneStart += s.duration;
-        }
-        const playheadTime = transport.getFrame() / (composition.fps || 30);
-        return (
-          <SceneContextMenu
-            sceneId={scene.id}
-            sceneName={scene.name}
-            sceneStart={sceneStart}
-            sceneDuration={scene.duration}
-            playheadTime={playheadTime}
-            x={sceneContextMenu.x}
-            y={sceneContextMenu.y}
-            onClose={() => setSceneContextMenu(null)}
-            onCut={() => clipOps.split.mutate({ targetId: scene.id, atTime: playheadTime })}
-            onDuplicate={() => clipOps.duplicate.mutate({ targetId: scene.id })}
-            onRemove={() => {
-              void fetch(`/api/pieces/${pieceId}/scenes/${scene.id}`, { method: "DELETE" });
-            }}
-          />
-        );
-      })()}
 
       {contextMenu && composition?.audioClips && (() => {
         const clip = composition.audioClips.find((c) => c.id === contextMenu.clipId);

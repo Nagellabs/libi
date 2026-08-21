@@ -41,7 +41,6 @@ function setup(pieceId: string | null = "p1") {
   // to mutate (overlays live at manifest.overlays).
   qc.setQueryData(pieceKeys.composition("p1"), {
     manifest: {
-      sceneOrder: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -65,7 +64,6 @@ function setup(pieceId: string | null = "p1") {
         },
       ],
     },
-    scenes: [],
     audioClips: [],
   });
 
@@ -300,8 +298,7 @@ describe("useOverlayTransformCommit", () => {
     const store: OverlayEditStore = createOverlayEditStore();
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     qc.setQueryData(pieceKeys.composition("p1"), {
-      manifest: { sceneOrder: [], width: 1920, height: 1080, fps: 30, overlays: [] },
-      scenes: [],
+      manifest: { width: 1920, height: 1080, fps: 30, overlays: [] },
       audioClips: [],
     });
     const addKeyframe = vi.fn();

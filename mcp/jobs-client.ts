@@ -678,6 +678,53 @@ export async function getJobStatusFromServer(
 }
 
 /**
+ * List jobs, newest first, optionally filtered by status and kind.
+ *
+ * The counterpart to `getJobStatusFromServer` for the case where the caller has
+ * NO jobId — which is the common case after something goes wrong, and was a dead
+ * end until now. A blocking job tool hands its jobId back in its return value,
+ * so an agent whose tool call was interrupted, declined, or killed with the
+ * session never learns the id of the work it started. The work itself survives
+ * (aborting only closes the SSE reader; nothing cancels the job), so the agent
+ * was left unable to see a running download it had itself kicked off — and
+ * reported "nothing has been downloaded" while 6 GB streamed in the background
+ * (session 9c3ce4d0, 2026-08-17).
+ */
+export async function listJobsFromServer(opts: {
+  status?: string;
+  kind?: string;
+  limit?: number;
+}): Promise<JobStatusSnapshot[]> {
+  const base = resolveBaseUrl();
+  const qs = new URLSearchParams();
+  if (opts.status) qs.set("status", opts.status);
+  if (opts.kind) qs.set("kind", opts.kind);
+  if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  let res: Response;
+  try {
+    res = await fetch(`${base}/api/jobs${suffix}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+  } catch (err) {
+    if (isConnectionRefused(err)) {
+      const port = base.split(":").pop();
+      throw new LibiServerUnavailableError(
+        `failed to reach libi server at ${base}`,
+        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+      );
+    }
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(`unexpected status ${res.status} from /api/jobs`);
+  }
+  const json = (await res.json()) as { jobs?: JobStatusSnapshot[] };
+  return json.jobs ?? [];
+}
+
+/**
  * DELETE /api/jobs/${jobId} — request cooperative cancellation.
  *
  * Used by `libi.cancel_job`. Returns once the server accepts the cancel

@@ -98,8 +98,17 @@ export const files = sqliteTable(
       .$defaultFn(() => crypto.randomUUID()),
     pieceId: text("piece_id")
       .references(() => pieces.id, { onDelete: "cascade" }),
-    // NULL = file at the root of its scope. References asset_folders; FK action
-    // is enforced only with PRAGMA foreign_keys=ON (tests) — prod runs FK-off.
+    // NULL = file at the root of its scope. References asset_folders.
+    //
+    // FK ACTIONS DO RUN IN PRODUCTION. An earlier note here claimed the
+    // opposite ("prod runs FK-off"), which is not what the runtime does:
+    // better-sqlite3 opens every connection with `foreign_keys = 1`, and the
+    // one place libi turns it off (`migrateDatabase`) uses a throwaway
+    // connection it closes again. Measured two ways — the pragma reads 1 on a
+    // fresh better-sqlite3 handle, and deleting a piece row from a COPY of a
+    // real `~/.libi/libi.sqlite` cascaded through 30 `files` rows and took the
+    // dependent `tracks` row with it. Code that relies on a cascade (the
+    // onboarding build's rollback does) is relying on something real.
     folderId: text("folder_id").references((): AnySQLiteColumn => assetFolders.id, {
       onDelete: "set null",
     }),

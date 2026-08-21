@@ -19,6 +19,10 @@ export interface JobProgressPayload {
   total: number;
   unit: string;
   etaMs: number | null;
+  /** Wall-clock ms since the last REAL progress tick. Present on heartbeat
+   *  re-sends (see `JobManager.emitHeartbeat`) so the chat line can say
+   *  "quiet for 12m" instead of either a frozen countdown or nothing at all. */
+  msSinceProgress?: number | null;
   toolName?: string;
   toolArgs?: unknown;
   progressLabel?: string;

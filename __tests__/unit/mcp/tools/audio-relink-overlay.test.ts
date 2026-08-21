@@ -52,7 +52,6 @@ describe("libi.audio_relink_overlay registration", () => {
 describe("audioRelinkOverlay", () => {
   it("re-attaches a standalone clip to a video overlay as inline audio", async () => {
     writeManifest({
-      sceneOrder: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -100,7 +99,7 @@ describe("audioRelinkOverlay", () => {
   });
 
   it("fails when the clip or the video overlay is missing", async () => {
-    writeManifest({ sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [] });
+    writeManifest({ width: 1920, height: 1080, fps: 30, audioClips: [] });
 
     const { audioRelinkOverlay } = await import("@/mcp/tools/audio-clip-tools");
     const result = await audioRelinkOverlay(ctx(), {

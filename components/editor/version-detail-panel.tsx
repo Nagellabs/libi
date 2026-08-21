@@ -3,10 +3,7 @@
 import type {
   VersionDiffResponse,
   EntityRefDTO,
-  ChangedSceneRefDTO,
-  SceneRefDTO,
 } from "@/lib/queries/snapshots";
-import { VersionSceneStrip } from "./version-scene-strip";
 import { AlertTriangle } from "lucide-react";
 
 interface Props {
@@ -74,16 +71,6 @@ export function VersionDetailPanel({ pieceId, data, isLoading, isOldest }: Props
         </p>
       </div>
 
-      <section>
-        <h3 className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          Scenes{" "}
-          {data.kind === "draft"
-            ? "(working copy)"
-            : "(state at this version)"}
-        </h3>
-        <VersionSceneStrip pieceId={pieceId} tiles={diff.sceneStrip} />
-      </section>
-
       <section className="space-y-1">
         <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {data.kind === "draft"
@@ -97,21 +84,6 @@ export function VersionDetailPanel({ pieceId, data, isLoading, isOldest }: Props
             No changes from the previous version.
           </div>
         )}
-        {diff.scenes.added.map((s: SceneRefDTO) => (
-          <ChangeLine key={`sa-${s.id}`} sym="＋" cls="text-emerald-400">
-            {s.name} — new scene ({s.type})
-          </ChangeLine>
-        ))}
-        {diff.scenes.removed.map((s: SceneRefDTO) => (
-          <ChangeLine key={`sr-${s.id}`} sym="−" cls="text-red-400">
-            {s.name} — removed
-          </ChangeLine>
-        ))}
-        {diff.scenes.changed.map((s: ChangedSceneRefDTO) => (
-          <ChangeLine key={`sc-${s.id}`} sym="~" cls="text-amber-400">
-            {s.name} — {s.reasons.join(", ")}
-          </ChangeLine>
-        ))}
         {(
           [
             ...diff.overlays.added.map((o) => ["＋", "text-emerald-400", o] as [string, string, EntityRefDTO]),

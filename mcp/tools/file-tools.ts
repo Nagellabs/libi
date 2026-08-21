@@ -257,6 +257,15 @@ export interface StoreFileParams {
   /** Place the new file inside this asset folder. Must match the file's scope
    *  (piece file → that piece's folder; global file → a global folder). */
   folderId?: string | null;
+  /** Suppress the automatic `proxy_gen` enqueue below. For assets that are
+   *  WATCHED IMMEDIATELY, where a mid-playback source swap costs more than
+   *  scrub density: when a proxy finishes, the runner emits `refresh_query`,
+   *  `buildComposition` re-runs and `pickVideoUrl` starts returning the proxy,
+   *  so every overlay on that file changes `videoUrl` — plausibly while the
+   *  user is watching. A ≤1080p source gains nothing from a proxy but denser
+   *  GOPs for scrubbing, which a piece that is played rather than scrubbed
+   *  never spends. Leave it unset for ordinary uploads and agent imports. */
+  skipProxyGeneration?: boolean;
 }
 
 /**
@@ -401,6 +410,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
   // back to the WebM container signal.
   if (
     record.type === "video" &&
+    !params.skipProxyGeneration &&
     !alphaRecoverableInPreview({
       hasAlpha: record.hasAlpha,
       videoCodec: probedVideoCodec,

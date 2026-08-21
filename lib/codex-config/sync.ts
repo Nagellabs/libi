@@ -146,6 +146,10 @@ export async function syncCodexGlobalMcps(deps: SyncDeps = {}): Promise<void> {
     // scoped home won't until the first install — create it so `codex mcp add`
     // can write its config there. Best-effort: if this fails, codex's own add
     // reports the real error; never let it abort the whole sync.
+    //
+    // `codexHome` is injectable for tests, so this cannot just call
+    // `ensureCodexHome()` — but it is the same guarantee, and the shared
+    // helper in ./canonical.ts is where the reasoning lives.
     try {
       fs.mkdirSync(codexHome, { recursive: true });
     } catch {

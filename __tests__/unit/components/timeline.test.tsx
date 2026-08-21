@@ -69,7 +69,7 @@ function setup() {
 }
 
 describe("Timeline (track stack)", () => {
-  it("renders the Video track, an overlay row, and no scrubber/legend; scene name appears once", () => {
+  it("renders an overlay row and no scrubber/legend, and no Video track at all", () => {
     const { frameStore, selectionStore, composition } = setup();
     qcWrap(
       <Timeline
@@ -77,10 +77,6 @@ describe("Timeline (track stack)", () => {
         frameStore={frameStore}
         fps={30}
         onFrameChange={() => {}}
-        scenes={[
-          { id: "s1", name: "Base video — ride", duration: 2 },
-          { id: "s2", name: "Outro", duration: 1 },
-        ]}
         composition={composition}
         audioClips={[]}
         markers={[]}
@@ -91,7 +87,6 @@ describe("Timeline (track stack)", () => {
         onToggleRowCollapsed={() => {}}
         onCommitOverlayTiming={() => {}}
         onCrossRowOverlay={() => {}}
-        onSceneContextMenu={() => {}}
         pieceId="p1"
         resolveCtx={() => ({ startTime: 0, width: 1920, height: 1080, z: 1, totalDuration: 30 })}
         onCreateDirect={() => {}}
@@ -103,48 +98,11 @@ describe("Timeline (track stack)", () => {
         onDropFiles={() => {}}
       />,
     );
-    expect(screen.getByTestId("timeline-video-track")).toBeInTheDocument();
+    expect(screen.queryByTestId("timeline-video-track")).toBeNull();
     expect(screen.getByTestId("playhead-strip")).toBeInTheDocument();
     expect(screen.getByTestId("overlay-lane-captions")).toBeInTheDocument();
-    // Scene name renders exactly once (Video block), not in a legend too.
-    expect(screen.getAllByText("Base video — ride")).toHaveLength(1);
     // Old scrubber-bar testid is gone.
     expect(screen.queryByTestId("timeline-track")).toBeNull();
-  });
-
-  it("selects a scene when its Video block is clicked", () => {
-    const { frameStore, selectionStore, composition } = setup();
-    qcWrap(
-      <Timeline
-        totalFrames={90}
-        frameStore={frameStore}
-        fps={30}
-        onFrameChange={() => {}}
-        scenes={[{ id: "s1", name: "Base video — ride", duration: 2 }, { id: "s2", name: "Outro", duration: 1 }]}
-        composition={composition}
-        audioClips={[]}
-        markers={[]}
-        overlays={composition.overlays}
-        selectionStore={selectionStore}
-        isOverlayLocked={() => false}
-        collapsedGroups={{}}
-        onToggleRowCollapsed={() => {}}
-        onCommitOverlayTiming={() => {}}
-        onCrossRowOverlay={() => {}}
-        onSceneContextMenu={() => {}}
-        pieceId="p1"
-        resolveCtx={() => ({ startTime: 0, width: 1920, height: 1080, z: 1, totalDuration: 30 })}
-        onCreateDirect={() => {}}
-        onPickAsset={() => {}}
-        onAskAgent={() => {}}
-        durationSec={10}
-        frameSize={{ width: 1920, height: 1080 }}
-        onDropCreate={() => {}}
-        onDropFiles={() => {}}
-      />,
-    );
-    screen.getByTestId("video-block-s1").click();
-    expect(selectionStore.get()).toBe("s1");
   });
 
   it("spanning playhead line is grabbable and scrubs on pointerdown", () => {
@@ -158,10 +116,6 @@ describe("Timeline (track stack)", () => {
         frameStore={frameStore}
         fps={30}
         onFrameChange={onFrameChange}
-        scenes={[
-          { id: "s1", name: "Base video — ride", duration: 2 },
-          { id: "s2", name: "Outro", duration: 1 },
-        ]}
         composition={composition}
         audioClips={[]}
         markers={[]}
@@ -172,7 +126,6 @@ describe("Timeline (track stack)", () => {
         onToggleRowCollapsed={() => {}}
         onCommitOverlayTiming={() => {}}
         onCrossRowOverlay={() => {}}
-        onSceneContextMenu={() => {}}
         pieceId="p1"
         resolveCtx={() => ({ startTime: 0, width: 1920, height: 1080, z: 1, totalDuration: 30 })}
         onCreateDirect={() => {}}

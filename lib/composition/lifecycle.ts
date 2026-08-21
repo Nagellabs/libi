@@ -23,48 +23,19 @@ import { navigationEmitter } from "@/lib/navigation-events";
 import { EMPTY_MANIFEST } from "./persistence";
 import type { CompositionManifest } from "./persistence";
 
-export interface SceneRef {
-  id: string;
-  name: string;
-}
-
 export interface ManifestDiff {
-  scenes: { added: SceneRef[]; removed: SceneRef[]; changed: SceneRef[] };
   overlays: { added: number; removed: number; changed: number };
   audioClips: { added: number; removed: number; changed: number };
   totalChanges: number;
 }
 
 export function compareStates(snapshot: CompositionManifest, draft: CompositionManifest): ManifestDiff {
-  const snapshotScenes = snapshot.scenes ?? [];
-  const draftScenes = draft.scenes ?? [];
-
-  const sceneDiff = diffByIdWithNames(snapshotScenes, draftScenes);
   const overlays = countDiff(snapshot.overlays ?? [], draft.overlays ?? []);
   const audioClips = countDiff(snapshot.audioClips ?? [], draft.audioClips ?? []);
   const totalChanges =
-    sceneDiff.added.length + sceneDiff.removed.length + sceneDiff.changed.length +
     overlays.added + overlays.removed + overlays.changed +
     audioClips.added + audioClips.removed + audioClips.changed;
-  return { scenes: sceneDiff, overlays, audioClips, totalChanges };
-}
-
-function diffByIdWithNames(a: { id: string; name?: string }[], b: { id: string; name?: string }[]): {
-  added: SceneRef[];
-  removed: SceneRef[];
-  changed: SceneRef[];
-} {
-  const ma = new Map(a.map((x) => [x.id, x]));
-  const mb = new Map(b.map((x) => [x.id, x]));
-  const addedIds = [...mb.keys()].filter((k) => !ma.has(k));
-  const removedIds = [...ma.keys()].filter((k) => !mb.has(k));
-  const changedIds = [...mb.keys()].filter((k) => ma.has(k) && JSON.stringify(ma.get(k)) !== JSON.stringify(mb.get(k)));
-
-  return {
-    added: addedIds.map((id) => ({ id, name: mb.get(id)?.name ?? "Unnamed" })),
-    removed: removedIds.map((id) => ({ id, name: ma.get(id)?.name ?? "Unnamed" })),
-    changed: changedIds.map((id) => ({ id, name: mb.get(id)?.name ?? "Unnamed" })),
-  };
+  return { overlays, audioClips, totalChanges };
 }
 
 function diffById<T extends { id: string }>(a: T[], b: T[]) {
@@ -81,10 +52,9 @@ function countDiff<T extends { id: string }>(a: T[], b: T[]) {
   return { added: d.added.length, removed: d.removed.length, changed: d.changed.length };
 }
 
-/** True when a manifest has no scenes, overlays, or audio clips. */
+/** True when a manifest has no overlays and no audio clips. */
 function isEmptyManifest(m: CompositionManifest): boolean {
   return (
-    (m.scenes?.length ?? 0) === 0 &&
     (m.overlays?.length ?? 0) === 0 &&
     (m.audioClips?.length ?? 0) === 0
   );

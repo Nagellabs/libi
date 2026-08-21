@@ -1,20 +1,20 @@
 // __tests__/unit/effects/types.test.ts
 import { describe, it, expect } from "vitest";
 import { IDENTITY_DELTA, type LayerEffects, type EffectDef } from "@/lib/effects/types";
-import type { TextOverlay, CanvasScene, AudioClip } from "@/lib/engine/types";
+import type { TextOverlay, CodeOverlay, AudioClip } from "@/lib/engine/types";
 
 describe("effect types", () => {
   it("IDENTITY_DELTA is a no-op delta", () => {
     expect(IDENTITY_DELTA).toEqual({});
   });
 
-  it("LayerEffects attaches to overlays, scenes, and audio clips", () => {
+  it("LayerEffects attaches to every overlay kind and to audio clips", () => {
     const fx: LayerEffects = { in: { effectId: "fade", durationMs: 400 } };
     const overlay: Pick<TextOverlay, "effects"> = { effects: fx };
-    const scene: Pick<CanvasScene, "effects"> = { effects: fx };
+    const code: Pick<CodeOverlay, "effects"> = { effects: fx };
     const audio: Pick<AudioClip, "effects"> = { effects: { in: { effectId: "audio-fade-in" } } };
     expect(overlay.effects?.in?.effectId).toBe("fade");
-    expect(scene.effects?.in?.durationMs).toBe(400);
+    expect(code.effects?.in?.durationMs).toBe(400);
     expect(audio.effects?.in?.effectId).toBe("audio-fade-in");
   });
 

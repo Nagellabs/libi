@@ -1,6 +1,6 @@
 /** Snapshot / Draft MCP tool implementations */
 
-import { commitDraft, discardDraft, restoreSnapshot, getPieceState, compareStates, type SceneRef } from "@/lib/composition/lifecycle";
+import { commitDraft, discardDraft, restoreSnapshot, getPieceState, compareStates } from "@/lib/composition/lifecycle";
 import { loadManifest, EMPTY_MANIFEST } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { findUnvalidatedGeneratedClips, type UnvalidatedClip } from "@/lib/composition/generated-asset-gate";
@@ -93,7 +93,6 @@ export async function restoreSnapshotTool(params: RestoreSnapshotParams): Promis
 
 export async function compareStatesTool(params: CompareStatesParams): Promise<ToolResult<{
   hasDraft: boolean;
-  scenes: { added: SceneRef[]; removed: SceneRef[]; changed: SceneRef[] };
   overlays: { added: number; removed: number; changed: number };
   audioClips: { added: number; removed: number; changed: number };
   totalChanges: number;

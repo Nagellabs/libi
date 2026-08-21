@@ -1,6 +1,6 @@
 ---
 name: using-effects
-description: Apply tasteful in/out/loop animation effects to any layer — captions, stickers, logos, base scenes, audio. Fade a caption in, pop a logo, gently pulse an emphasis, Ken-Burns a photo, fade audio. "make the title bounce in", "add a subtle float", "fade this out".
+description: Apply tasteful in/out/loop animation effects to any layer — captions, stickers, logos, backgrounds, audio. Fade a caption in, pop a logo, gently pulse an emphasis, Ken-Burns a photo, fade audio. "make the title bounce in", "add a subtle float", "fade this out".
 when_to_use: When the user asks to animate, add motion to, or "make X move/appear/leave" any overlay, scene, or audio clip — or when adding a new overlay that would look better with motion out of the box.
 tags: [overlays, effects, animation]
 ---
@@ -23,7 +23,7 @@ set; correct and retry.
 ## Apply
 
 - `libi.apply_layer_effect({ pieceId, layerId, phase, effectId, durationMs?, params? })`
-  — `layerId` is any overlay, base scene, or audio clip id.
+  — `layerId` is any overlay or audio clip id.
 - `libi.clear_layer_effect({ pieceId, layerId, phase })` — remove one slot.
 - New overlays — pass `effects` on `libi.add_overlay` so the layer is born with motion.
 - `libi.highlight_effect({ pieceId, target })` — when the user asks how to add an

@@ -9,6 +9,7 @@ import {
   type Client,
 } from "@agentclientprotocol/sdk";
 import { getAgentConfig } from "./acp/agent-registry";
+import { ensureCodexHome } from "@/lib/codex-config/canonical";
 import {
   type ManagedProcess,
   ACP_INIT_TIMEOUT_MS,
@@ -156,9 +157,27 @@ export class AgentProcessManager {
     // cold start, and parallel-spawned children compete for disk IO and can
     // hit 40+ seconds. 60000ms gives every MCP — bundled or user-added —
     // 2x today's headroom without changing the SDK.
+    // CODEX_HOME: the same home the built-in Terminal's PTY is given
+    // (lib/terminal/manager.ts) and the same one libi's Install button writes
+    // its MCP servers into. Without it this child inherited nothing and codex
+    // fell back to its own default `~/.codex`, so the two halves of libi
+    // disagreed about where Codex lives on every NON-canonical instance — a
+    // worktree, skill-eval, or LIBI_TEST_MODE=1, where resolveCodexHome()
+    // returns `<LIBI_HOME>/.codex`. The Terminal read the scoped home libi had
+    // just configured while the agent read the user's real one: the surface
+    // used to VERIFY Codex behaviour was the one surface not under test.
+    // Identical to today's value on a canonical install (both are ~/.codex),
+    // and harmless for Claude, which ignores it — same as the PTY.
+    //
+    // `ensureCodexHome`, not `resolveCodexHome`: naming a directory that does
+    // not exist makes codex EXIT 1 ("CODEX_HOME points to … but that path does
+    // not exist"), which is how the first version of this change broke Codex
+    // on a scoped home. Creating it is unconditional for the same reason the
+    // variable is — gating on the agent id would leave the hole open for
+    // whichever surface we forgot.
     const child = spawn(agentConfig.command, [...agentConfig.args], {
       stdio: ["pipe", "pipe", "inherit"],
-      env: { ...process.env, MCP_TIMEOUT: "60000" },
+      env: { ...process.env, MCP_TIMEOUT: "60000", CODEX_HOME: ensureCodexHome() },
     });
 
     const managed: ManagedProcess = {

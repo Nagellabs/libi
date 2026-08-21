@@ -40,7 +40,7 @@ describe("clonePieceInto", () => {
     }).run();
     await storage.save("src", "clip.mp4", Buffer.from("data"), "video/mp4");
     await saveManifest("src", {
-      sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [],
+      width: 1920, height: 1080, fps: 30, 
       audioClips: [],
       overlays: [{
         id: "ov1", kind: "video", fileId, displayName: "S",

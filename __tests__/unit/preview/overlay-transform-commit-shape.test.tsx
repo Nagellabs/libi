@@ -21,7 +21,6 @@ const composition = {
   height: 200,
   fps: 30,
   durationInFrames: 60,
-  scenes: [],
   overlays: [],
 } as unknown as Composition;
 

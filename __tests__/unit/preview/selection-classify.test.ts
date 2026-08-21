@@ -16,9 +16,8 @@ describe("classifySelection", () => {
     const r = classifySelection("o1", composition);
     expect(r?.kind).toBe("overlay");
   });
-  it("classifies a scene id with its index", () => {
-    const r = classifySelection("s1", composition);
-    expect(r).toMatchObject({ kind: "scene", index: 0 });
+  it("returns null for a stale scene id — scenes no longer exist", () => {
+    expect(classifySelection("s1", composition)).toBeNull();
   });
   it("classifies an audio-clip id", () => {
     const r = classifySelection("a1", composition);

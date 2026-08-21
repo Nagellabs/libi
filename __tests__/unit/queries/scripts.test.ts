@@ -111,7 +111,7 @@ describe("useScriptJob", () => {
       id: "j1", kind: "extra_analysis_model", status: "running",
       pieceId: "p", fileId: "file-1",
       progressDone: 0, progressTotal: 0, progressUnit: "items",
-      etaMs: null, msPerUnit: null, error: null, resultJson: null,
+      etaMs: null, msPerUnit: null, msSinceProgress: null, error: null, resultJson: null,
       startedAt: new Date("2026-05-25T00:00:00Z"),
       completedAt: null, lastProgressAt: null,
     };

@@ -12,6 +12,8 @@ import { recomputeTextOverlayRect } from "@/lib/captions/persist-rect";
 import { flattenCaption } from "@/lib/captions/flat-guard";
 import type { TextOverlay } from "@/lib/engine/types";
 import { serverLogger as logger } from "@/lib/logger";
+import { unresolvedFamilies, familyFromFont } from "@/lib/fonts/resolve";
+import { sanitizeDuck } from "@/lib/audio/duck-params";
 import { z } from "zod/v3";
 import type {
   CaptionBackground,
@@ -22,27 +24,6 @@ import type {
   Transform3D,
   OverlayKeyframes,
 } from "@/lib/engine/types";
-
-/** Base fields shared by all persisted scene types */
-interface PersistedSceneBase {
-  id: string;
-  name: string;
-  duration: number;
-}
-
-/** A canvas scene as stored on disk */
-export interface PersistedCanvasScene extends PersistedSceneBase {
-  type: "canvas";
-  drawFunction: string;
-}
-
-/**
- * Scene data as stored on disk. Canvas-only — the video-scene variant was
- * retired (2026-07-19) and every on-disk manifest migrated to full-frame video
- * overlays. Kept as an alias because the SCENE concept survives: canvas scenes
- * are still sequential `sceneOrder`-driven base layers in active use.
- */
-export type PersistedScene = PersistedCanvasScene;
 
 /** Audio clip stored in the composition manifest. Mirrors the runtime
  *  `AudioClip` from lib/engine/types.ts. */
@@ -55,9 +36,7 @@ export interface PersistedAudioClip {
   trimStart: number;
   volume: number;
   enabled: boolean;
-  linkedSceneId?: string;
-  /** Inline clip whose audio comes from a video OVERLAY. At most one of
-   *  `linkedSceneId` / `linkedOverlayId` is set. */
+  /** Inline clip whose audio comes from a video OVERLAY. */
   linkedOverlayId?: string;
   /** Vertical placement of a DETACHED track in the timeline stack (same axis as
    *  overlay `z`, higher = nearer the top). Only meaningful for detached clips
@@ -65,7 +44,12 @@ export interface PersistedAudioClip {
   timelineOrder?: number;
   label?: string;
   duck?: {
-    sidechainClipId: string;
+    /** Sidechain clips driving the duck. Written as an array since
+     *  2026-08-18; `loadManifest` normalizes older manifests through
+     *  `sanitizeDuck`, so a loaded clip always has this. */
+    sidechainClipIds?: string[];
+    /** @deprecated Pre-2026-08-18 single-sidechain spelling. Read, never written. */
+    sidechainClipId?: string;
     thresholdDb: number;
     ratio: number;
     attackMs: number;
@@ -301,18 +285,11 @@ export type PersistedOverlay =
 
 /** Composition manifest stored as composition.json */
 export interface CompositionManifest {
-  sceneOrder: string[];
   width: number;
   height: number;
   fps: number;
   audioClips?: PersistedAudioClip[];
   overlays?: PersistedOverlay[];
-  /**
-   * Inlined scenes. New manifests written by this version always include
-   * this field; legacy manifests (pre-snapshot/draft) omit it and the
-   * loader falls back to sharded scene-{id}.json files.
-   */
-  scenes?: PersistedScene[];
 }
 
 /** Zod schema for a Vec3 (`{ x, y, z }`) — reused by `transform3dSchema`. */
@@ -334,18 +311,26 @@ export const transform3dSchema = z.object({
 /** Canonical empty manifest — used as the "no content" baseline throughout
  *  the snapshot/draft system. Import this instead of writing the literal inline. */
 export const EMPTY_MANIFEST: CompositionManifest = {
-  sceneOrder: [],
   width: 1920,
   height: 1080,
   fps: 30,
   audioClips: [],
-  scenes: [],
 };
 
 const MANIFEST_FILE = "composition.json";
 
-function sceneFilename(sceneId: string): string {
-  return `scene-${sceneId}.json`;
+/**
+ * Has this piece ever had a composition saved? A cheap existence check that,
+ * unlike `loadManifest`, has NO side effects — `loadManifest` initialises a
+ * snapshot for a piece that has none, so using it to ask "is this piece built?"
+ * quietly creates state for a piece you were about to reject.
+ *
+ * Exists so callers can distinguish a fully-built piece from a shell that a
+ * killed process left behind, without duplicating the filename constant.
+ */
+export async function hasManifest(pieceId: string): Promise<boolean> {
+  const storage = await getStorage();
+  return storage.exists(pieceId, MANIFEST_FILE);
 }
 
 /** Load the composition manifest, or return a default if none exists */
@@ -358,7 +343,7 @@ export async function loadManifest(pieceId: string): Promise<CompositionManifest
       await saveCurrentSnapshot(pieceId, EMPTY_MANIFEST);
     }
     // Return a fresh clone — callers mutate the manifest they receive
-    // (addOverlayToManifest, saveSceneAndUpdateManifest, …). Handing out
+    // (addOverlayToManifest, addAudioClip, …). Handing out
     // the shared EMPTY_MANIFEST constant lets one piece's edits leak into
     // every other file-less piece loaded afterwards.
     return structuredClone(EMPTY_MANIFEST);
@@ -367,15 +352,11 @@ export async function loadManifest(pieceId: string): Promise<CompositionManifest
   const data = await storage.read(pieceId, MANIFEST_FILE);
   const manifest = JSON.parse(data.toString("utf-8")) as CompositionManifest;
 
-  // Backfill scenes from sharded files for legacy manifests.
-  if (!manifest.scenes) {
-    const scenes: PersistedScene[] = [];
-    for (const sceneId of manifest.sceneOrder) {
-      const scene = await loadScene(pieceId, sceneId);
-      if (scene) scenes.push(scene);
-    }
-    manifest.scenes = scenes;
-  }
+  // A pre-2026-08-20 manifest may still carry `scenes` / `sceneOrder`. The
+  // canvas-scene layer is gone; ignore both rather than throwing, so an old
+  // manifest still opens (as its overlays) instead of failing to load.
+  delete (manifest as { scenes?: unknown }).scenes;
+  delete (manifest as { sceneOrder?: unknown }).sceneOrder;
 
   // Drop the legacy `rotation` (degrees) field: storage now has a single rotation
   // authority (transform3d.rotation.z). Pre-2026-07 manifests may still carry it;
@@ -388,6 +369,15 @@ export async function loadManifest(pieceId: string): Promise<CompositionManifest
         "dropped legacy rotation field",
       );
     }
+  }
+
+  // Normalize every duck to `sidechainClipIds`. A duck used to name exactly ONE
+  // sidechain, and manifests written then still say `sidechainClipId`; this is
+  // the one read-time seam that turns it into `[id]`, which is why the change
+  // to N sidechains needs no migration script. Runs on load so the preview, the
+  // export and the tools all see the same shape.
+  for (const clip of manifest.audioClips ?? []) {
+    if (clip.duck) clip.duck = sanitizeDuck(clip.duck);
   }
 
   // Hydrate code-bearing overlays (code/three/tracked-code) from their files.
@@ -421,6 +411,30 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
     o.rect = recomputeTextOverlayRect(o, frameWidth, measure);
   }
 
+  // Warn — never rewrite — when a text overlay names a font family that will
+  // not resolve (see lib/fonts/resolve.ts). Silently substituting a font is
+  // how this bug hid in the first place: a whole 42-second piece rendered in
+  // a serif fallback because it asked for "Inter", and nothing reported it
+  // for twenty hours. This only reports; `font` is left byte-identical and a
+  // bad family never makes the save throw.
+  const textOverlays = (manifest.overlays ?? []).filter(
+    (o): o is Extract<PersistedOverlay, { kind: "text" }> => o.kind === "text",
+  );
+  const badFamilies = unresolvedFamilies(textOverlays.map((o) => o.font));
+  if (badFamilies.length > 0) {
+    const badSet = new Set(badFamilies);
+    const overlayIds = textOverlays
+      .filter((o) => {
+        const family = familyFromFont(o.font);
+        return family !== null && badSet.has(family);
+      })
+      .map((o) => o.id);
+    logger.child({ tag: "fonts", op: "unresolved_family" }).warn(
+      { pieceId, families: badFamilies, overlayIds },
+      "text overlay names a font family that will not resolve — it will render in a fallback face",
+    );
+  }
+
   // Write each code-bearing overlay's body to its file (from the ORIGINAL
   // manifest whose overlays still hold the bodies), then serialize a stripped
   // clone — code lives in files, not in composition.json. stripOverlayCode
@@ -436,10 +450,9 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
   const data = Buffer.from(JSON.stringify(onDisk, null, 2), "utf-8");
   await storage.save(pieceId, MANIFEST_FILE, data, "application/json");
 
-  // Sweep orphaned scene-*.json shards.
-  const keep = new Set((manifest.scenes ?? []).map((s) => sceneFilename(s.id)));
+  // Sweep any scene-*.json shard left by the retired canvas-scene layer.
   for (const entry of await storage.list(pieceId)) {
-    if (entry.startsWith("scene-") && entry.endsWith(".json") && !keep.has(entry)) {
+    if (entry.startsWith("scene-") && entry.endsWith(".json")) {
       await storage.remove(pieceId, entry).catch(() => {});
     }
   }
@@ -465,209 +478,12 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
   }
 }
 
-/** Save a single scene file */
-export async function saveScene(pieceId: string, scene: PersistedScene): Promise<void> {
-  const storage = await getStorage();
-  const data = Buffer.from(JSON.stringify(scene, null, 2), "utf-8");
-  await storage.save(pieceId, sceneFilename(scene.id), data, "application/json");
-}
-
-/** Load a single scene file */
-export async function loadScene(pieceId: string, sceneId: string): Promise<PersistedScene | null> {
-  const storage = await getStorage();
-  const filename = sceneFilename(sceneId);
-
-  if (!(await storage.exists(pieceId, filename))) {
-    return null;
-  }
-
-  const data = await storage.read(pieceId, filename);
-  const parsed = JSON.parse(data.toString("utf-8"));
-  // Backward compatibility: scenes without type field are canvas scenes
-  if (!parsed.type) {
-    parsed.type = "canvas";
-  }
-  return parsed;
-}
-
-/** Delete a single scene file */
-export async function deleteScene(pieceId: string, sceneId: string): Promise<void> {
-  const storage = await getStorage();
-  await storage.delete(pieceId, sceneFilename(sceneId));
-}
-
-/** Load the full composition: manifest + all scene files in order */
+/** Load the full composition. Thin wrapper over `loadManifest`, kept because
+ *  callers read as "load the composition" rather than "load a JSON file". */
 export async function loadComposition(pieceId: string): Promise<{
   manifest: CompositionManifest;
-  scenes: PersistedScene[];
 }> {
-  const manifest = await loadManifest(pieceId);
-  return { manifest, scenes: manifest.scenes ?? [] };
-}
-
-/** Save a scene and update the manifest (add to order if new) */
-export async function saveSceneAndUpdateManifest(
-  pieceId: string,
-  scene: PersistedScene
-): Promise<void> {
-  const manifest = await loadManifest(pieceId);
-
-  if (!manifest.sceneOrder.includes(scene.id)) {
-    manifest.sceneOrder.push(scene.id);
-  }
-
-  // Rebuild the full scenes array by loading all scenes in the current order.
-  // This ensures the manifest has the canonical scenes list for saveManifest to
-  // determine which shards to keep during cleanup.
-  const scenes: PersistedScene[] = [];
-  for (const sceneId of manifest.sceneOrder) {
-    if (sceneId === scene.id) {
-      // Use the provided scene if it matches this id
-      scenes.push(scene);
-    } else {
-      // Load existing scenes for other ids
-      const existingScene = await loadScene(pieceId, sceneId);
-      if (existingScene) scenes.push(existingScene);
-    }
-  }
-  manifest.scenes = scenes;
-
-  await saveScene(pieceId, scene);
-  await saveManifest(pieceId, manifest);
-}
-
-/**
- * Update an EXISTING scene in place. Writes the shard AND replaces the scene in
- * the inline `manifest.scenes[]` — the source of truth that `loadComposition` /
- * `get_composition` and the renderer read. A plain `saveScene` writes ONLY the
- * shard, which those readers ignore (and the next `saveManifest` orphans), so a
- * trim / drawFunction / duration edit silently vanished while the tool reported
- * success (the silent-write-drop bug found in dogfood).
- * Also resyncs any linked inline AudioClip, since a trim / duration change
- * shifts its timeline position. Returns false when the scene id is not in the
- * manifest so the caller can surface an honest error instead of a false success.
- */
-export async function updateSceneInManifest(
-  pieceId: string,
-  scene: PersistedScene,
-): Promise<boolean> {
-  // Keep the shard in sync FIRST — loadScene + resyncLinkedClips read it.
-  await saveScene(pieceId, scene);
-  const manifest = await loadManifest(pieceId);
-  const scenes = manifest.scenes ?? [];
-  const idx = scenes.findIndex((s) => s.id === scene.id);
-  if (idx === -1) return false;
-  scenes[idx] = scene;
-  manifest.scenes = scenes;
-  await resyncLinkedClips(pieceId, manifest);
-  await saveManifest(pieceId, manifest);
-  return true;
-}
-
-/**
- * Re-derive every inline AudioClip's timeline position from its linked
- * scene's actual place in `sceneOrder`. An inline clip's startTime /
- * duration / trimStart is duplicated state: it is computed once, from the
- * sceneOrder snapshot at clip-creation time (video-scene-tools.ts). ANY
- * later scene-layout change — deleting a preceding scene, reordering, or
- * editing a scene's trim/duration — silently desyncs it from the scene it
- * is supposed to voice. Calling this at the end of every scene-layout
- * mutation makes that desync structurally impossible: the position is
- * always derived, never stale.
- *
- * Mutates `manifest.audioClips` in place. Standalone clips are never
- * touched. An inline clip whose linked scene is gone is left as-is for the
- * caller's cascade to drop.
- */
-export async function resyncLinkedClips(
-  pieceId: string,
-  manifest: CompositionManifest,
-): Promise<void> {
-  const clips = manifest.audioClips;
-  if (!clips?.length) return;
-
-  const pos = new Map<
-    string,
-    { start: number; duration: number; trimStart: number }
-  >();
-  let acc = 0;
-  for (const sid of manifest.sceneOrder) {
-    const s = await loadScene(pieceId, sid);
-    if (!s) continue;
-    // Canvas scenes have no source trim window, so an inline clip linked to
-    // one always plays from the top of its file.
-    pos.set(sid, { start: acc, duration: s.duration, trimStart: 0 });
-    acc += s.duration;
-  }
-
-  for (const clip of clips) {
-    if (clip.kind !== "inline" || !clip.linkedSceneId) continue;
-    const p = pos.get(clip.linkedSceneId);
-    if (!p) continue;
-    clip.startTime = p.start;
-    clip.duration = p.duration;
-    clip.trimStart = p.trimStart;
-  }
-}
-
-/**
- * Remove a scene and update the manifest. Cascades to any linked
- * AudioClip (kind='inline' with linkedSceneId pointing at this scene)
- * so the manifest stays consistent — orphaned linked clips would
- * otherwise reference a scene that no longer exists.
- *
- * Standalone clips and clips linked to OTHER scenes are untouched, but the
- * latter have their timeline position re-derived (deleting a preceding
- * scene shifts every following scene — and thus its audio — earlier).
- *
- * Returns the list of clip ids that were cascaded away so callers can
- * log or notify the user.
- */
-export async function removeSceneAndUpdateManifest(
-  pieceId: string,
-  sceneId: string,
-): Promise<{ removedClips: string[] }> {
-  const manifest = await loadManifest(pieceId);
-  manifest.sceneOrder = manifest.sceneOrder.filter((id) => id !== sceneId);
-
-  const removedClips: string[] = [];
-  if (manifest.audioClips) {
-    const dropped = manifest.audioClips.filter((c) => c.linkedSceneId === sceneId);
-    removedClips.push(...dropped.map((c) => c.id));
-    manifest.audioClips = manifest.audioClips.filter((c) => c.linkedSceneId !== sceneId);
-  }
-
-  // Rebuild the scenes array to reflect the new sceneOrder.
-  if (manifest.scenes) {
-    manifest.scenes = manifest.scenes.filter((s) => s.id !== sceneId);
-  }
-
-  await deleteScene(pieceId, sceneId);
-  await resyncLinkedClips(pieceId, manifest);
-  await saveManifest(pieceId, manifest);
-  return { removedClips };
-}
-
-/** Update scene order in the manifest */
-export async function updateSceneOrder(
-  pieceId: string,
-  sceneIds: string[]
-): Promise<void> {
-  const manifest = await loadManifest(pieceId);
-  manifest.sceneOrder = sceneIds;
-
-  // Rebuild the scenes array to match the new order.
-  if (manifest.scenes) {
-    const scenes: PersistedScene[] = [];
-    for (const sceneId of sceneIds) {
-      const scene = manifest.scenes.find((s) => s.id === sceneId);
-      if (scene) scenes.push(scene);
-    }
-    manifest.scenes = scenes;
-  }
-
-  await resyncLinkedClips(pieceId, manifest);
-  await saveManifest(pieceId, manifest);
+  return { manifest: await loadManifest(pieceId) };
 }
 
 

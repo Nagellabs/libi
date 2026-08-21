@@ -52,11 +52,9 @@ describe("tracked overlay positionMode persistence", () => {
     createTempStorageDir();
     const pieceId = "p1";
     await saveManifest(pieceId, {
-      sceneOrder: [],
       width: 720,
       height: 1280,
       fps: 30,
-      scenes: [],
       overlays: [
         {
           id: "t1",

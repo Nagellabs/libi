@@ -4,7 +4,7 @@ import { overlayHasNonIdentityTransform } from "@/lib/export/overlay-predicates"
 import type { Composition, TextOverlay, VideoOverlay } from "@/lib/engine/types";
 
 function mkComp(overrides: Partial<Composition>): Composition {
-  return { id: "c", name: "", width: 1920, height: 1080, fps: 30, scenes: [], ...overrides };
+  return { id: "c", name: "", width: 1920, height: 1080, fps: 30, ...overrides };
 }
 
 /** Base-shaped full-frame video overlay (ffmpeg's `[0:v]` input). */

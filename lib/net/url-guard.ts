@@ -235,3 +235,33 @@ export async function assertLoopbackOrPublicHttpUrl(
   }
   return assertPublicHttpUrl(raw);
 }
+
+/**
+ * Loopback on ANY port, or else the full public guard.
+ *
+ * This exists for exactly one caller: the onboarding asset base when — and
+ * only when — `LIBI_ONBOARDING_ASSET_BASE` has explicitly overridden the
+ * shipping default, so tests and staging can serve fixtures from an
+ * ephemeral local port. `assertLoopbackOrPublicHttpUrl` cannot do this: it
+ * permits loopback only on the app's own port.
+ *
+ * NEVER reach for this from a code path a released build can take with no
+ * env var set. A loopback-reachable default is an SSRF hole.
+ * `__tests__/unit/onboarding/asset-base.test.ts` asserts this identifier has
+ * exactly one non-test call site.
+ */
+export async function assertDevLoopbackOrPublicHttpUrl(
+  raw: string,
+): Promise<VettedUrl | { url: URL; dispatcher?: undefined }> {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    throw new Error(`invalid url: ${raw}`);
+  }
+  if (u.protocol === "http:") {
+    const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (h === "127.0.0.1" || h === "::1" || h === "localhost") return { url: u };
+  }
+  return assertPublicHttpUrl(raw);
+}

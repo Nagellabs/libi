@@ -5,21 +5,21 @@ import type { Keyframed } from "./animatable";
 
 /** Context passed to every draw function.
  *
- *  Timing is ELEMENT-LOCAL in every case: for a canvas scene it is the time
- *  within that scene; for a code overlay it is the time within that overlay's
- *  own [startTime, startTime+duration) window (the renderer remaps it — see
+ *  Timing is ELEMENT-LOCAL: the clock runs within the overlay's own
+ *  [startTime, startTime+duration) window (the renderer remaps it — see
  *  lib/engine/overlay-renderer.ts). A draw function therefore animates relative
- *  to its OWN element and the same body works identically in a scene or overlay. */
+ *  to its OWN element, and the same body behaves identically wherever it is
+ *  placed on the timeline. */
 export interface DrawContext {
   /** Canvas 2D rendering context */
   ctx: CanvasRenderingContext2D;
-  /** Composition width in pixels (overlays: the overlay rect width) */
+  /** The overlay rect's width in pixels */
   width: number;
-  /** Composition height in pixels (overlays: the overlay rect height) */
+  /** The overlay rect's height in pixels */
   height: number;
   /** Frames per second */
   fps: number;
-  /** Total frames in THIS element (scene frames, or overlay-window frames) */
+  /** Total frames in THIS element's own window */
   totalFrames: number;
   /** Current frame number within this element (0-indexed) */
   frame: number;
@@ -50,30 +50,6 @@ export interface DrawContext {
    */
   renderScale?: number;
 }
-
-/** A canvas scene — draws each frame via a JavaScript function */
-export interface CanvasScene {
-  id: string;
-  name: string;
-  type: "canvas";
-  /** Duration in seconds */
-  duration: number;
-  /** Draw function called for each frame */
-  draw: (context: DrawContext) => void;
-  /** In/out/loop whole-frame animations applied to this scene. Absent ⇒ none. */
-  effects?: LayerEffects;
-}
-
-/**
- * A scene in the composition. Canvas-drawn only — video scenes were retired
- * (2026-07-19); an imported video is a full-frame `VideoOverlay` on
- * `Composition.overlays`, which is editable, transformable and natively
- * compositable by the ffmpeg export backend. Kept as an alias (rather than
- * collapsing every `Scene` reference onto `CanvasScene`) because the SCENE
- * concept itself survives: canvas scenes remain sequential, `sceneOrder`-driven
- * base layers and are in active use.
- */
-export type Scene = CanvasScene;
 
 /** Rectangular bounds in composition pixel space (not normalized). */
 export interface OverlayRect {
@@ -224,7 +200,13 @@ export interface TextOverlay extends BaseOverlay {
   kind: "text";
   /** User-editable text content. */
   content: string;
-  font: string;      // e.g. "48px Inter"
+  /** CSS font shorthand, e.g. `"800 120px Inter"`. Bundled families — always
+   *  available, and identical on every platform — are "Inter" and
+   *  "JetBrains Mono"; see lib/fonts/bundled.ts. Naming any other family is a
+   *  gamble: if the machine does not have it, the text renders in a fallback
+   *  face SILENTLY, at a different width, with nothing reported. Call
+   *  libi.list_fonts to see what will actually render. */
+  font: string;
   color: string;     // CSS color
   /** Optional uploaded font file (id of a `font`-category file). When set, the
    *  renderer + export resolve a registered/custom family for this overlay;
@@ -367,21 +349,20 @@ export interface ThreeOverlay extends BaseOverlay {
 
 export type Overlay = TextOverlay | ImageOverlay | VideoOverlay | CodeOverlay | TrackedOverlay | ThreeOverlay;
 
-/** A full video composition — ordered list of scenes */
+/** A full video composition — a z-ordered stack of overlays plus audio. */
 export interface Composition {
   id: string;
   name: string;
   width: number;
   height: number;
   fps: number;
-  scenes: Scene[];
   overlays?: Overlay[];
   /** Per-clip audio entries, mixed together at playback. Replaces the
    *  old `audioTracks` shape. */
   audioClips?: AudioClip[];
-  /** Solid background fill for the frame, drawn before overlays. Used by the
-   *  empty-scenes path (a video-less piece renders bg + overlays). Defaults
-   *  to "#000000" when absent. */
+  /** Solid background fill for the frame, drawn before overlays. Defaults to
+   *  "#000000" when absent — a full-frame `code` overlay at the floor z is how
+   *  a piece gets a real backdrop. */
   backgroundColor?: string;
 }
 
@@ -424,7 +405,7 @@ export interface ExportSettings {
   fps: number;
   /** Quality preset; drives the bitrate ladder + scale stage. Defaults to "source". */
   quality?: ExportQuality;
-  /** Audio bitrate in bits/sec. Defaults to 192_000. */
+  /** Audio bitrate in bits/sec. Defaults to 256_000. */
   audioBitrate?: number;
 }
 
@@ -449,13 +430,26 @@ export interface FrameAnnotation {
   note: string;
 }
 
-/** Sidechain compression parameters. Music clip ducks when sidechain
- *  signal exceeds threshold — same shape feeds Web Audio (preview) and
- *  ffmpeg sidechaincompress (export). */
+/** Sidechain compression parameters. Music clip ducks when the sidechain
+ *  signal exceeds threshold — the same shape feeds Web Audio (preview) and the
+ *  pre-rendered gain envelope (export), through the one law in
+ *  `lib/audio/duck-law.ts`. */
 export interface DuckSettings {
-  /** AudioClip id whose envelope drives the duck. Usually a dialogue or
-   *  voice-over clip. */
-  sidechainClipId: string;
+  /**
+   * AudioClip ids whose SUMMED envelope drives the duck. Usually the dialogue
+   * or voice-over clips — all of them, so a piece with six VO lines does not
+   * have to be bounced into a single "VO bus" clip first.
+   *
+   * The preview fans all N sidechain gain nodes into the worklet's one input
+   * (Web Audio sums natively); the export sums the placed clips into one mono
+   * buffer and runs the curve once. Neither averages, and neither multiplies
+   * per-clip curves — that would double-duck wherever two voices overlap.
+   *
+   * Pre-2026-08-18 manifests carry a single `sidechainClipId` string instead;
+   * `sanitizeDuck` (`lib/audio/duck-params.ts`) is the one seam that normalizes
+   * it to `[id]` on read. There is no migration script.
+   */
+  sidechainClipIds: string[];
   /** Threshold for the sidechain in dBFS. Below = no compression.
    *  Typical: -30 to -20 dB. */
   thresholdDb: number;
@@ -514,7 +508,7 @@ export interface AudioClip {
   timelineOrder?: number;
   /** Optional display string ("background music", "intro VO"). */
   label?: string;
-  /** When set, this clip is sidechain-compressed by `duck.sidechainClipId`
+  /** When set, this clip is sidechain-compressed by `duck.sidechainClipIds`
    *  during playback and export. Phase 2 — see plans/2026-04-23-audio-auto-ducking.md. */
   duck?: DuckSettings;
   /** In/out volume-envelope effects (audio fades). `loop` ignored. Absent ⇒ none. */

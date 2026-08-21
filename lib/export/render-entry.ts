@@ -11,9 +11,9 @@
  * script in the `/render` HTML can trigger `runRender()`.
  */
 import { exportVideo } from "@/lib/engine/export";
+import { ensureBundledFontsLoaded } from "@/lib/fonts/load-client";
 import { getCompositionFrames } from "@/lib/engine/renderer";
 import { buildComposition } from "@/lib/composition/build-composition";
-import type { SceneData } from "@/lib/composition/build-composition";
 import type {
   AudioClip,
   Composition,
@@ -33,7 +33,6 @@ import { buildOverlaySpatialQuadsWithDeps } from "@/lib/export/render-entry-quad
 import { loadOverlayTracks } from "@/lib/export/render-overlay-tracks";
 
 interface JobPayload {
-  scenes: SceneData[];
   overlays: Overlay[];
   audioClips: AudioClip[];
   width: number;
@@ -277,12 +276,18 @@ export async function runRender({
     if (!res.ok) throw new Error(`Job fetch failed: ${res.status}`);
     const { payload, settings } = (await res.json()) as JobResponse;
     console.log("[Render] job fetched", {
-      scenes: payload.scenes?.length,
       files: payload.files?.length,
       overlays: payload.overlays?.length,
     });
 
     setStatus("hydrating");
+    // Download the bundled text faces BEFORE the first frame is captured.
+    // The render page declares them via @font-face (app/render/route.ts), but
+    // an @font-face is lazy and a canvas draw never triggers the fetch — so
+    // without this the opening frames bake in a fallback face at the wrong
+    // width. See lib/fonts/load-client.ts for the measured proof.
+    await ensureBundledFontsLoaded();
+    console.log("[Render] bundled fonts loaded");
     // Register custom effect packages into THIS bundle's registry before any
     // frame is rendered — the render entry is a standalone esbuild bundle with
     // its own module instances, so the server's boot-time registration doesn't
@@ -292,8 +297,8 @@ export async function runRender({
     const filesMap = new Map<string, FileRecord>(
       payload.files.map((f) => [f.id, f]),
     );
-    const base = buildComposition(payload.scenes, filesMap, payload.overlays, payload.audioClips);
-    if (!base) throw new Error("Composition is empty (no scenes)");
+    const base = buildComposition(filesMap, payload.overlays, payload.audioClips);
+    if (!base) throw new Error("Composition is empty");
     const composition: Composition = {
       ...base,
       width: payload.width,
@@ -336,14 +341,10 @@ export async function runRender({
       ? frameRange.endFrameExclusive - frameRange.startFrame
       : compositionFrames;
     console.log("[Render] hydrated; starting exportVideo", {
-      sceneCount: composition.scenes.length,
+      overlayCount: composition.overlays?.length ?? 0,
       compositionFrames,
       frameRange,
       chunkFrames,
-      duration: composition.scenes.reduce(
-        (acc, s) => acc + (s.duration ?? 0),
-        0,
-      ),
     });
     const start = performance.now();
     let lastReportedFrame = -1;

@@ -42,7 +42,6 @@ function missingVideoComp(): Composition {
     fps: 30,
     width: 1920,
     height: 1080,
-    scenes: [],
     overlays: [
       { id: "vid-ok", kind: "video", startTime: 0, duration: 8, videoUrl: "a", fileId: "fa", z: 1, opacity: 1, rect },
       { id: "vid-missing", kind: "video", startTime: 0, duration: 8, videoUrl: "b", fileId: "fb", z: 4, opacity: 1, rect, missing: true },
@@ -107,7 +106,6 @@ describe("stripNonDecodingOverlays (decode composition, missing video)", () => {
       fps: 30,
       width: 1920,
       height: 1080,
-      scenes: [],
       overlays: [
         { id: "vid-ok", kind: "video", startTime: 0, duration: 8, fileId: "fa", z: 1, opacity: 1, rect },
       ],

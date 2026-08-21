@@ -9,7 +9,6 @@ import {
   resolveMediaPaint,
 } from "@/lib/preview/timeline-media";
 import { OverlayBar, type OverlayBarModel } from "@/components/preview/overlay-bar";
-import { TimelineVideoTrack } from "@/components/preview/timeline-video-track";
 import type { LaneView } from "@/lib/preview/lane-bar-geometry";
 
 function comp(): Composition {
@@ -18,7 +17,6 @@ function comp(): Composition {
     height: 1080,
     fps: 30,
     scenes: [
-      { id: "sc", name: "canvas scene", type: "canvas", duration: 2, draw: () => {} },
     ],
     overlays: [
       { id: "oi", kind: "image", fileId: "img-1", startTime: 0, duration: 2, z: 1, rect: { x: 0, y: 0, w: 1, h: 1 } },
@@ -29,11 +27,10 @@ function comp(): Composition {
 }
 
 describe("buildMediaById / distinctVideoFileIds", () => {
-  it("collects image+video overlays (skips canvas scenes / text overlays)", () => {
+  it("collects image+video overlays (skips text overlays)", () => {
     const m = buildMediaById(comp());
     expect(m.get("oi")).toEqual({ kind: "image", fileId: "img-1" });
     expect(m.get("ov")).toEqual({ kind: "video", fileId: "vid-2" });
-    expect(m.has("sc")).toBe(false); // canvas scene references no file
     expect(m.has("ot")).toBe(false); // text overlay
   });
 
@@ -137,24 +134,3 @@ describe("OverlayBar media painting", () => {
   });
 });
 
-describe("TimelineVideoTrack scene blocks", () => {
-  const scenes = [{ id: "sv", name: "canvas scene", type: "canvas" as const }];
-  it("renders a plain (unpainted) block per scene", () => {
-    // Filmstrip painting was video-SCENE-only; canvas scenes reference no file,
-    // so scene blocks are always solid now. Overlay bars still paint.
-    const { getByTestId } = render(
-      <TimelineVideoTrack
-        scenes={scenes}
-        fps={30}
-        totalFrames={120}
-        durations={{ sv: 4 }}
-        selectedId={null}
-        onSelect={() => {}}
-        onContextMenu={() => {}}
-      />,
-    );
-    const block = getByTestId("video-block-sv");
-    expect(block.getAttribute("data-media")).toBeNull();
-    expect(block.style.backgroundImage).toBe("");
-  });
-});

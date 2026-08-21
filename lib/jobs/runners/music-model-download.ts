@@ -7,10 +7,18 @@ import {
   isAceStepModelInstalled,
   missingAceStepModelFiles,
   writeInstalledToken,
+  aceStepModelsDir,
   ACESTEP_MODEL_VERSION,
+  ACESTEP_DOWNLOAD_BYTES,
 } from "@/lib/music/models";
 import type { JobContext, JobRunner } from "@/lib/jobs/types";
+import { trackDirectoryBytes } from "@/lib/jobs/dir-download-progress";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
+
+/** Chat/Settings show `done`/`total` verbatim, so report MB rather than raw
+ *  bytes — "4821/7892 MB" reads, "5053071360/8275792188 bytes" does not. Matches
+ *  the unit `tts_model_download` already uses. */
+const BYTES_PER_MB = 1_000_000;
 
 // Empty on purpose: "install the ACE-Step model" is ONE piece of work with one
 // output directory, so it must have exactly one paramsHash.
@@ -44,7 +52,7 @@ export const musicModelDownloadRunner: JobRunner<
   // One shared output dir (~/.libi/models/ace-step) for every run of this kind,
   // so a forced restart must not race one already in flight.
   exclusiveResource: true,
-  // ~5.5 GB pull + wheel fetch runs silent for many minutes.
+  // ~8.3 GB pull + wheel fetch runs silent for many minutes.
   noProgressTimeoutMs: null,
   async run(
     ctx: JobContext<MusicModelDownloadParams>,
@@ -67,12 +75,51 @@ export const musicModelDownloadRunner: JobRunner<
     // both completed files and `.incomplete` blobs, and both live under this
     // dir, so `rm -rf` throws away everything a retry could have reused.
     if (discard) clearModelDir();
-    ctx.reportProgress(0, 1, "files");
-    let lastTotal = 1;
-    await downloadModel((done, total) => {
-      if (total > 0) lastTotal = total;
-      ctx.reportProgress(done, total > 0 ? total : 1, "files");
+
+    // Progress is measured in MEGABYTES ON DISK, not in files completed.
+    //
+    // The Python side (`snapshot_download`'s outer tqdm bar) only ticks once per
+    // finished file, and this repo's 12 files run from 639 bytes to 6.61 GB. So
+    // the old file-count progress sat at 11/12 for 24 silent minutes while the
+    // transformer downloaded, and the ETA — extrapolated from how fast the tiny
+    // config files landed — advertised about a minute for all of it
+    // (session 9c3ce4d0, 2026-08-17). Bytes are what actually take the time.
+    const totalMb = Math.max(1, Math.round(ACESTEP_DOWNLOAD_BYTES / BYTES_PER_MB));
+    // NO opening `reportProgress(0, totalMb)` here, deliberately. It looks like
+    // harmless initialisation and it cost 64 seconds of visible "0%" on a real
+    // resumed download (measured 2026-08-17, 7.1 GB already on disk):
+    //
+    //   - the explicit 0 is simply FALSE on a resume — bytes are already there;
+    //   - it consumes JobManager's 1s progress debounce, so the tracker's very
+    //     first measurement (the resume baseline) is dropped as too-soon;
+    //   - and the tracker only re-emits on an INCREASE, so that baseline is gone
+    //     for good. The bar then reads 0/8276 until real bytes climb past what
+    //     was already on disk — 64s here, and minutes on a cold `uv` cache,
+    //     which is exactly the "is it stuck?" state this change exists to end.
+    //
+    // Letting the tracker's immediate measure be the first report costs nothing
+    // (it is not debounced, since nothing preceded it) and starts the bar at the
+    // truth: 7148/8276 MB for the resume above, 0 for a genuinely fresh install.
+    const progress = trackDirectoryBytes({
+      dir: aceStepModelsDir(),
+      totalBytes: ACESTEP_DOWNLOAD_BYTES,
+      onBytes: (bytesDone) => {
+        ctx.reportProgress(
+          Math.min(Math.floor(bytesDone / BYTES_PER_MB), totalMb),
+          totalMb,
+          "MB",
+        );
+      },
     });
+    try {
+      // The file-count callback no longer drives the bar — mixing units in one
+      // job would corrupt the rolling ETA, which averages ms-per-unit. It still
+      // earns its keep as a poke: a finished file is the moment the on-disk
+      // total jumps, so measure right then instead of up to a poll later.
+      await downloadModel(() => progress.poke());
+    } finally {
+      progress.stop();
+    }
     if (ctx.shouldCancel()) throw new Error("cancelled");
     // VERIFY BEFORE DECLARING SUCCESS. `downloadModel` resolving means `uv`
     // exited 0, which is not the same as "the weights are on disk" — the dir
@@ -95,7 +142,7 @@ export const musicModelDownloadRunner: JobRunner<
         "ACE-Step install token was written but the model still reads as not installed",
       );
     }
-    ctx.reportProgress(lastTotal, lastTotal, "files");
+    ctx.reportProgress(totalMb, totalMb, "MB");
     return { alreadyInstalled: false };
   },
 };

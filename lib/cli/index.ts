@@ -8,6 +8,7 @@ import { serveMcp } from "./serve-mcp";
 import { serveTrackingMcp } from "./serve-mcp-tracking";
 import { updateProject } from "./update";
 import { packageRoot } from "@/lib/runtime/package-root";
+import { installStdioResilience } from "./stdio-resilience";
 
 /** The real published version. Never hardcode it: `libi --version` reported a
  *  stale "0.1.0" forever after any bump. `packageRoot` walks up from
@@ -24,9 +25,32 @@ function readOwnVersion(): string {
   }
 }
 
+// Before anything can log: a dead stdout pipe must not be able to kill the
+// server. See ./stdio-resilience for the three incidents this prevents.
+installStdioResilience();
+
 const CONNECT_AGENT_FLAG = "--connect-agent [dir]";
 const CONNECT_AGENT_DESC =
   "Bring-your-own-CLI mode: serve headless and sync agent config (instructions, MCP servers, skills) to the given directory (default: the directory you ran libi from)";
+
+// Tri-state on purpose: declaring `--open` FIRST means commander leaves
+// `opts.open` undefined when neither flag is passed, so `shouldOpenBrowser`
+// can tell "the user said nothing" from "the user said yes" and apply the
+// installed-vs-dev-checkout default. Declaring only `--no-open` would silently
+// default it to `true` and take that decision away.
+const OPEN_DESC =
+  "Open the studio in your default browser once it's ready (default: on for an installed libi, off in a dev checkout)";
+const NO_OPEN_DESC = "Don't launch a browser — just print the URL";
+
+/** Both the `studio` subcommand and the bare `npx libi` default action take
+ *  the same options; keep them defined in one place so they can't drift. */
+function studioOptions(cmd: Command): Command {
+  return cmd
+    .option("-p, --port <port>", "Port number", "3456")
+    .option(CONNECT_AGENT_FLAG, CONNECT_AGENT_DESC)
+    .option("--open", OPEN_DESC)
+    .option("--no-open", NO_OPEN_DESC);
+}
 
 const program = new Command();
 
@@ -36,14 +60,11 @@ program
   .version(readOwnVersion());
 
 // libi studio
-program
-  .command("studio")
-  .description("Start the Libi studio (web UI)")
-  .option("-p, --port <port>", "Port number", "3456")
-  .option(CONNECT_AGENT_FLAG, CONNECT_AGENT_DESC)
-  .action(async (opts) => {
-    await startStudio(opts.port, opts.connectAgent);
-  });
+studioOptions(program.command("studio").description("Start the Libi studio (web UI)")).action(
+  async (opts) => {
+    await startStudio(opts.port, opts.connectAgent, { open: opts.open });
+  },
+);
 
 // libi serve-mcp
 program
@@ -85,11 +106,8 @@ program
   });
 
 // Default action: running `npx libi` without a subcommand starts the studio
-program
-  .option("-p, --port <port>", "Port number", "3456")
-  .option(CONNECT_AGENT_FLAG, CONNECT_AGENT_DESC)
-  .action(async (opts) => {
-    await startStudio(opts.port, opts.connectAgent);
-  });
+studioOptions(program).action(async (opts) => {
+  await startStudio(opts.port, opts.connectAgent, { open: opts.open });
+});
 
 program.parse();

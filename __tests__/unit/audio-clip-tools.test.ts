@@ -41,7 +41,6 @@ const readManifest = () =>
   JSON.parse(readFileSync(join(pieceDir, "composition.json"), "utf-8"));
 
 const baseManifest = {
-  sceneOrder: [],
   width: 1920,
   height: 1080,
   fps: 30,
@@ -111,13 +110,15 @@ describe("audio clip MCP tools", () => {
   it("audio_unlink turns an inline clip into standalone", async () => {
     writeManifest({
       ...baseManifest,
-      audioClips: [{ id: "c1", kind: "inline", linkedSceneId: "s1", fileId: FILE_ID, startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true }],
+      audioClips: [{ id: "c1", kind: "inline", linkedOverlayId: "vid-1", fileId: FILE_ID, startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true }],
     });
     const result = await audioUnlink(ctx(), { pieceId: PIECE_ID, clipId: "c1" });
     expect(result.success).toBe(true);
     const clip = readManifest().audioClips[0];
     expect(clip.kind).toBe("standalone");
-    expect(clip.linkedSceneId).toBeUndefined();
+    // Detaching KEEPS linkedOverlayId — a detached clip still remembers its
+    // source video so the timeline can park it there and offer re-attach.
+    expect(clip.linkedOverlayId).toBe("vid-1");
   });
 
   it("audio_split splits a clip in two", async () => {

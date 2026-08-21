@@ -1226,6 +1226,36 @@ export class DependencyManager {
         };
       }
     }
+    // Capability gate: runnable is not the same as usable. A binary can execute
+    // cleanly and still lack the features libi depends on — the Linux ffmpeg
+    // shipped until 2026-08-16 passed `-version` and had no `drawtext`, so every
+    // text overlay export failed at the ffmpeg backend. Checked AFTER runCheck
+    // because an un-runnable binary cannot answer a capability probe either,
+    // and "wrong CPU arch" is the more useful diagnosis when both would fail.
+    if (dep.capabilityCheck && status.installed && status.path) {
+      const missing = await DependencyManager.missingCapabilities(
+        status.path,
+        dep.capabilityCheck,
+      );
+      if (missing.length > 0) {
+        logger.warn(
+          {
+            binary: dep.binary,
+            path: status.path,
+            missing,
+            tag: "dep-capability",
+          },
+          `installed ${dep.binary} is missing required capabilities (${missing.join(", ")}) — marking for re-install`,
+        );
+        return {
+          binary: dep.binary,
+          installed: false,
+          path: null,
+          source: null,
+          runtimeStatus: "pending",
+        };
+      }
+    }
     return status;
   }
 
@@ -1249,6 +1279,41 @@ export class DependencyManager {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Run a capability probe and report whether the binary advertises everything
+   * libi needs. See `capabilityCheck` in ./types.ts for why running is not
+   * enough on its own.
+   *
+   * Returns the MISSING tokens rather than a bare boolean so the caller can
+   * name them — "installed ffmpeg is missing: drawtext" is actionable;
+   * "capability check failed" is not.
+   *
+   * A probe that cannot run at all reports every token missing: a binary that
+   * will not answer `-filters` cannot be trusted to have those filters, and
+   * `runCheck` is the thing that diagnoses un-runnable binaries.
+   *
+   * `maxBuffer` is raised because these probes are deliberately verbose —
+   * `ffmpeg -filters` prints ~560 lines, well past the 1MB default on some
+   * builds, and an overflow would otherwise read as a failed probe.
+   */
+  private static async missingCapabilities(
+    binPath: string,
+    check: { args: string[]; mustContain: string[] },
+  ): Promise<string[]> {
+    let output: string;
+    try {
+      const { stdout, stderr } = await execFileAsync(binPath, check.args, {
+        timeout: 15_000,
+        killSignal: "SIGKILL",
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      output = `${stdout}\n${stderr}`;
+    } catch {
+      return [...check.mustContain];
+    }
+    return check.mustContain.filter((token) => !output.includes(token));
   }
 
   /** Public for retry; called internally from ensureMcp. */

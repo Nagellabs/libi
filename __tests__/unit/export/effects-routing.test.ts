@@ -14,7 +14,6 @@ const BASE_VIDEO = {
 function comp(overrides: Partial<Composition>): Composition {
   return {
     id: "c", name: "c", width: 1920, height: 1080, fps: 30,
-    scenes: [],
     audioClips: [],
     ...overrides,
     // Base video is an OVERLAY now. Prepended below the caller's overlays

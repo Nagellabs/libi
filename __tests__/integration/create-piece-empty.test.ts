@@ -50,8 +50,8 @@ describe("createPiece", () => {
     const compositionPath = join(storageRoot, "storage", pieceId, "composition.json");
     if (existsSync(compositionPath)) {
       const manifest = JSON.parse(readFileSync(compositionPath, "utf-8"));
-      expect(manifest.scenes ?? []).toHaveLength(0);
-      expect(manifest.sceneOrder ?? []).toHaveLength(0);
+      expect(manifest.overlays ?? []).toHaveLength(0);
+      expect(manifest.overlays ?? []).toHaveLength(0);
     }
   });
 
@@ -64,6 +64,6 @@ describe("createPiece", () => {
 
     const { loadManifest } = await import("@/lib/composition/persistence");
     const manifest = await loadManifest(pieceId);
-    expect(manifest.scenes ?? []).toHaveLength(0);
+    expect(manifest.overlays ?? []).toHaveLength(0);
   });
 });

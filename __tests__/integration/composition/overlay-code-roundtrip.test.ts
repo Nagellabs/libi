@@ -20,11 +20,9 @@ const three = (body: string): PersistedOverlay => ({
 });
 
 const base = (ov: PersistedOverlay[]): CompositionManifest => ({
-  sceneOrder: [],
   width: 1920,
   height: 1080,
   fps: 30,
-  scenes: [],
   overlays: ov,
 });
 

@@ -5,11 +5,18 @@
 //        `state: "unknown"` and the UI stays quiet. Covers BOTH channels:
 //        the npm runtime (update-check.ts) and the desktop shell's own
 //        electron-updater feed (`shell`, when the shell registered one).
-// POST — start an install. `target: "runtime"` (default) enqueues the
-//        `runtime_update` JobManager job — nothing touches the RUNNING
-//        runtime, the new one applies at next launch. `target: "shell"`
-//        asks the shell's updater to download; the shell restarts itself
-//        into the new version once the download is verified.
+//
+//        GET also carries the AUTO-DOWNLOAD side effect: a check that
+//        classifies `update-available` enqueues the download itself, once
+//        per version per server process. The user is never asked to approve
+//        a download — only the restart that applies it. (Packaged app only;
+//        dev and npx never even check.)
+// POST — the manual paths. `target: "runtime"` (default) re-enqueues the
+//        `runtime_update` job — Settings' "Try again" after a failed
+//        auto-download. `target: "shell"` relays a click to the shell's
+//        updater: `action: "restart"` applies a ready download now;
+//        `action: "install"` (default, and the only action old runtime UIs
+//        send) starts a download on shells that don't auto-download.
 import { NextResponse } from "next/server";
 import { desc, eq } from "drizzle-orm";
 import { z, ZodError } from "zod/v3";
@@ -78,6 +85,41 @@ function latestInstallJob(): (JobStatusSnapshot & { version: string | null }) | 
   }
 }
 
+/**
+ * Enqueue the `runtime_update` job for `version` and run it detached.
+ * `matching_completed` means a previous attempt at this exact version
+ * already finished — succeeded or failed. Both callers want a fresh run in
+ * that case (the user clicked Try again, or a new process is auto-retrying
+ * a download that failed last launch) rather than an old row's outcome
+ * replayed as if it were this attempt's.
+ */
+async function enqueueRuntimeInstall(version: string): Promise<string> {
+  const manager = getJobManager();
+  const first = await manager.enqueue(RUNTIME_UPDATE_JOB_KIND, { version });
+  const result =
+    first.status === "matching_completed"
+      ? await manager.enqueue(RUNTIME_UPDATE_JOB_KIND, { version }, { forceNew: true })
+      : first;
+  const jobId = "jobId" in result ? result.jobId : result.existingJob.jobId;
+
+  // Fire and forget: this takes minutes. The client polls GET.
+  void manager.runToCompletion(jobId).catch((err: unknown) => {
+    logger.warn(
+      { tag: LOG_TAG, op: "run_failed", jobId, err: String(err) },
+      "runtime update job ended in failure",
+    );
+  });
+  return jobId;
+}
+
+/**
+ * Versions this process has already auto-started a download for. One shot
+ * per version per launch: a download that failed is not retried in a loop —
+ * Settings' "Try again" (POST) retries on demand, and the next app launch
+ * gets one fresh attempt.
+ */
+const autoDownloadAttempted = new Set<string>();
+
 export async function GET(req: Request): Promise<Response> {
   const force = new URL(req.url).searchParams.get("force") === "1";
   const current = describeCurrentRuntime();
@@ -89,6 +131,43 @@ export async function GET(req: Request): Promise<Response> {
   const shellUpdater = getShellUpdater();
   if (force && shellUpdater) await shellUpdater.checkNow();
 
+  const pendingVersion = current.updatesSupported
+    ? pendingRuntimeVersion(current.version)
+    : null;
+  let install = current.updatesSupported ? latestInstallJob() : null;
+
+  // ── Auto-download ─────────────────────────────────────────────────────
+  // The check just said an installable update exists; start fetching it.
+  // The version comes from the server's OWN check (same trust stance as
+  // POST's re-check), and `update-available` already excludes anything the
+  // shell couldn't run. Skipped when that exact version is staged, when an
+  // install is already in flight, and after one attempt per process.
+  if (
+    current.updatesSupported &&
+    update.state === "update-available" &&
+    update.latestVersion &&
+    pendingVersion !== update.latestVersion &&
+    !(install && (install.status === "queued" || install.status === "running")) &&
+    !autoDownloadAttempted.has(update.latestVersion)
+  ) {
+    autoDownloadAttempted.add(update.latestVersion);
+    try {
+      const jobId = await enqueueRuntimeInstall(update.latestVersion);
+      logger.info(
+        { tag: LOG_TAG, op: "auto_install_enqueued", jobId, version: update.latestVersion },
+        "runtime update found — downloading automatically",
+      );
+      // Reflect the download this response just started, so the client's
+      // first poll already renders "downloading" instead of a stale offer.
+      install = latestInstallJob();
+    } catch (err) {
+      logger.warn(
+        { tag: LOG_TAG, op: "auto_install_failed", version: update.latestVersion, err: String(err) },
+        "auto-download could not be enqueued",
+      );
+    }
+  }
+
   const dto: RuntimeUpdateDto = {
     current: {
       version: current.version,
@@ -97,10 +176,8 @@ export async function GET(req: Request): Promise<Response> {
     },
     shellApi: current.shellApi,
     update,
-    pendingVersion: current.updatesSupported
-      ? pendingRuntimeVersion(current.version)
-      : null,
-    install: current.updatesSupported ? latestInstallJob() : null,
+    pendingVersion,
+    install,
     shell: shellUpdater?.getStatus() ?? null,
   };
   return NextResponse.json(dto);
@@ -111,6 +188,11 @@ const postBodySchema = z.object({
   version: z.string().min(1),
   /** Which channel to install from. Defaults to the npm runtime. */
   target: z.enum(["runtime", "shell"]).optional(),
+  /**
+   * Shell channel only. "restart" applies a READY download now; "install"
+   * (default) starts a download — the only action old runtime UIs send.
+   */
+  action: z.enum(["install", "restart"]).optional(),
 });
 
 export async function POST(req: Request): Promise<Response> {
@@ -134,6 +216,33 @@ export async function POST(req: Request): Promise<Response> {
         { status: 400 },
       );
     }
+    if (body.action === "restart") {
+      // Apply a download that already landed. No feed re-check: this is not
+      // a download decision, and the ready state was verified on disk by
+      // electron-updater. The version must still match what's staged.
+      const status = updater.getStatus();
+      if (status.phase !== "ready" || status.latestVersion !== body.version) {
+        return NextResponse.json(
+          {
+            error: "not-ready",
+            message:
+              `Refusing to restart into shell ${body.version}: the updater reports ` +
+              `${status.latestVersion ?? "no version"} (${status.phase}).`,
+            shell: status,
+          },
+          { status: 409 },
+        );
+      }
+      // Old shells have no restart(); their download() restarts a ready
+      // download itself, so the fallback keeps the same meaning.
+      (updater.restart ?? updater.download).call(updater);
+      logger.info(
+        { tag: LOG_TAG, op: "shell_restart_requested", version: body.version },
+        "shell update restart requested",
+      );
+      return NextResponse.json({ version: body.version, target: "shell", action: "restart" });
+    }
+
     await updater.checkNow();
     const status = updater.getStatus();
     const offered =
@@ -191,31 +300,7 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  const manager = getJobManager();
-  const first = await manager.enqueue(RUNTIME_UPDATE_JOB_KIND, {
-    version: body.version,
-  });
-  // `matching_completed` means a previous attempt at this exact version already
-  // finished — succeeded or failed. The user is asking again, so run it again
-  // rather than replaying an old row's outcome as if it were this click's.
-  // (That branch is also the only one of the four with no top-level `jobId`.)
-  const result =
-    first.status === "matching_completed"
-      ? await manager.enqueue(
-          RUNTIME_UPDATE_JOB_KIND,
-          { version: body.version },
-          { forceNew: true },
-        )
-      : first;
-  const jobId = "jobId" in result ? result.jobId : result.existingJob.jobId;
-
-  // Fire and forget: this takes minutes. The client polls GET.
-  void manager.runToCompletion(jobId).catch((err: unknown) => {
-    logger.warn(
-      { tag: LOG_TAG, op: "run_failed", jobId, err: String(err) },
-      "runtime update job ended in failure",
-    );
-  });
+  const jobId = await enqueueRuntimeInstall(body.version);
 
   logger.info(
     { tag: LOG_TAG, op: "install_enqueued", jobId, version: body.version },

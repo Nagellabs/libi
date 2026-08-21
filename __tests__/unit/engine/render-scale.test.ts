@@ -59,7 +59,6 @@ function comp(overlayDraw?: (ctx: DrawContext) => void): {
       width: 100,
       height: 100,
       fps: 30,
-      scenes: [],
       overlays: overlayDraw
         ? [
             {
@@ -120,7 +119,6 @@ describe("renderFrame render-scale", () => {
       width: 1920,
       height: 1080,
       fps: 30,
-      scenes: [],
       overlays: [],
     };
     renderFrame(canvas, composition, 0);

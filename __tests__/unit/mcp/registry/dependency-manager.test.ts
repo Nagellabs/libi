@@ -22,19 +22,48 @@ vi.mock("@/lib/db/client", () => ({
 // settle deterministically. Default stdout is empty — callers that
 // shell out to `which uv` then treat "" as "not found" and fail fast
 // (the production-correct behaviour: report failed promptly, don't hang).
-vi.mock("child_process", () => ({
-  execSync: vi.fn(),
-  execFile: vi.fn((...args: unknown[]) => {
+//
+// One exception to the empty-stdout default: a `capabilityCheck` probe
+// (`ffmpeg -filters`) is checked for CONTENT, not just exit code, so an empty
+// answer means "this ffmpeg has no drawtext filter" and the dep is correctly
+// marked unusable. That is the F5 guard doing its job — but in these tests the
+// binary is a mock, so it must answer like a healthy one or every ffmpeg
+// assertion fails for the wrong reason.
+// The real `child_process.execFile` carries a `util.promisify.custom` symbol so
+// `promisify(execFile)` resolves to `{ stdout, stderr }`. A plain vi.fn() does
+// NOT, so promisify falls back to resolving with the callback's first value — a
+// bare string — and any caller destructuring `{ stdout }` silently gets
+// undefined. `isBinaryRunnable` never noticed because it ignores the value;
+// `missingCapabilities` reads it, so the mock has to be faithful here.
+vi.mock("child_process", async () => {
+  const { promisify } = await import("node:util");
+  const stdoutFor = (argv: string[]) =>
+    // A `capabilityCheck` probe is checked for CONTENT, not exit code, so an
+    // empty answer legitimately means "this ffmpeg has no drawtext" and the dep
+    // is marked unusable — the F5 guard working. These tests use a mock binary,
+    // so it must answer like a healthy one.
+    argv.includes("-filters")
+      ? " TS. drawtext          V->V       Draw text on top of video frames.\n"
+      : "";
+
+  const execFile = vi.fn((...args: unknown[]) => {
     const cb = args[args.length - 1];
+    const argv = Array.isArray(args[1]) ? (args[1] as string[]) : [];
     if (typeof cb === "function") {
       (cb as (err: Error | null, stdout: string, stderr: string) => void)(
         null,
-        "",
+        stdoutFor(argv),
         "",
       );
     }
-  }),
-}));
+  });
+  (execFile as unknown as Record<symbol, unknown>)[promisify.custom] = (
+    _cmd: string,
+    argv?: string[],
+  ) => Promise.resolve({ stdout: stdoutFor(argv ?? []), stderr: "" });
+
+  return { execSync: vi.fn(), execFile };
+});
 
 // Mock fs and os
 vi.mock("fs", async () => {

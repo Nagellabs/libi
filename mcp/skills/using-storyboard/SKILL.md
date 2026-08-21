@@ -267,6 +267,21 @@ then read back from it when you spend.
    takes and switch between them freely; `hide_storyboard_take` removes a take from view.
    Repeat per card.
 
+## Look at what you made (required)
+
+After ANY layout, position, size, or typography change — before you tell the
+user it is done — render the affected times and look:
+
+`libi.render_overlay_frames({ pieceId, atTimes: [...], contactSheet: true })`
+
+Read the returned image. Check that text fits its box, that nothing overlaps
+or runs off frame (`overflow.touchesEdge` flags the obvious cases), and that
+`unresolvedFonts` is empty — a family listed there is rendering in a fallback
+face and will look wrong. Reasoning about coordinates is not verification:
+a real build got the brand mark overlapping its wordmark, a chip 90px too
+narrow for its text, and every text in a serif fallback, all of which one
+render made obvious.
+
 ## Cost discipline
 
 `storyboard_get` returns a `costSummary` (`totalUsd`, `budgetUsd`, `remainingUsd`). An

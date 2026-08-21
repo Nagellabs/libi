@@ -5,9 +5,8 @@
 // libi.delete_clip / libi.duplicate_clip) and the timeline right-click menu's
 // REST route. One transactional `loadManifest → mutate → saveManifest` per op.
 //
-// A "clip" here is any of the three timeline entity families, auto-detected from
-// a single id (ids are prefix-disjoint: scene_* / <kind>-* / clip_*):
-//   - scene     — a sequential base scene (canvas or video)
+// A "clip" here is either timeline entity family, auto-detected from a single
+// id (ids are prefix-disjoint: <kind>-* / clip_*):
 //   - overlay   — a layered overlay (text / image / video / code / three / tracked)
 //   - audio     — an AudioClip (inline-linked or standalone)
 //
@@ -17,19 +16,14 @@
 import {
   loadManifest,
   saveManifest,
-  saveScene,
-  resyncLinkedClips,
-  removeSceneAndUpdateManifest,
   removeOverlayFromManifest,
   type CompositionManifest,
-  type PersistedScene,
   type PersistedOverlay,
   type PersistedAudioClip,
 } from "./persistence";
 import {
   removeClip,
   splitClip as splitAudioClipPure,
-  findInlineClipForScene,
   findInlineClipForOverlay,
 } from "./audio-clips";
 import { rippleCloseGap } from "./ripple";
@@ -37,7 +31,7 @@ import { rippleCloseGap } from "./ripple";
 /** Minimum half-duration a split may produce (one frame at 30fps). */
 const MIN_DURATION_SEC = 1 / 30;
 
-export type ClipFamily = "scene" | "overlay" | "audio";
+export type ClipFamily = "overlay" | "audio";
 
 export type ClipOpError = "clip_not_found" | "split_out_of_bounds";
 
@@ -57,9 +51,6 @@ export type DuplicateClipResult =
 
 function randSuffix(): string {
   return Math.random().toString(36).substring(2, 10);
-}
-function newSceneId(): string {
-  return `scene_${randSuffix()}`;
 }
 function newClipId(): string {
   return `clip_${randSuffix()}`;
@@ -88,11 +79,6 @@ function zBelow(overlays: PersistedOverlay[], sourceZ: number): number {
 // ─── family resolution ───────────────────────────────────────────────────────
 
 function resolveFamily(m: CompositionManifest, id: string): ClipFamily | null {
-  if (
-    (m.scenes ?? []).some((s) => s.id === id) ||
-    m.sceneOrder.includes(id)
-  )
-    return "scene";
   if ((m.overlays ?? []).some((o) => o.id === id)) return "overlay";
   if ((m.audioClips ?? []).some((c) => c.id === id)) return "audio";
   return null;
@@ -106,22 +92,6 @@ function splittable(start: number, duration: number, atTime: number): boolean {
   return head >= MIN_DURATION_SEC && tail >= MIN_DURATION_SEC;
 }
 
-/** Global start (seconds) + the scene object for a scene id, walking sceneOrder. */
-function sceneWindow(
-  m: CompositionManifest,
-  sceneId: string,
-): { start: number; scene: PersistedScene } | null {
-  const scenes = m.scenes ?? [];
-  let acc = 0;
-  for (const sid of m.sceneOrder) {
-    const s = scenes.find((x) => x.id === sid);
-    if (!s) continue;
-    if (sid === sceneId) return { start: acc, scene: s };
-    acc += s.duration;
-  }
-  return null;
-}
-
 // ─── delete ──────────────────────────────────────────────────────────────────
 
 export interface DeleteClipOptions {
@@ -129,12 +99,7 @@ export interface DeleteClipOptions {
    *  shifting every overlay/audio clip that starts at/after its END time left
    *  by its duration. Default false: today's plain-delete behavior (the gap
    *  stays), unchanged for every existing caller. See lib/composition/ripple.ts
-   *  for the full semantics writeup.
-   *
-   *  NO-OP for the scene family: a scene delete already closes its own gap
-   *  via `sceneOrder` + `resyncLinkedClips` (see the scene branch of
-   *  `deleteClip` below for why layering `rippleCloseGap` on top would
-   *  double-shift scene-linked audio). */
+   *  for the full semantics writeup. */
   ripple?: boolean;
 }
 
@@ -150,29 +115,6 @@ export async function deleteClip(
   // Capture the target's timeline window BEFORE removal — once the family
   // branch below removes it, `startTime`/`duration` are gone.
   const window = targetWindow(m, family, targetId);
-
-  if (family === "scene") {
-    // Cascades the scene's inline audio + resyncs following scenes. Never
-    // touches the source file.
-    //
-    // `ripple` is a documented NO-OP here, deliberately — NOT an oversight.
-    // Scene positions are implicit in `sceneOrder`, so removing a scene
-    // already closes the gap by construction, and
-    // `removeSceneAndUpdateManifest` → `resyncLinkedClips` re-derives every
-    // following scene's linked inline audio from the new `sceneOrder` in the
-    // same call. Running `rippleCloseGap` on top would shift those same
-    // clips a SECOND time — and not just the immediate successor:
-    // `resyncLinkedClips` walks the whole order, so a clip two-plus hops
-    // downstream can cross back over `gapEnd` and get double-shifted by the
-    // ripple pass (verified: S0[0-5) S1(del,5)[5-10) S2[10-16) S3[16-21)
-    // with audio linked to S3 — ripple-on-top lands S3's clip at 6 instead
-    // of the correct 11). We intentionally do NOT chase the "precise" fix
-    // (ripple overlays / non-scene-linked audio only) — the entire scene
-    // branch of deleteClip is being retired in the very next task, so that
-    // extra complexity has no lifespan left to earn its keep.
-    const { removedClips } = await removeSceneAndUpdateManifest(pieceId, targetId);
-    return { ok: true, family, targetId, removedClips };
-  }
 
   if (family === "overlay") {
     // Cascades a video overlay's coupled inline audio (linkedOverlayId).
@@ -201,10 +143,6 @@ function targetWindow(
   family: ClipFamily,
   targetId: string,
 ): { start: number; duration: number } | null {
-  if (family === "scene") {
-    const win = sceneWindow(m, targetId);
-    return win ? { start: win.start, duration: win.scene.duration } : null;
-  }
   if (family === "overlay") {
     const o = (m.overlays ?? []).find((x) => x.id === targetId);
     return o ? { start: o.startTime, duration: o.duration } : null;
@@ -249,7 +187,7 @@ export async function splitClip(
 
   if (family === "audio") return splitAudio(pieceId, m, targetId, atTime);
   if (family === "overlay") return splitOverlay(pieceId, m, targetId, atTime);
-  return splitScene(pieceId, m, targetId, atTime);
+  return { ok: false, error: "clip_not_found" };
 }
 
 async function splitAudio(
@@ -326,58 +264,6 @@ async function splitOverlay(
   return { ok: true, family: "overlay", headId: overlayId, tailId: tail.id };
 }
 
-async function splitScene(
-  pieceId: string,
-  m: CompositionManifest,
-  sceneId: string,
-  atTime: number,
-): Promise<SplitClipResult> {
-  const win = sceneWindow(m, sceneId);
-  if (!win) return { ok: false, error: "clip_not_found" };
-  const { start: sceneStart, scene } = win;
-  const origDuration = scene.duration;
-  if (!splittable(sceneStart, origDuration, atTime))
-    return { ok: false, error: "split_out_of_bounds" };
-
-  const localOffset = atTime - sceneStart;
-  const tailId = newSceneId();
-  const tail = structuredClone(scene) as PersistedScene;
-  tail.id = tailId;
-  tail.duration = origDuration - localOffset;
-
-  // Canvas scenes carry no source trim window — splitting is purely a duration
-  // cut (video scenes, which did need a trim split, were retired).
-  scene.duration = localOffset;
-
-  // Insert the tail scene right after the head in both order + inline scenes.
-  const scenes = m.scenes ?? [];
-  const sIdx = scenes.findIndex((s) => s.id === sceneId);
-  scenes.splice(sIdx + 1, 0, tail);
-  m.scenes = scenes;
-  const oIdx = m.sceneOrder.indexOf(sceneId);
-  m.sceneOrder.splice(oIdx + 1, 0, tailId);
-
-  // Persist both shards BEFORE resync (it reads shards via loadScene).
-  await saveScene(pieceId, scene);
-  await saveScene(pieceId, tail);
-
-  // Give the tail scene its own inline audio clip (a clone of the head's).
-  const headClip = findInlineClipForScene(m, sceneId);
-  if (headClip) {
-    const tailClip: PersistedAudioClip = {
-      ...structuredClone(headClip),
-      id: newClipId(),
-      linkedSceneId: tailId,
-    };
-    m.audioClips = [...(m.audioClips ?? []), tailClip];
-  }
-
-  // Derives both inline clips' startTime/duration/trimStart from the shards.
-  await resyncLinkedClips(pieceId, m);
-  await saveManifest(pieceId, m);
-  return { ok: true, family: "scene", headId: sceneId, tailId };
-}
-
 // ─── duplicate ───────────────────────────────────────────────────────────────
 
 export async function duplicateClip(
@@ -389,8 +275,7 @@ export async function duplicateClip(
   if (!family) return { ok: false, error: "clip_not_found" };
 
   if (family === "audio") return duplicateAudio(pieceId, m, targetId);
-  if (family === "overlay") return duplicateOverlay(pieceId, m, targetId);
-  return duplicateScene(pieceId, m, targetId);
+  return duplicateOverlay(pieceId, m, targetId);
 }
 
 async function duplicateAudio(
@@ -402,12 +287,11 @@ async function duplicateAudio(
   const copy: PersistedAudioClip = {
     ...structuredClone(src),
     id: newClipId(),
-    // A duplicated clip is a FREE copy — not coupled to the source's scene/overlay.
+    // A duplicated clip is a FREE copy — not coupled to the source's overlay.
     kind: "standalone",
     startTime: src.startTime + src.duration,
     label: src.label ? `${src.label} copy` : src.label,
   };
-  delete copy.linkedSceneId;
   delete copy.linkedOverlayId;
   copy.timelineOrder = undefined;
   m.audioClips = [...(m.audioClips ?? []), copy];
@@ -450,37 +334,4 @@ async function duplicateOverlay(
 
   await saveManifest(pieceId, m);
   return { ok: true, family: "overlay", newId: copy.id };
-}
-
-async function duplicateScene(
-  pieceId: string,
-  m: CompositionManifest,
-  sceneId: string,
-): Promise<DuplicateClipResult> {
-  const scenes = m.scenes ?? [];
-  const sIdx = scenes.findIndex((s) => s.id === sceneId);
-  if (sIdx === -1) return { ok: false, error: "clip_not_found" };
-  const src = scenes[sIdx];
-  const copy = structuredClone(src) as PersistedScene;
-  copy.id = newSceneId();
-  copy.name = `${src.name} copy`;
-  scenes.splice(sIdx + 1, 0, copy);
-  m.scenes = scenes;
-  const oIdx = m.sceneOrder.indexOf(sceneId);
-  m.sceneOrder.splice(oIdx + 1, 0, copy.id);
-  await saveScene(pieceId, copy);
-
-  const headClip = findInlineClipForScene(m, sceneId);
-  if (headClip) {
-    const clipCopy: PersistedAudioClip = {
-      ...structuredClone(headClip),
-      id: newClipId(),
-      linkedSceneId: copy.id,
-    };
-    m.audioClips = [...(m.audioClips ?? []), clipCopy];
-  }
-
-  await resyncLinkedClips(pieceId, m);
-  await saveManifest(pieceId, m);
-  return { ok: true, family: "scene", newId: copy.id };
 }

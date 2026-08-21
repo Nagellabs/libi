@@ -317,25 +317,140 @@ export class SessionEventHandler {
       }
     };
 
+    // ── Terminal-event bridge → close the chat tool-call row ───────────────
+    //
+    // A chat tool-call row goes terminal ONLY when a tool RESULT arrives; that
+    // is the single channel, and it breaks whenever the tool call does. When the
+    // user interrupted a running `music_download_model`, Claude Code cancelled
+    // the call, no result was ever delivered, and the row kept the progress
+    // stream it was still subscribed to — so it climbed to "12/12 MB (100%)"
+    // while spinning, offering "stop", and counting past 28 minutes on a job
+    // that had finished (session 9c3ce4d0, 2026-08-17). The job was fine; only
+    // its representation was stuck.
+    //
+    // So: when a job ends and its row never got a result, write one.
+    const finalizeRows = (
+      status: "completed" | "failed" | "cancelled",
+      toolCallIds: string[],
+      errorMessage: string | null,
+    ): void => {
+      for (const toolCallId of toolCallIds) {
+        const session = findSessionByToolCallId(toolCallId);
+        if (!session) continue;
+        const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
+        if (!agentMsg) continue;
+        // The normal path won the race — leave its real result alone.
+        if (
+          agentMsg.parts.some(
+            (p) => p.type === "tool-result" && p.toolCallId === toolCallId,
+          )
+        ) {
+          continue;
+        }
+        const result =
+          status === "completed"
+            ? "Finished in the background."
+            : status === "failed"
+              ? `Failed in the background: ${errorMessage ?? "unknown error"}`
+              : "Cancelled.";
+        agentMsg.parts.push({
+          type: "tool-result",
+          toolCallId,
+          toolId: null,
+          rawTitle: "",
+          result,
+          success: status === "completed",
+          completedAt: Date.now(),
+        });
+        clearTransientStatus(agentMsg.parts, toolCallId);
+        this.emit(session.sessionId, {
+          type: "agent-tool-result",
+          toolCallId,
+          toolId: null,
+          rawTitle: "",
+          result,
+          success: status === "completed",
+        });
+        logger.info(
+          {
+            tag: "session-manager",
+            op: "orphaned_tool_call_finalized",
+            toolCallId,
+            status,
+          },
+          "closed a chat tool-call row whose job ended without a tool result",
+        );
+      }
+    };
+
+    // Deliberately delayed. In the HEALTHY case the job finishes a beat before
+    // the MCP tool returns, so firing immediately would synthesize a result for
+    // every job and then collide with the real one — two results per call.
+    // Waiting lets the normal path land first; only genuinely orphaned rows are
+    // still resultless by the time this runs.
+    const FINALIZE_GRACE_MS = 8_000;
+    const pendingFinalizers = new Set<ReturnType<typeof setTimeout>>();
+    const scheduleFinalize = (
+      status: "completed" | "failed" | "cancelled",
+      toolCallIds: string[],
+      errorMessage: string | null,
+    ): void => {
+      if (toolCallIds.length === 0) return;
+      const timer = setTimeout(() => {
+        pendingFinalizers.delete(timer);
+        try {
+          finalizeRows(status, toolCallIds, errorMessage);
+        } catch (err) {
+          logger.warn(
+            {
+              tag: "session-manager",
+              op: "finalize_rows_failed",
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "Failed to close an orphaned tool-call row",
+          );
+        }
+      }, FINALIZE_GRACE_MS);
+      timer.unref?.();
+      pendingFinalizers.add(timer);
+    };
+
     const completionHandler = (payload: {
       jobId: string;
       result?: unknown;
+      toolCallIds?: string[];
     }): void => {
       void handleTerminal("completed", payload.jobId, null);
+      scheduleFinalize("completed", payload.toolCallIds ?? [], null);
     };
     const failureHandler = (payload: {
       jobId: string;
       error: string;
+      toolCallIds?: string[];
     }): void => {
       void handleTerminal("failed", payload.jobId, payload.error);
+      scheduleFinalize("failed", payload.toolCallIds ?? [], payload.error);
+    };
+    // No push notification for a cancel — the user did it, they know. The row
+    // still has to close: a cancelled job is exactly the case where no tool
+    // result is coming.
+    const cancelHandler = (payload: { toolCallIds?: string[] }): void => {
+      scheduleFinalize("cancelled", payload.toolCallIds ?? [], null);
     };
     mgr.on("completed", completionHandler);
     mgr.on("failed", failureHandler);
+    mgr.on("cancelled", cancelHandler);
 
     this.detachJobProgress = () => {
       jobProgressEmitter.off("job_progress", handler);
       mgr.off("completed", completionHandler);
       mgr.off("failed", failureHandler);
+      mgr.off("cancelled", cancelHandler);
+      // Re-attaching (HMR) rebuilds every closure above, so a finalizer left
+      // pending would run against the previous generation's session map and
+      // patch a message cache nothing is reading any more.
+      for (const timer of pendingFinalizers) clearTimeout(timer);
+      pendingFinalizers.clear();
     };
   }
 
@@ -753,19 +868,7 @@ export class SessionEventHandler {
             ...(session.isReplaying ? {} : { completedAt: Date.now() }),
           });
           // Clear the call part's transient status (terminal state = result present).
-          const callIdx = holder.parts.findIndex(
-            (p) => p.type === "tool-call" && p.toolCallId === update.toolCallId,
-          );
-          if (callIdx !== -1) {
-            const call = holder.parts[callIdx] as Extract<
-              AgentMessagePart,
-              { type: "tool-call" }
-            >;
-            if (call.status !== undefined) {
-              const { status: _s, ...rest } = call;
-              holder.parts[callIdx] = rest as AgentMessagePart;
-            }
-          }
+          clearTransientStatus(holder.parts, update.toolCallId);
           // Sequential execution: the next queued sibling starts now.
           this.markOldestPendingRunning(sessionId, session, holder);
         }
@@ -1150,12 +1253,51 @@ function formatEta(ms: number): string {
   return `${min}m ${sec}s`;
 }
 
-/** One-line progress text for a job tick. Exported for unit tests. */
+/** Below this, "no progress for 3s" is noise rather than information — a job
+ *  ticking normally is briefly between ticks at any given moment. */
+const QUIET_THRESHOLD_MS = 30_000;
+
+/**
+ * Strip a tool-call part's transient `status` once its result exists.
+ *
+ * Terminal state in the UI is "a result is present", so a part still carrying
+ * `status: "running"` next to a result renders as done AND running — a finished
+ * row that keeps its spinner and its Stop button. Called from both places that
+ * complete a tool call: the ACP `tool_call_update` path, and the job-terminal
+ * finalizer for rows whose result never arrived.
+ */
+function clearTransientStatus(
+  parts: AgentMessagePart[],
+  toolCallId: string,
+): void {
+  const idx = parts.findIndex(
+    (p) => p.type === "tool-call" && p.toolCallId === toolCallId,
+  );
+  if (idx === -1) return;
+  const call = parts[idx] as Extract<AgentMessagePart, { type: "tool-call" }>;
+  if (call.status === undefined) return;
+  const rest: Record<string, unknown> = { ...call };
+  delete rest.status;
+  parts[idx] = rest as unknown as AgentMessagePart;
+}
+
+/** One-line progress text for a job tick. Exported for unit tests.
+ *
+ *  When the ETA is unknown, the line says WHY if it can. "11/12 files (91%)"
+ *  alone reads as frozen; "11/12 files (91%) — working, no progress for 12m"
+ *  reads as what it is. The old line just kept the last countdown it ever
+ *  computed, which is how "ETA 1m 12s" survived fifteen minutes on screen. */
 export function formatJobProgressText(payload: JobProgressPayload): string {
   const pct =
     payload.total > 0 ? Math.floor((payload.done / payload.total) * 100) : 0;
   const eta = payload.etaMs != null ? formatEta(payload.etaMs) : null;
-  const core = `${payload.kind} ${payload.done}/${payload.total} ${payload.unit}${pct ? ` (${pct}%)` : ""}${eta ? ` — ETA ${eta}` : ""}`;
+  const quiet =
+    eta === null &&
+    payload.msSinceProgress != null &&
+    payload.msSinceProgress >= QUIET_THRESHOLD_MS
+      ? ` — working, no progress for ${formatEta(payload.msSinceProgress)}`
+      : "";
+  const core = `${payload.kind} ${payload.done}/${payload.total} ${payload.unit}${pct ? ` (${pct}%)` : ""}${eta ? ` — ETA ${eta}` : quiet}`;
   return payload.progressLabel ? `${payload.progressLabel} — ${core}` : core;
 }
 

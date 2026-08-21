@@ -22,6 +22,7 @@ import { promisify } from "util";
 import fs from "node:fs";
 import path from "node:path";
 import { resolveCodexHome } from "./canonical";
+import { userCommandSearchDirs } from "@/lib/shell-path-cache";
 import { getLibiHome } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 import { scrubSecrets } from "@/lib/security/secret-scrub";
@@ -76,16 +77,9 @@ export interface UserCodexCliOpts {
  * packaged boot that hung 10+ minutes inside a TCC-blocked `/bin/zsh` that no
  * timeout could kill. Reading its cache is free; re-spawning the shell is not.
  */
-function cachedShellPathDirs(): string[] {
-  try {
-    const raw = fs.readFileSync(path.join(getLibiHome(), "shell-path-cache.json"), "utf8");
-    const parsed = JSON.parse(raw) as { path?: unknown };
-    if (typeof parsed.path !== "string") return [];
-    return parsed.path.split(process.platform === "win32" ? ";" : ":").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
+// Implementation lives in lib/shell-path-cache.ts — shared with
+// lib/runtime/node-runtime.ts and lib/terminal/user-cli.ts so the "never
+// re-probe the login shell" rule above is stated and enforced in one place.
 
 /**
  * Directories searched for a `codex`, most-honest source first.
@@ -98,9 +92,7 @@ function cachedShellPathDirs(): string[] {
  * install.
  */
 export function codexSearchDirs(): string[] {
-  const sep = process.platform === "win32" ? ";" : ":";
-  const own = (process.env.PATH ?? "").split(sep).filter(Boolean);
-  return [...cachedShellPathDirs(), ...own];
+  return userCommandSearchDirs();
 }
 
 /** Executable file names a `codex` could have on this platform. */

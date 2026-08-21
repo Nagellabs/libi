@@ -19,7 +19,7 @@ Before any download step, tell the user (paraphrase, don't paste verbatim):
 > - **Transitive deps**: torch, diffusers, spacy, transformers, etc.
 >   The first install will pull ~2 GB of Python wheels into uv's cache.
 > - **Model weights**: ACE-Step's `v1-3.5B` checkpoint from
->   **HuggingFace** (`ACE-Step/ACE-Step-v1-3.5B`, ~5.5 GB into
+>   **HuggingFace** (`ACE-Step/ACE-Step-v1-3.5B`, ~8.3 GB into
 >   `~/.libi/models/ace-step/`).
 > - **Cost**: free, on-device. No API key. Generation is CPU-heavy
 >   though — ~3–5 minutes per 10 s of audio on a typical Mac.
@@ -43,7 +43,7 @@ After approval:
 libi.music_download_model()
 ```
 
-Downloads ACE-Step (~5.5 GB) from HuggingFace into
+Downloads ACE-Step (~8.3 GB) from HuggingFace into
 `~/.libi/models/ace-step/`, plus installs the `ace-step` Python library
 from the pinned GitHub commit on first run. Background job with progress
 in chat; idempotent (returns immediately if already present and the
@@ -100,7 +100,7 @@ is a stored audio file — add it to the composition with
 
 If `libi.list_bundled_mcps` later shows the `ace-step` model dep as not
 installed even though it was (a newer pinned model version shipped in a
-libi update), tell the user a newer model is available (~5.5 GB) and, on
+libi update), tell the user a newer model is available (~8.3 GB) and, on
 approval, re-run `libi.music_download_model()`.
 
 ## Paid / licensed music

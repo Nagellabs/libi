@@ -27,7 +27,6 @@ function wrap(ui: React.ReactElement) {
 }
 
 const comp = {
-  scenes: [],
   overlays: [{ id: "ov1", kind: "text", startTime: 0, duration: 3, z: 0, rect: { x: 0, y: 0, w: 1, h: 1 }, text: "hi" }],
 } as unknown as Composition;
 

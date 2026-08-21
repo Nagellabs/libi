@@ -58,7 +58,7 @@ export function resolveExportSettings(
   height = height & ~1;
 
   const bitrate = bitrateForPixels(width * height);
-  const audioBitrate = partial.audioBitrate ?? 192_000;
+  const audioBitrate = partial.audioBitrate ?? 256_000;
 
   return {
     format: partial.format,

@@ -23,18 +23,16 @@ describe("buildComposition with empty scenes", () => {
   } as unknown as Overlay;
 
   it("returns a valid empty composition with default-black background and the overlay", () => {
-    const comp = buildComposition([], new Map(), [oneOverlay]);
+    const comp = buildComposition(new Map(), [oneOverlay]);
     expect(comp).not.toBeNull();
-    expect(comp!.scenes).toEqual([]);
     expect(comp!.backgroundColor).toBe("#000000");
     expect(comp!.overlays).toHaveLength(1);
     expect(comp!.overlays![0].id).toBe("t1");
   });
 
   it("returns a valid empty composition even with no overlays", () => {
-    const comp = buildComposition([], new Map(), []);
+    const comp = buildComposition(new Map(), []);
     expect(comp).not.toBeNull();
-    expect(comp!.scenes).toEqual([]);
     expect(comp!.backgroundColor).toBe("#000000");
   });
 });

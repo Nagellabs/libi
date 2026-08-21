@@ -29,7 +29,9 @@ export async function GET(req: Request): Promise<Response> {
   if (kindFilter) rows = rows.filter((r) => r.kind === kindFilter);
   if (statusFilter) rows = rows.filter((r) => r.status === statusFilter);
 
-  const snapshots: JobStatusSnapshot[] = rows.map(snapshotFromRow);
+  // NOT `rows.map(snapshotFromRow)` — map would pass the element index as the
+  // second argument. See the note on snapshotFromRow.
+  const snapshots: JobStatusSnapshot[] = rows.map((r) => snapshotFromRow(r));
   return NextResponse.json({ jobs: snapshots });
 }
 

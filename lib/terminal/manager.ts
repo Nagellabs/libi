@@ -4,8 +4,8 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { serverLogger as logger } from "@/lib/logger";
 import { getPreset } from "./presets";
-import { launchCommandForPreset } from "./launch-command";
-import { resolveCodexHome } from "@/lib/codex-config/canonical";
+import { launchLineForPreset } from "./launch-command";
+import { ensureCodexHome } from "@/lib/codex-config/canonical";
 import { MAX_TERMINAL_SESSIONS } from "./types";
 import type {
   AttachedSocket,
@@ -127,11 +127,16 @@ export class TerminalManager {
     // `<LIBI_HOME>/.codex` in a worktree/dev build. This is the same home the
     // "Install" button writes libi's MCP servers into, so a bare `codex` here
     // picks up libi's tools. Harmless for non-codex presets (claude ignores it).
+    //
+    // `ensureCodexHome` creates it if absent: codex exits 1 rather than
+    // starting when CODEX_HOME names a missing directory, and the preset is
+    // NOT a safe gate for that — the `needs-auth` remedy signs in by opening a
+    // plain `shell` terminal and typing `codex login` into it.
     const pty = this.ptyFactory({
       cwd,
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
-      env: { ...process.env, CODEX_HOME: resolveCodexHome() },
+      env: { ...process.env, CODEX_HOME: ensureCodexHome() },
     });
 
     const headless = new HeadlessTerminal({
@@ -168,14 +173,22 @@ export class TerminalManager {
       this.destroy(id, exitCode);
     });
 
-    // Resolve the command to type (e.g. `claude`, `codex`) — the static preset
-    // command; `null` for the plain shell.
-    const launchCommand = launchCommandForPreset(cliId);
-    if (launchCommand) {
+    // Resolve the line to type (e.g. `claude`, `codex`) — `null` for the plain
+    // shell. When the user has no such CLI this is a `#` comment carrying the
+    // preset's install hint instead of a command that can only fail; see
+    // `launchLineForPreset`.
+    const launchLine = launchLineForPreset(cliId);
+    if (launchLine) {
       // Typed into the shell (kernel pty input buffer holds it until the
       // shell reads), not exec'd — the user keeps a live shell when the
       // CLI exits and the command stays editable in history.
-      pty.write(`${launchCommand}\r`);
+      pty.write(`${launchLine.text}\r`);
+      if (launchLine.kind === "install-hint") {
+        logger.info(
+          { tag: "terminal", op: "cli_missing", id, cliId: entry.meta.cliId },
+          "preset CLI not found on the user's PATH — typed the install hint instead",
+        );
+      }
     }
 
     // Held, not written yet — see flushPendingInput for why the first client

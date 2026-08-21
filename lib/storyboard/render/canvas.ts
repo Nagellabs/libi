@@ -1,4 +1,5 @@
 import { createCanvas } from "@napi-rs/canvas";
+import { ensureBundledFontsRegistered } from "@/lib/fonts/register-server";
 import rough from "roughjs";
 import { createDrawFunction } from "@/lib/ai/scene-validator";
 import { DRAW_HELPERS } from "@/lib/engine/draw-helpers";
@@ -19,6 +20,7 @@ export async function renderCanvasUnit(
   frame: RenderFrame,
   extra: Record<string, unknown> = {},
 ): Promise<Buffer> {
+  ensureBundledFontsRegistered();
   const canvas = createCanvas(frame.width, frame.height);
   const ctx = canvas.getContext("2d");
   const rc = rough.canvas(canvas as unknown as HTMLCanvasElement, {

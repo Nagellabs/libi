@@ -35,7 +35,7 @@ tail -f ~/.libi/logs/libi.log | jq 'select(.tag == "…")'   # app-level structu
 
 Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export`, `overlay`,
 `analysis`, `tracking-engine`, `tracking-pyenv`, `matte`, `mcp-config`, `session-manager`,
-`lifecycle`, `snapshot`, `codex-config`, `terminal`, `analytics`.
+`lifecycle`, `snapshot`, `codex-config`, `terminal`, `analytics`, `onboarding`.
 
 ## Hard rules
 

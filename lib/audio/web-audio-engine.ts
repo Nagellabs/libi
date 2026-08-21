@@ -1,9 +1,11 @@
 "use client";
 
 import { Input, UrlSource, ALL_FORMATS, AudioBufferSink } from "mediabunny";
+import { mediaFetchRetryDelay } from "@/lib/engine/media-fetch-retry";
 import type { AudioClip } from "@/lib/engine/types";
 import { effectiveVolume } from "@/lib/audio/active-clips";
 import { applyDuckParams } from "@/lib/audio/web-audio-mixer";
+import { duckSidechainIds } from "@/lib/audio/duck-params";
 import {
   compToCtxTime,
   clipSourceRange,
@@ -33,9 +35,11 @@ interface EngineClip {
    *  gain → duckGain → master, with duckGain.gain driven by the worklet. */
   duckGain: GainNode | null;
   duckWorklet: AudioWorkletNode | null;
-  /** The sidechain clip's gain node we tapped into the worklet — kept so
-   *  teardown can sever exactly that edge and the sig can detect a swap. */
-  duckSidechainGain: GainNode | null;
+  /** The sidechain clips' gain nodes we tapped into the worklet, in order —
+   *  kept so teardown can sever exactly those edges and the sig can detect a
+   *  swap. All of them feed the worklet's ONE input; Web Audio sums fan-in,
+   *  which is the duck we want (it responds to whichever voice is speaking). */
+  duckSidechainGains: GainNode[];
   /** Signature of the duck graph currently built, so reconcile rebuilds
    *  only on a real change (params or sidechain node identity). */
   duckSig: string | null;
@@ -50,8 +54,9 @@ interface EngineClip {
  *
  * Sidechain ducking: a clip with `clip.duck` is routed gain → duckGain →
  * master, where duckGain.gain (intrinsic 0) is driven entirely by the shared
- * sidechain envelope-follower worklet, fed from the sidechain clip's gain.
- * When the sidechain is silent the worklet emits ~1.0 (full level); when it
+ * sidechain envelope-follower worklet, fed from the sidechain clips' gains —
+ * ALL of them, into the worklet's single input, which Web Audio sums. When the
+ * sidechains are silent the worklet emits ~1.0 (full level); when their sum
  * exceeds threshold the music dips toward reductionMin. The duck graph is
  * reconciled in `setClips` and is independent of buffer scheduling.
  */
@@ -114,10 +119,15 @@ export class WebAudioEngine {
     const ec: EngineClip = {
       clip, url, sink: null, input: null, gain,
       nodes: new Set(), pumpAbort: null, ready: Promise.resolve(),
-      duckGain: null, duckWorklet: null, duckSidechainGain: null, duckSig: null,
+      duckGain: null, duckWorklet: null, duckSidechainGains: [], duckSig: null,
     };
     ec.ready = (async () => {
-      const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS });
+      const input = new Input({
+      // Bounded retries: mediabunny's default retries a same-origin fetch
+      // failure forever. See media-fetch-retry.ts.
+      source: new UrlSource(url, { getRetryDelay: mediaFetchRetryDelay }),
+      formats: ALL_FORMATS,
+    });
       ec.input = input;
       const track = await input.getPrimaryAudioTrack();
       if (track) ec.sink = new AudioBufferSink(track);
@@ -285,15 +295,28 @@ export class WebAudioEngine {
     return this.workletReady;
   }
 
+  /** The live sidechain clips driving this clip's duck, in declared order.
+   *  Ids that name a missing clip (or the clip itself) are skipped, so a duck
+   *  with five of six VO lines still present keeps ducking under those five. */
+  private duckSources(ec: EngineClip): EngineClip[] {
+    if (!ec.clip.duck) return [];
+    const out: EngineClip[] = [];
+    for (const id of duckSidechainIds(ec.clip.duck)) {
+      const sc = this.clips.get(id);
+      if (sc && sc !== ec) out.push(sc);
+    }
+    return out;
+  }
+
   /** Stable signature of the duck graph a clip should currently have —
-   *  null when it should have none. Reference-compares the sidechain gain
-   *  node so a sidechain rebuild (url change) forces a re-tap. */
-  private duckSignature(ec: EngineClip): string | null {
+   *  null when it should have none. The sidechain gain nodes are compared by
+   *  reference separately, so a sidechain rebuild (url change) forces a
+   *  re-tap even when the ids are unchanged. */
+  private duckSignature(ec: EngineClip, sources: EngineClip[]): string | null {
     const d = ec.clip.duck;
-    if (!d) return null;
-    const sidechain = this.clips.get(d.sidechainClipId);
-    if (!sidechain || sidechain === ec) return null;
-    return `${d.sidechainClipId}|${d.thresholdDb}|${d.ratio}|${d.attackMs}|${d.releaseMs}|${d.reductionDb}`;
+    if (!d || sources.length === 0) return null;
+    const ids = sources.map((s) => s.clip.id).join(",");
+    return `${ids}|${d.thresholdDb}|${d.ratio}|${d.attackMs}|${d.releaseMs}|${d.reductionDb}`;
   }
 
   /** Re-evaluate every clip's duck graph; rebuild only those that changed. */
@@ -305,8 +328,10 @@ export class WebAudioEngine {
 
   /** Sever this clip's duck graph and restore the direct gain → master route. */
   private teardownDuck(ec: EngineClip): void {
-    if (ec.duckSidechainGain && ec.duckWorklet) {
-      try { ec.duckSidechainGain.disconnect(ec.duckWorklet); } catch { /* gone */ }
+    if (ec.duckWorklet) {
+      for (const g of ec.duckSidechainGains) {
+        try { g.disconnect(ec.duckWorklet); } catch { /* gone */ }
+      }
     }
     if (ec.duckWorklet) { try { ec.duckWorklet.disconnect(); } catch { /* gone */ } }
     if (ec.duckGain) {
@@ -316,29 +341,30 @@ export class WebAudioEngine {
     }
     ec.duckGain = null;
     ec.duckWorklet = null;
-    ec.duckSidechainGain = null;
+    ec.duckSidechainGains = [];
     ec.duckSig = null;
   }
 
   /** Build/refresh the sidechain duck graph for one clip (idempotent). */
   private async rebuildDuck(ec: EngineClip): Promise<void> {
-    const desired = this.duckSignature(ec);
-    const sidechain = ec.clip.duck ? this.clips.get(ec.clip.duck.sidechainClipId) : undefined;
-    // Fold the sidechain node identity into the comparison so a rebuilt
+    const sources = this.duckSources(ec);
+    const desired = this.duckSignature(ec, sources);
+    // Fold the sidechain node identities into the comparison so a rebuilt
     // sidechain (new gain node) re-taps even when params are unchanged.
     const same = desired !== null
       && desired === ec.duckSig
-      && ec.duckSidechainGain === (sidechain?.gain ?? null);
+      && ec.duckSidechainGains.length === sources.length
+      && sources.every((s, i) => ec.duckSidechainGains[i] === s.gain);
     if (same) return;
 
     this.teardownDuck(ec);
-    if (desired === null || !sidechain || !ec.clip.duck) return;
+    if (desired === null || !ec.clip.duck) return;
 
     await this.ensureWorklet();
     // The clip set may have changed while the worklet loaded — re-validate.
     if (this.clips.get(ec.clip.id) !== ec) return;
-    const sc = this.clips.get(ec.clip.duck.sidechainClipId);
-    if (!sc) return;
+    const live = this.duckSources(ec);
+    if (live.length === 0) return;
 
     const duckGain = this.ctx.createGain();
     // Intrinsic 0: the worklet output is the SOLE driver (1.0 idle → reductionMin
@@ -351,7 +377,11 @@ export class WebAudioEngine {
     });
     applyDuckParams(worklet, ec.clip.duck, this.ctx.sampleRate);
     worklet.connect(duckGain.gain);
-    sc.gain.connect(worklet);
+    // Every sidechain feeds the worklet's ONE input — Web Audio sums fan-in, so
+    // the follower sees the same summed signal the export builds by adding the
+    // placed clips into one buffer. The tap stays POST-volume (`.gain`): a
+    // pre-volume tap would duck against a level the listener never hears.
+    for (const sc of live) sc.gain.connect(worklet);
 
     // Reroute the clip's audio through the duck stage.
     try { ec.gain.disconnect(); } catch { /* */ }
@@ -360,8 +390,11 @@ export class WebAudioEngine {
 
     ec.duckGain = duckGain;
     ec.duckWorklet = worklet;
-    ec.duckSidechainGain = sc.gain;
-    ec.duckSig = desired;
+    ec.duckSidechainGains = live.map((s) => s.gain);
+    // Recomputed from `live`, not `desired`: the clip set may have changed
+    // while the worklet module loaded, and the sig must describe what was
+    // actually wired or the next reconcile would skip a needed rebuild.
+    ec.duckSig = this.duckSignature(ec, live);
   }
 
   dispose(): void {

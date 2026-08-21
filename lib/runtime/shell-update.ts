@@ -24,10 +24,14 @@
 // dead-code-eliminated. An opaque `globalThis` property survives both.
 
 /**
- * The shell updater's lifecycle, flattened to what the UI needs. Terminal
- * download states are deliberately absent: a finished download restarts the
- * app moments later (`electron/shell-updater.ts`), so "ready" is the last
- * phase a poll can observe.
+ * The shell updater's lifecycle, flattened to what the UI needs.
+ *
+ * Since the auto-download change, "ready" is a STABLE state: the download
+ * happened on its own and the shell waits for an explicit restart — either
+ * the UI's "Restart to apply" (`restart()`) or the user's next normal quit
+ * (`autoInstallOnAppQuit`). Shells that predate auto-download restart
+ * themselves moments after "ready"; `ShellUpdateStatus.autoDownload` is how
+ * the UI tells the two generations apart.
  */
 export type ShellUpdatePhase =
   /** No check has completed yet. */
@@ -37,7 +41,7 @@ export type ShellUpdatePhase =
   /** A newer shell exists on the feed. Offerable. */
   | "update-available"
   | "downloading"
-  /** Downloaded and verified; the shell is about to quit-and-install. */
+  /** Downloaded and verified; waiting for a restart to apply it. */
   | "ready"
   /** The last check or download failed. SILENT in the UI, like `unknown`. */
   | "error";
@@ -54,6 +58,13 @@ export interface ShellUpdateStatus {
   error: string | null;
   /** When the last check finished (epoch ms), or null before the first. */
   checkedAt: number | null;
+  /**
+   * True when this shell downloads updates on its own and waits at "ready"
+   * for an explicit restart. Absent (old shells): downloads start only from
+   * a click, and the shell restarts itself once the download is verified —
+   * the UI must keep the click-to-install offer for those.
+   */
+  autoDownload?: boolean;
 }
 
 export interface ShellUpdater {
@@ -64,12 +75,19 @@ export interface ShellUpdater {
    */
   checkNow(): Promise<void>;
   /**
-   * Download the advertised update. The click that calls this is the consent
-   * for the restart that follows — once verified on disk, the shell
-   * quits-and-installs on its own (`electron/shell-updater.ts`), so there is
-   * no separate "restart" call to forget.
+   * Download the advertised update. On auto-download shells this is a
+   * back-compat entry point: it is a no-op while a download runs, and when
+   * the download is already `ready` it is treated as restart consent (so an
+   * old runtime's "Install & restart" click still applies the update on a
+   * new shell). On pre-auto-download shells, the click that calls this is
+   * the consent for the self-restart that follows the download.
    */
   download(): void;
+  /**
+   * Quit and install the `ready` download now. Only auto-download shells
+   * register this; callers must fall back to `download()` when absent.
+   */
+  restart?(): void;
 }
 
 const slot = globalThis as unknown as { __libiShellUpdater?: ShellUpdater | null };

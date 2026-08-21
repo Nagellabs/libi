@@ -100,28 +100,4 @@ describe("mcp/notify", () => {
     });
   });
 
-  it("refreshQuery({ queryKey, pieceId, sceneId }) includes sceneId so the client can jump to the change", async () => {
-    getCurrentPortMock.mockReturnValue(19999);
-    const fetchMock = vi.fn().mockResolvedValue(new Response(null));
-    vi.stubGlobal("fetch", fetchMock);
-
-    notify.refreshQuery({
-      queryKey: "composition",
-      pieceId: "p1",
-      sceneId: "scene_42",
-    });
-
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    const [, init] = fetchMock.mock.calls[0];
-    const body = JSON.parse(init?.body as string);
-    expect(body).toEqual({
-      type: "refresh_query",
-      queryKey: "composition",
-      pieceId: "p1",
-      sceneId: "scene_42",
-    });
-  });
-
 });

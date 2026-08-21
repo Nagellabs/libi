@@ -5,7 +5,7 @@ import type { Composition, Overlay } from "@/lib/engine/types";
 function comp(over: Partial<Composition> = {}): Composition {
   return {
     id: "c1", width: 1920, height: 1080, fps: 30,
-    scenes: [], sceneOrder: [], overlays: [], audioClips: [],
+    overlays: [], audioClips: [],
     ...over,
   } as unknown as Composition;
 }
@@ -96,14 +96,6 @@ describe("resolveExportBase", () => {
       sourceWidth: null,
       sourceHeight: null,
     });
-  });
-
-  it("returns null when a canvas scene is present (ffmpeg can't run draw fns)", () => {
-    const c = comp({
-      scenes: [{ id: "s1", type: "canvas", name: "card", duration: 4, draw: () => {} }],
-      overlays: [baseOverlay()],
-    });
-    expect(resolveExportBase(c)).toBeNull();
   });
 
   it("resolves the LOWER-z video as base when two full-frame videos stack", () => {

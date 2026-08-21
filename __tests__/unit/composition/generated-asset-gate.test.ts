@@ -13,8 +13,8 @@ import {
 
 const PIECE = "gate-piece";
 
-function manifestWith(scenes: CompositionManifest["scenes"], overlays?: CompositionManifest["overlays"]): CompositionManifest {
-  return { sceneOrder: (scenes ?? []).map((s) => s.id), width: 1080, height: 1920, fps: 30, scenes, overlays };
+function manifestWith(overlays?: CompositionManifest["overlays"]): CompositionManifest {
+  return { width: 1080, height: 1920, fps: 30, overlays };
 }
 
 /** Full-frame base video overlay carrying `fileId` — the modern spelling of
@@ -53,10 +53,10 @@ function insertCompletedAnalysis(db: ReturnType<typeof createTestDb>, fileId: st
 }
 
 describe("collectTimelineVideoFileIds", () => {
-  it("collects video overlay fileIds, ignores canvas scenes / image overlays", () => {
+  it("collects video overlay fileIds, ignores code / image overlays", () => {
     const m = manifestWith(
-      [{ id: "s2", type: "canvas", name: "c", duration: 2, drawFunction: "" }],
       [
+        { id: "bg1", kind: "code" as const, startTime: 0, duration: 2, z: -1, opacity: 1, rect: { x: 0, y: 0, width: 1080, height: 1920 }, drawFunction: "" },
         videoOverlay("o0", "vid-1"),
         { id: "o1", kind: "video", startTime: 0, duration: 2, rect: { x: 0, y: 0, width: 1, height: 1 }, z: 1, opacity: 1, fileId: "vid-2" },
         { id: "o2", kind: "image", startTime: 0, duration: 2, rect: { x: 0, y: 0, width: 1, height: 1 }, z: 2, opacity: 1, fileId: "img-1" },
@@ -65,8 +65,8 @@ describe("collectTimelineVideoFileIds", () => {
     expect(collectTimelineVideoFileIds(m).sort()).toEqual(["vid-1", "vid-2"]);
   });
 
-  it("returns empty for a canvas-only timeline", () => {
-    const m = manifestWith([{ id: "s1", type: "canvas", name: "c", duration: 2, drawFunction: "" }]);
+  it("returns empty for a code-only timeline", () => {
+    const m = manifestWith([{ id: "bg1", kind: "code" as const, startTime: 0, duration: 2, z: -1, opacity: 1, rect: { x: 0, y: 0, width: 1080, height: 1920 }, drawFunction: "" }]);
     expect(collectTimelineVideoFileIds(m)).toEqual([]);
   });
 });
@@ -103,7 +103,7 @@ describe("findUnvalidatedGeneratedClips", () => {
     const db = createTestDb();
     db.insert(pieces).values({ id: PIECE, name: "p" }).run();
     insertFile(db, "vid-1", { aiGeneration: '{"provider":"fal-ai"}' });
-    await saveManifest(PIECE, manifestWith([], [videoOverlay("o1", "vid-1")]));
+    await saveManifest(PIECE, manifestWith([videoOverlay("o1", "vid-1")]));
 
     const out = await findUnvalidatedGeneratedClips(PIECE);
     expect(out.map((c) => c.fileId)).toEqual(["vid-1"]);
@@ -114,7 +114,7 @@ describe("findUnvalidatedGeneratedClips", () => {
     db.insert(pieces).values({ id: PIECE, name: "p" }).run();
     insertFile(db, "vid-1", { aiGeneration: '{"provider":"fal-ai"}' });
     insertCompletedAnalysis(db, "vid-1");
-    await saveManifest(PIECE, manifestWith([], [videoOverlay("o1", "vid-1")]));
+    await saveManifest(PIECE, manifestWith([videoOverlay("o1", "vid-1")]));
 
     expect(await findUnvalidatedGeneratedClips(PIECE)).toEqual([]);
   });
@@ -123,15 +123,15 @@ describe("findUnvalidatedGeneratedClips", () => {
     const db = createTestDb();
     db.insert(pieces).values({ id: PIECE, name: "p" }).run();
     insertFile(db, "vid-1", {});
-    await saveManifest(PIECE, manifestWith([], [videoOverlay("o1", "vid-1")]));
+    await saveManifest(PIECE, manifestWith([videoOverlay("o1", "vid-1")]));
 
     expect(await findUnvalidatedGeneratedClips(PIECE)).toEqual([]);
   });
 
-  it("returns empty for an empty/canvas-only timeline", async () => {
+  it("returns empty for an empty/code-only timeline", async () => {
     const db = createTestDb();
     db.insert(pieces).values({ id: PIECE, name: "p" }).run();
-    await saveManifest(PIECE, manifestWith([{ id: "s1", type: "canvas", name: "c", duration: 2, drawFunction: "" }]));
+    await saveManifest(PIECE, manifestWith([{ id: "bg1", kind: "code" as const, startTime: 0, duration: 2, z: -1, opacity: 1, rect: { x: 0, y: 0, width: 1080, height: 1920 }, drawFunction: "" }]));
 
     expect(await findUnvalidatedGeneratedClips(PIECE)).toEqual([]);
   });

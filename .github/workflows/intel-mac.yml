@@ -1,0 +1,141 @@
+name: Intel mac (x86_64)
+
+# libi is developed and released on Apple Silicon. `darwin-x64` is a genuinely
+# different provisioning path and NOTHING has ever executed it:
+#
+#   ffmpeg/ffprobe   arm64 → ffmpeg.martin-riedl.de   x64 → evermeet.cx
+#   node runtime     a different tarball and a different pinned sha256
+#   codex binary     x86_64-apple-darwin
+#
+# It cannot be faked locally: an Apple Silicon machine without Rosetta cannot
+# execute an x86_64 binary at all (`arch -x86_64` → "Bad CPU type"), and
+# renting a real Intel Mac means AWS EC2 Mac's 24-hour minimum host allocation
+# — roughly $16-26 for a twenty-minute check.
+#
+# GitHub's hosted Intel runner is free for public repositories, so this is
+# essentially the only affordable way to exercise those paths at all.
+#
+# `macos-13` was retired in December 2025. `macos-15-intel` is the LAST x86_64
+# macOS image GitHub will offer and it sunsets in **August 2027**, after which
+# this coverage disappears and the only options are paid hardware or dropping
+# Intel support deliberately.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  provisioning:
+    name: darwin-x64 provisioning paths
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Confirm this really is x86_64
+        run: |
+          set -euo pipefail
+          echo "uname -m : $(uname -m)"
+          echo "node arch: $(node -p process.arch)"
+          # A silent fallback to an arm64 runner would make everything below
+          # re-test the path that is already covered, while reporting green.
+          test "$(node -p process.arch)" = "x64" || {
+            echo "::error::runner is not x64 — this workflow would test nothing new"
+            exit 1
+          }
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native modules for this Node
+        run: npm rebuild better-sqlite3 node-pty
+
+      # The x64 ffmpeg comes from a DIFFERENT vendor than the arm64 one
+      # (evermeet.cx vs martin-riedl), so it is a separate artifact with its own
+      # feature set. F5 (2026-08-16) was exactly this: a per-platform ffmpeg
+      # that ran fine and had no drawtext filter, breaking every text overlay
+      # export on Linux. Check the x64 mac build for the same hole.
+      - name: darwin-x64 ffmpeg has drawtext?
+        run: |
+          set -euo pipefail
+          URL=$(node -e '
+            const fs=require("fs");
+            const s=fs.readFileSync("mcp/registry/bundled.ts","utf8");
+            const m=s.match(/x64:\s*"(https:\/\/[^"]+ffmpeg[^"]*)"/);
+            if(!m){console.error("no darwin x64 ffmpeg url found");process.exit(1)}
+            console.log(m[1]);
+          ')
+          echo "registry darwin-x64 ffmpeg: $URL"
+          curl -fsSL --max-time 300 -o ff.zip "$URL"
+          unzip -q -o ff.zip -d ffcheck
+          BIN=$(find ffcheck -type f -name ffmpeg | head -1)
+          test -n "$BIN" || { echo "::error::no ffmpeg binary in the archive"; exit 1; }
+          chmod +x "$BIN"
+          "$BIN" -version | head -1
+          echo "total filters: $("$BIN" -filters | tail -n +9 | wc -l)"
+          if ! "$BIN" -filters | grep -qw drawtext; then
+            echo "::error::drawtext ABSENT from the darwin-x64 ffmpeg — Intel macs have the F5 bug"
+            exit 1
+          fi
+          # Listed is not the same as working: the Linux build advertised
+          # --enable-libfreetype while lacking the filter entirely.
+          "$BIN" -y -f lavfi -i color=c=black:s=320x120:d=1 \
+            -vf "drawtext=text=OK:fontsize=32:fontcolor=white" -frames:v 1 out.png >/dev/null 2>&1
+          test -f out.png || { echo "::error::drawtext is listed but does not render"; exit 1; }
+          echo "drawtext present and renders"
+
+      # Every pinned managed-node sha256, checked against nodejs.org's own
+      # SHASUMS256.txt. A wrong hash bricks first boot for any user whose
+      # system node is older than MIN_NODE_MAJOR, and four of the six had never
+      # been checked against anything.
+      #
+      # Deliberately compares MANIFESTS rather than downloading the archives:
+      # the hash is the hash, so this is architecture-independent, and it turns
+      # four ~60MB downloads into one 3KB fetch. It only lives in this workflow
+      # because Intel mac is the platform whose hash was least likely to ever
+      # be exercised by hand — but it validates ALL of them.
+      - name: Every pinned managed-node sha256 matches upstream
+        run: |
+          set -euo pipefail
+          npx tsx -e '
+            import { nodeArchiveTarget } from "./lib/runtime/node-runtime";
+            const combos = [
+              ["darwin","arm64"],["darwin","x64"],
+              ["linux","x64"],["linux","arm64"],
+              ["win32","x64"],["win32","arm64"],
+            ] as const;
+            for (const [p,a] of combos) {
+              const t = nodeArchiveTarget(p as never, a);
+              if (!t) { console.error(`no target for ${p}-${a}`); process.exit(1); }
+              console.log(`${p}-${a}\t${t.sha256}\t${t.url}`);
+            }
+          ' > targets.tsv
+          cat targets.tsv
+
+          VER=$(node -p "require('fs').readFileSync('targets.tsv','utf8').match(/dist\/(v[0-9.]+)\//)[1]")
+          curl -fsSL --max-time 120 "https://nodejs.org/dist/$VER/SHASUMS256.txt" -o shasums.txt
+
+          fail=0
+          while IFS=$'\t' read -r key want url; do
+            file=$(basename "$url")
+            upstream=$(grep -E "  ${file}\$" shasums.txt | awk '{print $1}')
+            if [ -z "$upstream" ]; then
+              echo "::error::$key — $file is not in upstream SHASUMS256.txt"; fail=1
+            elif [ "$upstream" = "$want" ]; then
+              echo "OK $key"
+            else
+              echo "::error::$key pinned $want but upstream is $upstream"; fail=1
+            fi
+          done < targets.tsv
+          test "$fail" -eq 0
+
+      - name: Unit + integration suite on x64
+        run: npm test

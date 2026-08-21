@@ -28,7 +28,7 @@ const writeScene = (id: string, scene: object) =>
   writeFileSync(join(dir(), `scene-${id}.json`), JSON.stringify(scene));
 const readManifest = () =>
   JSON.parse(readFileSync(join(dir(), "composition.json"), "utf-8"));
-type Clip = { id: string; startTime: number; duration: number; trimStart: number; kind: string; linkedSceneId?: string; linkedOverlayId?: string };
+type Clip = { id: string; startTime: number; duration: number; trimStart: number; kind: string; linkedOverlayId?: string };
 type Ov = { id: string; kind: string; startTime: number; duration: number; fileId?: string; trim?: { start: number; end: number }; z: number; group?: string };
 
 beforeEach(() => {
@@ -36,22 +36,21 @@ beforeEach(() => {
   process.env.LIBI_HOME = storageRoot;
   mkdirSync(dir(), { recursive: true });
 
-  // One video scene (6s, fileId f1) + its inline audio.
-  writeScene("s1", { id: "s1", type: "canvas", name: "S1", duration: 6, drawFunction: "// s1" });
-
   writeFileSync(
     join(dir(), "composition.json"),
     JSON.stringify({
-      sceneOrder: ["s1"],
       width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "S1", duration: 6, drawFunction: "// s1" }],
       overlays: [
+        // A full-frame background layer, plus TWO videos: the cascade test needs
+        // a second video whose inline audio must survive vid-1's delete.
+        { id: "code-s1", kind: "code", displayName: "S1", startTime: 0, duration: 6, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "// s1" },
         { id: "vid-1", kind: "video", startTime: 0, duration: 4, fileId: "fv", trim: { start: 0, end: 4 }, rect: { x: 0, y: 0, width: 100, height: 100 }, z: 1, opacity: 1 },
+        { id: "vid-2", kind: "video", startTime: 0, duration: 6, fileId: "f1", trim: { start: 0, end: 6 }, rect: { x: 0, y: 0, width: 100, height: 100 }, z: 4, opacity: 1 },
         { id: "img-1", kind: "image", startTime: 0, duration: 3, fileId: "fimg", rect: { x: 0, y: 0, width: 100, height: 100 }, z: 2, opacity: 1, group: "stickers" },
         { id: "img-2", kind: "image", startTime: 0, duration: 3, fileId: "fimg", rect: { x: 0, y: 0, width: 100, height: 100 }, z: 3, opacity: 1 },
       ],
       audioClips: [
-        { id: "c-s1", kind: "inline", linkedSceneId: "s1", fileId: "f1", startTime: 0, duration: 6, trimStart: 0, volume: 1, enabled: true },
+        { id: "c-s1", kind: "inline", linkedOverlayId: "vid-2", fileId: "f1", startTime: 0, duration: 6, trimStart: 0, volume: 1, enabled: true },
         { id: "c-vid1", kind: "inline", linkedOverlayId: "vid-1", fileId: "fv", startTime: 0, duration: 4, trimStart: 0, volume: 1, enabled: true },
         { id: "c-music", kind: "standalone", fileId: "fmusic", startTime: 0, duration: 10, trimStart: 0, volume: 0.5, enabled: true },
       ],
@@ -81,18 +80,17 @@ describe("deleteClip — source file always survives", () => {
     const m = readManifest();
     expect(m.overlays.find((o: Ov) => o.id === "vid-1")).toBeUndefined();
     expect(m.audioClips.find((c: Clip) => c.id === "c-vid1")).toBeUndefined();
-    // The scene's inline + the standalone music are untouched.
+    // The OTHER video's inline + the standalone music are untouched.
     expect(m.audioClips.find((c: Clip) => c.id === "c-s1")).toBeDefined();
     expect(m.audioClips.find((c: Clip) => c.id === "c-music")).toBeDefined();
   });
 
-  it("deletes a standalone audio clip without touching scenes/overlays", async () => {
+  it("deletes a standalone audio clip without touching the overlays", async () => {
     const r = await deleteClip(PIECE_ID, "c-music");
     expect(r.ok).toBe(true);
     const m = readManifest();
     expect(m.audioClips.find((c: Clip) => c.id === "c-music")).toBeUndefined();
-    expect(m.scenes).toHaveLength(1);
-    expect(m.overlays).toHaveLength(3);
+    expect(m.overlays).toHaveLength(5);
   });
 
   it("returns clip_not_found for an unknown id", async () => {
@@ -109,9 +107,7 @@ describe("deleteClip — ripple option", () => {
     writeFileSync(
       join(dir(), "composition.json"),
       JSON.stringify({
-        sceneOrder: [],
         width: 1920, height: 1080, fps: 30,
-        scenes: [],
         overlays: [
           { id: "vidA", kind: "video", startTime: 0, duration: 5, fileId: "fa", trim: { start: 0, end: 5 }, rect: { x: 0, y: 0, width: 100, height: 100 }, z: 1, opacity: 1 },
           { id: "vidB", kind: "video", startTime: 5, duration: 5, fileId: "fb", trim: { start: 0, end: 5 }, rect: { x: 0, y: 0, width: 100, height: 100 }, z: 2, opacity: 1 },
@@ -143,80 +139,14 @@ describe("deleteClip — ripple option", () => {
   });
 });
 
-describe("deleteClip — ripple option (scene family: no double-shift)", () => {
-  // Reviewer's exact repro (C1): a 4-scene sequential timeline —
-  //   S0[0-5) dur 5, S1[5-10) dur 5 (deleted), S2[10-16) dur 6, S3[16-21) dur 5
-  // — with inline audio "c-s3" linked to S3, starting at 16.
-  //
-  // Scenes already ripple natively: removing S1 from sceneOrder + the
-  // resyncLinkedClips walk inside removeSceneAndUpdateManifest re-derives
-  // c-s3's startTime from the NEW order (S0,S2,S3) to the correct 11
-  // (5 + 6). Layering rippleCloseGap on top of that (the pre-fix bug) shifts
-  // c-s3 a SECOND time to 6 — wrong.
-  beforeEach(() => {
-    const scenes = [
-      { id: "S0", type: "canvas", name: "S0", duration: 5, drawFunction: "// S0" },
-      { id: "S1", type: "canvas", name: "S1", duration: 5, drawFunction: "// S1" },
-      { id: "S2", type: "canvas", name: "S2", duration: 6, drawFunction: "// S2" },
-      { id: "S3", type: "canvas", name: "S3", duration: 5, drawFunction: "// S3" },
-    ];
-    for (const s of scenes) writeScene(s.id, s);
-    writeFileSync(
-      join(dir(), "composition.json"),
-      JSON.stringify({
-        sceneOrder: ["S0", "S1", "S2", "S3"],
-        width: 1920, height: 1080, fps: 30,
-        scenes,
-        overlays: [],
-        audioClips: [
-          { id: "c-s3", kind: "inline", linkedSceneId: "S3", fileId: "f3", startTime: 16, duration: 5, trimStart: 0, volume: 1, enabled: true },
-        ],
-      }),
-    );
-  });
-
-  it("does not double-shift a scene-linked inline audio clip two hops downstream", async () => {
-    const r = await deleteClip(PIECE_ID, "S1", { ripple: true });
-    expect(r.ok).toBe(true);
-    const m = readManifest();
-    expect(m.sceneOrder).toEqual(["S0", "S2", "S3"]);
-    // Correct: S2 now starts at 5 (right after S0), S3 at 5+6=11.
-    expect(m.audioClips.find((c: Clip) => c.id === "c-s3").startTime).toBe(11);
-  });
-});
-
 describe("splitClip — cut at a time", () => {
-  it("splits a canvas scene + resyncs both inline audio halves", async () => {
-    const r = await splitClip(PIECE_ID, "s1", 2.5);
-    expect(r.ok).toBe(true);
-    const m = readManifest();
-    expect(m.sceneOrder).toHaveLength(2);
-    const [head, tail] = m.scenes;
-    expect(head.id).toBe("s1");
-    expect(head.duration).toBeCloseTo(2.5);
-    expect(tail.duration).toBeCloseTo(3.5);
-    // Canvas scenes carry no source trim window — a split is a pure duration cut.
-    expect(head.trim).toBeUndefined();
-    expect(tail.trim).toBeUndefined();
-    // Inline audio: head resynced to [0,2.5]; a NEW tail clip for the tail scene.
-    const headClip = m.audioClips.find((c: Clip) => c.id === "c-s1");
-    expect(headClip.startTime).toBeCloseTo(0);
-    expect(headClip.duration).toBeCloseTo(2.5);
-    const tailClip = m.audioClips.find((c: Clip) => c.linkedSceneId === tail.id && c.id !== "c-s1");
-    expect(tailClip).toBeDefined();
-    expect(tailClip.startTime).toBeCloseTo(2.5);
-    expect(tailClip.duration).toBeCloseTo(3.5);
-    // A canvas scene has no source trim window, so both halves play their
-    // linked file from the top.
-    expect(tailClip.trimStart).toBeCloseTo(0);
-  });
-
   it("splits a video overlay + its coupled inline audio", async () => {
     const r = await splitClip(PIECE_ID, "vid-1", 1.5);
     expect(r.ok).toBe(true);
     const m = readManifest();
+    // vid-1 split into head+tail, plus the untouched vid-2 = 3.
     const vids = m.overlays.filter((o: Ov) => o.kind === "video");
-    expect(vids).toHaveLength(2);
+    expect(vids).toHaveLength(3);
     const head = m.overlays.find((o: Ov) => o.id === "vid-1");
     expect(head.duration).toBeCloseTo(1.5);
     expect(head.trim).toEqual({ start: 0, end: 1.5 });
@@ -254,22 +184,6 @@ describe("splitClip — cut at a time", () => {
 });
 
 describe("duplicateClip — copy adjacent", () => {
-  it("duplicates a scene right after it with its own inline audio", async () => {
-    const r = await duplicateClip(PIECE_ID, "s1");
-    expect(r.ok).toBe(true);
-    const m = readManifest();
-    expect(m.sceneOrder).toHaveLength(2);
-    const copyId = m.sceneOrder[1];
-    expect(copyId).not.toBe("s1");
-    const copy = m.scenes.find((s: { id: string; drawFunction: string; duration: number }) => s.id === copyId);
-    expect(copy.drawFunction).toBe("// s1");
-    expect(copy.duration).toBe(6);
-    // Copy gets its own inline clip, resynced to start at 6 (right after s1).
-    const copyClip = m.audioClips.find((c: Clip) => c.linkedSceneId === copyId);
-    expect(copyClip).toBeDefined();
-    expect(copyClip.startTime).toBeCloseTo(6);
-  });
-
   it("duplicates an image overlay adjacent on the same lane", async () => {
     const r = await duplicateClip(PIECE_ID, "img-1");
     expect(r.ok).toBe(true);
@@ -302,13 +216,12 @@ describe("duplicateClip — copy adjacent", () => {
   });
 
   it("duplicates an audio clip as a FREE standalone copy", async () => {
-    const r = await duplicateClip(PIECE_ID, "c-s1"); // c-s1 is inline (linked to s1)
+    const r = await duplicateClip(PIECE_ID, "c-s1"); // c-s1 is inline (linked to vid-2)
     expect(r.ok).toBe(true);
     const m = readManifest();
     if (!r.ok) throw new Error("unreachable");
     const copy = m.audioClips.find((c: Clip) => c.id === r.newId);
     expect(copy.kind).toBe("standalone");
-    expect(copy.linkedSceneId).toBeUndefined();
     expect(copy.linkedOverlayId).toBeUndefined();
     expect(copy.startTime).toBeCloseTo(6); // c-s1.startTime(0) + duration(6)
   });

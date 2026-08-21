@@ -32,6 +32,20 @@ jobs:
       - name: Check licenses
         run: bash scripts/check-licenses.sh
 
+      # THIRD-PARTY-NOTICES.md records the sha256 of the package-lock it was
+      # generated from, and `prebuild:electron` refuses to build when the two
+      # disagree. Nothing ever checked that here, and it cost a silent break:
+      # the 0.1.1 version bump moved the lockfile hash, `release:npm` does not
+      # run `prebuild:electron` (only `build:electron` does), and no test
+      # references the file — so `npm run build:electron` was broken on every
+      # platform for a day and would have failed the next Electron release at
+      # its first gate. Found by a QA rig, which is far too late for something
+      # a five-second check catches.
+      #
+      # --check is offline and writes nothing; it only compares the hash.
+      - name: Check third-party notices are current
+        run: npm run notices:check
+
       - name: Generate SBOM
         if: always()
         run: npx --yes @cyclonedx/cyclonedx-npm --omit dev --output-file libi-sbom.json || true

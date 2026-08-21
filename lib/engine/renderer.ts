@@ -1,6 +1,6 @@
 /** Frame renderer for the Libi composition engine */
 
-import type { Composition, DrawContext, Scene } from './types';
+import type { Composition, DrawContext } from './types';
 import type { VideoFrameSource } from './video-frame-source';
 import type { Track } from '@/lib/tracking/types';
 import type { ThreeOverlayInstance } from './three-overlay';
@@ -12,9 +12,9 @@ import { clamp01 } from './overlay-timing';
 import { composeEffects } from '@/lib/effects/compose';
 import { resolveEffect } from '@/lib/effects/registry';
 
-/** Per-frame draw isolation: a single scene or overlay whose draw fn throws
- *  (a broken canvas-scene body, a 3D-text/three instance that errors, a bad
- *  code overlay) must NOT abort the whole frame — otherwise `renderFrame`
+/** Per-frame draw isolation: a single overlay whose draw fn throws (a broken
+ *  code-overlay body, a 3D-text/three instance that errors) must NOT abort the
+ *  whole frame — otherwise `renderFrame`
  *  unwinds after `clearRect` and the entire preview goes blank (silently, since
  *  the preview loop swallows the throw). We isolate each draw and skip only the
  *  offending element, warning ONCE per (element, message) so the console isn't
@@ -29,16 +29,8 @@ function warnOnceDraw(key: string, err: unknown): void {
   console.warn(`[renderFrame] skipped ${key}: ${msg}`);
 }
 
-/** Information about which scene a global frame falls in. `scene` is `null`
- *  when the composition has no scenes (the empty-scenes / overlay-only path). */
-export interface SceneFrameInfo {
-  scene: Scene | null;
-  localFrame: number;
-  sceneIndex: number;
-}
-
 /** Fill the whole frame with the composition's solid background (default
- *  black). Drawn under overlays on the empty-scenes path. */
+ *  black). Drawn under every overlay. */
 export function fillBackground(
   ctx: CanvasRenderingContext2D,
   comp: Composition,
@@ -49,75 +41,18 @@ export function fillBackground(
 
 
 /**
- * Returns the total number of frames across all scenes in a composition.
- */
-export function getTotalFrames(composition: Composition): number {
-  return composition.scenes.reduce(
-    (total, scene) => total + Math.round(scene.duration * composition.fps),
-    0,
-  );
-}
-
-/**
- * Total frames the composition spans = the LATER of (a) the sum of scene
- * durations and (b) the end of the latest overlay or audio clip. Overlays and
- * audio clips may extend past the last scene; this is the value the timeline
- * ruler, the playhead end, and the export loop must use so a late-starting
- * caption / outro music tail is never truncated. (`getTotalFrames` stays
- * scene-only because scene→frame mapping in `getSceneAtFrame` depends on it.)
+ * Total frames the composition spans — the end of the latest overlay or audio
+ * clip. This is the value the timeline ruler, the playhead end, and the export
+ * loop must use so a late-starting caption or outro music tail is never
+ * truncated.
  */
 export function getCompositionFrames(composition: Composition): number {
-  const sceneFrames = getTotalFrames(composition);
   const endOf = (item: { startTime?: number; duration?: number }) =>
     Math.round(((item.startTime ?? 0) + (item.duration ?? 0)) * composition.fps);
-  let max = sceneFrames;
+  let max = 0;
   for (const o of composition.overlays ?? []) max = Math.max(max, endOf(o));
   for (const c of composition.audioClips ?? []) max = Math.max(max, endOf(c));
   return max;
-}
-
-/**
- * Determines which scene a given global frame falls in and calculates the
- * local frame number within that scene.
- */
-export function getSceneAtFrame(
-  composition: Composition,
-  globalFrame: number,
-): SceneFrameInfo {
-  // Empty composition (video-less piece): no base scene to map to. Callers
-  // either guard scenes.length first (scene-details, layers-inspector) or
-  // handle the null sentinel (renderFrame, collectVideoSeekTargets).
-  if (composition.scenes.length === 0) {
-    return { scene: null, localFrame: 0, sceneIndex: -1 };
-  }
-
-  let accumulated = 0;
-
-  for (let i = 0; i < composition.scenes.length; i++) {
-    const scene = composition.scenes[i];
-    const sceneFrames = Math.round(scene.duration * composition.fps);
-
-    if (globalFrame < accumulated + sceneFrames) {
-      return {
-        scene,
-        localFrame: globalFrame - accumulated,
-        sceneIndex: i,
-      };
-    }
-
-    accumulated += sceneFrames;
-  }
-
-  // Clamp to the last frame of the last scene
-  const lastIndex = composition.scenes.length - 1;
-  const lastScene = composition.scenes[lastIndex];
-  const lastSceneFrames = Math.round(lastScene.duration * composition.fps);
-
-  return {
-    scene: lastScene,
-    localFrame: lastSceneFrames - 1,
-    sceneIndex: lastIndex,
-  };
 }
 
 /**
@@ -134,8 +69,8 @@ export function getSceneAtFrame(
  * seek-and-wait per frame.
  *
  * The time formulas here MUST stay in lockstep with the seek calls in
- * `renderFrame` (video scene) and `drawOverlay` (video + tracked-video
- * overlays) so the awaited decode matches the frame that gets drawn.
+ * `drawOverlay` (video + tracked-video overlays) so the awaited decode matches
+ * the frame that gets drawn.
  */
 export function collectVideoSeekTargets(
   composition: Composition,
@@ -143,7 +78,7 @@ export function collectVideoSeekTargets(
 ): Array<{ id: string; time: number }> {
   const targets: Array<{ id: string; time: number }> = [];
   // Overlays are timed on the GLOBAL timeline (mirrors renderFrame's overlay
-  // pass). Scenes are canvas-only and decode no video.
+  // pass).
   const globalTime = globalFrame / composition.fps;
 
   if (composition.overlays && composition.overlays.length) {
@@ -166,9 +101,9 @@ export function collectVideoSeekTargets(
 /**
  * Renders a single frame of a composition onto the given canvas.
  *
- * Draws the active canvas scene (its draw function), then composites every
- * active overlay on top in ascending z. The videoFrameSources map provides
- * decoded frame data for video overlays — keyed by overlay ID.
+ * Paints the composition background, then composites every active overlay on
+ * top in ascending z. The videoFrameSources map provides decoded frame data for
+ * video overlays — keyed by overlay ID.
  */
 export function renderFrame(
   canvas: HTMLCanvasElement | OffscreenCanvas,
@@ -212,29 +147,24 @@ export function renderFrame(
   const renderScale = renderScaleX;
   ctx.setTransform(renderScaleX, 0, 0, renderScaleY, 0, 0);
 
-  // Overlays live on the GLOBAL composition timeline — their startTime/duration
-  // are absolute, not scene-local — so they MUST be evaluated and drawn at
-  // global time, not the active scene's local time. (The base scene below still
-  // uses scene-local time for its own draw fn / video trim.) Without this, a
-  // caption scoped to e.g. 0.4–5.8s re-appears at the start of EVERY scene
-  // (each scene's local clock passes back through that window) and a 70s-mark
-  // overlay never shows at all. drawOverlay reads ctx.time as absolute (video
-  // localT, tracked sampleTrack, code-overlay clock), so feed it global time.
+  // Overlays live on the GLOBAL composition timeline — their startTime and
+  // duration are absolute — so they are evaluated and drawn at global time.
+  // `drawOverlay` remaps to each overlay's own window internally (video localT,
+  // tracked sampleTrack, code-overlay clock), so feed it global time here.
   const globalTime = globalFrame / composition.fps;
-  const compTotalFrames = getTotalFrames(composition);
+  const compTotalFrames = getCompositionFrames(composition);
 
-  // The live-overlay pass: draws overlays on top of the base scene, sorted by z.
+  // The live-overlay pass: draws every active overlay, sorted by z.
   const drawLiveOverlays = (baseCtx: DrawContext) => {
-    // Re-assert the base scale transform before drawing overlays. The base scene
-    // draw is bracketed by save()/restore(), but this is belt-and-suspenders so a
-    // canvas-scene body that mutated the transform WITHOUT balancing it can never
-    // mis-scale or mis-place the overlays (they must always be crisp + correct).
+    // Re-assert the base scale transform before drawing overlays, so a draw body
+    // that mutated the transform WITHOUT balancing it can never mis-scale or
+    // mis-place the ones after it (they must always be crisp + correct).
     baseCtx.ctx.setTransform(renderScale, 0, 0, renderScale, 0, 0);
     if (composition.overlays && composition.overlays.length) {
       const active = overlaysActiveAt(composition.overlays, globalTime);
       for (const overlay of active) {
         // Isolate each overlay: a broken code/3D-text/three overlay must not
-        // blank the base scene + sibling overlays. drawOverlay save()/restore()s
+        // blank the background + sibling overlays. drawOverlay save()/restore()s
         // internally, but a throw mid-draw could leave the ctx stack unbalanced,
         // so we snapshot depth and rebalance on failure.
         const savedAlpha = baseCtx.ctx.globalAlpha;
@@ -250,6 +180,12 @@ export function renderFrame(
             compiledDrawFns,
             codeContentBoxes,
             tracks,
+            // The full overlay list — a tracked overlay resolves the video
+            // overlay its track rides on from it, which is what puts the art
+            // on the subject's own clock and in the video's own pixel space
+            // (lib/engine/tracked-space.ts). Not `active`: the owning video
+            // may be windowed differently from the tracked art.
+            overlays: composition.overlays,
             threeScenes,
             spatialQuads,
             // The canvas being drawn on serves as the source for effect overlays
@@ -266,100 +202,25 @@ export function renderFrame(
     }
   };
 
-  const { scene, localFrame } = getSceneAtFrame(composition, globalFrame);
-
-  // Empty-scenes path (video-less piece): no base scene to draw. Paint the
-  // solid background, then run the overlay pass on top and return — skip all
-  // scene-effects / scene-draw logic, which has no scene to operate on.
-  if (scene === null) {
-    ctx.clearRect(0, 0, composition.width, composition.height);
-    fillBackground(ctx, composition);
-    const emptyDrawContext: DrawContext = {
-      ctx,
-      width: composition.width,
-      height: composition.height,
-      fps: composition.fps,
-      totalFrames: compTotalFrames,
-      frame: globalFrame,
-      time: globalTime,
-      duration: 0,
-      progress: 0,
-      assets,
-      renderScale,
-    };
-    drawLiveOverlays(emptyDrawContext);
-    return;
-  }
-
-  const sceneFrames = Math.round(scene.duration * composition.fps);
-
-  const sceneLocalTime = localFrame / composition.fps;
+  // No base layer to draw: paint the composition background, then run the
+  // overlay pass on top. Full-frame backgrounds are ordinary `code` overlays at
+  // the floor z — the canvas-scene layer that used to sit under everything was
+  // retired because it had no startTime, rect, z or opacity, which made it the
+  // one layer the editor could not move.
+  ctx.clearRect(0, 0, composition.width, composition.height);
+  fillBackground(ctx, composition);
   const drawContext: DrawContext = {
     ctx,
     width: composition.width,
     height: composition.height,
     fps: composition.fps,
-    totalFrames: sceneFrames,
-    frame: localFrame,
-    time: sceneLocalTime,
-    duration: scene.duration,
-    progress: scene.duration > 0 ? clamp01(sceneLocalTime / scene.duration) : 0,
+    totalFrames: compTotalFrames,
+    frame: globalFrame,
+    time: globalTime,
+    duration: 0,
+    progress: 0,
     assets,
     renderScale,
   };
-
-  // Clear the canvas before drawing
-  ctx.clearRect(0, 0, composition.width, composition.height);
-
-  // Scene-level effects: compose the in/out/loop transform delta for this scene.
-  const sceneStartTime = globalTime - drawContext.time;
-  const sceneFx = composeEffects(
-    {
-      effects: (scene as { effects?: import("@/lib/effects/types").LayerEffects }).effects,
-      globalTime,
-      startTime: sceneStartTime,
-      duration: scene.duration,
-    },
-    resolveEffect,
-  );
-  ctx.save();
-  if (sceneFx.opacity !== undefined) ctx.globalAlpha = sceneFx.opacity;
-  if (sceneFx.blurPx) ctx.filter = `blur(${sceneFx.blurPx}px)`;
-  if (sceneFx.dx || sceneFx.dy || sceneFx.scale || sceneFx.rotateDeg) {
-    const fcx = composition.width / 2;
-    const fcy = composition.height / 2;
-    ctx.translate((sceneFx.dx ?? 0), (sceneFx.dy ?? 0));
-    ctx.translate(fcx, fcy);
-    if (sceneFx.rotateDeg) ctx.rotate((sceneFx.rotateDeg * Math.PI) / 180);
-    if (sceneFx.scale && sceneFx.scale !== 1) ctx.scale(sceneFx.scale, sceneFx.scale);
-    ctx.translate(-fcx, -fcy);
-  }
-
-  // Scene-level clipReveal: edge-anchored wipe over the whole frame, in absolute
-  // frame coordinates. Scoped to the scene-effects save()/restore() above.
-  if (sceneFx.clipReveal) {
-    const { edge, fraction } = sceneFx.clipReveal;
-    const f = Math.max(0, Math.min(1, fraction));
-    const W = composition.width, H = composition.height;
-    ctx.beginPath();
-    if (edge === "left")        ctx.rect(0, 0, W * f, H);
-    else if (edge === "right")  ctx.rect(W * (1 - f), 0, W * f, H);
-    else if (edge === "top")    ctx.rect(0, 0, W, H * f);
-    else                         ctx.rect(0, H * (1 - f), W, H * f); // bottom
-    ctx.clip();
-  }
-
-  // Canvas scene: call the draw fn, isolated so a broken body (e.g. a
-  // reference error in agent-authored code) doesn't abort the whole frame —
-  // overlays still render on top of whatever the scene managed to paint.
-  try {
-    scene.draw(drawContext);
-  } catch (err) {
-    warnOnceDraw(`scene:${scene.id}`, err);
-  }
-
-  ctx.restore(); // scene effects — IMMEDIATELY before drawLiveOverlays
-
-  // Draw overlays on top of the base scene, sorted by z (ascending).
   drawLiveOverlays(drawContext);
 }

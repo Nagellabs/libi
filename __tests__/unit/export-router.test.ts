@@ -37,7 +37,6 @@ describe("exportRouter", () => {
   it("routes stream-copy-trim to /api/export/ffmpeg for a base video overlay with nothing on top", async () => {
     const comp: Composition = {
       id: "c", name: "", width: 320, height: 240, fps: 24,
-      scenes: [],
       overlays: [{
         id: "s", kind: "video", fileId: "f", videoUrl: "",
         startTime: 0, duration: 1, z: 0, opacity: 1, fit: "cover",
@@ -56,7 +55,6 @@ describe("exportRouter", () => {
   it("routes ffmpeg-overlay to /api/export/ffmpeg for a base video overlay with a declarative overlay on top", async () => {
     const comp: Composition = {
       id: "c", name: "", width: 320, height: 240, fps: 24,
-      scenes: [],
       overlays: [{
         id: "s", kind: "video", fileId: "f", videoUrl: "",
         startTime: 0, duration: 1, z: 0, opacity: 1, fit: "cover",
@@ -83,11 +81,11 @@ describe("exportRouter", () => {
     try {
       const comp: Composition = {
         id: "c", name: "", width: 320, height: 240, fps: 24,
-        scenes: [
-          { id: "a", name: "", type: "canvas", duration: 1, draw: () => {} },
-          { id: "b", name: "", type: "canvas", duration: 1, draw: () => {} },
-        ],
-      };
+        overlays: [{
+          id: "code-1", kind: "code", startTime: 0, duration: 2, z: 0, opacity: 1,
+          rect: { x: 0, y: 0, width: 320, height: 240 }, drawFunction: "",
+        }],
+      } as Composition;
       const r = await exportRouter(commonOpts(comp));
       expect(r.backend).toBe("canvas-source");
       expect(fetchMock).not.toHaveBeenCalled();
@@ -112,11 +110,11 @@ describe("exportRouter", () => {
 
     const comp: Composition = {
       id: "c", name: "", width: 320, height: 240, fps: 24,
-      scenes: [
-        { id: "a", name: "", type: "canvas", duration: 1, draw: () => {} },
-        { id: "b", name: "", type: "canvas", duration: 1, draw: () => {} },
-      ],
-    };
+        overlays: [{
+          id: "code-1", kind: "code", startTime: 0, duration: 2, z: 0, opacity: 1,
+          rect: { x: 0, y: 0, width: 320, height: 240 }, drawFunction: "",
+        }],
+    } as Composition;
 
     const result = await exportRouter(commonOpts(comp));
 
@@ -133,7 +131,7 @@ describe("exportRouter", () => {
   });
 
   it("throws on empty composition", async () => {
-    const comp: Composition = { id: "c", name: "", width: 1, height: 1, fps: 24, scenes: [] };
+    const comp: Composition = { id: "c", name: "", width: 1, height: 1, fps: 24 };
     await expect(exportRouter(commonOpts(comp))).rejects.toThrow();
   });
 });

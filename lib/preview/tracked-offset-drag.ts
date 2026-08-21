@@ -6,7 +6,12 @@ import { applyFitAndScale } from "@/lib/engine/overlay-renderer";
 import type { TrackFit } from "@/lib/tracking/types";
 
 export interface OffsetFromDropOpts {
-  /** Sampled track bbox at the drag time (sampleTrack output). */
+  /** Sampled track bbox at the drag time, in COMPOSITION pixels — i.e.
+   *  `sampleTrackedOverlay` output, not raw `sampleTrack` output. `drop` is in
+   *  composition pixels too, and this function's whole job is the ratio
+   *  between them, so a raw source-pixel sample here silently yields the wrong
+   *  offset for any video that is windowed, trimmed, or not full-frame. See
+   *  `lib/engine/tracked-space.ts`. */
   sample: { x: number; y: number; w: number; h: number };
   rect: { x: number; y: number; width: number; height: number };
   fit: TrackFit;

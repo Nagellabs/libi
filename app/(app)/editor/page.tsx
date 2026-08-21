@@ -529,7 +529,6 @@ export default function EditorPage() {
   const {
     composition,
     totalFrames,
-    rawScenes: scenes,
     isLoading: isCompositionLoading,
     isFetching: isCompositionFetching,
     manifest,
@@ -719,7 +718,6 @@ export default function EditorPage() {
             <PreviewSurface
               composition={composition}
               totalFrames={totalFrames}
-              scenes={scenes}
               pieceId={activePieceId ?? ""}
               pieceName={pieceQuery.data?.name ?? null}
               files={filesQuery.data ?? []}

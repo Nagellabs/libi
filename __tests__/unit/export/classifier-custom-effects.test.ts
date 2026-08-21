@@ -16,7 +16,6 @@ const BASE_VIDEO = {
 function comp(overrides: Partial<Composition>): Composition {
   return {
     id: "c", name: "c", width: 1920, height: 1080, fps: 30,
-    scenes: [],
     audioClips: [],
     ...overrides,
     // Base video is an OVERLAY now. Prepended below the caller's overlays
@@ -32,7 +31,7 @@ const CUSTOM_VISUAL: EffectDef = {
     name: "Slow Drift",
     family: "animation",
     phases: ["loop"],
-    supports: ["scene", "text"],
+    supports: ["code", "text"],
     params: [],
   },
   animate: (progress) => ({ dx: progress * 10 }),
@@ -48,15 +47,17 @@ describe("export routing for custom + unknown effects", () => {
     clearCustomEffects();
   });
 
-  it("a REGISTERED custom visual effect on the scene forces canvas-source", () => {
+  it("a REGISTERED custom visual effect on a layer forces canvas-source", () => {
     registerCustomEffects([CUSTOM_VISUAL]);
     const c = comp({
-      scenes: [
+      overlays: [
         {
-          id: "s", name: "s", type: "video", duration: 4, fileId: "f", videoUrl: "/x",
+          id: "o", kind: "text", startTime: 0, duration: 2, z: 0,
+          rect: { x: 0, y: 0, width: 10, height: 10 }, opacity: 1,
+          content: "hi", font: "24px Inter", color: "#fff", align: "left",
           effects: { loop: { effectId: "slow-drift" } },
-        } as never,
-      ],
+        },
+      ] as never,
     });
     expect(classifyExportShape(c).tag).toBe("canvas-source");
   });

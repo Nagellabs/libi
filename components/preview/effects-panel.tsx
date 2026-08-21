@@ -89,9 +89,6 @@ function selectedLayer(selectionId: string | null, comp: Composition | null): Se
     }
     return base;
   }
-  if (cls.kind === "scene") {
-    return { layerId: cls.scene.id, kind: "scene", effects: cls.scene.effects };
-  }
   return { layerId: cls.clip.id, kind: "audio", effects: cls.clip.effects };
 }
 

@@ -59,7 +59,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFile, execFileSync } from "node:child_process";
-import { getLibiBinDir, getLibiHome } from "@/lib/libi-home";
+import { getLibiBinDir } from "@/lib/libi-home";
+import { cachedShellPathDirs } from "@/lib/shell-path-cache";
 import { sidecarMajorsIn } from "@/lib/runtime/node-abi-sidecars";
 // `native-binding.ts` imports nothing but `node:fs`/`node:path`, so this is a
 // leaf dependency, not a layering inversion — and it is the ONE module that
@@ -248,17 +249,8 @@ export function versionManagerDirs(): string[] {
   return dirs;
 }
 
-/** PATH entries from the login-shell PATH cache written by `electron/path-bootstrap.ts`. */
-function cachedShellPathDirs(): string[] {
-  try {
-    const raw = fs.readFileSync(path.join(getLibiHome(), "shell-path-cache.json"), "utf8");
-    const parsed = JSON.parse(raw) as { path?: unknown };
-    if (typeof parsed.path !== "string") return [];
-    return parsed.path.split(process.platform === "win32" ? ";" : ":").filter(Boolean);
-  } catch {
-    return [];
-  }
-}
+// `cachedShellPathDirs` now lives in lib/shell-path-cache.ts, shared with
+// lib/codex-config/codex-cli.ts and lib/terminal/user-cli.ts.
 
 /** Major version of a node binary, or null when it can't be run. */
 export function nodeMajorVersion(binary: string): number | null {

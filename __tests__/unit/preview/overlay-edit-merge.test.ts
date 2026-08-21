@@ -4,7 +4,7 @@ import { createOverlayEditStore } from "@/lib/preview/overlay-edit-store";
 import type { Composition } from "@/lib/engine/types";
 
 const comp = {
-  width: 1920, height: 1080, fps: 30, scenes: [], sceneOrder: [], audioClips: [],
+  width: 1920, height: 1080, fps: 30, audioClips: [],
   overlays: [
     { id: "a", kind: "text", startTime: 0, duration: 2, z: 0, opacity: 1,
       rect: { x: 0, y: 0, w: 10, h: 10 }, content: "hi", font: "32px Inter",

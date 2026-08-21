@@ -101,12 +101,6 @@ describe("LayersInspectorPanel", () => {
     expect(screen.queryByTestId("layer-row-o1")).toBeNull();
   });
 
-  it("names the selected scene (canvas scenes carry no source-video card)", () => {
-    renderPanel("s1");
-    expect(screen.getByTestId("inspector-scene-name")).toHaveTextContent("Intro card");
-    expect(screen.queryByText("ride.mp4")).toBeNull();
-  });
-
   it("shows the transform inspector when an overlay is selected", () => {
     renderPanel("o1");
     // Text mounts the in-plane placement panel on its Transform tab (X/Y/Size +
@@ -115,12 +109,6 @@ describe("LayersInspectorPanel", () => {
     expect(document.querySelector('[data-field="rotation"]')).not.toBeNull();
     expect(document.querySelector('[data-field="transformPosX"]')).not.toBeNull();
     expect(document.querySelector('[data-field="opacity"]')).not.toBeNull();
-  });
-
-  it("falls back to the playhead scene when nothing is selected", () => {
-    renderPanel(null);
-    // Frame 0 → scene s1.
-    expect(screen.getByTestId("inspector-scene-name")).toHaveTextContent("Intro card");
   });
 
   it("renders the Effects sub-panel only on the Transform tab", () => {

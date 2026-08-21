@@ -147,6 +147,21 @@ the reveal modes can't express.
    visible by the end of the reveal — never a truncated "Sa". Fix by editing the
    `draw.jsx` file again.
 
+## Look at what you made (required)
+
+After ANY layout, position, size, or typography change — before you tell the
+user it is done — render the affected times and look:
+
+`libi.render_overlay_frames({ pieceId, atTimes: [...], contactSheet: true })`
+
+Read the returned image. Check that text fits its box, that nothing overlaps
+or runs off frame (`overflow.touchesEdge` flags the obvious cases), and that
+`unresolvedFonts` is empty — a family listed there is rendering in a fallback
+face and will look wrong. Reasoning about coordinates is not verification:
+a real build got the brand mark overlapping its wordmark, a chip 90px too
+narrow for its text, and every text in a serif fallback, all of which one
+render made obvious.
+
 ## Guardrails
 
 - **Reserved words in text:** the draw-function validator is regex-based and

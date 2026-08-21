@@ -3,147 +3,11 @@ import fs from "fs";
 import path from "path";
 import { createTempStorageDir, cleanupTempDir } from "../helpers/test-storage";
 import { createTestDb, resetTestDb } from "../helpers/test-db";
-import { loadManifest, saveManifest, type PersistedCanvasScene } from "@/lib/composition/persistence";
+import { loadManifest, saveManifest } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { getLibiStorageDir } from "@/lib/libi-home";
 import { pieces as piecesTable } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
-
-describe("loadManifest — inlined scenes", () => {
-  afterEach(() => cleanupTempDir());
-
-  it("returns scenes when stored inline in composition.json", async () => {
-    vi.resetModules();
-    createTempStorageDir();
-
-    // Re-import after module reset to pick up fresh singleton
-    const { loadManifest: lm } = await import("@/lib/composition/persistence");
-    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
-
-    const pieceId = "p1";
-    const dir = path.join(gsd(), pieceId);
-    fs.mkdirSync(dir, { recursive: true });
-
-    const scene: PersistedCanvasScene = {
-      id: "s1",
-      type: "canvas",
-      name: "Hello",
-      duration: 3,
-      drawFunction: "// noop",
-    };
-    const manifest = {
-      sceneOrder: ["s1"],
-      width: 1920,
-      height: 1080,
-      fps: 30,
-      scenes: [scene],
-    };
-    fs.writeFileSync(path.join(dir, "composition.json"), JSON.stringify(manifest));
-
-    const loaded = await lm(pieceId);
-    expect(loaded.scenes).toEqual([scene]);
-    expect(loaded.sceneOrder).toEqual(["s1"]);
-  });
-
-  it("falls back to sharded scene files when scenes absent (legacy format)", async () => {
-    vi.resetModules();
-    createTempStorageDir();
-
-    // Re-import after module reset to pick up fresh singleton
-    const { loadManifest: lm } = await import("@/lib/composition/persistence");
-    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
-
-    const pieceId = "p2";
-    const dir = path.join(gsd(), pieceId);
-    fs.mkdirSync(dir, { recursive: true });
-
-    fs.writeFileSync(
-      path.join(dir, "composition.json"),
-      JSON.stringify({ sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30 }),
-    );
-    fs.writeFileSync(
-      path.join(dir, "scene-s1.json"),
-      JSON.stringify({
-        id: "s1",
-        type: "canvas",
-        name: "Legacy",
-        duration: 2,
-        drawFunction: "// l",
-      }),
-    );
-
-    const loaded = await lm(pieceId);
-    expect(loaded.scenes?.length).toBe(1);
-    expect(loaded.scenes?.[0]).toMatchObject({ id: "s1", name: "Legacy" });
-  });
-});
-
-describe("saveManifest — writes inlined + cleans up shards", () => {
-  afterEach(() => cleanupTempDir());
-
-  it("writes scenes inline and deletes orphaned shard files", async () => {
-    vi.resetModules();
-    createTempStorageDir();
-
-    const { saveManifest: sm } = await import("@/lib/composition/persistence");
-    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
-
-    const pieceId = "p3";
-    const dir = path.join(gsd(), pieceId);
-    fs.mkdirSync(dir, { recursive: true });
-
-    // Pre-existing orphan shard (legacy)
-    fs.writeFileSync(
-      path.join(dir, "scene-old.json"),
-      JSON.stringify({ id: "old", type: "canvas", name: "Old", duration: 1, drawFunction: "" }),
-    );
-
-    const scene: PersistedCanvasScene = {
-      id: "s1",
-      type: "canvas",
-      name: "Hello",
-      duration: 3,
-      drawFunction: "// noop",
-    };
-    await sm(pieceId, {
-      sceneOrder: ["s1"],
-      width: 1920,
-      height: 1080,
-      fps: 30,
-      scenes: [scene],
-    });
-
-    const written = JSON.parse(fs.readFileSync(path.join(dir, "composition.json"), "utf-8"));
-    expect(written.scenes).toEqual([scene]);
-    expect(fs.existsSync(path.join(dir, "scene-old.json"))).toBe(false);
-  });
-
-  it("preserves shard files that match current sceneOrder", async () => {
-    vi.resetModules();
-    createTempStorageDir();
-
-    const { saveManifest: sm } = await import("@/lib/composition/persistence");
-    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
-
-    const pieceId = "p4";
-    const dir = path.join(gsd(), pieceId);
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, "scene-s1.json"),
-      JSON.stringify({ id: "s1", type: "canvas", name: "x", duration: 1, drawFunction: "" }),
-    );
-
-    await sm(pieceId, {
-      sceneOrder: ["s1"],
-      width: 1920,
-      height: 1080,
-      fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "x", duration: 1, drawFunction: "" }],
-    });
-
-    expect(fs.existsSync(path.join(dir, "scene-s1.json"))).toBe(true); // matched, kept
-  });
-});
 
 describe("loadManifest — lazy snapshot init", () => {
   afterEach(() => { resetTestDb(); cleanupTempDir(); });
@@ -164,7 +28,7 @@ describe("loadManifest — lazy snapshot init", () => {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
       path.join(dir, "composition.json"),
-      JSON.stringify({ sceneOrder: [], width: 1920, height: 1080, fps: 30 }),
+      JSON.stringify({ width: 1920, height: 1080, fps: 30 }),
     );
 
     await lm(piece.id);
@@ -191,27 +55,25 @@ describe("loadManifest — lazy snapshot init", () => {
     fs.writeFileSync(
       path.join(dir, "composition.json"),
       JSON.stringify({
-        sceneOrder: [],
         width: 1920,
         height: 1080,
         fps: 30,
-        scenes: [{ id: "s", type: "canvas", name: "draft", duration: 1, drawFunction: "" }],
+        overlays: [{ id: "code-s", kind: "code" as const, displayName: "draft", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
       }),
     );
     fs.writeFileSync(
       path.join(dir, "snapshots/current.json"),
       JSON.stringify({
-        sceneOrder: [],
         width: 1920,
         height: 1080,
         fps: 30,
-        scenes: [{ id: "s", type: "canvas", name: "snapshot", duration: 1, drawFunction: "" }],
+        overlays: [{ id: "code-s", kind: "code" as const, displayName: "snapshot", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
       }),
     );
 
     await lm(piece.id);
 
     const snap = await lcs(piece.id);
-    expect(snap?.scenes?.[0].name).toBe("snapshot");
+    expect(snap?.overlays?.[0].displayName).toBe("snapshot");
   });
 });

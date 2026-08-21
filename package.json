@@ -98,6 +98,7 @@
     "track:eval": "tsx scripts/track-eval/index.ts",
     "matte:eval": "tsx scripts/matte-eval/index.ts",
     "fal:billing:probe": "tsx scripts/fal-billing/probe.ts",
+    "onboarding:extract": "tsx scripts/extract-onboarding-piece.ts",
     "skill:eval": "tsx scripts/skill-eval/run.ts",
     "skill:eval:index": "tsx scripts/skill-eval/build-index.ts",
     "skill:eval:audit": "tsx scripts/skill-eval/audit-endpoints.ts",

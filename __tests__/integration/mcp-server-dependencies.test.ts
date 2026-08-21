@@ -90,9 +90,18 @@ describe("GET /api/settings/mcp-servers/[id]/dependencies", () => {
     // not-installed"). A one-byte file fails with ENOEXEC, so the status was
     // correctly downgraded to installed:false and the test failed with a bare
     // `expected false to be true` that read like a product regression.
+    //
+    // It must also ANSWER `-filters` with drawtext. ffmpeg now declares a
+    // `capabilityCheck` (F5, 2026-08-16: the Linux build ran fine but had no
+    // drawtext, so every text-overlay export failed), and a stub that merely
+    // exits 0 is exactly the "runs but cannot do the job" case that check
+    // exists to reject — it would fail here in precisely the same misleading
+    // way as the ENOEXEC stub above.
     fs.writeFileSync(
       path.join(tempBinDir, binName),
-      process.platform === "win32" ? "@echo off\r\nexit 0\r\n" : "#!/bin/sh\nexit 0\n",
+      process.platform === "win32"
+        ? '@echo off\r\nif "%1"=="-filters" echo  TS. drawtext V->V Draw text on top of video frames.\r\nexit 0\r\n'
+        : '#!/bin/sh\ncase "$1" in -filters) echo " TS. drawtext V->V Draw text on top of video frames." ;; esac\nexit 0\n',
       { mode: 0o755 },
     );
     // `resolveStatus` only reports installed once the on-disk marker matches

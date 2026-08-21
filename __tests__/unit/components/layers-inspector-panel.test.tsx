@@ -229,9 +229,8 @@ describe("LayersInspectorPanel (A5: drop layers list + move hide/lock into inspe
     renderPanel("a1");
     const body = screen.getByTestId("audio-details-body");
     expect(body).toBeInTheDocument();
-    // Source is the linked scene's VIDEO file; the linked scene name shows.
+    // Source is the linked video overlay's file.
     expect(body).toHaveTextContent("base.mp4");
-    expect(body).toHaveTextContent("Base");
     // It must NOT fall through to a scene-details panel.
     expect(screen.queryByTestId("inspector-scene-name")).toBeNull();
   });

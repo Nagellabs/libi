@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { eq } from "drizzle-orm";
 import { compareStates, commitDraft, discardDraft, restoreSnapshot, getPieceState } from "@/lib/composition/lifecycle";
-import type { CompositionManifest, PersistedCanvasScene } from "@/lib/composition/persistence";
+import type { CompositionManifest, PersistedOverlay } from "@/lib/composition/persistence";
 import { saveManifest, loadManifest } from "@/lib/composition/persistence";
 import { saveCurrentSnapshot, listSnapshotHistory } from "@/lib/composition/snapshots";
 import { pieces } from "@/lib/db/schema/sqlite";
@@ -9,29 +9,21 @@ import { createTestDb, resetTestDb } from "../helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "../helpers/test-storage";
 
 const baseManifest = (): CompositionManifest => ({
-  sceneOrder: [], width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [], scenes: [],
+  width: 1920, height: 1080, fps: 30, audioClips: [], overlays: [],
 });
 
-const scene = (id: string, name: string): PersistedCanvasScene => ({
-  id, type: "canvas", name, duration: 2, drawFunction: "// noop",
-});
+/** A full-frame background layer — what the retired canvas scenes became. */
+const scene = (id: string, name: string, duration = 2): PersistedOverlay => ({
+  id, kind: "code", displayName: name, startTime: 0, duration, z: 0,
+  rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "// noop",
+} as PersistedOverlay);
 
 describe("compareStates", () => {
   it("zero diff for identical manifests", () => {
     const m = baseManifest();
     const diff = compareStates(m, m);
     expect(diff.totalChanges).toBe(0);
-    expect(diff.scenes).toEqual({ added: [], removed: [], changed: [] });
-  });
-
-  it("detects added/removed/changed scenes", () => {
-    const snap: CompositionManifest = { ...baseManifest(), sceneOrder: ["a", "b"], scenes: [scene("a", "A"), scene("b", "B")] };
-    const draft: CompositionManifest = { ...baseManifest(), sceneOrder: ["a", "c"], scenes: [scene("a", "A renamed"), scene("c", "C")] };
-    const diff = compareStates(snap, draft);
-    expect(diff.scenes.added).toEqual([{ id: "c", name: "C" }]);
-    expect(diff.scenes.removed).toEqual([{ id: "b", name: "B" }]);
-    expect(diff.scenes.changed).toEqual([{ id: "a", name: "A renamed" }]);
-    expect(diff.totalChanges).toBe(3);
+    expect(diff.overlays).toEqual({ added: 0, removed: 0, changed: 0 });
   });
 
   it("counts overlay add/remove/change", () => {
@@ -57,8 +49,8 @@ describe("commitDraft", () => {
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: true, snapshotSummary: "v1 baseline" }).returning();
 
     // Seed snapshot (v1) + draft (v2) on disk
-    await saveCurrentSnapshot(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "v1", duration: 1, drawFunction: "" }] });
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "v2", duration: 1, drawFunction: "" }] });
+    await saveCurrentSnapshot(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v1", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v2", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
 
     const result = await commitDraft(piece.id, { summary: "promoted v2", actor: "user" });
     expect(result.snapshotId).toMatch(/^snap-/);
@@ -70,7 +62,7 @@ describe("commitDraft", () => {
     expect(after.snapshotCommittedAt).not.toBeNull(); // dedicated commit timestamp set
 
     const snap = await loadManifest(piece.id);
-    expect(snap.scenes?.[0].name).toBe("v2");
+    expect(snap.overlays?.[0].displayName).toBe("v2");
 
     // OLD snapshot (v1) now lives in history WITH its original summary preserved
     const history = await listSnapshotHistory(piece.id);
@@ -87,8 +79,8 @@ describe("commitDraft", () => {
     // every agent tool hits before the first edit), THEN the user adds scenes.
     await loadManifest(piece.id);
     await saveManifest(piece.id, {
-      sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s1", type: "canvas", name: "first", duration: 1, drawFunction: "" }],
+      width: 1920, height: 1080, fps: 30,
+      overlays: [{ id: "code-s1", kind: "code" as const, displayName: "first", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
     });
 
     await commitDraft(piece.id, { summary: "first save", actor: "user" });
@@ -98,10 +90,10 @@ describe("commitDraft", () => {
 
     // A SECOND commit archives the real first snapshot — and only that one.
     await saveManifest(piece.id, {
-      sceneOrder: ["s1", "s2"], width: 1920, height: 1080, fps: 30,
-      scenes: [
-        { id: "s1", type: "canvas", name: "first", duration: 1, drawFunction: "" },
-        { id: "s2", type: "canvas", name: "second", duration: 1, drawFunction: "" },
+      width: 1920, height: 1080, fps: 30,
+      overlays: [
+        { id: "code-s1", kind: "code" as const, displayName: "first", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" },
+        { id: "code-s2", kind: "code" as const, displayName: "second", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" },
       ],
     });
     await commitDraft(piece.id, { summary: "second save", actor: "user" });
@@ -117,14 +109,14 @@ describe("commitDraft", () => {
     // real backfilled current snapshot. That content must NOT be suppressed.
     const [piece] = await db.insert(pieces).values({ name: "legacy" }).returning();
     await saveCurrentSnapshot(piece.id, {
-      sceneOrder: ["s0"], width: 1920, height: 1080, fps: 30,
-      scenes: [{ id: "s0", type: "canvas", name: "legacy content", duration: 1, drawFunction: "" }],
+      width: 1920, height: 1080, fps: 30,
+      overlays: [{ id: "code-s0", kind: "code" as const, displayName: "legacy content", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }],
     });
     await saveManifest(piece.id, {
-      sceneOrder: ["s0", "s1"], width: 1920, height: 1080, fps: 30,
-      scenes: [
-        { id: "s0", type: "canvas", name: "legacy content", duration: 1, drawFunction: "" },
-        { id: "s1", type: "canvas", name: "new edit", duration: 1, drawFunction: "" },
+      width: 1920, height: 1080, fps: 30,
+      overlays: [
+        { id: "code-s0", kind: "code" as const, displayName: "legacy content", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" },
+        { id: "code-s1", kind: "code" as const, displayName: "new edit", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" },
       ],
     });
 
@@ -142,13 +134,13 @@ describe("discardDraft", () => {
   it("copies snapshot to composition, clears hasDraft", async () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: true }).returning();
-    await saveCurrentSnapshot(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "v1", duration: 1, drawFunction: "" }] });
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "v2", duration: 1, drawFunction: "" }] });
+    await saveCurrentSnapshot(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v1", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v2", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
 
     await discardDraft(piece.id);
 
     const restored = await loadManifest(piece.id);
-    expect(restored.scenes?.[0].name).toBe("v1");
+    expect(restored.overlays?.[0].displayName).toBe("v1");
     const [after] = await db.select().from(pieces).where(eq(pieces.id, piece.id));
     expect(after.hasDraft).toBe(false);
   });
@@ -161,15 +153,15 @@ describe("restoreSnapshot", () => {
   it("promotes a history snapshot to current and archives the old current", async () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: false }).returning();
-    await saveCurrentSnapshot(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "current", duration: 1, drawFunction: "" }] });
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "current", duration: 1, drawFunction: "" }] });
+    await saveCurrentSnapshot(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "current", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "current", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
     const { pushSnapshotToHistory } = await import("@/lib/composition/snapshots");
-    const oldId = await pushSnapshotToHistory(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "older", duration: 1, drawFunction: "" }] }, { summary: "older", actor: "user" });
+    const oldId = await pushSnapshotToHistory(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "older", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] }, { summary: "older", actor: "user" });
 
     await restoreSnapshot(piece.id, oldId);
 
     const live = await loadManifest(piece.id);
-    expect(live.scenes?.[0].name).toBe("older");
+    expect(live.overlays?.[0].displayName).toBe("older");
     const history = await listSnapshotHistory(piece.id);
     expect(history.find((h) => h.id === oldId)).toBeUndefined(); // removed from history
     expect(history.some((h) => h.summary === "Pre-restore snapshot")).toBe(true); // old current archived
@@ -188,7 +180,7 @@ describe("getPieceState", () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: true }).returning();
     const { pushSnapshotToHistory } = await import("@/lib/composition/snapshots");
-    await pushSnapshotToHistory(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [] }, { summary: "h1", actor: "agent" });
+    await pushSnapshotToHistory(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] }, { summary: "h1", actor: "agent" });
 
     const state = await getPieceState(piece.id);
     expect(state.hasDraft).toBe(true);
@@ -204,7 +196,7 @@ describe("saveManifest — has_draft flag", () => {
   it("flips hasDraft to true when manifest is saved", async () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: false }).returning();
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] });
     const [after] = await db.select().from(pieces).where(eq(pieces.id, piece.id));
     expect(after.hasDraft).toBe(true);
   });
@@ -214,7 +206,7 @@ describe("saveManifest — has_draft flag", () => {
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: true }).returning();
     const originalUpdate = piece.updatedAt;
     await new Promise((r) => setTimeout(r, 1100)); // updatedAt resolution = 1 second
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] });
     const [after] = await db.select().from(pieces).where(eq(pieces.id, piece.id));
     expect(after.hasDraft).toBe(true);
     // updatedAt should not have changed because we skipped the UPDATE

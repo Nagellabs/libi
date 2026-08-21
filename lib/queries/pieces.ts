@@ -20,18 +20,6 @@ export interface PieceSummary {
   lastOpenedAt: string | null;
 }
 
-interface CanvasSceneData {
-  id: string;
-  type: "canvas";
-  name: string;
-  duration: number;
-  drawFunction: string;
-}
-
-/** Scene data as returned by the composition API. Canvas-only — video scenes
- *  were retired (2026-07-19) in favour of full-frame video overlays. */
-type SceneData = CanvasSceneData;
-
 interface AudioClipData {
   id: string;
   kind: "inline" | "standalone";
@@ -84,14 +72,12 @@ export function usePieceComposition(pieceId: string, options?: { enabled?: boole
     queryKey: pieceKeys.composition(pieceId),
     queryFn: async (): Promise<{
       manifest: CompositionManifest;
-      scenes: SceneData[];
       audioClips: AudioClipData[];
     }> => {
       const res = await fetch(`/api/pieces/${pieceId}/composition`);
       if (!res.ok) {
         return {
-          manifest: { sceneOrder: [], width: 1920, height: 1080, fps: 30 },
-          scenes: [],
+          manifest: { width: 1920, height: 1080, fps: 30 },
           audioClips: [],
         };
       }

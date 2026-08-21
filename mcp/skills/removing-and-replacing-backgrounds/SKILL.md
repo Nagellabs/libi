@@ -98,7 +98,7 @@ minutes on weak hardware. Tell the user before starting.
      `subject.box` only.
    - **Transparent/green-screen deliverable** — the cutout file itself IS the
      transparent asset; for a green-screen variant compose it over a solid
-     green canvas scene and export.
+     green full-frame code overlay and export.
 5. **Audio** — the cutout is video-only (`-an`). The source clip's audio stays
    with the source asset; re-attach it via the normal audio-clip tools if the
    composed piece should keep the subject's speech.

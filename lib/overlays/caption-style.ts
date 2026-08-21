@@ -113,13 +113,27 @@ export function typewriterCharCount(
 }
 
 /**
- * Per-word alpha for a staggered fade-in. All ~0 at progress 0, all 1 at
- * progress 1. Earlier words lead later ones.
+ * Per-word alpha for a staggered fade-in. All ~0 at progress 0, all 1 once the
+ * reveal window has elapsed. Earlier words lead later ones.
+ *
+ * `fraction` is the portion of the element's window the reveal occupies — the
+ * same contract `typewriterCharCount` above uses, derived from
+ * `reveal.durationMs` by `revealFraction`. Without it a 500 ms fade-words
+ * reveal silently stretched to fill the WHOLE overlay: correct-looking on a
+ * 1.4 s caption, and a 5-second crawl once that same overlay was extended to
+ * 11.4 s to hold an end card on screen. `durationMs` is documented as
+ * authoritative, and typewriter already honoured it — fade-words was the one
+ * mode that did not, in both the 2D and 3D renderers.
  */
-export function fadeWordsAlpha(wordCount: number, progress: number): number[] {
+export function fadeWordsAlpha(
+  wordCount: number,
+  progress: number,
+  fraction: number = 1,
+): number[] {
   const out: number[] = [];
   if (wordCount <= 0) return out;
-  const p = clamp01(progress);
+  const f = fraction > 0 ? fraction : 1;
+  const p = clamp01(clamp01(progress) / f);
   // Overlapping stagger: each word gets a window; with overlap the windows
   // share span so the last word still reaches 1 at p=1.
   const overlap = 0.5;

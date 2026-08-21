@@ -1,6 +1,6 @@
 import type { Composition, Overlay, OverlayRect, Transform3D } from "./types";
 import type { Track } from "@/lib/tracking/types";
-import { sampleTrack } from "@/lib/tracking/sample";
+import { sampleTrackedOverlay } from "@/lib/engine/tracked-space";
 import { resolveTrackedRect } from "./overlay-renderer";
 import { resolveOverlayTransform, resolveFlip, classifyTransform, inversePlanarPoint, splitScreenRoll, rotatePointAround } from "@/lib/engine/overlay-transform";
 import { projectSpatialQuadFootprint, pointInQuad } from "@/lib/engine/overlay-quad-projection";
@@ -125,7 +125,10 @@ export function hitTest(
     if (o.kind === "tracked") {
       const tr = tracks?.[o.trackId];
       if (!tr) continue;
-      const s = sampleTrack(tr, time, o.smoothing);
+      // Sampled on the owning video's clock and mapped into composition
+      // pixels — the hit region has to be where the art actually IS, so this
+      // must be the same call the renderer makes (lib/engine/tracked-space.ts).
+      const s = sampleTrackedOverlay(o, tr, overlays, time);
       if (!s || !s.visible) continue;
       const a = resolveTrackedRect(s, o, frame);
       box = { x: a.x, y: a.y, width: a.w, height: a.h };

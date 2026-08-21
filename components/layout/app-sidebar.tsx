@@ -16,6 +16,7 @@ import { useRuntimeInfo } from "@/lib/queries/runtime";
 import {
   isInstallInFlight,
   isShellInstallInFlight,
+  restartOffer,
   updateOffer,
   useRuntimeUpdate,
 } from "@/lib/queries/runtime-update";
@@ -75,10 +76,11 @@ export function AppSidebar(props: AppSidebarProps) {
   // Either channel: a runtime install job, or the shell downloading itself.
   const installingUpdate =
     isInstallInFlight(runtimeUpdate) || isShellInstallInFlight(runtimeUpdate);
+  // The dot covers both asks: "restart to apply" (the normal auto-download
+  // outcome) and the legacy click-to-install offers.
   const updateAvailable =
     !installingUpdate &&
-    updateOffer(runtimeUpdate) !== null &&
-    !runtimeUpdate?.pendingVersion;
+    (restartOffer(runtimeUpdate) !== null || updateOffer(runtimeUpdate) !== null);
   // Real fraction when the runner reports one; null renders indeterminate.
   const installJob = runtimeUpdate?.install;
   const shellPercent = runtimeUpdate?.shell?.percent ?? null;
@@ -324,7 +326,7 @@ export function AppSidebar(props: AppSidebarProps) {
           <SidebarMenuItem>
             <SidebarMenuButton
               render={<Link href="/settings" />}
-              tooltip={installingUpdate ? "Installing update…" : "Settings"}
+              tooltip={installingUpdate ? "Downloading update…" : "Settings"}
               isActive={pathname === "/settings"}
               className="cursor-pointer relative"
             >

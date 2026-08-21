@@ -12,7 +12,6 @@ function emptyScenesComp(
     width: 1280,
     height: 720,
     fps: 30,
-    scenes: [],
     overlays,
     audioClips,
   };
@@ -25,7 +24,6 @@ function singleVideoComp(): Composition {
     width: 1280,
     height: 720,
     fps: 30,
-    scenes: [],
     overlays: [{
       id: "s1", kind: "video", fileId: "f1",
       startTime: 0, duration: 4, z: 0, opacity: 1, fit: "cover",

@@ -24,7 +24,7 @@ Every piece has two states:
 
 ### Rule 1 — Edits always land in the draft. You don't need to do anything.
 
-Every existing mutation tool (`create_scene`, `add_overlay (kind "text" / "video")`, `add_audio_clip`, etc.) writes to the draft automatically. You don't call any snapshot/draft tool to make edits work. Just use the tools you already use.
+Every existing mutation tool (`add_overlay (kind "text" / "video" / "code")`, `update_overlay`, `add_audio_clip`, etc.) writes to the draft automatically. You don't call any snapshot/draft tool to make edits work. Just use the tools you already use.
 
 ### Rule 2 — Before starting fundamentally new work, check for existing draft.
 

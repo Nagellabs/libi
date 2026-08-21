@@ -1,6 +1,19 @@
 import { describe, it, expect } from "vitest";
 import { buildAudioFilterChain } from "@/lib/export/backends/ffmpeg-overlay";
-import type { AudioClip } from "@/lib/engine/types";
+import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
+import type { AudioClip, DuckSettings } from "@/lib/engine/types";
+
+/**
+ * The ffmpeg-overlay backend's audio adapter, on the duck path.
+ *
+ * This file used to assert the shape of a `sidechaincompress` filter — right
+ * down to a case named "makeup gain comes from the inverse of reductionDb"
+ * expecting `makeup=12`, which locked in the bug that amplified every ducked
+ * mix 12x. The duck is no longer re-derived by ffmpeg at all: the preview's own
+ * gain curve is rendered to a track and multiplied in. The curve's arithmetic
+ * is covered by `duck-law-parity.test.ts`; what belongs here is only that the
+ * graph wires the envelope up correctly.
+ */
 
 const clip = (overrides: Partial<AudioClip> = {}): AudioClip => ({
   id: "c",
@@ -14,114 +27,68 @@ const clip = (overrides: Partial<AudioClip> = {}): AudioClip => ({
   ...overrides,
 });
 
+const DUCK: DuckSettings = {
+  sidechainClipIds: ["vo"],
+  thresholdDb: -25,
+  ratio: 6,
+  attackMs: 40,
+  releaseMs: 300,
+  reductionDb: -12,
+};
+
+function build(clips: AudioClip[], inputIndex: Map<string, number>, envelopeIndex?: Map<string, number>) {
+  return buildAudioFilterChain({
+    keepBaseAudio: false,
+    baseVolume: 1,
+    clips,
+    inputIndex,
+    envelopeIndex,
+    sceneDuration: 10,
+  });
+}
+
 describe("buildAudioFilterChain — duck", () => {
-  it("emits sidechaincompress when a clip has duck settings", () => {
-    const music = clip({
-      id: "music",
-      duck: {
-        sidechainClipId: "vo",
-        thresholdDb: -25,
-        ratio: 6,
-        attackMs: 40,
-        releaseMs: 300,
-        reductionDb: -12,
-      },
-    });
-    const vo = clip({ id: "vo" });
-    const inputIndex = new Map<string, number>([["music", 1], ["vo", 2]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false,
-      baseVolume: 1,
-      clips: [music, vo],
-      inputIndex,
-      sceneDuration: 10,
-    });
+  const music = clip({ id: "music", duck: DUCK });
+  const vo = clip({ id: "vo" });
+  const inputIndex = new Map<string, number>([["music", 1], ["vo", 2]]);
+
+  it("multiplies the ducked clip by its rendered envelope", () => {
+    const { chain } = build([music, vo], inputIndex, new Map([["music", 3]]));
     expect(chain).toBeTruthy();
-    // The music label should be passed through sidechaincompress, with the
-    // sidechain coming from the VO label.
-    expect(chain).toContain("sidechaincompress");
-    expect(chain).toContain("threshold=");
-    expect(chain).toContain("ratio=6");
-    // ffmpeg expects SECONDS — so 40 ms → 0.040, 300 ms → 0.300.
-    // Plain "attack=40" would mean 40 SECONDS on strict ffmpeg builds.
-    expect(chain).toContain("attack=0.040");
-    expect(chain).toContain("release=0.300");
-    // amix preserves per-clip volume (normalize=0 prevents 1/N dip).
-    expect(chain).toContain("normalize=0");
+    expect(chain).toContain("amultiply");
+    expect(chain).toContain("[3:a]pan=stereo|c0=c0|c1=c0");
   });
 
-  it("skips ducking when the sidechain clip doesn't exist in the inputs", () => {
-    const music = clip({
-      id: "music",
-      duck: { sidechainClipId: "missing", thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 },
-    });
-    const inputIndex = new Map<string, number>([["music", 1]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false,
-      baseVolume: 1,
-      clips: [music],
-      inputIndex,
-      sceneDuration: 10,
-    });
+  it("never emits sidechaincompress — the duck is not re-derived by ffmpeg", () => {
+    const { chain } = build([music, vo], inputIndex, new Map([["music", 3]]));
+    expect(chain).not.toContain("sidechaincompress");
+    expect(chain).not.toContain("makeup");
+  });
+
+  it("pins both multiply inputs to the envelope's rate and to stereo", () => {
+    const { chain } = build([music, vo], inputIndex, new Map([["music", 3]]));
+    expect(chain).toContain(`sample_rates=${ENVELOPE_SAMPLE_RATE}`);
+    expect(chain).toContain("channel_layouts=stereo");
+  });
+
+  it("mixes the clip UNDUCKED when its envelope is missing, rather than failing", () => {
+    const { chain } = build([music, vo], inputIndex);
     expect(chain).toBeTruthy();
+    expect(chain).not.toContain("amultiply");
+    expect(chain).toContain("[aout]");
+  });
+
+  it("does not touch clips without duck settings", () => {
+    const plain = clip({ id: "plain" });
+    const { chain } = build([plain], new Map([["plain", 1]]));
+    expect(chain).not.toContain("amultiply");
     expect(chain).not.toContain("sidechaincompress");
   });
 
-  it("does not emit sidechaincompress for clips without duck", () => {
-    const a = clip({ id: "a" });
-    const inputIndex = new Map<string, number>([["a", 1]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false,
-      baseVolume: 1,
-      clips: [a],
-      inputIndex,
-      sceneDuration: 10,
-    });
-    expect(chain).not.toContain("sidechaincompress");
-  });
-});
-
-describe("buildAudioFilterChain — dB→linear conversion", () => {
-  it("-20 dB threshold serializes as ~0.1 linear", () => {
-    const music = clip({
-      id: "music",
-      duck: { sidechainClipId: "vo", thresholdDb: -20, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 },
-    });
-    const vo = clip({ id: "vo" });
-    const inputIndex = new Map<string, number>([["music", 1], ["vo", 2]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false, baseVolume: 1, clips: [music, vo], inputIndex, sceneDuration: 10,
-    });
-    // Find threshold=N in the chain
-    const m = chain!.match(/threshold=([0-9.]+)/);
-    expect(m).toBeTruthy();
-    expect(parseFloat(m![1])).toBeCloseTo(0.1, 3);
-  });
-
-  it("0 dB threshold serializes as ~1.0", () => {
-    const music = clip({
-      id: "music",
-      duck: { sidechainClipId: "vo", thresholdDb: 0, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 },
-    });
-    const vo = clip({ id: "vo" });
-    const inputIndex = new Map<string, number>([["music", 1], ["vo", 2]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false, baseVolume: 1, clips: [music, vo], inputIndex, sceneDuration: 10,
-    });
-    const m = chain!.match(/threshold=([0-9.]+)/);
-    expect(parseFloat(m![1])).toBeCloseTo(1, 3);
-  });
-
-  it("makeup gain comes from the inverse of reductionDb", () => {
-    const music = clip({
-      id: "music",
-      duck: { sidechainClipId: "vo", thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 },
-    });
-    const vo = clip({ id: "vo" });
-    const inputIndex = new Map<string, number>([["music", 1], ["vo", 2]]);
-    const { chain } = buildAudioFilterChain({
-      keepBaseAudio: false, baseVolume: 1, clips: [music, vo], inputIndex, sceneDuration: 10,
-    });
-    expect(chain).toMatch(/makeup=12/);
+  it("still mixes both clips — the sidechain plays normally in its own right", () => {
+    const { chain } = build([music, vo], inputIndex, new Map([["music", 3]]));
+    expect(chain).toContain("[1:a]atrim");
+    expect(chain).toContain("[2:a]atrim");
+    expect(chain).toContain("amix=inputs=2");
   });
 });

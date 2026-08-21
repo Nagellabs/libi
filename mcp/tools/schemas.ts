@@ -110,42 +110,8 @@ export const listEffectPackagesSchema = z.object({});
 
 // ---------------------------------------------------------------------------
 
-export const createSceneSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  name: z.string().describe("A descriptive name for the scene"),
-  duration: z.number().positive().describe("Duration of the scene in seconds"),
-  drawFunction: z
-    .string()
-    .describe(
-      "The function body (JavaScript code) that receives `context: DrawContext` and draws a single frame. All animation helpers (interpolate, spring, easing functions) and drawing helpers (drawRoundedRect, drawGradient, drawTextBlock, drawCircle, drawSvg, loadImage, svgToImage) are available in scope.",
-    ),
-});
-
-export const updateSceneSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  sceneId: z.string().describe("The ID of the scene to update"),
-  name: z.string().optional().describe("New name for the scene"),
-  duration: z.number().positive().optional().describe("New duration in seconds"),
-  drawFunction: z.string().optional().describe("New function body for the draw function"),
-});
-
-export const deleteSceneSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  sceneId: z.string().describe("The ID of the scene to remove"),
-});
-
-export const reorderScenesSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  sceneIds: z.array(z.string()).describe("Array of scene IDs in the desired new order"),
-});
-
 export const getCompositionSchema = z.object({
   pieceId: z.string().describe("ID of the piece to operate on"),
-});
-
-export const loadSceneSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  sceneId: z.string().describe("The ID of the scene to load"),
 });
 
 export const updatePieceNameSchema = z.object({
@@ -363,6 +329,16 @@ export const UploadFontSchema = z.object({
 });
 export type UploadFontParams = z.infer<typeof UploadFontSchema>;
 
+export const listFontsSchema = z.object({
+  pieceId: z
+    .string()
+    .optional()
+    .describe(
+      "Piece to include piece-scoped uploaded fonts for, in addition to global uploads. Omit to list only bundled, system, and globally-uploaded fonts.",
+    ),
+});
+export type ListFontsParams = z.infer<typeof listFontsSchema>;
+
 export const TrimVideoSchema = z.object({
   pieceId: z.string().describe("The piece that owns the source file"),
   fileId: z.string().describe("File ID of the source video"),
@@ -422,12 +398,7 @@ export const DropProxiesSchema = z.object({
   pieceId: z.string().describe("The piece whose proxies should be dropped"),
 });
 
-export type CreateSceneParams = z.infer<typeof createSceneSchema>;
-export type UpdateSceneParams = z.infer<typeof updateSceneSchema>;
-export type DeleteSceneParams = z.infer<typeof deleteSceneSchema>;
-export type ReorderScenesParams = z.infer<typeof reorderScenesSchema>;
 export type GetCompositionParams = z.infer<typeof getCompositionSchema>;
-export type LoadSceneParams = z.infer<typeof loadSceneSchema>;
 export type UpdatePieceNameParams = z.infer<typeof updatePieceNameSchema>;
 export type UpdatePieceDescriptionParams = z.infer<typeof updatePieceDescriptionSchema>;
 export type SaveAssetParams = z.infer<typeof saveAssetSchema>;
@@ -932,7 +903,14 @@ export type DeleteFileParams = z.infer<typeof deleteFileSchema>;
 export const audioDuckEnableSchema = z.object({
   pieceId: z.string(),
   clipId: z.string().describe("The clip to apply ducking to (typically music)"),
-  sidechainClipId: z.string().describe("The clip whose volume drives the duck (typically dialogue or VO)"),
+  sidechainClipIds: z.array(z.string()).min(1).optional().describe(
+    "The clips whose volume drives the duck (typically every dialogue or VO clip). Pass ALL of them — their levels are summed, so the music dips under whichever voice is speaking. There is no need to bounce several VO lines into one file first.",
+  ),
+  /** @deprecated Superseded by `sidechainClipIds`; still accepted so older
+   *  agent transcripts and skills keep working. */
+  sidechainClipId: z.string().optional().describe(
+    "Deprecated — use sidechainClipIds. A single sidechain clip id, accepted as an alias for a one-element sidechainClipIds.",
+  ),
   thresholdDb: z.number().min(-60).max(0).optional().describe("Sidechain threshold in dBFS, default -30"),
   ratio: z.number().min(1).max(20).optional().describe("Compression ratio, default 4"),
   attackMs: z.number().min(1).max(1000).optional().describe("Attack time in ms, default 50"),
@@ -948,7 +926,13 @@ export const audioDuckDisableSchema = z.object({
 export const audioDuckUpdateSchema = z.object({
   pieceId: z.string(),
   clipId: z.string(),
-  sidechainClipId: z.string().optional(),
+  sidechainClipIds: z.array(z.string()).min(1).optional().describe(
+    "Replace the full set of clips driving the duck. Their levels are summed.",
+  ),
+  /** @deprecated Superseded by `sidechainClipIds`. */
+  sidechainClipId: z.string().optional().describe(
+    "Deprecated — use sidechainClipIds. Replaces the set with this single clip.",
+  ),
   thresholdDb: z.number().min(-60).max(0).optional(),
   ratio: z.number().min(1).max(20).optional(),
   attackMs: z.number().min(1).max(1000).optional(),
@@ -1801,6 +1785,29 @@ export const CancelJobSchema = z.object({
 });
 export type CancelJobParams = z.infer<typeof CancelJobSchema>;
 
+export const ListJobsSchema = z.object({
+  status: z
+    .enum(["running", "queued", "completed", "failed", "cancelled"])
+    .optional()
+    .describe(
+      "Filter by lifecycle state. Omit for all. Use 'running' to answer 'is anything still working?'",
+    ),
+  kind: z
+    .string()
+    .optional()
+    .describe(
+      "Filter by runner kind, e.g. 'music_model_download', 'export_render', 'tracking'.",
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .describe("Max rows, newest first. Defaults to 20."),
+});
+export type ListJobsParams = z.infer<typeof ListJobsSchema>;
+
 // ===== Snapshot / Draft tools =====
 
 export const getPieceStateSchema = z.object({
@@ -1992,7 +1999,7 @@ export const musicDownloadModelSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Discard whatever is on disk and re-download from scratch (~5.5 GB) — for corrupt/partial recovery or a version bump. Ask the user first. If a download is ALREADY running this attaches to it and reports its progress instead of restarting; cancel that job first if you really mean to start over.",
+      "Discard whatever is on disk and re-download from scratch (~8.3 GB) — for corrupt/partial recovery or a version bump. Ask the user first. If a download is ALREADY running this attaches to it and reports its progress instead of restarting; cancel that job first if you really mean to start over.",
     ),
   /** @deprecated Alias of `force`. Two knobs for one action is how a retry
    *  ended up creating a second job over the same directory; kept only so an
@@ -2288,6 +2295,18 @@ export const showApiConfigSchema = z.object({
 });
 export type ShowApiConfigParams = z.infer<typeof showApiConfigSchema>;
 
+export const buildOnboardingPieceSchema = z.object({
+  version: z
+    .string()
+    .optional()
+    .describe("Definition version to build. Defaults to the current one (v1)."),
+  force: z
+    .boolean()
+    .optional()
+    .describe("Build a fresh copy even if this version was already built."),
+});
+export type BuildOnboardingPieceParams = z.infer<typeof buildOnboardingPieceSchema>;
+
 // ---------------------------------------------------------------------------
 // Storyboard tools
 // ---------------------------------------------------------------------------
@@ -2482,6 +2501,12 @@ export const renderOverlayFramesSchema = z.object({
     .enum(["draft", "snapshot"])
     .optional()
     .describe("Which composition state to render. Default 'draft'."),
+  contactSheet: z
+    .boolean()
+    .optional()
+    .describe(
+      "When true, ALSO compose the rendered frames into one labelled JPEG grid and return its path as `contactSheet` — one image to look at instead of N. Prefer this: it is the cheap way to make looking a habit.",
+    ),
 });
 export type RenderOverlayFramesParams = z.infer<typeof renderOverlayFramesSchema>;
 
@@ -2592,4 +2617,13 @@ export type DeleteCaptionStyleParams = z.infer<typeof deleteCaptionStyleSchema>;
 export const devSlowJobSchema = {
   seconds: z.number().int().min(1).max(600).describe("How long the job runs"),
   label: z.string().optional().describe("Optional label echoed in the result"),
+  quietAfter: z
+    .number()
+    .int()
+    .min(1)
+    .max(600)
+    .optional()
+    .describe(
+      "Stop reporting progress after N ticks while continuing to work — reproduces a job whose remaining work sits inside one opaque unit (a multi-GB single file). Use to inspect the decaying/withdrawn ETA and the 'no progress for Xm' line.",
+    ),
 };

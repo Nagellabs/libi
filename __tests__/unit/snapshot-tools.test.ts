@@ -29,7 +29,7 @@ describe("MCP snapshot tools", () => {
   it("commitDraft flips hasDraft to false", async () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
-    await saveManifest(piece.id, { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] });
     const result = await commitDraftTool({ pieceId: piece.id, summary: "x" });
     expect(result.success).toBe(true);
     const state = await getPieceStateTool({ pieceId: piece.id });
@@ -45,12 +45,12 @@ describe("MCP snapshot tools", () => {
   it("compareStates returns diff", async () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
-    await saveManifest(piece.id, { sceneOrder: ["s1"], width: 1920, height: 1080, fps: 30, scenes: [{ id: "s1", type: "canvas", name: "v2", duration: 1, drawFunction: "" }] });
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "code-s1", kind: "code" as const, displayName: "v2", startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" }] });
     const result = await compareStatesTool({ pieceId: piece.id });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.hasDraft).toBe(true);
-      expect(result.data.scenes.added).toEqual([{ id: "s1", name: "v2" }]);
+      expect(result.data.overlays.added).toBe(1);
     }
   });
 });

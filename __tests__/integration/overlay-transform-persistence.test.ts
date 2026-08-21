@@ -11,11 +11,9 @@ const PIECE = "piece-transform";
 
 function baseManifest(overlays: PersistedOverlay[]): CompositionManifest {
   return {
-    sceneOrder: [],
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes: [],
     overlays,
   };
 }

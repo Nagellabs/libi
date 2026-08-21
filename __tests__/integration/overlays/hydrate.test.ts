@@ -7,7 +7,7 @@ import { getOverlayBody } from "@/lib/overlays/code-fields";
 import type { CompositionManifest, PersistedOverlay } from "@/lib/composition/persistence";
 
 function mkManifest(ov: PersistedOverlay[]): CompositionManifest {
-  return { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [], overlays: ov };
+  return { width: 1920, height: 1080, fps: 30, overlays: ov };
 }
 const three = (body: string): PersistedOverlay => ({ id: "three-1", kind: "three", startTime: 0, duration: 1, rect: { x: 0, y: 0, width: 10, height: 10 }, z: 0, opacity: 1, sceneFunction: body });
 

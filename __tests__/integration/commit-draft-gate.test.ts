@@ -10,7 +10,7 @@ const PIECE = "commit-gate-piece";
 
 function videoManifest(fileId: string): CompositionManifest {
   return {
-    sceneOrder: [], width: 1080, height: 1920, fps: 30, scenes: [],
+    width: 1080, height: 1920, fps: 30, 
     overlays: [{
       id: "ov1", kind: "video", fileId, displayName: "v",
       startTime: 0, duration: 8, z: 0, opacity: 1, fit: "cover",

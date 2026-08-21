@@ -97,12 +97,12 @@ function clip(id: string, extra: Partial<AudioClip> = {}): AudioClip {
   } as AudioClip;
 }
 
-const DUCK = { sidechainClipId: "vo", thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 };
+const DUCK = { sidechainClipIds: ["vo"], thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 };
 
 // Bracket access to private engine internals for white-box assertions.
 type Internal = {
   master: FakeNode;
-  clips: Map<string, { gain: FakeGain; duckGain: FakeGain | null; duckWorklet: FakeWorklet | null; duckSidechainGain: FakeGain | null; duckSig: string | null }>;
+  clips: Map<string, { gain: FakeGain; duckGain: FakeGain | null; duckWorklet: FakeWorklet | null; duckSidechainGains: FakeGain[]; duckSig: string | null }>;
 };
 
 describe("WebAudioEngine sidechain ducking", () => {
@@ -121,7 +121,7 @@ describe("WebAudioEngine sidechain ducking", () => {
     expect(music.duckGain).toBeTruthy();
     expect(music.duckGain!.gain.value).toBe(0); // worklet is the sole driver
     expect(music.duckWorklet).toBeTruthy();
-    expect(music.duckSidechainGain).toBe(vo.gain);
+    expect(music.duckSidechainGains).toEqual([vo.gain]);
     expect(music.duckSig).toContain("vo");
     expect(workletCount).toBe(1);
 
@@ -163,6 +163,100 @@ describe("WebAudioEngine sidechain ducking", () => {
     expect(music.duckSig).toBeNull();
     // gain reconnected directly to master
     expect(conns).toContainEqual({ from: gainId, to: internal.master.id });
+  });
+
+  it("taps EVERY sidechain into the one worklet input", async () => {
+    // Six VO lines is the workload this exists for. Web Audio sums fan-in, so
+    // all six gains connect to the single worklet input and the duck responds
+    // to whichever voice is speaking — no bounced "VO bus" clip needed.
+    const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+    const eng = new WebAudioEngine((fid) => `/${fid}`);
+    const internal = eng as unknown as Internal;
+    const voIds = ["vo1", "vo2", "vo3", "vo4", "vo5", "vo6"];
+
+    eng.setClips([
+      clip("music", { duck: { ...DUCK, sidechainClipIds: voIds } }),
+      ...voIds.map((id) => clip(id)),
+    ]);
+    await tick(); await tick();
+
+    const music = internal.clips.get("music")!;
+    expect(workletCount).toBe(1); // one follower, N inputs
+    expect(music.duckSidechainGains).toEqual(voIds.map((id) => internal.clips.get(id)!.gain));
+    for (const id of voIds) {
+      expect(conns).toContainEqual({ from: internal.clips.get(id)!.gain.id, to: music.duckWorklet!.id });
+    }
+  });
+
+  it("taps the sidechains POST-volume, so the duck follows what the listener hears", async () => {
+    const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+    const eng = new WebAudioEngine((fid) => `/${fid}`);
+    const internal = eng as unknown as Internal;
+    eng.setClips([
+      clip("music", { duck: { ...DUCK, sidechainClipIds: ["vo", "vo2"] } }),
+      clip("vo", { volume: 0.4 }),
+      clip("vo2", { volume: 0.9 }),
+    ]);
+    await tick(); await tick();
+    const music = internal.clips.get("music")!;
+    // The tapped nodes ARE the clips' gain nodes (post-volume), not their
+    // sources — a pre-volume tap would duck against a level never heard.
+    expect(music.duckSidechainGains).toEqual([
+      internal.clips.get("vo")!.gain,
+      internal.clips.get("vo2")!.gain,
+    ]);
+  });
+
+  it("rebuilds when a sidechain is added to an existing duck", async () => {
+    const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+    const eng = new WebAudioEngine((fid) => `/${fid}`);
+    const internal = eng as unknown as Internal;
+    eng.setClips([clip("music", { duck: DUCK }), clip("vo"), clip("vo2")]);
+    await tick(); await tick();
+    expect(internal.clips.get("music")!.duckSidechainGains.length).toBe(1);
+
+    eng.setClips([
+      clip("music", { duck: { ...DUCK, sidechainClipIds: ["vo", "vo2"] } }),
+      clip("vo"),
+      clip("vo2"),
+    ]);
+    await tick(); await tick();
+    expect(internal.clips.get("music")!.duckSidechainGains).toEqual([
+      internal.clips.get("vo")!.gain,
+      internal.clips.get("vo2")!.gain,
+    ]);
+  });
+
+  it("keeps ducking under the sidechains that remain when one disappears", async () => {
+    const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+    const eng = new WebAudioEngine((fid) => `/${fid}`);
+    const internal = eng as unknown as Internal;
+    eng.setClips([
+      clip("music", { duck: { ...DUCK, sidechainClipIds: ["vo", "vo2"] } }),
+      clip("vo"),
+      clip("vo2"),
+    ]);
+    await tick(); await tick();
+
+    eng.setClips([clip("music", { duck: { ...DUCK, sidechainClipIds: ["vo", "vo2"] } }), clip("vo")]);
+    await tick(); await tick();
+    const music = internal.clips.get("music")!;
+    expect(music.duckGain).toBeTruthy(); // still ducked, not torn down
+    expect(music.duckSidechainGains).toEqual([internal.clips.get("vo")!.gain]);
+  });
+
+  it("reads a legacy single-sidechain duck straight off the manifest", async () => {
+    // Manifests written before 2026-08-18 say `sidechainClipId`. The engine
+    // reads them through the same normalizer as everything else.
+    const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+    const eng = new WebAudioEngine((fid) => `/${fid}`);
+    const internal = eng as unknown as Internal;
+    const legacy = { sidechainClipId: "vo", thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12 };
+    eng.setClips([clip("music", { duck: legacy as unknown as AudioClip["duck"] }), clip("vo")]);
+    await tick(); await tick();
+    const music = internal.clips.get("music")!;
+    expect(music.duckGain).toBeTruthy();
+    expect(music.duckSidechainGains).toEqual([internal.clips.get("vo")!.gain]);
   });
 
   it("tears down when the sidechain clip disappears", async () => {

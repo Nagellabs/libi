@@ -1,0 +1,139 @@
+name: Windows build
+
+# libi has never had a Windows desktop artifact. This produces one.
+#
+# It exists because the GCE route did not work: `gcloud compute ssh` never
+# reached either a windows-2025 or a windows-2022 instance across four boots
+# (the guest agent reads the sshd service's ImagePath to version-check OpenSSH,
+# gets an empty string, and never provisions keys — see qa/cloud/lib/gce.sh).
+# A hosted Windows runner sidesteps the access problem entirely: GitHub-hosted
+# runners are free for public repositories, and this repo is public.
+#
+# What this DOES cover: the build itself — native module rebuild for Electron's
+# ABI on Windows, the Next release build, the runtime bundle, and NSIS
+# packaging, none of which has ever run on Windows.
+#
+# What it does NOT cover: anything interactive. Nobody clicks the installer,
+# nothing exercises ConPTY, and SmartScreen's behaviour on an unsigned
+# installer is unobservable here. Those still need a real Windows session.
+# Do not read a green run as "Windows works" — read it as "Windows builds".
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── the open question from F5 ─────────────────────────────────────────────
+  # The Linux ffmpeg libi downloaded had no `drawtext` filter, so every
+  # text-over-video export failed (fixed 2026-08-16). Windows pulls gyan.dev's
+  # "essentials" build — a name that advertises a REDUCED feature set — and
+  # nobody has ever checked whether it has drawtext either.
+  #
+  # Deliberately its own job, and deliberately first: it needs no build, takes
+  # a minute, and answers a live product question. If this fails, Windows has
+  # the same shipping bug Linux had, and the fix is the same shape.
+  ffmpeg-capability:
+    name: Windows ffmpeg has drawtext?
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Read the URL from the registry rather than hardcoding it, so this test
+      # follows the source libi actually uses instead of drifting from it.
+      - name: Resolve the Windows ffmpeg URL from the registry
+        id: url
+        shell: pwsh
+        run: |
+          # `https://` is required, not decorative. `win32:` appears twice per
+          # dep — once under downloadUrl and once under binaryPathInArchive —
+          # and without this anchor the pattern also matches the extraction
+          # glob (`ffmpeg-*-essentials_build/bin/ffmpeg.exe`). Today the URL
+          # happens to come first, so it works by ordering luck alone.
+          $src = Get-Content mcp/registry/bundled.ts -Raw
+          if ($src -notmatch 'win32:\s*\r?\n?\s*"(https://[^"]+)"') {
+            throw "could not find the win32 ffmpeg downloadUrl in mcp/registry/bundled.ts"
+          }
+          $u = $Matches[1]
+          Write-Host "registry win32 ffmpeg: $u"
+          "url=$u" >> $env:GITHUB_OUTPUT
+
+      - name: Download and probe it
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          Invoke-WebRequest -Uri "${{ steps.url.outputs.url }}" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffcheck
+          $bin = Get-ChildItem -Path ffcheck -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $bin) { throw "no ffmpeg.exe in the archive" }
+          Write-Host "binary: $($bin.FullName)"
+          & $bin.FullName -version | Select-Object -First 1
+
+          $filters = & $bin.FullName -filters 2>$null
+          Write-Host "total filters: $($filters.Count)"
+
+          if ($filters -match '\bdrawtext\b') {
+            Write-Host "drawtext PRESENT"
+          } else {
+            throw "drawtext ABSENT — Windows has the same defect Linux had (F5). Text-over-video exports will fail. Switch the win32 downloadUrl in mcp/registry/bundled.ts to a full build and bump pinnedInstallToken."
+          }
+
+          # Presence in `-filters` is necessary but not sufficient — the Linux
+          # build advertised --enable-libfreetype in its configuration string
+          # while lacking the filter entirely. Render something.
+          & $bin.FullName -y -f lavfi -i color=c=black:s=320x120:d=1 `
+            -vf "drawtext=text=OK:fontsize=32:fontcolor=white" -frames:v 1 out.png 2>&1 | Out-Null
+          if (-not (Test-Path out.png)) { throw "drawtext is listed but does not RENDER" }
+          Write-Host "drawtext renders"
+
+  build:
+    name: NSIS installer
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Unlike the test workflow, scripts are NOT skipped here: `postinstall`
+      # runs `electron-builder install-app-deps`, which rebuilds better-sqlite3
+      # and node-pty against ELECTRON's ABI — which is exactly what a packaged
+      # app needs. The test workflow skips it for the opposite reason (that ABI
+      # SIGKILLs vitest workers).
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the Windows shell
+        run: npm run build:electron
+
+      - name: What did it produce?
+        shell: pwsh
+        run: Get-ChildItem release | Select-Object Name, @{n="MB";e={[math]::Round($_.Length/1MB,1)}}
+
+      # electron-updater resolves `latest.yml` on Windows. Ship the installer
+      # without it and every Windows user gets a shell whose update check fails
+      # silently, forever — the same trap that was confirmed live on Linux,
+      # where the running AppImage reported "Cannot find latest-linux.yml".
+      - name: Verify the update feed artifact exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path release/latest.yml)) {
+            throw "latest.yml was not produced — publishing this installer would break Windows auto-update permanently"
+          }
+          Get-Content release/latest.yml
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libi-windows-installer
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 14

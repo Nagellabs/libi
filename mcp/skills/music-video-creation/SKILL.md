@@ -29,7 +29,7 @@ captions correctly, and verifying the result before you say "done".
 ## The Storyboard is the build spine for AI-generated visuals (default — not optional)
 
 When the music video's visuals are **AI-generated video clips** (not just lyrics /
-captions over a single static or canvas scene), you build those visuals **through the
+captions over a single static image or code overlay), you build those visuals **through the
 Storyboard** — invoke `using-storyboard` and follow it. It is the default, not an
 optional planning step. First **plan the visuals as building blocks via `video-planning`**:
 decompose the song's section/lyric structure into visual blocks (each block's content,

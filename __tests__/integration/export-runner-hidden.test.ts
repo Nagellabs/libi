@@ -70,18 +70,21 @@ function params(destFolder: string): ExportParams {
   } as ExportParams;
 }
 
-/** Seed the draft manifest: a canvas scene (forces the chromium-render branch)
- *  + a video overlay (optionally hidden) with a COUPLED inline clip, plus a
+/** Seed the draft manifest: a full-frame code overlay (its JS draw fn is what
+ *  forces the chromium-render branch — the ffmpeg graph cannot run one) + a
+ *  video overlay (optionally hidden) with a COUPLED inline clip, plus a
  *  free-standing music clip that must always survive. */
 async function seedManifest(opts: { hidden: boolean }): Promise<void> {
   const m = await loadManifest(PIECE_ID);
   m.width = 320;
   m.height = 240;
   m.fps = 24;
-  m.scenes = [
-    { id: "s1", name: "canvas", type: "canvas", duration: 2, drawFunction: "// draw" },
-  ] as typeof m.scenes;
   m.overlays = [
+    {
+      id: "code-bg", kind: "code", displayName: "backdrop",
+      startTime: 0, duration: 2, z: -1, opacity: 1,
+      rect: { x: 0, y: 0, width: 320, height: 240 }, drawFunction: "// draw",
+    },
     {
       id: "vid-x", kind: "video", fileId: FILE_ID,
       startTime: 0, duration: 1, z: 0, opacity: 1, fit: "cover",
@@ -136,8 +139,10 @@ describe("export runner — hidden layers stripped before classify (agent path)"
     expect(result.backend).toBe("chromium-render");
     expect(captured.runs).toHaveLength(1);
     const { composition, payload } = captured.runs[0];
-    expect(composition.overlays?.map((o) => o.id)).toEqual(["vid-x"]);
-    expect(payload.overlays.map((o) => o.id)).toEqual(["vid-x"]);
+    // The backdrop is what forces the chromium branch; the video is the layer
+    // under test. Both survive when nothing is hidden.
+    expect(composition.overlays?.map((o) => o.id)).toEqual(["code-bg", "vid-x"]);
+    expect(payload.overlays.map((o) => o.id)).toEqual(["code-bg", "vid-x"]);
     expect(payload.audioClips.map((c) => (c as { id: string }).id)).toEqual([
       "a-coupled",
       "a-free",
@@ -150,11 +155,12 @@ describe("export runner — hidden layers stripped before classify (agent path)"
     expect(result.backend).toBe("chromium-render");
     expect(captured.runs).toHaveLength(1);
     const { composition, payload } = captured.runs[0];
-    // Classifier composition: hidden overlay + coupled clip gone.
-    expect(composition.overlays ?? []).toHaveLength(0);
+    // Classifier composition: hidden overlay + coupled clip gone; the backdrop
+    // (never hidden) stays.
+    expect(composition.overlays?.map((o) => o.id)).toEqual(["code-bg"]);
     expect(composition.audioClips?.map((c) => c.id)).toEqual(["a-free"]);
     // Render payload (what the /render page draws): hidden overlay gone.
-    expect(payload.overlays).toHaveLength(0);
+    expect(payload.overlays.map((o) => o.id)).toEqual(["code-bg"]);
     // Audio mux input (payload.audioClips feeds muxAudioIntoRender in the
     // export_render runner): coupled clip gone, free clip kept.
     expect(payload.audioClips.map((c) => (c as { id: string }).id)).toEqual(["a-free"]);

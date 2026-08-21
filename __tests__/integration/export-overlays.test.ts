@@ -51,7 +51,6 @@ skipIf("FfmpegOverlayBackend", () => {
     const backend = new FfmpegOverlayBackend();
     const composition: Composition = {
       id: "c", name: "", width: 320, height: 240, fps: 24,
-      scenes: [],
       overlays: [{
         id: "s1", kind: "video", fileId: "f1", videoUrl: "",
         startTime: 0, duration: 0.5, z: 0, opacity: 1, fit: "cover",
@@ -85,7 +84,6 @@ skipIf("FfmpegOverlayBackend", () => {
     const backend = new FfmpegOverlayBackend();
     const composition: Composition = {
       id: "c", name: "", width: 320, height: 240, fps: 24,
-      scenes: [],
       overlays: [{
         id: "s1", kind: "video", fileId: "f1", videoUrl: "",
         startTime: 0, duration: 0.5, z: 0, opacity: 1, fit: "cover",

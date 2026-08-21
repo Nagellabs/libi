@@ -24,7 +24,7 @@ const MAX_TRACKING_VIDEO_BYTES = 4 * 1024 * 1024 * 1024;
 /**
  * Stream `res`'s body to `destPath`, enforcing `maxBytes` AS the stream
  * arrives (never buffering the whole body first). Mirrors the byte-cap
- * shape of `readBodyWithCap` in `lib/jobs/runners/remote-fetch.ts`, but
+ * shape of `readBodyWithCap` in `lib/net/fetch-and-store.ts`, but
  * writes straight to disk instead of accumulating a Buffer — this call site
  * carries whole source videos, not the smaller downloads remote-fetch caps.
  */

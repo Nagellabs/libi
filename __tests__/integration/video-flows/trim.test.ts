@@ -109,7 +109,6 @@ skipIf("Layer-1: StreamCopyTrimBackend trim flow", () => {
         width: 320,
         height: 240,
         fps: 24,
-        scenes: [],
         overlays: [
           {
             id: "scene-trim",

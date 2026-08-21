@@ -60,10 +60,27 @@ describe("MCP client → libi server", () => {
 
     // Verify specific tools exist
     const toolNames = result.tools.map(t => t.name);
-    expect(toolNames).toContain("libi.create_scene");
+    expect(toolNames).toContain("libi.add_overlay");
     expect(toolNames).toContain("libi.get_composition");
     expect(toolNames).toContain("libi.list_pieces");
     expect(toolNames).toContain("libi.get_version");
+    expect(toolNames).toContain("libi.list_jobs");
+
+    // libi.list_jobs exists so an agent can discover work it has no jobId for —
+    // the situation that made it report "nothing has been downloaded" over a
+    // running 6 GB download (session 9c3ce4d0). Every filter must actually reach
+    // the agent: a silently-empty inputSchema would leave it guessing arguments,
+    // which is the exact failure mode the compute_object_track regression below
+    // documents.
+    const listJobsTool = result.tools.find((t) => t.name === "libi.list_jobs");
+    expect(listJobsTool).toBeTruthy();
+    const listJobsProps = (listJobsTool!.inputSchema.properties ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(listJobsProps).toHaveProperty("status");
+    expect(listJobsProps).toHaveProperty("kind");
+    expect(listJobsProps).toHaveProperty("limit");
 
     // Verify each tool has required fields
     for (const tool of result.tools) {

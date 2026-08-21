@@ -50,12 +50,11 @@ function hasVisualEffect(fx: LayerEffects | undefined): boolean {
 }
 
 /**
- * True if any overlay or scene carries a visual effect.
+ * True if any overlay carries a visual effect.
  */
 export function compHasVisualEffects(comp: Composition): boolean {
   const overlays = comp.overlays ?? [];
   if (overlays.some((o) => hasVisualEffect((o as { effects?: LayerEffects }).effects))) return true;
-  if (comp.scenes.some((s) => hasVisualEffect((s as { effects?: LayerEffects }).effects))) return true;
   return false;
 }
 
@@ -76,9 +75,9 @@ function outlivesBase(comp: Composition, baseDuration: number): boolean {
 /**
  * Inspect a composition and classify its export shape. Pure.
  *
- * The "base" (ffmpeg input `[0:v]`) comes from `resolveExportBase` — EITHER a
- * legacy single video scene OR a full-frame, untransformed bottom-z video
- * overlay. Both fast paths below require one; without a base we fall back.
+ * The "base" (ffmpeg input `[0:v]`) comes from `resolveExportBase` — the
+ * full-frame, untransformed bottom-z video overlay. Both fast paths below
+ * require one; without a base we fall back.
  *
  *   stream-copy-trim — a base video, optional trim, nothing else to
  *     composite, no extra audio tracks: ffmpeg -ss -to -c copy (near-instant).
@@ -89,24 +88,20 @@ function outlivesBase(comp: Composition, baseDuration: number): boolean {
  *     backend composites overlays via drawtext + overlay filters and mixes
  *     extra audio via amix. Stream-copy can't mix or mute audio streams.
  *   chromium-render  — default for anything the ffmpeg-overlay backend
- *     can't render server-side: multi-scene comps, canvas scenes, comps with
- *     no resolvable base, or comps containing a `code`-kind overlay in
- *     `comp.overlays[]`. Runs off-browser in headless Chromium.
+ *     can't render server-side: comps with no resolvable base, or comps
+ *     containing a `code`-kind overlay in `comp.overlays[]`. Runs off-browser
+ *     in headless Chromium.
  *   canvas-source    — emergency fallback (enabled via
  *     `LIBI_EXPORT_USE_BROWSER_CANVAS=1`). Runs in the user's browser
  *     tab via the existing MediaBunny CanvasSource loop.
  */
 export function classifyExportShape(comp: Composition): ExportShape {
-  // A composition with no base video SCENES is normal — videos live as
-  // overlays. Only a truly-empty piece has nothing to export. The base for the
-  // ffmpeg fast paths is resolved below from EITHER a legacy single video scene
-  // or a base-shaped video overlay (see lib/export/export-base.ts), so an
-  // empty-scenes comp is no longer forced onto the render fallback.
-  if (comp.scenes.length === 0) {
-    const hasOverlays = (comp.overlays?.length ?? 0) > 0;
-    const hasAudio = (comp.audioClips?.length ?? 0) > 0;
-    if (!hasOverlays && !hasAudio) return { tag: "error", reason: "nothing to export" };
-  }
+  // Only a truly-empty piece has nothing to export. The base for the ffmpeg
+  // fast paths is a full-frame, untransformed bottom-z video overlay (see
+  // lib/export/export-base.ts).
+  const hasOverlays = (comp.overlays?.length ?? 0) > 0;
+  const hasAudio = (comp.audioClips?.length ?? 0) > 0;
+  if (!hasOverlays && !hasAudio) return { tag: "error", reason: "nothing to export" };
 
   const overlays = comp.overlays;
   const hasCodeOverlay = Array.isArray(overlays) && overlays.some((o) => o.kind === "code");
@@ -129,7 +124,7 @@ export function classifyExportShape(comp: Composition): ExportShape {
     Array.isArray(overlays) && overlays.some(overlayHasKeyframes);
   // Needs re-encode (ffmpeg-overlay) when there are standalone audio clips or
   // inline clips that need volume adjustment / muting. An inline clip linked to
-  // the single video scene with volume=1 and enabled=true is just "keep base
+  // the base video overlay with volume=1 and enabled=true is just "keep base
   // audio" — stream-copy handles that transparently. We still need ffmpeg-overlay
   // for any clip that requires audio processing.
   const audioClips = comp.audioClips ?? [];
@@ -186,8 +181,6 @@ export function classifyExportShape(comp: Composition): ExportShape {
     // The base overlay itself is not "an overlay to composite" — it IS the base
     // input `[0:v]`. Only OTHER overlays require the filter graph, so a lone
     // base-shaped video overlay still gets the near-instant `-c copy` path.
-    // (`base.overlayId` is null for a legacy base SCENE, where no overlay is
-    // the base and every overlay must be composited.)
     const compositedOverlays = (comp.overlays ?? []).filter((o) => o.id !== base.overlayId);
     // `-c copy` ships the source bytes verbatim: it cannot scale, pad, or crop,
     // so it is only valid when the source ALREADY matches the composition's

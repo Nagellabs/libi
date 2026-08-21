@@ -104,20 +104,48 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
         // build (its /redirect/latest/.../release/ alias mirrors evermeet's
         // "getrelease" latest-alias and includes drawtext). Token bumped so
         // existing wrong-arch installs re-fetch.
-        pinnedInstallToken: "2026-07-24",
+        //
+        // 2026-08-16: LINUX MOVED OFF johnvansickle. The 2026-05-23 note above
+        // claimed all four sources "include freetype". That was wrong for
+        // johnvansickle, and it cost every Linux user their text overlays:
+        //   [AVFilterGraph] No such filter: 'drawtext'
+        // Measured on the shipped artifact — 486 filters, no drawtext, and a
+        // direct render smoke test fails. Its `-version` configuration string
+        // DOES advertise --enable-libfreetype/--enable-fontconfig/--enable-libass,
+        // which is why reading that string (or trusting `-version` to exit 0)
+        // never caught it.
+        // BtbN/FFmpeg-Builds linux64-gpl was measured on the same box before
+        // switching: 563 filters, drawtext present, and it renders. Same GPL
+        // footing as johnvansickle (both carry libx264, which the export
+        // pipeline uses as its encoder) and downloaded on the user's machine
+        // at runtime, never redistributed.
+        // See `capabilityCheck` below — the guard that would have caught this.
+        pinnedInstallToken: "2026-08-16",
         requireBundled: true,
         // Actually exec `ffmpeg -version` after install — an existing binary
         // that can't run (wrong CPU arch) is treated as not-installed and
         // re-fetched, instead of passing verification on file-existence alone.
         runCheck: ["-version"],
+        // `-version` only proves the binary EXECUTES. It cannot tell you the
+        // binary can do what libi needs, and the two are not the same thing:
+        // the johnvansickle build ran perfectly and had no drawtext filter.
+        // Assert the capability itself.
+        capabilityCheck: {
+          args: ["-filters"],
+          // drawtext is what every text overlay on the ffmpeg export path
+          // compiles to. Without it `ffmpeg-overlay` fails outright and the
+          // user just sees a failed export.
+          mustContain: ["drawtext"],
+        },
         downloadUrl: {
           darwin: {
             arm64:
               "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
             x64: "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip",
           },
+          // BtbN, not johnvansickle — see the 2026-08-16 note above.
           linux:
-            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
           win32:
             "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         },
@@ -127,8 +155,9 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
             // Both macOS zips (evermeet x64, martin-riedl arm64) extract a
             // single `ffmpeg` file at root.
             darwin: "ffmpeg",
-            // johnvansickle tar extracts ffmpeg-*-amd64-static/ffmpeg
-            linux: "ffmpeg-*-amd64-static/ffmpeg",
+            // BtbN tar extracts ffmpeg-*-linux64-gpl/bin/ffmpeg — note the
+            // `bin/` level, which johnvansickle's layout did not have.
+            linux: "ffmpeg-*-linux64-gpl/bin/ffmpeg",
             // gyan.dev zip extracts ffmpeg-*-essentials_build/bin/ffmpeg.exe
             win32: "ffmpeg-*-essentials_build/bin/ffmpeg.exe",
           },
@@ -139,9 +168,16 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
         // Same rationale as ffmpeg above — don't let a homebrew/system
         // ffprobe shadow the static build we control. darwin arch-keyed
         // 2026-07-24 for the same evermeet-is-x86_64-only reason (see ffmpeg).
-        pinnedInstallToken: "2026-07-24",
+        //
+        // 2026-08-16: linux moved to BtbN alongside ffmpeg. These two MUST come
+        // from the same upstream archive — they are a matched pair, and mixing
+        // a BtbN ffmpeg with a johnvansickle ffprobe would mean probing with a
+        // different build than the one doing the encoding.
+        pinnedInstallToken: "2026-08-16",
         requireBundled: true,
         runCheck: ["-version"],
+        // No capabilityCheck: ffprobe has no filter graph. Its counterpart
+        // guarantee is that it comes from the same archive as ffmpeg above.
         downloadUrl: {
           darwin: {
             arm64:
@@ -149,7 +185,7 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
             x64: "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip",
           },
           linux:
-            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
           win32:
             "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         },
@@ -157,7 +193,7 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
           format: "zip",
           binaryPathInArchive: {
             darwin: "ffprobe",
-            linux: "ffmpeg-*-amd64-static/ffprobe",
+            linux: "ffmpeg-*-linux64-gpl/bin/ffprobe",
             win32: "ffmpeg-*-essentials_build/bin/ffprobe.exe",
           },
         },

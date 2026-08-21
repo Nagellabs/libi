@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { collectVideoSeekTargets } from "@/lib/engine/renderer";
-import type { Composition, Scene, Overlay } from "@/lib/engine/types";
+import type { Composition, Overlay } from "@/lib/engine/types";
 
 /** A full-frame base VIDEO OVERLAY at `startTime` — the modern spelling of a
  *  base video. (Video scenes were retired; scenes are canvas-only and decode
@@ -25,25 +25,28 @@ const videoLayer = (
     trim: { start: trimStart, end: trimStart + duration },
   }) as unknown as Overlay;
 
-const canvasScene = (id: string, duration: number): Scene =>
+const canvasScene = (id: string, duration: number): Overlay =>
   ({
     id,
-    type: "canvas",
+    kind: "code",
+    startTime: 0,
     duration,
-    draw: () => {},
-  }) as unknown as Scene;
+    z: 0,
+    opacity: 1,
+    rect: { x: 0, y: 0, width: 1920, height: 1080 },
+    drawFunction: "",
+  }) as unknown as Overlay;
 
-const comp = (scenes: Scene[], overlays: Overlay[] = []): Composition =>
+const comp = (backgrounds: Overlay[], overlays: Overlay[] = []): Composition =>
   ({
     width: 1920,
     height: 1080,
     fps: 30,
-    scenes,
-    overlays,
+    overlays: [...backgrounds, ...overlays],
   }) as unknown as Composition;
 
 describe("collectVideoSeekTargets", () => {
-  it("returns no targets for a canvas-only composition", () => {
+  it("returns no targets for a code-only composition", () => {
     const c = comp([canvasScene("a", 4)]);
     expect(collectVideoSeekTargets(c, 0)).toEqual([]);
     expect(collectVideoSeekTargets(c, 60)).toEqual([]);

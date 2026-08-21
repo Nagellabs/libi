@@ -21,7 +21,7 @@ function textOverlay(extra: Record<string, unknown>): Record<string, unknown> {
 }
 
 function manifest(overlays: Record<string, unknown>[]): CompositionManifest {
-  return { sceneOrder: [], width: 1920, height: 1080, fps: 30, scenes: [], overlays: overlays as never };
+  return { width: 1920, height: 1080, fps: 30, overlays: overlays as never };
 }
 
 describe("stripRevealMirror — reveal is the single persisted source of truth", () => {

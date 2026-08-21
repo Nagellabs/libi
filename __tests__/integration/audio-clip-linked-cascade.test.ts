@@ -37,7 +37,6 @@ beforeEach(() => {
   writeFileSync(
     join(storageRoot, "storage", PIECE_ID, "composition.json"),
     JSON.stringify({
-      sceneOrder: [],
       width: 1920,
       height: 1080,
       fps: 30,

@@ -1,3 +1,4 @@
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { getLibiHome } from "@/lib/libi-home";
@@ -49,4 +50,31 @@ export function resolveCodexHome(): string {
   if (explicit) return explicit;
   if (isCanonicalLibiInstance()) return path.join(os.homedir(), ".codex");
   return path.join(getLibiHome(), ".codex");
+}
+
+/**
+ * Resolve the codex home AND make sure the directory exists.
+ *
+ * Handing `CODEX_HOME` to a process that then finds nothing there is not a
+ * no-op — codex REFUSES TO START:
+ *
+ *     Error: CODEX_HOME points to "…/.codex", but that path does not exist
+ *
+ * (observed directly: the ACP child exited 1 on a scoped home, 2026-08-16).
+ * So every place that sets the variable must also guarantee the directory —
+ * the ACP child (lib/agents/process-manager.ts), the terminal PTY
+ * (lib/terminal/manager.ts, which sets it for EVERY preset because the
+ * `needs-auth` remedy signs in from a plain shell), and the config sync.
+ *
+ * Best-effort by design: a failure here is never worth blocking a spawn over,
+ * and whatever codex or the sync does next reports the real error.
+ */
+export function ensureCodexHome(): string {
+  const home = resolveCodexHome();
+  try {
+    fs.mkdirSync(home, { recursive: true });
+  } catch {
+    // ignore — surfaced downstream by codex itself if it matters
+  }
+  return home;
 }

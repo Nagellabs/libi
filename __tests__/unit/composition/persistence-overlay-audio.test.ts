@@ -65,8 +65,6 @@ describe("persistence: linkedOverlayId round-trip", () => {
       linkedOverlayId: "vid-abc",
     };
     const manifest: CompositionManifest = {
-      sceneOrder: [],
-      scenes: [],
       width: 1920,
       height: 1080,
       fps: 30,
@@ -85,6 +83,5 @@ describe("persistence: linkedOverlayId round-trip", () => {
       duration: 5,
       trimStart: 1,
     });
-    expect(loaded.audioClips![0].linkedSceneId).toBeUndefined();
   });
 });

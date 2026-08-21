@@ -40,7 +40,6 @@ function threeVideoComp(): Composition {
     fps: 30,
     width: 1920,
     height: 1080,
-    scenes: [],
     overlays: [
       { id: "vid-a", kind: "video", startTime: 7, duration: 7, videoUrl: "a", fileId: "fa", z: 1, opacity: 1, rect },
       { id: "vid-b", kind: "video", startTime: 7, duration: 7, videoUrl: "b", fileId: "fb", z: 4, opacity: 1, rect },

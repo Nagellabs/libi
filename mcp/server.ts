@@ -8,11 +8,6 @@ import { LIBI_SKILL_VERSION } from "@/mcp/version";
 import { registerTrackingTools } from "@/mcp/tracking-mcp/register-tracking-tools";
 import { installArgCoercion } from "@/mcp/tools/coerce-args";
 import {
-  createSceneSchema,
-  updateSceneSchema,
-  deleteSceneSchema,
-  reorderScenesSchema,
-  loadSceneSchema,
   getCompositionSchema,
   updatePieceNameSchema,
   updatePieceDescriptionSchema,
@@ -49,6 +44,7 @@ import {
   uploadFileSchema,
   UploadFileToFalSchema,
   UploadFontSchema,
+  listFontsSchema,
   registerMcpServerSchema,
   updateMcpServerSchema,
   setMcpServerEnabledSchema,
@@ -169,6 +165,7 @@ import {
   LinkItemToAssetSchema,
   UnlinkItemFromAssetSchema,
   GetJobStatusSchema,
+  ListJobsSchema,
   CancelJobSchema,
   getInstallPlanSchema,
   updateDepStatusSchema,
@@ -203,6 +200,7 @@ import {
   importRemoteFilesSchema,
   startOnboardingSchema,
   showApiConfigSchema,
+  buildOnboardingPieceSchema,
   storyboardGetSchema,
   addStoryboardCardSchema,
   approveStoryboardStageSchema,
@@ -321,12 +319,16 @@ import {
   musicInstallAnalysisDeps,
 } from "@/mcp/tools/music-analysis-tools";
 import { listBundledMcps, showMcpSettings } from "@/mcp/tools/mcp-status-tools";
-import { startOnboarding, showApiConfig } from "@/mcp/tools/onboarding-tools";
+import {
+  startOnboarding,
+  showApiConfig,
+  buildOnboardingPiece,
+} from "@/mcp/tools/onboarding-tools";
 import { updateMemories, overrideInstructions } from "@/mcp/tools/instruction-tools";
 import { retryMcpServer } from "@/mcp/tools/mcp-retry-tools";
 import { retrieveAssetsDimensions, updateCompositionDimensions } from "@/mcp/tools/canvas-tools";
 import { regenerateProxy, dropProxies } from "@/mcp/tools/proxy-tools";
-import { getJobStatus, cancelJob } from "@/mcp/tools/job-tools";
+import { getJobStatus, listJobs, cancelJob } from "@/mcp/tools/job-tools";
 import { importRemoteFiles } from "@/mcp/tools/remote-tools";
 import { runJobViaServer, legacyTripleFromRunJobResult } from "@/mcp/jobs-client";
 import { isTestMode } from "@/lib/test-mode";
@@ -386,123 +388,10 @@ export function createLibiMcpServer(): McpServer {
       wrapRegisterToolWithContext(orig as (...a: unknown[]) => unknown);
   }
 
-  server.registerTool(
-    "libi.create_scene",
-    {
-      description:
-        "Create a new scene in the video composition. The drawFunction is JavaScript code that receives a `context: DrawContext` parameter and uses the Canvas2D API plus animation/drawing helpers to render each frame.",
-      inputSchema: createSceneSchema,
-    },
-    async (params) => {
-      try {
-        const ctx = makeContext(params.pieceId);
-        const result = await tools.createScene(ctx, params);
-        if (result.success) {
-          notify.refreshQuery({
-            queryKey: "composition",
-            pieceId: params.pieceId,
-            sceneId: result.data?.sceneId as string | undefined,
-          });
-        }
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
 
-  server.registerTool(
-    "libi.update_scene",
-    {
-      description:
-        "Modify an existing scene in the composition. Only the provided fields are updated; omitted fields remain unchanged.",
-      inputSchema: updateSceneSchema,
-    },
-    async (params) => {
-      try {
-        const ctx = makeContext(params.pieceId);
-        const result = await tools.updateScene(ctx, params);
-        if (result.success) {
-          notify.refreshQuery({
-            queryKey: "composition",
-            pieceId: params.pieceId,
-            sceneId: params.sceneId,
-          });
-        }
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
 
-  server.registerTool(
-    "libi.delete_scene",
-    {
-      description:
-        "Remove a scene FROM THE TIMELINE (composition manifest only). The source file is NOT deleted — it stays in resources, and the scene can be recreated. Any linked audio clip for this scene is also removed (the audio was bound to the scene); the response surfaces those cascaded clip ids in `data.removedClips` so you can summarize the change to the user (e.g. 'removed scene + 1 linked audio clip'). Use this for 'remove scene', 'take out the second scene', 'drop the intro from the timeline', etc. To PERMANENTLY delete the source file, use libi.delete_file (with explicit user confirmation).",
-      inputSchema: deleteSceneSchema,
-    },
-    async (params) => {
-      try {
-        const ctx = makeContext(params.pieceId);
-        const result = await tools.deleteScene(ctx, params);
-        if (result.success) {
-          notify.refreshQuery({
-            queryKey: "composition",
-            pieceId: params.pieceId,
-            sceneId: params.sceneId,
-          });
-        }
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
 
-  server.registerTool(
-    "libi.reorder_scenes",
-    {
-      description:
-        "Change the order of scenes in the composition. Provide all scene IDs in the desired new order.",
-      inputSchema: reorderScenesSchema,
-    },
-    async (params) => {
-      try {
-        const ctx = makeContext(params.pieceId);
-        const result = await tools.reorderScenes(ctx, params);
-        if (result.success) {
-          notify.refreshQuery({
-            queryKey: "composition",
-            pieceId: params.pieceId,
-            sceneId: params.sceneIds[0],
-          });
-        }
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
 
-  server.registerTool(
-    "libi.load_scene",
-    {
-      description:
-        "Load a single scene's data (name, duration, drawFunction) by its ID.",
-      inputSchema: loadSceneSchema,
-    },
-    async (params) => {
-      try {
-        const ctx = makeContext(params.pieceId);
-        const result = await tools.loadSceneData(ctx, params);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
 
   server.registerTool(
     "libi.get_composition",
@@ -746,7 +635,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.audio_duck_enable",
     {
       description:
-        "Enable sidechain ducking on a clip. The clip's volume dips when the sidechain clip plays loudly — typical use: music ducks under voiceover. Defaults: -30 dBFS threshold, 4:1 ratio, 50 ms attack, 250 ms release, -12 dB max reduction.",
+        "Enable sidechain ducking on a clip. The clip's volume dips when any sidechain clip plays loudly — typical use: music ducks under voiceover. Pass EVERY voice clip in `sidechainClipIds`: their levels are summed, so a piece with six VO lines ducks under all six without bouncing them into one file. Defaults: -30 dBFS threshold, 4:1 ratio, 50 ms attack, 250 ms release, -12 dB max reduction.",
       inputSchema: audioDuckEnableSchema,
     },
     async (params) => {
@@ -779,7 +668,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.audio_duck_update",
     {
       description:
-        "Update ducking parameters on a clip that already has ducking enabled. Patch any subset of: sidechainClipId, thresholdDb, ratio, attackMs, releaseMs, reductionDb.",
+        "Update ducking parameters on a clip that already has ducking enabled. Patch any subset of: sidechainClipIds, thresholdDb, ratio, attackMs, releaseMs, reductionDb. `sidechainClipIds` replaces the whole set of clips driving the duck.",
       inputSchema: audioDuckUpdateSchema,
     },
     async (params) => {
@@ -880,6 +769,36 @@ export function createLibiMcpServer(): McpServer {
     async (params) => {
       try {
         return makeContent(await getJobStatus(params));
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "libi.list_jobs",
+    {
+      description:
+        "List background jobs newest-first, WITHOUT needing a jobId. Filter by " +
+        "`status` ('running' answers \"is anything still working?\") and/or `kind`. " +
+        "Each row carries { jobId, kind, status, progress, percent, etaMs, " +
+        "msSinceProgress, elapsedMs, error }. " +
+        "**Call this before telling the user that nothing is happening.** A libi " +
+        "job runs on the SERVER, not inside the tool call that started it, so it " +
+        "keeps running when the tool call that launched it is interrupted, " +
+        "declined, cancelled, or lost with the session — you simply stop hearing " +
+        "about it, and you never receive its jobId. 'My tool call was declined' " +
+        "is therefore NOT evidence that the work stopped; this tool is how you " +
+        "check. " +
+        "Reading a row: `etaMs: null` on a running job means the estimate is " +
+        "unknown, NOT that it is nearly done. `msSinceProgress` is how long it " +
+        "has been quiet — large values are normal mid-transfer for a big file " +
+        "and are not by themselves evidence of a hang.",
+      inputSchema: ListJobsSchema,
+    },
+    async (params) => {
+      try {
+        return makeContent(await listJobs(params));
       } catch (err) {
         return makeError(err);
       }
@@ -1238,6 +1157,23 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
+    "libi.list_fonts",
+    {
+      description:
+        "List every font family that will actually render — the families it is SAFE to name in an overlay's `font` field. Naming anything else does not error: the canvas silently substitutes a fallback face, and a whole piece can ship in the wrong typeface with no signal anywhere that it happened. Returns three groups: `bundled` (libi's own families with their available weights — identical on every platform, always available, and the ones to prefer), `system` (this machine's installed fonts, capped at 40 and sorted — NOT portable, since macOS/Windows/Linux and even different machines ship different sets, so a piece that leans on one may fall back silently elsewhere; see `systemTruncated` and `note`), and `uploaded` (fonts uploaded via libi.upload_font, scoped to `pieceId` plus global uploads). Call this before picking a font rather than guessing a family name.",
+      inputSchema: listFontsSchema.shape,
+    },
+    async (params) => {
+      try {
+        const result = await tools.listFonts(params);
+        return makeContent(result);
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "libi.upload_file_to_fal",
     {
       description:
@@ -1398,13 +1334,16 @@ export function createLibiMcpServer(): McpServer {
     "libi.show_piece",
     {
       description:
-        "Navigate the editor to display a piece. Use this after creating a new piece to show it to the user.",
+        "Navigate the editor to display a piece. Use this after creating a new piece to show it to the user. Returns `piece_not_found` if the piece does not exist (e.g. it was deleted) — in that case the editor did NOT navigate, so do not tell the user the piece is on screen; list pieces or rebuild instead.",
       inputSchema: showPieceSchema,
     },
     async (params) => {
       try {
-        notify.navigate({ target: "piece", pieceId: params.pieceId });
         const result = await tools.showPiece(params);
+        // Only after the piece is proven to exist — see navigation-tools.ts.
+        if (result.success) {
+          notify.navigate({ target: "piece", pieceId: params.pieceId });
+        }
         return makeContent(result);
       } catch (err) {
         return makeError(err);
@@ -1416,17 +1355,20 @@ export function createLibiMcpServer(): McpServer {
     "libi.show_asset",
     {
       description:
-        "Navigate the editor to display an asset in the Assets tab.",
+        "Navigate the editor to display an asset in the Assets tab. Returns `piece_not_found`, `file_not_found`, or `file_not_in_piece` (the file belongs to another piece — data.ownerPieceId names it). On any of these the editor did NOT navigate, so do not tell the user the asset is on screen.",
       inputSchema: showAssetSchema,
     },
     async (params) => {
       try {
-        notify.navigate({
-          target: "asset",
-          pieceId: params.pieceId,
-          fileId: params.fileId,
-        });
         const result = await tools.showAsset(params);
+        // Only after piece AND file are proven — see navigation-tools.ts.
+        if (result.success) {
+          notify.navigate({
+            target: "asset",
+            pieceId: params.pieceId,
+            fileId: params.fileId,
+          });
+        }
         return makeContent(result);
       } catch (err) {
         return makeError(err);
@@ -1627,13 +1569,16 @@ export function createLibiMcpServer(): McpServer {
     "libi.show_preview",
     {
       description:
-        "Switch the editor to the Preview tab (canvas player + timeline) for a piece. Use when the timeline should be the focus — e.g. after creating a piece, or when the user asks to see the video for a piece whose timeline isn't on screen. Do NOT call after every scene tool; if the user is actively on Assets, leave them there unless the scene change is the whole point of the turn.",
+        "Switch the editor to the Preview tab (canvas player + timeline) for a piece. Use when the timeline should be the focus — e.g. after creating a piece, or when the user asks to see the video for a piece whose timeline isn't on screen. Do NOT call after every scene tool; if the user is actively on Assets, leave them there unless the scene change is the whole point of the turn. Returns `piece_not_found` if the piece does not exist — the editor did NOT navigate, so do not claim it did.",
       inputSchema: showPreviewSchema,
     },
     async (params) => {
       try {
-        notify.navigate({ target: "preview", pieceId: params.pieceId });
         const result = await tools.showPreview(params);
+        // Only after the piece is proven to exist — see navigation-tools.ts.
+        if (result.success) {
+          notify.navigate({ target: "preview", pieceId: params.pieceId });
+        }
         return makeContent(result);
       } catch (err) {
         return makeError(err);
@@ -1645,13 +1590,16 @@ export function createLibiMcpServer(): McpServer {
     "libi.show_storyboard",
     {
       description:
-        "Switch the editor to the Storyboard tab for a piece. Call this after you create or update the storyboard (author/revise schematics, attach a keyframe/clip, or advance the ladder) so the user sees the board you just changed. Mirrors libi.show_preview but targets the Storyboard tab.",
+        "Switch the editor to the Storyboard tab for a piece. Call this after you create or update the storyboard (author/revise schematics, attach a keyframe/clip, or advance the ladder) so the user sees the board you just changed. Mirrors libi.show_preview but targets the Storyboard tab. Returns `piece_not_found` if the piece does not exist — the editor did NOT navigate, so do not claim it did.",
       inputSchema: showStoryboardSchema,
     },
     async (params) => {
       try {
-        notify.navigate({ target: "storyboard", pieceId: params.pieceId });
         const result = await tools.showStoryboard(params);
+        // Only after the piece is proven to exist — see navigation-tools.ts.
+        if (result.success) {
+          notify.navigate({ target: "storyboard", pieceId: params.pieceId });
+        }
         return makeContent(result);
       } catch (err) {
         return makeError(err);
@@ -1930,6 +1878,7 @@ export function createLibiMcpServer(): McpServer {
       description:
         "Download a Whisper model into ~/.libi/models/whisper/ (background job, progress streamed). Idempotent. Confirm with the user before downloading medium (~1.5 GB) or large-v3 (~3 GB). " +
         "Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running download job with matching parameters and BLOCKED until it finished, so the model IS now on disk; inform the user we continued an existing download (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). " +
+        "This download runs on the SERVER. If this tool call is interrupted, declined, or cancelled, the download KEEPS GOING — you just stop hearing about it and never get its jobId. Never tell the user nothing was downloaded on the strength of a declined call: check `libi.list_jobs({ status: \"running\" })` first, and use it (not the terminal) to answer \"how far along is it?\". " +
         "When the tool returns `matchedExisting:true`, the model is already downloaded on disk — no action needed; you can proceed. The cached result implies the model is ready. Use `forceNew:true` only if you suspect the model is corrupted or needs re-downloading.",
       inputSchema: whisperDownloadModelSchema.shape,
     },
@@ -1946,14 +1895,20 @@ export function createLibiMcpServer(): McpServer {
       "libi.dev_slow_job",
       {
         description:
-          "DEV ONLY: run a deterministic slow background job that ticks once per second. Used to verify chat tool-call UI (progress, stop, ETA). Call with different `seconds` values in parallel to exercise concurrent same-name tools.",
+          "DEV ONLY: run a deterministic slow background job that ticks once per second. Used to verify chat tool-call UI (progress, stop, ETA). Call with different `seconds` values in parallel to exercise concurrent same-name tools. Pass `quietAfter` to make it go silent partway — reproduces a job stuck inside one opaque unit, for checking that the ETA decays and is withdrawn rather than freezing.",
         inputSchema: devSlowJobSchema,
       },
       async (params, extra) => {
         try {
           const resp = await runJobViaServer<{ ticks: number }>(
             "dev_slow",
-            { seconds: params.seconds, ...(params.label ? { label: params.label } : {}) },
+            {
+              seconds: params.seconds,
+              ...(params.label ? { label: params.label } : {}),
+              ...(params.quietAfter !== undefined
+                ? { quietAfter: params.quietAfter }
+                : {}),
+            },
             { extra, forceNew: true },
           );
           const ran = legacyTripleFromRunJobResult(resp);
@@ -1989,6 +1944,7 @@ export function createLibiMcpServer(): McpServer {
       description:
         "Download the Kokoro model (~110 MB) into ~/.libi/models/tts/ (background job, progress streamed). Idempotent. No API key, free, on-device. " +
         "Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running download job with matching parameters and BLOCKED until it finished, so the model IS now on disk; inform the user we continued an existing download (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). " +
+        "This download runs on the SERVER. If this tool call is interrupted, declined, or cancelled, the download KEEPS GOING — you just stop hearing about it and never get its jobId. Never tell the user nothing was downloaded on the strength of a declined call: check `libi.list_jobs({ status: \"running\" })` first, and use it (not the terminal) to answer \"how far along is it?\". " +
         "When the tool returns `matchedExisting:true`, the model is already downloaded on disk — no action needed; you can proceed. Use `forceNew:true` only if you suspect the model is corrupted or needs re-downloading.",
       inputSchema: ttsDownloadModelSchema.shape,
     },
@@ -2031,8 +1987,9 @@ export function createLibiMcpServer(): McpServer {
     {
       title: "Local music: download model",
       description:
-        "Download the ACE-Step model (~5.5 GB) into ~/.libi/models/ace-step/ (background job, progress streamed). Idempotent. Pass force:true to re-download corrupt/partial files or a bumped version. Free, on-device. Tell the user the size first. " +
+        "Download the ACE-Step model (~8.3 GB) into ~/.libi/models/ace-step/ (background job, progress streamed). Idempotent. Pass force:true to re-download corrupt/partial files or a bumped version. Free, on-device. Tell the user the size first. " +
         "Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running download job with matching parameters and BLOCKED until it finished, so the model IS now on disk; inform the user we continued an existing download (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). " +
+        "This download runs on the SERVER. If this tool call is interrupted, declined, or cancelled, the download KEEPS GOING — you just stop hearing about it and never get its jobId. Never tell the user nothing was downloaded on the strength of a declined call: check `libi.list_jobs({ status: \"running\" })` first, and use it (not the terminal) to answer \"how far along is it?\". " +
         "When the tool returns `matchedExisting:true`, the model is already downloaded on disk — no action needed; you can proceed. Use `forceNew:true` only if you suspect the model is corrupted or needs re-downloading.",
       inputSchema: musicDownloadModelSchema.shape,
     },
@@ -2047,7 +2004,7 @@ export function createLibiMcpServer(): McpServer {
     {
       title: "Generate music (local)",
       description:
-        "Generate music locally with ACE-Step and store it as an audio file on the piece. Free, no API key — the DEFAULT music provider. Pass `lyrics` for vocals, `instrumental:true` for a bed. May return status:\"needs_install\" (then run the local-music install plan after telling the user the ~5.5 GB size), status:\"confirm_duration\" (tell the user the ETA, re-call with confirm:true), or status:\"model_load_failed\" (call music_download_model({force:true}) then retry). Use paid/licensed music only on explicit request. Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running job with matching parameters and BLOCKED until it finished, so a fresh audio file IS available in this response; inform the user we continued an existing run (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). When the tool returns `matchedExisting:true`, the server found a cached prior result — NO new audio file is returned in this branch (the cached wavPath from the prior run is no longer guaranteed on disk). To actually obtain audio, call again with `forceNew:true`. Apply the dedup heuristic from CLAUDE.md: different piece → silently retry with `forceNew:true`; >7 days old → silently retry with `forceNew:true`; same piece + recent + successful → ASK the user whether to reuse the prior result or regenerate (if regenerate, retry with `forceNew:true`).",
+        "Generate music locally with ACE-Step and store it as an audio file on the piece. Free, no API key — the DEFAULT music provider. Pass `lyrics` for vocals, `instrumental:true` for a bed. May return status:\"needs_install\" (then run the local-music install plan after telling the user the ~8.3 GB size), status:\"confirm_duration\" (tell the user the ETA, re-call with confirm:true), or status:\"model_load_failed\" (call music_download_model({force:true}) then retry). Use paid/licensed music only on explicit request. Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running job with matching parameters and BLOCKED until it finished, so a fresh audio file IS available in this response; inform the user we continued an existing run (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). When the tool returns `matchedExisting:true`, the server found a cached prior result — NO new audio file is returned in this branch (the cached wavPath from the prior run is no longer guaranteed on disk). To actually obtain audio, call again with `forceNew:true`. Apply the dedup heuristic from CLAUDE.md: different piece → silently retry with `forceNew:true`; >7 days old → silently retry with `forceNew:true`; same piece + recent + successful → ASK the user whether to reuse the prior result or regenerate (if regenerate, retry with `forceNew:true`).",
       inputSchema: generateMusicSchema.shape,
     },
     async (args: GenerateMusicParams, extra) => {
@@ -3397,6 +3354,22 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
+    "libi.build_onboarding_piece",
+    {
+      description:
+        "Build libi's own 52-second explainer piece — the first-run demo. Downloads ~15 MB of pre-made media from libi's public asset bucket, verifies each file, and assembles the full composition. Returns the pieceId plus a `description` of what was built — runtime, beats, layer counts, how the audio is mixed — derived from the definition; relay that rather than describing the film from memory. Reports progress; a second call for the same version returns the piece already built unless force is set. ONBOARDING ONLY — never for a user's own project.",
+      inputSchema: buildOnboardingPieceSchema,
+    },
+    async (params, extra) => {
+      try {
+        return makeContent(await buildOnboardingPiece(params, extra));
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  server.registerTool(
     "libi.storyboard_get",
     {
       description:
@@ -3635,7 +3608,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.render_overlay_frames",
     {
       description:
-        "Render a few REAL composition frames (base video + all overlays, including WebGL 3D `three` overlays) to PNG files on disk, to VERIFY what an overlay actually looks like. Returns `frames: [{ time, path, overflow: { touchesEdge, edges } }]`. PRIMARY CHECK: each `path` is a PNG on disk — OPEN IT WITH YOUR READ TOOL to SEE the rendered frame, then compare against the source/intent and fix the overlay (size/position/blank) if wrong. `overflow` is a SECONDARY HINT and is base-dependent: over a dark/canvas base it reliably flags an overlay clipping the edge, but OVER A FULL-FRAME VIDEO it reflects the VIDEO reaching the edges, not your overlay — so when there's a video base, do NOT shrink an overlay just because `touchesEdge` is true; judge overlay overflow by LOOKING at the frame. Pass `atTimes` (1–8 composition timestamps in seconds) or `overlayId` (renders that overlay's start/middle/end). Use this after adding or updating a 3D/caption overlay, in a build → render → look → fix loop.",
+        "Render a few REAL composition frames (base video + all overlays, including WebGL 3D `three` overlays) to PNG files on disk, to VERIFY what an overlay actually looks like. Returns `frames: [{ time, path, overflow: { touchesEdge, edges } }]` plus `unresolvedFonts: string[]` (ALWAYS present, even when empty). PRIMARY CHECK: each `path` is a PNG on disk — OPEN IT WITH YOUR READ TOOL to SEE the rendered frame, then compare against the source/intent and fix the overlay (size/position/blank) if wrong. Pass `contactSheet: true` to ALSO get one labelled JPEG grid (`contactSheet` path) of every requested time — look at that ONE image instead of opening N PNGs; this is the cheap way to make looking a habit, so prefer it whenever you request more than one time. `unresolvedFonts` lists any font family, among the text overlays actually on screen at your requested times, that will NOT render as itself — it is falling back to a different face SILENTLY, at a different width, with nothing else telling you. A non-empty `unresolvedFonts` means: stop, call `libi.list_fonts`, and fix the `font` on the affected overlay before judging anything else about the frame. `overflow` is a SECONDARY HINT and is base-dependent: over a dark/canvas base it reliably flags an overlay clipping the edge, but OVER A FULL-FRAME VIDEO it reflects the VIDEO reaching the edges, not your overlay — so when there's a video base, do NOT shrink an overlay just because `touchesEdge` is true; judge overlay overflow by LOOKING at the frame. Pass `atTimes` (1–8 composition timestamps in seconds) or `overlayId` (renders that overlay's start/middle/end). Use this after adding or updating a 3D/caption overlay, in a build → render → look → fix loop.",
       inputSchema: renderOverlayFramesSchema,
     },
     async (params: RenderOverlayFramesParams) => {

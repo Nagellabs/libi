@@ -1,4 +1,5 @@
 import { Input, UrlSource, ALL_FORMATS, CanvasSink, type WrappedCanvas } from "mediabunny";
+import { mediaFetchRetryDelay } from "./media-fetch-retry";
 import type { VideoFrameSource } from "./video-frame-source";
 
 /** The narrow slice of `CanvasSink` this source uses — lets tests inject a fake. */
@@ -41,7 +42,12 @@ export class MediaBunnyExportFrameSource implements VideoFrameSource {
   }
 
   private async init(url: string): Promise<void> {
-    const input = new Input({ source: new UrlSource(url), formats: ALL_FORMATS });
+    const input = new Input({
+      // Bounded retries: mediabunny's default retries a same-origin fetch
+      // failure forever. See media-fetch-retry.ts.
+      source: new UrlSource(url, { getRetryDelay: mediaFetchRetryDelay }),
+      formats: ALL_FORMATS,
+    });
     this.input = input;
     const track = await input.getPrimaryVideoTrack();
     if (!track) throw new Error("MediaBunnyExportFrameSource: no video track in " + url);

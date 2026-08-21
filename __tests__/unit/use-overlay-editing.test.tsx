@@ -15,7 +15,7 @@ const mkText = (id: string, content = "hi"): TextOverlay => ({
 
 function mkComp(overlays: TextOverlay[]): Composition {
   return {
-    id: "c", name: "", width: 100, height: 100, fps: 30, scenes: [],
+    id: "c", name: "", width: 100, height: 100, fps: 30, 
     overlays,
   };
 }

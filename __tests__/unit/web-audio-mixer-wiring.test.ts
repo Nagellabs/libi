@@ -66,7 +66,7 @@ describe("attachDuckGraph", () => {
     sidechain.dataset.role = "sidechain";
 
     const graph = await attachDuckGraph(music, sidechain, {
-      sidechainClipId: "vo",
+      sidechainClipIds: ["vo"],
       thresholdDb: -30, ratio: 4, attackMs: 50, releaseMs: 250, reductionDb: -12,
     });
 

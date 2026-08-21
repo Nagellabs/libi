@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { ensureBundledFontsRegistered } from "@/lib/fonts/register-server";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { selectVerifyTimes } from "@/lib/tracking/verify-grid";
 import type { IdentityCandidate } from "@/lib/tracking/identity-candidates";
@@ -136,6 +137,7 @@ export async function renderCandidateFrames(
       continue;
     }
 
+    ensureBundledFontsRegistered();
     const canvas = createCanvas(args.frameW, args.frameH);
     const ctx = canvas.getContext("2d");
     ctx.drawImage(img, 0, 0, args.frameW, args.frameH);

@@ -33,15 +33,15 @@ async function placeAll(pieceId: string, cardIds = ["c1", "c2"]) {
 }
 
 describe("placeCardOverlay", () => {
-  it("upserts a full-frame VIDEO OVERLAY keyed sb-<cardId>, not a scene", async () => {
+  it("upserts a full-frame VIDEO OVERLAY keyed sb-<cardId>", async () => {
     createTempStorageDir();
     await saveStoryboard("p1", sb());
     const overlayId = await placeCardOverlay("p1", (await loadCard("p1", "c1"))!);
     expect(overlayId).toBe("sb-c1");
     const m = await loadManifest("p1");
 
-    expect(m.scenes ?? []).toHaveLength(0);
-    expect(m.sceneOrder).toEqual([]);
+    // Exactly ONE layer, and it is the card's video overlay.
+    expect(m.overlays ?? []).toHaveLength(1);
 
     const o = (m.overlays ?? []).find((x) => x.id === "sb-c1") as PersistedOverlay & { fileId: string };
     expect(o).toBeDefined();

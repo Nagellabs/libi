@@ -3,7 +3,6 @@ import type { EffectPhase, EffectRef } from "./types";
 import {
   loadManifest,
   saveManifest,
-  updateSceneInManifest,
 } from "@/lib/composition/persistence";
 
 export interface ApplyEffectInput {
@@ -23,7 +22,7 @@ export interface ApplyEffectInput {
 }
 
 /** Which kind of layer the id resolved to (overlay kind tagged), or null. */
-export type ResolvedLayerKind = `overlay-${string}` | "scene" | "audio" | null;
+export type ResolvedLayerKind = `overlay-${string}` | "audio" | null;
 
 export interface ApplyEffectResult {
   layerKind: ResolvedLayerKind;
@@ -68,18 +67,6 @@ export async function applyEffectToLayer(
     manifest.overlays = overlays;
     await saveManifest(pieceId, manifest);
     return { layerKind: `overlay-${ov.kind}` as ResolvedLayerKind };
-  }
-
-  const scenes = manifest.scenes ?? [];
-  const sc = scenes.find((s) => s.id === layerId) as
-    | ((typeof scenes)[number] & { effects?: EffectsBlock })
-    | undefined;
-  if (sc) {
-    const block = setPhase(sc.effects, phase, ref);
-    if (block === undefined) delete (sc as { effects?: unknown }).effects;
-    else sc.effects = block;
-    await updateSceneInManifest(pieceId, sc);
-    return { layerKind: "scene" };
   }
 
   const clips = manifest.audioClips ?? [];

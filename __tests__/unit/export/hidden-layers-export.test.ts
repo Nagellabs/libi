@@ -17,7 +17,7 @@ import type { Composition, Overlay } from "@/lib/engine/types";
 function comp(over: Partial<Composition> = {}): Composition {
   return {
     id: "c1", width: 1920, height: 1080, fps: 30,
-    scenes: [], sceneOrder: [], overlays: [], audioClips: [],
+    overlays: [], audioClips: [],
     ...over,
   } as unknown as Composition;
 }

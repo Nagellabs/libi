@@ -41,6 +41,12 @@ export async function computeSha256(filePath: string): Promise<string> {
   });
 }
 
+/** sha256 of bytes already in memory. Used to reject a bad download BEFORE it
+ *  is written anywhere, so a hash failure needs no cleanup. */
+export function sha256OfBuffer(buf: Buffer): string {
+  return createHash("sha256").update(buf).digest("hex").toLowerCase();
+}
+
 /**
  * Verify `filePath` matches `expected` (case-insensitive hex sha256).
  * Throws an actionable Error on mismatch (path + expected-prefix +

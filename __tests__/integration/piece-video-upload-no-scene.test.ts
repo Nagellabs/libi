@@ -42,8 +42,8 @@ afterEach(() => {
   resetTestDb();
 });
 
-describe("piece video upload creates no scene", () => {
-  it("storeFile of a video leaves the composition with no scenes", async () => {
+describe("piece video upload creates no timeline layer", () => {
+  it("storeFile of a video leaves the composition empty", async () => {
     const { storeFile } = await import("@/mcp/tools/file-tools");
     const record = await storeFile({
       pieceId: PIECE_ID,
@@ -56,11 +56,10 @@ describe("piece video upload creates no scene", () => {
     expect(record.type).toBe("video");
 
     // No composition.json should be created by an upload, and certainly no
-    // VideoScene. (If a manifest exists at all, it must have zero scenes.)
+    // timeline layer. (If a manifest exists at all, it must have zero overlays.)
     const { loadManifest } = await import("@/lib/composition/persistence");
     const manifest = await loadManifest(PIECE_ID);
-    expect(manifest.sceneOrder).toEqual([]);
-    expect(manifest.scenes ?? []).toHaveLength(0);
+    expect(manifest.overlays ?? []).toHaveLength(0);
 
     // The upload itself didn't write a composition.json.
     expect(existsSync(join(storageRoot, "storage", PIECE_ID, "composition.json"))).toBe(false);

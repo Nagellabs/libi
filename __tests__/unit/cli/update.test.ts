@@ -65,7 +65,7 @@ describe("updateProject", () => {
 
     // CLAUDE.md should have been updated with new instructions
     const content = fs.readFileSync(path.join(tempDir, "CLAUDE.md"), "utf-8");
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
     expect(content).toContain(
       `<!-- libi-instructions-start v${LIBI_SKILL_VERSION} -->`
     );
@@ -94,6 +94,6 @@ describe("updateProject", () => {
 
     expect(fs.existsSync(path.join(tempDir, "AGENTS.md"))).toBe(true);
     const content = fs.readFileSync(path.join(tempDir, "AGENTS.md"), "utf-8");
-    expect(content).toContain("libi.create_scene");
+    expect(content).toContain("libi.add_overlay");
   });
 });

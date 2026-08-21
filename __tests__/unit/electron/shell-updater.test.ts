@@ -120,3 +120,115 @@ describe("LIBI_SHELL_UPDATE_FEED", () => {
     expect(fakeAutoUpdater.forceDevUpdateConfig).toBe(true);
   });
 });
+
+/**
+ * The auto-download contract: downloads start themselves, a verified
+ * download PARKS at "ready", and only an explicit restart — `restart()`, or
+ * an old runtime's `download()` click landing on a ready download — calls
+ * `quitAndInstall`. A regression here either re-introduces the click-to-
+ * download flow or, worse, restarts the app under the user with no consent.
+ */
+describe("auto-download behaviour", () => {
+  interface Bridge {
+    getStatus(): { phase: string; autoDownload?: boolean; error: string | null };
+    download(): void;
+    restart?(): void;
+  }
+
+  /** Boot the updater (dev + https override so init doesn't skip) and hand
+   *  back the registered bridge plus a way to fire autoUpdater events. */
+  async function boot(): Promise<{
+    bridge: Bridge;
+    emit: (event: string, payload?: unknown) => void;
+  }> {
+    fakeApp.isPackaged = false;
+    process.env.LIBI_SHELL_UPDATE_FEED = "https://example.com/feed.yml";
+    const { initShellUpdater } = await loadShellUpdater();
+    const runtime = makeRuntime();
+    initShellUpdater(runtime, vi.fn());
+    const register = runtime.api.registerShellUpdater as ReturnType<typeof vi.fn>;
+    const bridge = register.mock.calls[0][0] as Bridge;
+    const emit = (event: string, payload?: unknown) => {
+      for (const [name, handler] of fakeAutoUpdater.on.mock.calls) {
+        if (name === event) (handler as (p: unknown) => void)(payload);
+      }
+    };
+    return { bridge, emit };
+  }
+
+  it("turns autoDownload on and applies on quit as the fallback", async () => {
+    await boot();
+    expect(fakeAutoUpdater.autoDownload).toBe(true);
+    expect(fakeAutoUpdater.autoInstallOnAppQuit).toBe(true);
+  });
+
+  it("advertises autoDownload in its status so the UI can tell shell generations apart", async () => {
+    const { bridge } = await boot();
+    expect(bridge.getStatus().autoDownload).toBe(true);
+  });
+
+  it("parks at ready after a download instead of restarting", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-available", { version: "2.0.0" });
+    emit("update-downloaded", { version: "2.0.0" });
+
+    expect(bridge.getStatus().phase).toBe("ready");
+    vi.advanceTimersByTime(60_000);
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("restart() on a ready download quits and installs after the UI beat", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-downloaded", { version: "2.0.0" });
+
+    bridge.restart!();
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled(); // the beat
+    vi.advanceTimersByTime(2_500);
+    expect(fakeAutoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("restart() during the download installs when the download lands", async () => {
+    const { bridge, emit } = await boot();
+    emit("download-progress", { percent: 40 });
+
+    bridge.restart!();
+    vi.advanceTimersByTime(60_000);
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+
+    emit("update-downloaded", { version: "2.0.0" });
+    vi.advanceTimersByTime(2_500);
+    expect(fakeAutoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("download() on a ready download restarts — the old runtime's Install click", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-downloaded", { version: "2.0.0" });
+
+    bridge.download();
+    vi.advanceTimersByTime(2_500);
+    expect(fakeAutoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it("download() while a download runs is a no-op", async () => {
+    const { bridge, emit } = await boot();
+    emit("download-progress", { percent: 10 });
+
+    bridge.download();
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("a download error clears restart consent — no surprise install later", async () => {
+    const { bridge, emit } = await boot();
+    emit("download-progress", { percent: 40 });
+    bridge.restart!();
+    emit("error", new Error("network gone"));
+
+    expect(bridge.getStatus().phase).toBe("error");
+    // A later successful download must NOT inherit the pre-error consent.
+    emit("update-downloaded", { version: "2.0.0" });
+    vi.advanceTimersByTime(60_000);
+    expect(fakeAutoUpdater.quitAndInstall).not.toHaveBeenCalled();
+  });
+});

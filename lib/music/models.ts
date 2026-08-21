@@ -31,7 +31,38 @@ export const ACESTEP_MODEL_REPO = "ACE-Step/ACE-Step-v1-3.5B";
  *  dependency-manager's existing .install-token mismatch path. */
 export const ACESTEP_MODEL_VERSION = "v1-3.5B-2026-05-19";
 
-export const ACESTEP_DOWNLOAD_SIZE_HUMAN = "~5.5 GB";
+/**
+ * MEASURED total of the snapshot this repo pulls, in bytes — not an estimate.
+ * Summed from a completed install on 2026-08-17:
+ *
+ *   6,611,422,728  ace_step_transformer/diffusion_pytorch_model.safetensors
+ *   1,127,460,248  umt5-base/model.safetensors
+ *     313,646,516  music_dcae_f8c8/diffusion_pytorch_model.safetensors
+ *     206,350,988  music_vocoder/diffusion_pytorch_model.safetensors
+ *      16,837,459  umt5-base/tokenizer.json
+ *         + configs/tokenizers
+ *
+ * Used as the denominator for byte progress (see `trackDirectoryBytes`). It is a
+ * constant rather than an HF API lookup because the snapshot is pinned by
+ * `ACESTEP_MODEL_VERSION` — the bytes cannot move without that token moving too.
+ * Re-measure and bump both together.
+ *
+ * Exact to within a few bytes, not to the byte: huggingface_hub also leaves ~1.3 KB
+ * of download metadata under `.cache/`, and that varies slightly between installs
+ * (measured: a 1-byte difference across two re-downloads of the same files). The
+ * progress tracker clamps to this total and the job's completion is gated on the
+ * file checks in `missingAceStepModelFiles`, not on hitting the number, so the
+ * drift is cosmetic.
+ */
+export const ACESTEP_DOWNLOAD_BYTES = 8_275_792_188;
+
+/**
+ * Shown to the user before they consent to the download, so it has to be right.
+ * Was "~5.5 GB" — understating the real pull by ~2.8 GB. The 5.5 GB figure is
+ * the commonly-quoted size of the 3.5B checkpoint alone; the snapshot also
+ * carries the umt5 text encoder, the DCAE, and the vocoder.
+ */
+export const ACESTEP_DOWNLOAD_SIZE_HUMAN = "~8.3 GB";
 
 export interface AceStepFile {
   /** Path relative to the model dir (dependency-manager parity). */
@@ -141,7 +172,7 @@ export function writeInstalledToken(token: string): void {
  *  `uv` exit code of 0 is not evidence the snapshot landed, and writing the
  *  install token on that assumption produced a `completed` job with no model
  *  behind it. Deliberately reports WHICH files are missing — "download
- *  failed" sends the user back to a 5.5 GB retry with nothing to act on. */
+ *  failed" sends the user back to an 8.3 GB retry with nothing to act on. */
 export function missingAceStepModelFiles(): string[] {
   const dir = aceStepModelsDir();
   return ACESTEP_FILES.filter((f) => {

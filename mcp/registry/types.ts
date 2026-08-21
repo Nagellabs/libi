@@ -161,6 +161,33 @@ export interface BundledDependency {
    * without Rosetta.
    */
   runCheck?: string[];
+
+  /**
+   * Assert the binary can actually DO what libi needs, not merely that it runs.
+   *
+   * `runCheck` proves execution; it cannot prove capability, and the two came
+   * apart badly. The Linux ffmpeg build shipped until 2026-08-16 executed
+   * perfectly, passed `-version`, and had no `drawtext` filter — so every text
+   * overlay on the ffmpeg export path failed with "No such filter: 'drawtext'".
+   * Worse, its `-version` output ADVERTISED `--enable-libfreetype`, so even
+   * parsing the configuration string would have reported it healthy.
+   *
+   * `resolveStatusAsync` runs `<binPath> <args>` and requires every string in
+   * `mustContain` to appear in the combined stdout+stderr. A miss is treated
+   * exactly like a failed `runCheck` — the dep drops to "pending" so the
+   * install loop re-fetches — because a binary that cannot do the job is not
+   * usefully "installed". If the upstream source itself is wrong, the install
+   * loop's own retry ceiling ends at `failed`, which surfaces in the UI rather
+   * than looping forever.
+   *
+   * Keep the probe cheap and offline: it runs on every status resolution.
+   */
+  capabilityCheck?: {
+    /** Args that make the binary print its capabilities (e.g. `["-filters"]`). */
+    args: string[];
+    /** Every one of these must appear in the output, or the dep is unusable. */
+    mustContain: string[];
+  };
 }
 
 export type DepRuntimeStatus = "pending" | "installing" | "installed" | "failed";
