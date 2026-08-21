@@ -1547,10 +1547,16 @@ export class DependencyManager {
     });
     // eslint-disable-next-line no-control-regex
     const toolDir = toolDirStdout.replace(/\[[0-9;]*m/g, "").trim();
+    // A uv/PEP-405 venv puts entry points in `Scripts\` on Windows and `bin/`
+    // everywhere else. Getting the FILENAME right (.exe) but not the DIRECTORY
+    // meant this threw "expected entry point not found" on every Windows boot —
+    // and because yt-dlp is a tier-1 dep whose failure is fatal to Category A,
+    // that took the whole app down before it ever served a page.
+    const venvBinDir = process.platform === "win32" ? "Scripts" : "bin";
     const ytDlpEntry = path.join(
       toolDir,
       "yt-dlp",
-      "bin",
+      venvBinDir,
       process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp",
     );
     if (!fs.existsSync(ytDlpEntry)) {
@@ -1567,7 +1573,7 @@ export class DependencyManager {
     const pythonBin = path.join(
       toolDir,
       "yt-dlp",
-      "bin",
+      venvBinDir,
       process.platform === "win32" ? "python.exe" : "python3",
     );
     let certifiPath = "";

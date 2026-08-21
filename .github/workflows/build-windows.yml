@@ -123,8 +123,16 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # `--publish never` is REQUIRED, not tidiness. electron-builder.yml
+      # carries a `publish:` block (provider: github), and electron-builder
+      # auto-publishes when it detects CI unless told otherwise — so the very
+      # first Windows build that produced a real installer then died with
+      # "GitHub Personal Access Token is not set" AFTER signing
+      # `Libi Setup <v>.exe` and its blockmap. This job's job is to BUILD;
+      # uploading is actions/upload-artifact's, below. The mac path passes the
+      # same flag (scripts/release-electron.js).
       - name: Build the Windows shell
-        run: npm run build:electron
+        run: npm run build:electron -- --publish never
 
       - name: What did it produce?
         shell: pwsh

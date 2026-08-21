@@ -122,7 +122,15 @@ const INSTALLERS: Record<string, CustomInstaller> = {
     verify: async () => {
       const { getLibiBinDir } = await import("@/lib/libi-home");
       const binDir = getLibiBinDir();
-      const target = path.join(binDir, "yt-dlp");
+      // Must match what the installer WRITES: the win32 branch of
+      // `runCustomInstaller` writes a `yt-dlp.cmd` shim (symlinks need admin on
+      // Windows), while Unix gets an extensionless shell wrapper. Checking the
+      // extensionless name on Windows made verify() return null forever — the
+      // install "succeeded" and was then declared failed, which aborted boot.
+      const target = path.join(
+        binDir,
+        process.platform === "win32" ? "yt-dlp.cmd" : "yt-dlp",
+      );
       // Use lstat so a broken symlink (e.g. uv-managed install was wiped)
       // counts as "not installed" — installing again recreates the link.
       try {
