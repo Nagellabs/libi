@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { navigationEmitter } from "@/lib/navigation-events";
 import {
   TerminalManager,
@@ -10,6 +10,25 @@ import type {
   PtyLike,
   PtySpawnOpts,
 } from "@/lib/terminal/types";
+
+/**
+ * Whether the USER has a given CLI on their shell PATH — stubbed, because it is
+ * a real filesystem probe of the host running the tests.
+ *
+ * Left unstubbed, `launchLineForPreset` types `claude` on a machine that has
+ * Claude Code installed and a `# ...isn't installed` hint on one that does not.
+ * Both are correct behaviour; the TEST was the thing that only worked in one
+ * environment. It passed on developer Macs and failed on every Linux CI runner
+ * from the moment the install-hint path landed in 0.1.2 — five consecutive red
+ * runs on `main`, while `npm test` stayed green locally.
+ *
+ * Default to "installed" so the existing expectations describe the ordinary
+ * case, and drive the other branch explicitly where it is the subject.
+ */
+const resolveUserCli = vi.hoisted(() => vi.fn<(command: string) => string | null>());
+vi.mock("@/lib/terminal/user-cli", () => ({
+  resolveUserCli: (command: string) => resolveUserCli(command),
+}));
 
 class FakePty implements PtyLike {
   pid = 1234;
@@ -112,9 +131,12 @@ describe("TerminalManager", () => {
   beforeEach(() => {
     refreshEvents = [];
     navigationEmitter.on("refresh_query", onRefresh);
+    // The user has the CLI unless a test says otherwise.
+    resolveUserCli.mockImplementation((command: string) => `/usr/local/bin/${command}`);
   });
   afterEach(() => {
     navigationEmitter.off("refresh_query", onRefresh);
+    resolveUserCli.mockReset();
   });
 
   it("creates a session and types the preset command into the shell", () => {
@@ -123,6 +145,33 @@ describe("TerminalManager", () => {
     expect(meta.status).toBe("running");
     expect(meta.title).toBe("Claude Code");
     expect(ptys[0].written).toEqual(["claude\r"]);
+  });
+
+  it("types an install HINT, not the command, when the user has no such CLI", () => {
+    // The other half of the same behaviour, and the half CI was accidentally
+    // exercising. A comment is inert in bash, zsh and PowerShell alike, so a
+    // wrong "missing" answer costs one scrollback line and never runs anything.
+    resolveUserCli.mockReturnValue(null);
+    const { manager, ptys } = makeManager();
+    const meta = manager.create({ cliId: "claude-code" });
+
+    expect(meta.status).toBe("running");
+    expect(ptys[0].written).toHaveLength(1);
+    const line = ptys[0].written[0];
+    expect(line.startsWith("# ")).toBe(true);
+    expect(line).toContain("Claude Code");
+    expect(line).toContain("npm i -g @anthropic-ai/claude-code");
+    expect(line.endsWith("\r")).toBe(true);
+    // It must never be the bare command — that is the `command not found`
+    // first-run this path exists to prevent.
+    expect(line).not.toBe("claude\r");
+  });
+
+  it("does not consult the user's PATH for the plain shell preset", () => {
+    const { manager, ptys } = makeManager();
+    manager.create({ cliId: "shell" });
+    expect(ptys[0].written).toEqual([]);
+    expect(resolveUserCli).not.toHaveBeenCalled();
   });
 
   it("types nothing for the plain shell preset", () => {
