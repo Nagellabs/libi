@@ -464,6 +464,129 @@ describe("resolveRuntime", () => {
   });
 });
 
+// The two version tracks — the shell (a whole `.app`, carrying a bundled
+// runtime snapshot) and the runtime (`runtime/<v>/` staged from npm) — move
+// independently, so either can end up newer. Selection used to read "any user
+// prefix first, bundled last", which was only ever correct while the bundled
+// snapshot could not advance underneath a staged one. A shell update advances
+// it, and a user who staged 0.1.1 and then updated the shell to 0.1.5 ran
+// 0.1.1 while the UI told them they were current.
+//
+// This is a MATRIX and not a single case on purpose: the bug is a rule, and
+// one row cannot express a rule. Row 1 is the regression itself and must fail
+// against source-before-version selection; if it passes, the test is not
+// reaching the selection logic.
+describe("resolveRuntime — selecting across the shell and runtime tracks", () => {
+  function layout() {
+    const resourcesPath = path.join(tmp, "Resources");
+    const libiHome = path.join(tmp, "home");
+    fs.mkdirSync(resourcesPath, { recursive: true });
+    fs.mkdirSync(libiHome, { recursive: true });
+    return { resourcesPath, libiHome };
+  }
+
+  interface Row {
+    why: string;
+    bundled: string;
+    /** Staged user runtimes, as `version` or `version@apiVersion`. */
+    staged: Array<string | FakeRuntimeOptions>;
+    expectVersion: string;
+    expectSource: "bundled" | "user";
+  }
+
+  const MATRIX: Row[] = [
+    {
+      why: "a staged runtime older than bundled must NOT win (the A0b regression)",
+      bundled: "0.1.5",
+      staged: ["0.1.1"],
+      expectVersion: "0.1.5",
+      expectSource: "bundled",
+    },
+    {
+      why: "a staged runtime newer than bundled still wins — the update path",
+      bundled: "0.1.5",
+      staged: ["0.1.7"],
+      expectVersion: "0.1.7",
+      expectSource: "user",
+    },
+    {
+      why: "fresh install, nothing staged",
+      bundled: "0.1.5",
+      staged: [],
+      expectVersion: "0.1.5",
+      expectSource: "bundled",
+    },
+    {
+      why: "an exact tie prefers bundled — no extra disk, already integrity-checked",
+      bundled: "0.1.5",
+      staged: ["0.1.5"],
+      expectVersion: "0.1.5",
+      expectSource: "bundled",
+    },
+    {
+      why: "the forward gate still holds: a runtime too new for this shell is refused",
+      bundled: "0.1.0",
+      staged: [{ version: "0.1.9", shellApiVersion: MAX_SHELL_API_VERSION + 1 }],
+      expectVersion: "0.1.0",
+      expectSource: "bundled",
+    },
+    {
+      why: "several stale staged runtimes all lose, not just the newest of them",
+      bundled: "0.1.5",
+      staged: ["0.1.1", "0.1.3"],
+      expectVersion: "0.1.5",
+      expectSource: "bundled",
+    },
+  ];
+
+  for (const row of MATRIX) {
+    const staged = row.staged
+      .map((s) => (typeof s === "string" ? s : s.version))
+      .join(", ");
+    it(`bundled ${row.bundled} + staged [${staged || "none"}] → ${row.expectVersion} (${row.expectSource}) — ${row.why}`, () => {
+      const { resourcesPath, libiHome } = layout();
+      makeRuntime(path.join(resourcesPath, "libi-bundle"), {
+        version: row.bundled,
+      });
+      for (const s of row.staged) {
+        const opts = typeof s === "string" ? { version: s } : s;
+        makeRuntime(path.join(libiHome, "runtime", opts.version!), opts);
+      }
+
+      const result = resolveRuntime({
+        isPackaged: true,
+        resourcesPath,
+        libiHome,
+        abi: ABI,
+        probeNative: false,
+      });
+
+      expect(result.runtime?.version).toBe(row.expectVersion);
+      expect(result.runtime?.source).toBe(row.expectSource);
+    });
+  }
+
+  // Losing on version is not the same as being broken, and the splash's
+  // rejection list is for things that are broken. A stale-but-valid runtime
+  // that simply lost the comparison must not be reported as a failure.
+  it("does not report a merely-older staged runtime as a rejection", () => {
+    const { resourcesPath, libiHome } = layout();
+    makeRuntime(path.join(resourcesPath, "libi-bundle"), { version: "0.1.5" });
+    makeRuntime(path.join(libiHome, "runtime", "0.1.1"), { version: "0.1.1" });
+
+    const result = resolveRuntime({
+      isPackaged: true,
+      resourcesPath,
+      libiHome,
+      abi: ABI,
+      probeNative: false,
+    });
+
+    expect(result.runtime?.version).toBe("0.1.5");
+    expect(result.rejections).toEqual([]);
+  });
+});
+
 describe("describeNoRuntimeFailure", () => {
   it("tells the user to update the app when a runtime needs a newer shell", () => {
     const { error, hint } = describeNoRuntimeFailure([

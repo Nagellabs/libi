@@ -83,8 +83,15 @@ export function listInstalledRuntimes(rootDir?: string): InstalledRuntimeEntry[]
  * The version that will take over at next launch, or null.
  *
  * "Newer than what is running" is the honest test: a downloaded runtime older
- * than the current one changes nothing at next launch (the loader picks the
- * newest valid prefix), so announcing it as pending would be a lie.
+ * than the current one changes nothing at next launch, so announcing it as
+ * pending would be a lie.
+ *
+ * That rests on the loader selecting by version across EVERY candidate —
+ * each staged prefix and the shell's bundled snapshot — which it does as of
+ * the A0b fix (`electron/runtime-loader.ts`, `resolveRuntime`). It did not
+ * before: staged prefixes were preferred wholesale over bundled, so a staged
+ * runtime older than the one inside a freshly-updated `.app` still took over
+ * at next launch and this comment was wrong in exactly that case.
  */
 export function pendingRuntimeVersion(
   currentVersion: string | null,

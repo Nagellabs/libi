@@ -483,7 +483,9 @@ export interface ResolveRuntimeResult {
 }
 
 /**
- * Resolve + load. Fetched runtimes first (newest valid), bundled snapshot last.
+ * Resolve + load: the highest version among every valid candidate — each
+ * staged runtime and the bundled snapshot alike — with bundled winning an
+ * exact tie. Source is the tiebreak, never the primary key.
  *
  * Returns `runtime: null` only when NOTHING is usable — a broken install, not a
  * network problem. Callers must surface that distinction honestly (see
@@ -517,16 +519,47 @@ export function resolveRuntime(opts: ResolveRuntimeOptions): ResolveRuntimeResul
     },
   ];
 
-  for (const candidate of candidates) {
-    const inspection = inspectRuntimePrefix(candidate.prefix, inspectOpts);
-    if (!inspection.ok) {
+  // Selection is by VERSION, not by source. libi versions two things
+  // independently — the shell (this `.app`, which carries the bundled snapshot)
+  // and the runtime (`runtime/<v>/`, staged from npm) — and either can advance
+  // without the other. The old rule, "prefer anything the user staged, fall
+  // back to bundled", held only while the bundled snapshot could never be the
+  // newer of the two. A shell update makes it the newer one, so that rule
+  // pinned a user who staged 0.1.1 and then updated the shell to 0.1.5 onto
+  // 0.1.1 — while the UI told them they were current.
+  //
+  // Source survives only as the tiebreak on an exact version match: the bundled
+  // snapshot costs no extra disk and was integrity-checked at build time.
+  //
+  // Candidates that fail inspection are rejections (a damaged or incompatible
+  // runtime, which the splash reports). A valid candidate that merely loses the
+  // comparison is NOT a rejection — nothing is wrong with it.
+  const usable = candidates
+    .map((candidate) => ({
+      ...candidate,
+      inspection: inspectRuntimePrefix(candidate.prefix, inspectOpts),
+    }))
+    .filter(({ inspection, source, prefix }) => {
+      if (inspection.ok) return true;
       log(
-        `runtime-loader: rejected ${candidate.source} runtime at ${candidate.prefix} — ` +
+        `runtime-loader: rejected ${source} runtime at ${prefix} — ` +
           `${inspection.reason}: ${inspection.detail ?? ""}`,
       );
       rejections.push(inspection);
-      continue;
-    }
+      return false;
+    })
+    .sort((a, b) => {
+      const byVersion = compareVersionDesc(
+        a.inspection.version ?? "",
+        b.inspection.version ?? "",
+      );
+      if (byVersion !== 0) return byVersion;
+      // Exact tie: bundled first.
+      return a.source === b.source ? 0 : a.source === "bundled" ? -1 : 1;
+    });
+
+  for (const candidate of usable) {
+    const { inspection } = candidate;
 
     // ── 8. load, and re-check the version against the loaded module ───────
     let api: ShellApi;
