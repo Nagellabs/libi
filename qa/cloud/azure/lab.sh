@@ -8,6 +8,9 @@
 #   qa/cloud/azure/lab.sh up linux         # create (or start) the Ubuntu VM
 #   qa/cloud/azure/lab.sh status           # what exists, what is running, what it costs
 #   qa/cloud/azure/lab.sh stop win         # DEALLOCATE — stops compute billing, keeps the disk
+#   qa/cloud/azure/lab.sh snapshot win     # keep a restorable image, cheaply
+#   qa/cloud/azure/lab.sh down --keep-snapshots   # END OF SESSION: delete VMs, keep snapshots
+#   qa/cloud/azure/lab.sh restore win      # rebuild from the snapshot, skipping provisioning
 #   qa/cloud/azure/lab.sh down             # DELETE EVERYTHING (the whole resource group)
 #   qa/cloud/azure/lab.sh allow-my-ip      # re-point the NSG at your current IP
 #   qa/cloud/azure/lab.sh connect win      # print how to reach it (RDP / SSH)
@@ -15,9 +18,18 @@
 #   qa/cloud/azure/lab.sh exec win s.ps1   # run a script ON the box, get stdout back
 #   qa/cloud/azure/lab.sh desktop linux    # add xfce+xrdp so you can SEE the Ubuntu box
 #
-# `stop` is the one you want between sessions; `down` is the one you want when
-# the work is finished. See lib/azure.sh's teardown contract for why both exist
-# and which guarantee is weaker than the GCE rig's.
+# END OF A QA SESSION, the short version:
+#
+#     lab.sh snapshot win && lab.sh snapshot linux && lab.sh down --keep-snapshots
+#
+# That leaves ~$3/month of snapshot storage and nothing else, and the next
+# session starts with `restore` instead of an hour of provisioning. Keeping the
+# DISKS instead would cost ~$14.40/month for the same convenience.
+#
+# `stop` deallocates for a break within a session; `down --keep-snapshots` is
+# the end-of-session command; bare `down` is for when the lab is finished for
+# good. See lib/azure.sh's teardown contract for why these differ and which
+# guarantee is weaker than the GCE rig's.
 #
 # NEVER put a credential on these machines — see lib/azure.sh.
 set -euo pipefail
@@ -25,7 +37,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/azure.sh
 . "$HERE/lib/azure.sh"
 
-usage() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; }
+# Print the header comment block as the help text. Deliberately NOT a fixed
+# line range: the previous `sed -n '3,20p'` silently truncated help the moment
+# the header grew. Stop at the first line that is not a comment.
+usage() { sed -n '3,$p' "$0" | sed -n '/^#/!q;p' | sed 's/^# \{0,1\}//'; }
 
 ensure_scaffold() {
   if az_group_exists; then return; fi
@@ -187,14 +202,26 @@ up() {
     auth=(--admin-username "$LIBI_AZ_ADMIN" --generate-ssh-keys)
   fi
 
-  az_note "creating $vm ($image, $size, ${LIBI_AZ_DISK_GB}GB) in $LIBI_AZ_LOCATION"
+  az_note "creating $vm ($image, $size, ${LIBI_AZ_DISK_GB}GB $LIBI_AZ_DISK_SKU) in $LIBI_AZ_LOCATION"
+  # --storage-sku is NOT cosmetic: Azure defaults `s`-suffixed sizes to Premium
+  # SSD, and a 128 GB Premium disk left sitting is $21.68/mo against $9.60/mo
+  # for Standard SSD. Nothing we do here is IOPS-bound.
   az vm create \
     --resource-group "$LIBI_AZ_GROUP" --name "$vm" \
     --image "$image" --size "$size" \
     --vnet-name "$LIBI_AZ_VNET" --subnet "$LIBI_AZ_SUBNET" --nsg "$LIBI_AZ_NSG" \
     --os-disk-size-gb "$LIBI_AZ_DISK_GB" \
+    --storage-sku "$LIBI_AZ_DISK_SKU" \
     --public-ip-sku Standard \
     "${auth[@]}" -o none
+
+  # Report what was ACTUALLY created. `--os-disk-size-gb` can only grow an
+  # image's disk, so a Windows image may land larger than requested; that is
+  # the number the cost maths has to use, not the one we asked for.
+  local made
+  made="$(az vm show --resource-group "$LIBI_AZ_GROUP" --name "$vm" \
+    --query "storageProfile.osDisk.diskSizeGb" -o tsv 2>/dev/null || echo "?")"
+  az_note "os disk actually provisioned: ${made}GB (requested ${LIBI_AZ_DISK_GB}GB)"
 
   arm_auto_shutdown "$vm"
   if [ "$plat" = linux ]; then
@@ -214,15 +241,111 @@ stop() {
   az_note "$vm deallocated — compute billing stopped, disk retained"
 }
 
+# A provisioned box is worth roughly an hour of setup — Category A, the model
+# downloads, the tracking pyenv. Keeping its DISK to avoid redoing that costs
+# $9.60/mo (Windows, Standard SSD). Keeping a SNAPSHOT of the same disk costs
+# ~$0.05/GB/mo on USED space only — about $2.50/mo for a ~50 GB Windows box.
+#
+# So the cheap option and the fast option are the same option: delete the VMs
+# after every session, keep a snapshot, and restore from it next time.
+snapshot() {
+  local plat="${1:-}"; [ -n "$plat" ] || az_die "usage: lab.sh snapshot <win|linux>"
+  local vm name disk
+  vm="$(az_vm_name "$plat")"
+  name="${vm}-snap"
+  disk="$(az vm show --resource-group "$LIBI_AZ_GROUP" --name "$vm" \
+    --query "storageProfile.osDisk.managedDisk.id" -o tsv 2>/dev/null)" \
+    || az_die "$vm not found — nothing to snapshot"
+  [ -n "$disk" ] || az_die "$vm has no managed OS disk"
+
+  # Deallocate first: a snapshot of a running Windows box is crash-consistent,
+  # which for our purposes (restore and keep testing) is a coin flip on whether
+  # the filesystem comes back clean.
+  az_note "deallocating $vm first so the snapshot is filesystem-consistent"
+  az vm deallocate --resource-group "$LIBI_AZ_GROUP" --name "$vm" -o none
+
+  az snapshot delete --resource-group "$LIBI_AZ_GROUP" --name "$name" -o none 2>/dev/null || true
+  az_note "creating incremental snapshot $name (bills used space only)"
+  az snapshot create \
+    --resource-group "$LIBI_AZ_GROUP" --name "$name" \
+    --source "$disk" --incremental true \
+    --sku "$LIBI_AZ_SNAPSHOT_SKU" -o none
+  local used
+  used="$(az snapshot show --resource-group "$LIBI_AZ_GROUP" --name "$name" \
+    --query "diskSizeGb" -o tsv 2>/dev/null || echo "?")"
+  az_note "snapshot $name created (~${used}GB provisioned; billed on used bytes)"
+  az_note "you can now 'lab.sh down' and restore later with 'lab.sh restore $plat'"
+}
+
+restore() {
+  local plat="${1:-}"; [ -n "$plat" ] || az_die "usage: lab.sh restore <win|linux>"
+  local vm name size
+  vm="$(az_vm_name "$plat")"; name="${vm}-snap"
+  [ "$plat" = win ] && size="$LIBI_AZ_WIN_SIZE" || size="$LIBI_AZ_LINUX_SIZE"
+  az snapshot show --resource-group "$LIBI_AZ_GROUP" --name "$name" >/dev/null 2>&1 \
+    || az_die "no snapshot $name — use 'lab.sh up $plat' for a fresh build"
+
+  az_note "restoring $vm from $name (skips provisioning entirely)"
+  az disk create --resource-group "$LIBI_AZ_GROUP" --name "${vm}-osdisk" \
+    --source "$name" --sku "$LIBI_AZ_DISK_SKU" -o none
+  az vm create --resource-group "$LIBI_AZ_GROUP" --name "$vm" \
+    --attach-os-disk "${vm}-osdisk" \
+    --os-type "$([ "$plat" = win ] && echo windows || echo linux)" \
+    --size "$size" \
+    --vnet-name "$LIBI_AZ_VNET" --subnet "$LIBI_AZ_SUBNET" --nsg "$LIBI_AZ_NSG" \
+    --public-ip-sku Standard -o none
+  arm_auto_shutdown "$vm"
+  az_note "$vm restored. NOTE: its public IP is NEW — run 'lab.sh allow-my-ip'."
+  connect "$plat"
+}
+
 down() {
   az_group_exists || { az_note "nothing to delete — $LIBI_AZ_GROUP does not exist"; return; }
+  # Snapshots live in the same resource group, so a plain `down` destroys them
+  # too. Say so before asking, rather than after.
+  local snaps
+  snaps="$(az snapshot list --resource-group "$LIBI_AZ_GROUP" --query "length(@)" -o tsv 2>/dev/null || echo 0)"
   printf '\nThis DELETES the entire %s resource group: both VMs, their disks,\n' "$LIBI_AZ_GROUP"
   printf 'NICs, public IPs, the NSG and the VNet. Artifacts still on those\n'
-  printf 'machines are gone. Type DELETE to continue: '
+  printf 'machines are gone.\n'
+  if [ "${snaps:-0}" -gt 0 ] 2>/dev/null; then
+    printf '\nIt also deletes %s SNAPSHOT(S) in this group — the thing that would let\n' "$snaps"
+    printf 'you skip an hour of provisioning next session. If you want to keep the\n'
+    printf 'lab restorable, Ctrl-C and run "lab.sh down --keep-snapshots" instead.\n'
+  fi
+  printf 'Type DELETE to continue: '
   local answer=""; read -r answer || true
   [ "$answer" = DELETE ] || az_die "not confirmed — nothing was deleted."
   az group delete --name "$LIBI_AZ_GROUP" --yes --no-wait
   az_note "deletion started (--no-wait). Check with: lab.sh status"
+}
+
+# Tear down everything that bills meaningfully while keeping the snapshots, so
+# the next session is a `restore` rather than a rebuild. This is the intended
+# end-of-session command.
+down_keep_snapshots() {
+  az_group_exists || { az_note "nothing to delete — $LIBI_AZ_GROUP does not exist"; return; }
+  local vms
+  vms="$(az vm list --resource-group "$LIBI_AZ_GROUP" --query "[].name" -o tsv 2>/dev/null)"
+  for vm in $vms; do
+    az_note "deleting VM $vm (its snapshot, if any, is kept)"
+    az vm delete --resource-group "$LIBI_AZ_GROUP" --name "$vm" --yes -o none
+  done
+  # VM delete leaves the OS disk, NIC and public IP behind — the classic Azure
+  # orphan trio, and the reason a "deleted" lab keeps billing.
+  for d in $(az disk list --resource-group "$LIBI_AZ_GROUP" --query "[?diskState=='Unattached'].name" -o tsv 2>/dev/null); do
+    az_note "deleting orphaned disk $d"
+    az disk delete --resource-group "$LIBI_AZ_GROUP" --name "$d" --yes -o none
+  done
+  for n in $(az network nic list --resource-group "$LIBI_AZ_GROUP" --query "[?virtualMachine==null].name" -o tsv 2>/dev/null); do
+    az network nic delete --resource-group "$LIBI_AZ_GROUP" --name "$n" -o none
+  done
+  for p in $(az network public-ip list --resource-group "$LIBI_AZ_GROUP" --query "[?ipConfiguration==null].name" -o tsv 2>/dev/null); do
+    az_note "releasing unattached public IP $p (Standard IPs bill hourly)"
+    az network public-ip delete --resource-group "$LIBI_AZ_GROUP" --name "$p" -o none
+  done
+  az_note "VMs, disks, NICs and IPs gone; snapshots kept. Next session: lab.sh restore <win|linux>"
+  status
 }
 
 status() {
@@ -296,7 +419,10 @@ case "${1:-}" in
   doctor)      shift; doctor ;;
   up)          shift; up "${1:-}" ;;
   stop)        shift; stop "${1:-}" ;;
-  down)        shift; down ;;
+  snapshot)    shift; az_require_cli; snapshot "${1:-}" ;;
+  restore)     shift; az_require_cli; restore "${1:-}" ;;
+  down)        shift
+               if [ "${1:-}" = "--keep-snapshots" ]; then down_keep_snapshots; else down; fi ;;
   status)      shift; status ;;
   connect)     shift; connect "${1:-}" ;;
   provision)   shift; az_require_cli; provision "${1:-}" ;;

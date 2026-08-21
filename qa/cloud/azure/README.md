@@ -10,9 +10,73 @@ qa/cloud/azure/lab.sh doctor        # preflight, costs nothing
 qa/cloud/azure/lab.sh up win        # ~5 min
 qa/cloud/azure/lab.sh connect win
 #   … do the work …
-qa/cloud/azure/lab.sh stop win      # between sessions: compute billing stops
-qa/cloud/azure/lab.sh down          # when finished: deletes everything
+qa/cloud/azure/lab.sh stop win      # a break WITHIN a session: compute billing stops
+qa/cloud/azure/lab.sh snapshot win  # end of session: keep a restorable image
+qa/cloud/azure/lab.sh down --keep-snapshots   # …then delete the VMs
+qa/cloud/azure/lab.sh restore win   # next session: skip provisioning entirely
+qa/cloud/azure/lab.sh down          # when the lab is finished for good
 ```
+
+## What it costs, and why the lab is deleted rather than kept
+
+Every number below came from the Azure retail price API (`prices.azure.com`)
+for **westeurope on 2026-08-21**. Re-check before quoting them; Azure moves.
+
+**Compute is not the problem.** The VMs only bill while running:
+
+| | vCPU / RAM | Linux $/hr | Windows $/hr | 8-hour session |
+|---|---|---|---|---|
+| `Standard_D4s_v5` *(chosen)* | 4 / 16 GB | 0.230 | 0.414 | $3.31 win, $1.84 linux |
+| `Standard_B4ms` *(rejected)* | 4 / 16 GB | 0.192 | 0.208 | burstable — see below |
+| `Standard_D2s_v5` | 2 / 8 GB | 0.115 | 0.207 | too small |
+
+`B4ms` is roughly half the Windows rate for identical specs, and it was still
+rejected. Local **tracking** is a sustained all-core load for 10–20 minutes,
+which is exactly what drains B-series credits. A throttled run does not fail —
+it comes back *slow*, and we would have no way to distinguish a real platform
+regression from a spent credit balance. On a rig whose only purpose is trusting
+the result, $0.21/hr is a cheap way to delete that confound.
+
+**Sizing scope:** local **music** generation (ACE-Step, ~14 GB RAM, 7.7 GB of
+weights) is deliberately out of scope — it is the one heavy surface with no
+platform-specific risk, being the same Python wheels everywhere. Dropping it is
+what keeps this a 16 GB box. Tracking stays in scope precisely because it is a
+native/pyenv path, which is the kind that breaks per platform.
+
+**Idle disks are the problem.** A stopped VM still bills for its disk:
+
+| what you keep | monthly |
+|---|---|
+| 128 GB **Premium** SSD (P10) — *Azure's default for `s` sizes* | **$21.68** |
+| 128 GB Standard SSD (E10) | $9.60 |
+| 64 GB Standard SSD (E6) | $4.80 |
+| **incremental snapshot**, Standard HDD, billed on USED space | **$0.05/GB** |
+
+So the lab now creates disks as `StandardSSD_LRS` explicitly rather than
+accepting the Premium default — that alone is the difference between $21.68 and
+$9.60 per box per month.
+
+**The decision.** Keeping both disks so you can `stop`/`start` costs about
+**$14.40/month**. Keeping only *snapshots* — a Windows box with ~50 GB used
+plus a ~15 GB Ubuntu box — costs about **$3.25/month**, and restoring from one
+is *faster* than a cold rebuild because it skips Category A, the model
+downloads and the tracking pyenv (roughly an hour of setup).
+
+The cheapest option and the fastest option are therefore the same option, so
+that is the default workflow:
+
+```bash
+lab.sh snapshot win && lab.sh snapshot linux
+lab.sh down --keep-snapshots     # VMs, disks, NICs and public IPs all released
+```
+
+`down --keep-snapshots` deletes the VMs *and* hunts the orphans Azure leaves
+behind — unattached OS disks, NICs, and Standard public IPs, which bill hourly
+whether or not anything is attached to them. That orphan trio is the usual
+reason a "deleted" cloud lab keeps costing money.
+
+Bare `down` deletes the resource group including the snapshots; it warns you
+how many it is about to destroy before asking for confirmation.
 
 ## The two rules that matter more than anything else here
 

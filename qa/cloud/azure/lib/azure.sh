@@ -72,11 +72,59 @@ fi
 : "${LIBI_AZ_SHUTDOWN_TIME:=1900}"
 : "${LIBI_AZ_TIMEZONE:=W. Europe Standard Time}"
 
-# 4-core/16GB both. libi's own floor is ~15 GB disk and ~14 GB RAM for music
-# generation, and electron-builder on 2 cores is painfully slow.
+# Sizing — the smallest box that still runs everything we intend to test.
+#
+# SCOPE DECISION: local MUSIC generation (ACE-Step) is deliberately OUT of
+# scope for the lab. It wants ~14 GB free RAM and pulls 7.7 GB of weights, and
+# it is the one heavy surface with no platform-specific risk — it is the same
+# Python wheels everywhere. Excluding it is what lets this be a 16 GB box.
+# Local TRACKING is explicitly IN scope: it is CPU-heavy, and it is exactly the
+# kind of native/pyenv path that breaks per-platform.
+#
+# Why NOT burstable (B4ms is ~half the Windows hourly rate for the same
+# 4 vCPU/16 GB): tracking is a sustained all-core load for 10-20 minutes, which
+# is precisely what exhausts B-series credits. A throttled run would not fail
+# outright, it would come back SLOW — and we would have no way to tell a real
+# platform regression from a spent credit balance. Paying ~$0.21/hr more to
+# remove that confound is the right trade for a rig whose entire purpose is
+# trusting the result.
+#
+# Real pay-as-you-go rates, westeurope, pulled from the Azure retail price API
+# on 2026-08-21 (prices.azure.com; re-check before quoting these):
+#
+#   size              vCPU/RAM   linux $/hr   windows $/hr
+#   Standard_D4s_v5     4/16       0.230        0.414        <- chosen
+#   Standard_B4ms       4/16       0.192        0.208        burstable, rejected
+#   Standard_D2s_v5     2/8        0.115        0.207        too small
+#
+# An 8-hour session is therefore ~$3.31 Windows + ~$1.84 Linux. Compute is
+# NOT where the money goes — idle disks are. See LIBI_AZ_DISK_SKU below.
 : "${LIBI_AZ_WIN_SIZE:=Standard_D4s_v5}"
 : "${LIBI_AZ_LINUX_SIZE:=Standard_D4s_v5}"
-: "${LIBI_AZ_DISK_GB:=128}"
+
+# Disk. Without music, libi's own footprint is ~10 GB (Chromium, ffmpeg, node,
+# the 212 MB adapter, whisper small 480 MB, Kokoro 124 MB, tracking pyenv+models
+# ~2.8 GB) plus the ~1.6 GB Electron install and room for media.
+#
+# Azure defaults `s`-suffixed sizes to PREMIUM SSD, which is the expensive
+# mistake here: 128 GB Premium (P10) is $21.68/mo to leave sitting, versus
+# $9.60/mo for the same size on Standard SSD (E10). QA workloads are not
+# IOPS-bound — the bottleneck is downloading models over the network — so
+# Standard SSD is chosen deliberately, not as a compromise.
+#
+# NOTE: `--os-disk-size-gb` can only GROW an image's disk, never shrink it.
+# Windows marketplace images ship a large OS disk, so the Windows box will
+# likely land at its image size regardless of what is set here. `lab.sh status`
+# prints the disk actually created, so this is measured rather than assumed.
+: "${LIBI_AZ_DISK_GB:=64}"
+: "${LIBI_AZ_DISK_SKU:=StandardSSD_LRS}"
+
+# Snapshot storage, for `lab.sh down --snapshot`. Standard HDD LRS snapshots are
+# $0.05/GB/month and incremental snapshots bill only USED space — so a Windows
+# box with ~50 GB used costs ~$2.50/mo to keep, against $9.60/mo for keeping its
+# disk. That is what makes "delete the VMs, keep a restorable image" both the
+# cheapest AND the fastest option. See the README's cost section.
+: "${LIBI_AZ_SNAPSHOT_SKU:=Standard_LRS}"
 
 # Windows 11 24H2 Pro confirmed available to this subscription 2026-08-21.
 # Azure gates MicrosoftWindowsDesktop CLIENT images behind subscription
