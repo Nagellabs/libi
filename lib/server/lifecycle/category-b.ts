@@ -49,6 +49,10 @@ export class BootPhaseError extends Error {
 
 let shuttingDown = false;
 
+/** How long a signal-triggered shutdown waits on the export driver before
+ *  exiting anyway. Ctrl-C must stay responsive even with Chromium wedged. */
+const SHUTDOWN_DRIVER_TIMEOUT_MS = 3000;
+
 /**
  * Resolve the port to publish in `<LIBI_HOME>/port`.
  *
@@ -100,10 +104,29 @@ export function writePortFileAndInstallSignals(): void {
   const cleanupSignal = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    try { await pickDriver().shutdown(); } catch (err) {
+    // `pickDriver().shutdown()` closes the EXPORT driver (Chromium), not the
+    // HTTP server — and a wedged browser must never be able to make Ctrl-C
+    // stop working, so it is raced against a deadline rather than awaited.
+    try {
+      await Promise.race([
+        pickDriver().shutdown(),
+        new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRIVER_TIMEOUT_MS).unref()),
+      ]);
+    } catch (err) {
       serverLogger.warn({ err }, "driver shutdown failed during exit");
     }
     cleanupPortFile();
+    // Registering a signal handler REPLACES Node's default disposition, which
+    // is to terminate. Without this explicit exit the process SURVIVES its own
+    // shutdown, in the worst possible state: the port file is gone but the
+    // HTTP server still holds the port. Observed on published 0.1.2 — the next
+    // `npx @nagellabs/libi` dies with `EADDRINUSE 127.0.0.1:3499`, and in
+    // production (no LIBI_PORT, so the port is ephemeral) every MCP child that
+    // resolves the now-deleted port file falls back to `getCurrentPort()`'s
+    // 3456 default and addresses a server that was never there.
+    // Exit 0, not 128+signum: this is an orderly, requested shutdown, and a
+    // non-zero code makes `npx` print a spurious failure on every Ctrl-C.
+    process.exit(0);
   };
   process.on("SIGTERM", cleanupSignal);
   process.on("SIGINT", cleanupSignal);
