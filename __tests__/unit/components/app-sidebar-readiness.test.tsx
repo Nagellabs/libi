@@ -82,6 +82,7 @@ vi.mock("@/lib/queries/runtime-update", () => ({
   isShellInstallInFlight: () => false,
   updateOffer: () => null,
   restartOffer: () => null,
+  blockedShellUpdate: () => null,
 }));
 vi.mock("@/lib/queries/terminals", () => ({
   useTerminalSessions: () => ({ data: [] }),
