@@ -400,3 +400,126 @@ describe("an install that cannot replace its own bundle", () => {
     expect(bridge.getStatus().phase).toBe("update-available");
   });
 });
+
+/**
+ * A0c — a download that dies mid-stream on a network hiccup.
+ *
+ * Observed live during the 0.1.2 QA run: `net::ERR_NETWORK_CHANGED` after
+ * 2m13s, and the manual retry succeeded in 23s. Our wrapper turned any error
+ * into a terminal state and scheduled nothing, and electron-updater's own
+ * `retryOnServerError` covers HTTP 5xx and EPIPE, not this. Someone whose
+ * sessions are shorter than a 481 MB download would never complete one.
+ */
+describe("retrying a download that failed mid-stream", () => {
+  interface Bridge {
+    getStatus(): { phase: string; error: string | null; percent: number | null };
+    checkNow(): Promise<void>;
+    restart?(): void;
+  }
+
+  async function boot(): Promise<{
+    bridge: Bridge;
+    emit: (event: string, payload?: unknown) => void;
+  }> {
+    fakeApp.isPackaged = false;
+    process.env.LIBI_SHELL_UPDATE_FEED = "https://example.com/feed.yml";
+    const { initShellUpdater } = await loadShellUpdater();
+    const runtime = makeRuntime();
+    initShellUpdater(runtime, vi.fn());
+    const register = runtime.api.registerShellUpdater as ReturnType<typeof vi.fn>;
+    const bridge = register.mock.calls[0][0] as Bridge;
+    const emit = (event: string, payload?: unknown) => {
+      for (const [name, handler] of fakeAutoUpdater.on.mock.calls) {
+        if (name === event) (handler as (p: unknown) => void)(payload);
+      }
+    };
+    return { bridge, emit };
+  }
+
+  it("retries a network-class failure after a backoff", async () => {
+    const { emit } = await boot();
+    emit("update-available", { version: "0.1.2" });
+    emit("download-progress", { percent: 40 });
+
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled(); // the backoff
+
+    vi.advanceTimersByTime(5_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after two retries instead of looping forever", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-available", { version: "0.1.2" });
+    emit("download-progress", { percent: 40 });
+
+    const fail = () => emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    fail();
+    vi.advanceTimersByTime(5_000);
+    fail();
+    vi.advanceTimersByTime(20_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+
+    // The third failure is terminal — the 6h re-check takes it from here.
+    fail();
+    vi.advanceTimersByTime(60_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+    expect(bridge.getStatus().phase).toBe("error");
+  });
+
+  // A signature failure, a corrupt zip or a full disk fails identically every
+  // time. Retrying those just delays the honest answer by 25 seconds.
+  it("does NOT retry a failure that would repeat", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-available", { version: "0.1.2" });
+    emit("download-progress", { percent: 40 });
+
+    emit("error", new Error("sha512 checksum mismatch"));
+    vi.advanceTimersByTime(60_000);
+
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+    expect(bridge.getStatus().phase).toBe("error");
+  });
+
+  it("does not retry an error that arrives outside a download", async () => {
+    const { emit } = await boot();
+    // A failed CHECK — nothing was in flight to retry.
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    vi.advanceTimersByTime(60_000);
+    expect(fakeAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  // The consent is waiting ON the download, so it is not a reason to skip it.
+  it("keeps a requested restart alive across a retry", async () => {
+    const { bridge, emit } = await boot();
+    emit("update-available", { version: "0.1.2" });
+    emit("download-progress", { percent: 40 });
+    bridge.restart!();
+
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    vi.advanceTimersByTime(5_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+
+    emit("update-downloaded", { version: "0.1.2" });
+    vi.advanceTimersByTime(2_500);
+    expect(fakeAutoUpdater.quitAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives a new version its own retry budget", async () => {
+    const { emit } = await boot();
+    emit("update-available", { version: "0.1.2" });
+    emit("download-progress", { percent: 40 });
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    vi.advanceTimersByTime(5_000);
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    vi.advanceTimersByTime(20_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+
+    // A later check finds 0.1.4 — a fresh subject, not a spent one.
+    emit("update-available", { version: "0.1.4" });
+    emit("download-progress", { percent: 10 });
+    emit("error", new Error("net::ERR_NETWORK_CHANGED"));
+    vi.advanceTimersByTime(5_000);
+    expect(fakeAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(3);
+  });
+});

@@ -48,6 +48,35 @@ const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
  *  show "Restarting Libi…" instead of the app just vanishing. */
 const INSTALL_DELAY_MS = 2_500;
 
+/**
+ * Backoff for retrying a download that died mid-stream. Two retries after the
+ * first attempt — three tries in all.
+ *
+ * Observed live during the 0.1.2 QA run: the download failed with
+ * `net::ERR_NETWORK_CHANGED` after 2m13s, and the manual retry succeeded in
+ * 23s. electron-updater's own `retryOnServerError` covers HTTP 5xx and EPIPE,
+ * so a network change en route is not covered by it.
+ *
+ * Bounded on purpose. An unbounded retry against a genuinely dead connection
+ * is a background process burning bandwidth on a metered link; after these,
+ * the 6h re-check starts the download over on its own.
+ */
+const DOWNLOAD_RETRY_DELAYS_MS = [5_000, 20_000];
+
+/**
+ * Is this failure worth trying again in a minute?
+ *
+ * Deliberately a small allowlist rather than "retry anything that isn't a
+ * 4xx". A signature check failure, a corrupt zip or a full disk fails
+ * identically every time, and retrying those twice just delays the honest
+ * answer by 25 seconds.
+ */
+export function isRetryableDownloadError(message: string): boolean {
+  return /ERR_NETWORK_CHANGED|ERR_INTERNET_DISCONNECTED|ERR_NETWORK_IO_SUSPENDED|ERR_CONNECTION_(RESET|CLOSED|ABORTED|TIMED_OUT|REFUSED)|ERR_NAME_NOT_RESOLVED|ECONNRESET|ECONNABORTED|ETIMEDOUT|EAI_AGAIN|ENETDOWN|ENETUNREACH|EPIPE|socket hang up|network (?:error|timeout)/i.test(
+    message,
+  );
+}
+
 type Phase =
   | "idle"
   | "checking"
@@ -146,6 +175,8 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
   // old runtime's "Install & restart" click). Once set, `update-downloaded`
   // — or the ready state it already reached — quits-and-installs.
   let restartRequested = false;
+  /** How many download retries this version has already consumed. */
+  let downloadAttempt = 0;
 
   autoUpdater.on("checking-for-update", () => {
     if (
@@ -158,6 +189,8 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     }
   });
   autoUpdater.on("update-available", (info) => {
+    // A different version is a fresh subject: its retries start over.
+    if (info.version !== status.latestVersion) downloadAttempt = 0;
     status.latestVersion = info.version;
     status.error = null;
     status.checkedAt = Date.now();
@@ -208,6 +241,7 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
   autoUpdater.on("update-downloaded", (info) => {
     status.phase = "ready";
     status.percent = 100;
+    downloadAttempt = 0;
     if (restartRequested) {
       // The restart was consented while the download was still running.
       log(`shell-updater: ${info.version} downloaded — restart already requested, installing in ${INSTALL_DELAY_MS}ms`);
@@ -230,6 +264,39 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
       log(`shell-updater: error while blocked — ${err.message}`);
       return;
     }
+
+    // A download that died mid-stream on a network hiccup deserves another
+    // go: the failure says nothing about whether the file is fetchable, and
+    // someone whose sessions are shorter than a 481 MB download would
+    // otherwise never complete one. Only while a download was actually in
+    // flight, only for network-class failures, and only twice.
+    const delay = DOWNLOAD_RETRY_DELAYS_MS[downloadAttempt];
+    if (
+      (status.phase === "downloading" || status.phase === "update-available") &&
+      isRetryableDownloadError(err.message) &&
+      delay !== undefined
+    ) {
+      downloadAttempt += 1;
+      status.error = err.message;
+      status.percent = null;
+      log(
+        `shell-updater: download failed (${err.message}) — retry ` +
+          `${downloadAttempt}/${DOWNLOAD_RETRY_DELAYS_MS.length} in ${delay}ms`,
+      );
+      const timer = setTimeout(() => {
+        // A restart the user already consented to is NOT a reason to skip the
+        // retry — the download is what that consent is waiting on.
+        if (status.phase === "blocked") return;
+        status.phase = "downloading";
+        status.percent = 0;
+        void autoUpdater.downloadUpdate().catch(() => {
+          /* the error event lands back here */
+        });
+      }, delay);
+      timer.unref?.();
+      return;
+    }
+
     status.phase = "error";
     status.percent = null;
     status.error = err.message;
