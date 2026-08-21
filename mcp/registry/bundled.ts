@@ -286,8 +286,14 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
     npmUrl: null,
     pypiUrl: "https://pypi.org/project/elevenlabs-mcp/",
     type: "stdio",
-    command: "uvx",
-    args: ["elevenlabs-mcp"],
+    // `uv tool run`, NOT `uvx`. They do the same thing, but `uvx` is a second
+    // binary in the uv archive and the dependency below extracts only `uv` —
+    // so `spawn("uvx", …)` could never resolve out of ~/.libi/bin, and this
+    // MCP could not start on ANY platform unless the user happened to have
+    // Homebrew's uv on PATH. Verified on a fresh 0.1.2 home: bin/ held
+    // ffmpeg, ffprobe, node and uv, and nothing else.
+    command: "uv",
+    args: ["tool", "run", "elevenlabs-mcp"],
     requireApproval: true,
     installFlow: "tier-2",
     installPlanPath: "mcp/bundled-mcps/plans/elevenlabs.md",

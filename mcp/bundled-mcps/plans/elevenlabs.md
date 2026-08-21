@@ -1,7 +1,7 @@
 # Recovery guide: ElevenLabs MCP (`elevenlabs-mcp`)
 
-This MCP runs via `uvx elevenlabs-mcp` by default. The only thing it
-needs from the user is an API key.
+This MCP runs via `uv tool run elevenlabs-mcp` by default. The only
+thing it needs from the user is an API key.
 
 ## Symptom: `inCurrentSession: false`, `whyExcluded: needs_config: ELEVENLABS_API_KEY`
 
@@ -34,7 +34,7 @@ The user's key was rejected (expired, malformed, account suspended).
 Ask the user to re-check their key, then re-save with `update_dep_status`
 and restart.
 
-## Symptom: `auxiliary` shows uvx-related errors
+## Symptom: `auxiliary` shows uv-related errors
 
 `uv` is missing from `~/.libi/bin/`. Libi's Category A normally
 installs it. Suggest the user restart libi or check their boot logs.
