@@ -72,6 +72,46 @@ It matters which you get:
 
 Confirmed available on this subscription 2026-08-21: `win11-24h2-pro`.
 
+## How QA is actually driven — two tiers, and the split is not negotiable
+
+The packaged app exposes **no CDP** (`electron/main.ts` gates it on `isDev`), so
+it cannot be driven with Playwright the way the dev shell can. That does not
+make Windows QA manual — it makes it two-tier.
+
+**Tier 1 — scripted, no screen, no credential.**
+`az vm run-command invoke` (wrapped as `lab.sh exec`) runs a script on the box
+through the **Azure control plane**: no SSH, no RDP, no open port, and nothing
+secret on the machine. It returns stdout here. That is enough to install
+silently (NSIS accepts `/S`), launch the app, wait for Category A, and then
+interrogate the app's own HTTP server and logs — the port is published to
+`$LIBI_HOME/port`, because `LIBI_PORT` is dev-only.
+
+```bash
+qa/cloud/azure/lab.sh exec win qa/cloud/azure/remote/win-smoke.ps1
+```
+
+**Tier 2 — eyes on a screen.** RDP in. Some findings are irreducibly visual and
+pretending otherwise is how you ship a broken first-run:
+
+- what **SmartScreen** actually says on an unsigned installer — the whole point
+  of the "experimental" warning we would write;
+- whether the **installer UX** is sane;
+- whether the **terminal panel** opens a usable `powershell.exe` (ConPTY);
+- whether anything simply *looks* wrong.
+
+Linux is the same shape. `provision` installs **xvfb**, which is enough to RUN
+the app headless for Tier 1. For Tier 2 on Linux — actually seeing it — run
+`lab.sh desktop linux`, which adds xfce + xrdp so you connect with the same RDP
+client you use for Windows. It is opt-in because most runs never need it.
+
+| | Tier 1 (scripted) | Tier 2 (eyes) |
+|---|---|---|
+| Windows | `lab.sh exec win …` | RDP — already available |
+| Linux | `xvfb-run` via `lab.sh exec linux …` | `lab.sh desktop linux`, then RDP |
+
+**Do not report a Tier-1 pass as "Windows works."** It proves the app installs,
+boots and serves. It says nothing about what a user sees.
+
 ## What to run once the box is up
 
 ### Windows — the gate on ever shipping a Windows build

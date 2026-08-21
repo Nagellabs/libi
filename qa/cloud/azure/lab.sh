@@ -12,6 +12,8 @@
 #   qa/cloud/azure/lab.sh allow-my-ip      # re-point the NSG at your current IP
 #   qa/cloud/azure/lab.sh connect win      # print how to reach it (RDP / SSH)
 #   qa/cloud/azure/lab.sh provision linux  # install build + Electron runtime deps
+#   qa/cloud/azure/lab.sh exec win s.ps1   # run a script ON the box, get stdout back
+#   qa/cloud/azure/lab.sh desktop linux    # add xfce+xrdp so you can SEE the Ubuntu box
 #
 # `stop` is the one you want between sessions; `down` is the one you want when
 # the work is finished. See lib/azure.sh's teardown contract for why both exist
@@ -27,6 +29,8 @@ usage() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; }
 
 ensure_scaffold() {
   if az_group_exists; then return; fi
+  az_note "registering Microsoft.Compute (needed for run-command; one-time, idempotent)"
+  az provider register --namespace Microsoft.Compute --wait -o none 2>/dev/null || true
   az_note "resource group $LIBI_AZ_GROUP does not exist — creating the scaffold"
   az group create --name "$LIBI_AZ_GROUP" --location "$LIBI_AZ_LOCATION" -o none
   az network vnet create --resource-group "$LIBI_AZ_GROUP" --name "$LIBI_AZ_VNET" \
@@ -94,6 +98,67 @@ provision() {
     az_note "(Windows provisioning is manual on purpose — no SSH on the client image,"
     az_note " and putting a key there would be a credential on a QA VM.)"
   fi
+}
+
+# Run a script ON the VM and get its stdout back HERE.
+#
+# THIS IS HOW AUTOMATED QA IS DRIVEN, and it is worth understanding why it is
+# not ssh. `az vm run-command invoke` goes through the AZURE CONTROL PLANE via
+# the VM's guest agent: no SSH, no RDP, no open port, and — the part that
+# matters — no key or credential on the QA machine. That is the same
+# no-credentials rule the GCE rig had, satisfied without an inbound channel.
+#
+# It is what makes Windows QA scriptable at all. The packaged app exposes NO
+# CDP (electron/main.ts gates it on isDev), so it cannot be driven with
+# Playwright the way the dev shell can. What CAN be driven: install silently
+# (NSIS accepts /S), launch it, then interrogate the app's own HTTP server and
+# its logs — the port is published to $LIBI_HOME/port. All of that is a script,
+# and this runs it.
+#
+# What it CANNOT do is see. SmartScreen's dialog, the installer's UX, and "does
+# the terminal panel look right" need eyes on a screen — that is RDP, and it is
+# the genuinely human half of the playbook. Do not pretend otherwise.
+#
+# Caveats: output is truncated around 4 KB, and there is a ~90-minute ceiling.
+# Write scripts that print a verdict, not a transcript.
+exec_on() {
+  local plat="${1:-}" script="${2:-}"
+  [ -n "$plat" ] && [ -n "$script" ] || az_die "usage: lab.sh exec <win|linux> <script-file>"
+  [ -f "$script" ] || az_die "no such script: $script"
+  local vm cmd; vm="$(az_vm_name "$plat")"
+  if [ "$plat" = win ]; then cmd=RunPowerShellScript; else cmd=RunShellScript; fi
+  az_note "running $script on $vm via the Azure control plane (no SSH, no credential on the box)"
+  az vm run-command invoke --resource-group "$LIBI_AZ_GROUP" --name "$vm" \
+    --command-id "$cmd" --scripts "@$script" \
+    --query "value[].message" -o tsv
+}
+
+# Give the Ubuntu box a real desktop you can look at.
+#
+# xvfb (installed by `provision`) lets the app RUN headless, which is enough for
+# scripted checks — HTTP 200, logs, Category A completing. It is NOT enough to
+# LOOK at the app, and some Linux findings are visual. This adds xfce + xrdp so
+# the same box can be RDP'd into with the same client used for Windows.
+#
+# Opt-in rather than default: it is a few hundred MB and a couple of minutes,
+# and most runs never need it.
+desktop() {
+  local plat="${1:-}"; [ "$plat" = linux ] || az_die "desktop is for linux (Windows already has one)"
+  local vm ip; vm="$(az_vm_name linux)"
+  ip="$(az vm show --resource-group "$LIBI_AZ_GROUP" --name "$vm" -d --query publicIps -o tsv 2>/dev/null || true)"
+  [ -n "$ip" ] || az_die "$vm has no public IP — is it up?"
+  az_note "installing xfce + xrdp on $vm (a few minutes)"
+  ssh -o StrictHostKeyChecking=accept-new "$LIBI_AZ_ADMIN@$ip" bash -s <<'REMOTE'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+sudo apt-get update -qq
+sudo apt-get install -y -qq xfce4 xfce4-goodies xrdp
+echo xfce4-session | sudo tee /home/*/.xsession >/dev/null || true
+sudo adduser xrdp ssl-cert 2>/dev/null || true
+sudo systemctl enable --now xrdp
+echo "[desktop] xrdp listening on 3389"
+REMOTE
+  az_note "RDP to $ip with user $LIBI_AZ_ADMIN — 3389 is already open to your IP in the NSG"
 }
 
 up() {
@@ -235,6 +300,8 @@ case "${1:-}" in
   status)      shift; status ;;
   connect)     shift; connect "${1:-}" ;;
   provision)   shift; az_require_cli; provision "${1:-}" ;;
+  exec)        shift; az_require_cli; exec_on "${1:-}" "${2:-}" ;;
+  desktop)     shift; az_require_cli; desktop "${1:-}" ;;
   allow-my-ip) shift; az_require_cli; allow_my_ip ;;
   -h|--help|"") usage ;;
   *)           usage >&2; az_die "unknown command: $1" ;;
