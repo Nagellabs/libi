@@ -56,6 +56,13 @@ Every one of these has broken something. Do not relax one without evidence.
   worker and **~250 test files vanish — counted in neither the passed nor the failed
   column**. If the summary numbers don't add up to the total, suspect this before
   believing anything else the run implies. Repair: `node scripts/ensure-native-modules.js`.
+- **A green suite on your Mac is not a green CI.** CI runs ubuntu-only, so any test
+  that reads `process.platform` — directly, or through code that does — can pass here
+  and fail there. Pin the platform inside the test rather than inheriting the host's.
+  To reproduce a Linux run for ONE file, point `--config` at a config whose
+  `setupFiles` redefines `process.platform`; do NOT try it on the whole suite, where
+  it breaks esbuild's binary resolution and fails 200+ unrelated files. This class of
+  test is what kept CI red for five releases.
 
 **MCP**
 - MCP tool schemas import `z` from `"zod/v3"`, never `"zod"`. Under v4 the SDK's
