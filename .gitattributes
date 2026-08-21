@@ -1,0 +1,11 @@
+# Keep package-lock.json byte-identical across platforms.
+#
+# `scripts/generate-third-party-notices.js` records a sha256 of this file's RAW
+# BYTES in THIRD-PARTY-NOTICES.md, and `prebuild:electron` re-checks it. Git's
+# default `text=auto` rewrites LF to CRLF on a Windows checkout, which changes
+# those bytes and therefore the hash — so the staleness gate could never pass on
+# Windows, and the first Windows build to get past `npm ci` died on
+# "THIRD-PARTY-NOTICES.md is stale relative to package-lock.json" against a
+# lockfile nobody had touched. Verified 2026-08-21: the committed LF file hashes
+# to the recorded value; the same file with CRLF does not.
+package-lock.json -text
