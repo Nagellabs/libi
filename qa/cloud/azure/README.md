@@ -99,14 +99,41 @@ nothing more. Work in this order, because each step gates the next:
    each reproduces before changing anything**; three of the four are inferred
    from reading code, not observed.
 
-### Linux — build and verify
+### Linux — yes, it can actually RUN the app
+
+An Azure Ubuntu VM has **no display**, so "run the app" means headless via
+`xvfb`. `lab.sh up linux` provisions that automatically (Node 22, the build
+toolchain, `xvfb`, and Electron's runtime libs) by reusing
+`qa/cloud/provision/ubuntu.sh` — the same script the GCE rig used, which
+contains no cloud-specific calls.
+
+Two details in that script worth not re-deriving: Ubuntu 24.04's 64-bit
+`time_t` transition renamed `libasound2` → `libasound2t64`, `libgtk-3-0` →
+`libgtk-3-0t64` and friends, so every electron-on-linux guide written before
+2024 lists names that no longer resolve. And it deliberately does **not**
+install ffmpeg, ffprobe, uv or Chromium — libi provisions those in Category A,
+and that provisioning is exactly what the rig exists to test. An apt-installed
+ffmpeg on PATH would mask a broken download URL and turn a real finding into a
+false pass. That is precisely how the Linux `drawtext` bug (F5) survived.
+
+Build, then run:
 
 ```bash
 # on the box
 node scripts/release-electron-platform.js --build
+
+# boot the built artifact headless, as the GCE rig did
+LIBI_HOME=~/qa/home xvfb-run -a ./release/Libi-<v>.AppImage --no-sandbox &
+curl -sS -o /dev/null -w '%{http_code}\n' http://127.0.0.1:<port>/editor
+
 # back on the Mac, where gh is authenticated
 node scripts/release-electron-platform.js --attach linux ./release-linux
 ```
+
+**Windows provisioning is manual on purpose.** These client images have no SSH,
+and installing a key would put a credential on a QA VM. RDP in and run
+`qa/cloud/provision/windows.ps1` yourself; `lab.sh provision win` prints the
+command.
 
 `--attach` refuses to upload without that platform's update-feed file
 (`latest-linux.yml`), so the F2 defect — an AppImage that can never find an

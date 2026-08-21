@@ -11,6 +11,7 @@
 #   qa/cloud/azure/lab.sh down             # DELETE EVERYTHING (the whole resource group)
 #   qa/cloud/azure/lab.sh allow-my-ip      # re-point the NSG at your current IP
 #   qa/cloud/azure/lab.sh connect win      # print how to reach it (RDP / SSH)
+#   qa/cloud/azure/lab.sh provision linux  # install build + Electron runtime deps
 #
 # `stop` is the one you want between sessions; `down` is the one you want when
 # the work is finished. See lib/azure.sh's teardown contract for why both exist
@@ -60,6 +61,41 @@ arm_auto_shutdown() {
   az_note "auto-shutdown armed: deallocates daily at $LIBI_AZ_SHUTDOWN_TIME"
 }
 
+# Install what BUILDING and RUNNING libi needs. Reuses the provisioners written
+# for the GCE rig verbatim — they turned out to contain no cloud-specific calls,
+# and they carry details worth not re-deriving: Ubuntu 24.04's 64-bit time_t
+# transition renamed libasound2 -> libasound2t64, libgtk-3-0 -> libgtk-3-0t64
+# and friends, so every electron-on-linux guide written before 2024 lists
+# package names that no longer resolve.
+#
+# They deliberately do NOT install ffmpeg, ffprobe, uv or Chromium. libi
+# provisions those itself in Category A, and that provisioning is exactly what
+# this rig exists to test — an apt-installed ffmpeg on PATH would mask a broken
+# download URL and turn a real finding into a false pass. That is precisely how
+# the Linux `drawtext` bug (F5) survived as long as it did.
+provision() {
+  local plat="${1:-}"; [ -n "$plat" ] || az_die "usage: lab.sh provision <win|linux>"
+  local vm ip; vm="$(az_vm_name "$plat")"
+  ip="$(az vm show --resource-group "$LIBI_AZ_GROUP" --name "$vm" -d --query publicIps -o tsv 2>/dev/null || true)"
+  [ -n "$ip" ] || az_die "$vm has no public IP — is it up?"
+
+  if [ "$plat" = linux ]; then
+    az_note "provisioning $vm (node 22, build toolchain, xvfb + electron runtime libs)"
+    scp -o StrictHostKeyChecking=accept-new \
+      "$HERE/../provision/ubuntu.sh" "$LIBI_AZ_ADMIN@$ip:/tmp/provision-ubuntu.sh"
+    ssh -o StrictHostKeyChecking=accept-new "$LIBI_AZ_ADMIN@$ip" \
+      "bash /tmp/provision-ubuntu.sh"
+    az_note "xvfb is installed — the AppImage/deb can be booted headless with:"
+    az_note "  LIBI_HOME=~/qa/home xvfb-run -a ./Libi-<v>.AppImage --no-sandbox"
+  else
+    # Windows has no ssh by default on these images; RDP in and run it there.
+    az_note "copy qa/cloud/provision/windows.ps1 to the box and run it in PowerShell:"
+    az_note "  powershell -ExecutionPolicy Bypass -File windows.ps1"
+    az_note "(Windows provisioning is manual on purpose — no SSH on the client image,"
+    az_note " and putting a key there would be a credential on a QA VM.)"
+  fi
+}
+
 up() {
   local plat="${1:-}"; [ -n "$plat" ] || az_die "usage: lab.sh up <win|linux>"
   local vm; vm="$(az_vm_name "$plat")"
@@ -96,6 +132,11 @@ up() {
     "${auth[@]}" -o none
 
   arm_auto_shutdown "$vm"
+  if [ "$plat" = linux ]; then
+    provision linux
+  else
+    az_note "next: RDP in and run qa/cloud/provision/windows.ps1 (see 'lab.sh provision win')"
+  fi
   connect "$plat"
 }
 
@@ -193,6 +234,7 @@ case "${1:-}" in
   down)        shift; down ;;
   status)      shift; status ;;
   connect)     shift; connect "${1:-}" ;;
+  provision)   shift; az_require_cli; provision "${1:-}" ;;
   allow-my-ip) shift; az_require_cli; allow_my_ip ;;
   -h|--help|"") usage ;;
   *)           usage >&2; az_die "unknown command: $1" ;;
