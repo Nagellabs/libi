@@ -74,4 +74,7 @@ this machine): the SMALL tier (~30 min — artifact integrity, npx cold boot und
 `LIBI_HOME`, dmg fresh boot, one agent round-trip) for routine releases, FULL when the
 release touched install, provisioning, onboarding, or agents. Never run QA against
 `~/.libi` (npx shares it with this checkout), and judge the dmg by staple + mount + app
-assessment — the container is unsigned by design, so `spctl -t open` always rejects it.
+assessment. Note the old caveat here — "the container is unsigned by design, so
+`spctl -t open` always rejects it" — **stopped being true in v0.1.2**: `dmg.sign: true`
+ships, the container is signed, separately notarized and stapled, and v0.1.2 assessed
+`accepted / source=Notarized Developer ID`. A rejection is now a real finding.

@@ -21,13 +21,24 @@
  *      conscious act; this script refuses rather than removes),
  *      `publishConfig.access` must be "public"
  *   3. npm test · npm run lint · npm run check:licenses · notices:check
- *   4. version bump (`npm version <type>` — commits + tags)
+ *   4. version bump (`npm version <type>` — commits + tags), then
+ *      REGENERATE the third-party notices: the bump rewrites the version
+ *      inside package-lock.json, whose sha256 the notices file pins, so
+ *      step 3's `notices:check` is invalidated by step 4. Left unfixed it
+ *      surfaces as a stale-notices failure in `release:electron`.
  *   5. node scripts/next-build-release.js — the RELEASE build: .next with
  *      Sentry reporting baked in (packaged apps install this very tarball,
  *      so a plain `npm run build` here would ship desktop users a
  *      non-reporting runtime), the externals manifest, and dist-cli
  *   6. npm run registry:e2e — full publish → install rehearsal on Verdaccio
- *   7. npm publish (npm prompts for the 2FA OTP itself)
+ *   7. npm publish. npm handles its own auth, and on a 2FA account that is
+ *      now a WEB flow, not an OTP prompt: it prints an
+ *      https://www.npmjs.com/auth/cli/… URL and waits on
+ *      "Press ENTER to open in the browser". It therefore needs a real
+ *      terminal and a human — it cannot be piped or automated. If the
+ *      publish alone fails after the bump has already happened, DO NOT
+ *      re-run with a bump type (that double-bumps): re-run with `none`,
+ *      which publishes the version already in package.json.
  *   8. verify what the registry actually serves (npm view)
  */
 const { spawnSync } = require("node:child_process");
@@ -177,9 +188,53 @@ run("notices freshness", "npm", ["run", "notices:check"]);
 // `release:electron --skip-checks` can VERIFY that claim instead of asserting it.
 recordGatesPassed(["test", "lint", "check:licenses", "notices:check"]);
 
+/**
+ * Re-sync THIRD-PARTY-NOTICES.md with the lockfile the version bump just
+ * rewrote, and fold it into the version commit.
+ *
+ * WHY THIS EXISTS. Step 3 verifies `notices:check` — and then step 4 breaks
+ * exactly what it verified. `npm version` writes the new version INTO
+ * package-lock.json, which changes the lockfile's sha256, which no longer
+ * matches the `source-lockfile-sha256` marker recorded in
+ * THIRD-PARTY-NOTICES.md. Nothing here notices, because the check already ran.
+ *
+ * The damage surfaces later and somewhere else: `prebuild:electron` re-runs the
+ * same check, so `npm run release:electron` dies on its FIRST step with
+ * "THIRD-PARTY-NOTICES.md is stale relative to package-lock.json" — against a
+ * lockfile nobody edited, in a different command, possibly hours later. It cost
+ * a release-day detour on 0.1.1 and again on 0.1.2. Documenting it did not stop
+ * the second one, so it is fixed here instead.
+ *
+ * Only the marker line changes (a version bump touches no dependency), so this
+ * is an amend rather than a second commit — `npm version` should leave ONE
+ * clean commit. The tag it just created is re-pointed at the amended commit;
+ * nothing has been pushed at this point, so that is safe.
+ */
+function syncNoticesAfterBump() {
+  run("regenerate notices (the version bump invalidated them)", "npm", [
+    "run",
+    "notices:generate",
+  ]);
+  const dirty = capture("git", ["status", "--porcelain", "THIRD-PARTY-NOTICES.md"]);
+  if (!dirty) {
+    console.log("   notices already in sync — nothing to fold in");
+    return;
+  }
+  const v = pkg().version;
+  run("fold the notices into the version commit", "git", [
+    "add",
+    "THIRD-PARTY-NOTICES.md",
+  ]);
+  run("amend", "git", ["commit", "--amend", "--no-edit"]);
+  // `npm version` tagged the pre-amend commit; move the tag to the real one.
+  run("re-point the version tag", "git", ["tag", "-f", "-a", "-m", `v${v}`, `v${v}`]);
+  console.log(`   notices re-synced and folded into the v${v} commit`);
+}
+
 // ── 4. version ─────────────────────────────────────────────────────────────
 if (bump !== "none") {
   run(`version bump (${bump})`, "npm", ["version", bump]);
+  syncNoticesAfterBump();
 }
 const version = pkg().version;
 console.log(`\n📦 releasing @nagellabs/libi@${version}${dryRun ? " (dry run)" : ""}`);
