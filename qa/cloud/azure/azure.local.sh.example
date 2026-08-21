@@ -1,0 +1,14 @@
+# Copy to `azure.local.sh` and fill in. That file is GITIGNORED and must stay
+# that way: this repo is public, and a subscription id is an identifier you do
+# not need to hand to strangers.
+#
+#   cp qa/cloud/azure/azure.local.sh.example qa/cloud/azure/azure.local.sh
+
+export LIBI_AZ_SUBSCRIPTION="00000000-0000-0000-0000-000000000000"
+
+# Optional overrides — the defaults in lib/azure.sh are fine for most work.
+# export LIBI_AZ_LOCATION="westeurope"
+# export LIBI_AZ_SHUTDOWN_TIME="1900"        # daily deallocate, HHmm local
+# export LIBI_AZ_TIMEZONE="W. Europe Standard Time"
+# export LIBI_AZ_WIN_SIZE="Standard_D4s_v5"
+# export LIBI_AZ_LINUX_SIZE="Standard_D4s_v5"

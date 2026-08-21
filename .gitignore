@@ -117,3 +117,7 @@ skill-eval/runs/
 /qa/cloud/config.local.sh
 # Result bundles pulled back off the QA VMs — evidence for one run, not content.
 /qa/cloud/results/
+
+# Azure QA lab — subscription id stays out of a public repo (mirrors
+# qa/cloud/config.local.sh for the retired GCE rig).
+qa/cloud/azure/azure.local.sh
