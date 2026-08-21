@@ -259,6 +259,28 @@ describe("auto-download behaviour", () => {
  * a blocked install downloads nothing while saying loudly that it can't.
  */
 describe("an install that cannot replace its own bundle", () => {
+  // These assert macOS behaviour, so they must ASK for macOS rather than
+  // inherit whatever the host happens to be. `initShellUpdater` passes
+  // `process.platform` into the probe, and on Linux the probe deliberately
+  // never blocks (apt/dnf installs are updated by the package manager, so a
+  // block there would be a pure false positive) — which made every one of
+  // these pass on a Mac and fail on CI's ubuntu runner.
+  //
+  // Worth being blunt about: an environment-dependent test is what kept this
+  // repo's CI red for five releases. A test that only holds on the machine
+  // that wrote it is not a test.
+  let realPlatform: PropertyDescriptor | undefined;
+  beforeEach(() => {
+    realPlatform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", {
+      value: "darwin",
+      configurable: true,
+    });
+  });
+  afterEach(() => {
+    if (realPlatform) Object.defineProperty(process, "platform", realPlatform);
+  });
+
   interface Bridge {
     getStatus(): {
       phase: string;
