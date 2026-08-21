@@ -79,8 +79,29 @@ describe("musicModelDownloadRunner", () => {
     const models = await import("@/lib/music/models");
     const totalMb = Math.round(models.ACESTEP_DOWNLOAD_BYTES / 1_000_000);
 
+    // Built BEFORE the mock, so the mock can wait on its first report.
+    const ctx = makeCtx();
+
     vi.spyOn(gen, "downloadModel").mockImplementation(
       async (onProgress?: (d: number, t: number) => void) => {
+        // WAIT FOR THE OPENING MEASUREMENT BEFORE WRITING A BYTE.
+        //
+        // `trackDirectoryBytes` measures ASYNCHRONOUSLY — `measure()` awaits a
+        // directory walk (lib/jobs/dir-download-progress.ts:99). The runner
+        // deliberately emits no opening `reportProgress(0, total)`; it lets
+        // that first walk BE the first report. So a synchronous 3 MB write
+        // here races that walk, and whichever wins decides whether the opening
+        // report reads 0 or 3. It read 3 on 2026-08-21 and failed a release
+        // publish.
+        //
+        // The PRODUCT is correct either way — it reports on-disk truth at the
+        // moment it measures — so the determinism belongs here in the harness
+        // rather than in a loosened assertion. Waiting keeps the real contract
+        // under test: a genuinely fresh install opens the bar at 0.
+        await vi.waitFor(() => {
+          expect(ctx.reportProgress).toHaveBeenCalled();
+        });
+
         // Land 3 MB, then tick the way snapshot_download does when a file
         // finishes. The runner turns that tick into a measurement rather than
         // into progress of its own.
@@ -100,7 +121,6 @@ describe("musicModelDownloadRunner", () => {
     const { musicModelDownloadRunner } = await import(
       "@/lib/jobs/runners/music-model-download"
     );
-    const ctx = makeCtx();
     await musicModelDownloadRunner.run(ctx);
 
     const calls = vi.mocked(ctx.reportProgress).mock.calls;

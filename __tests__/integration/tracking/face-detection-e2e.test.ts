@@ -5,7 +5,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { build as esbuild } from "esbuild";
-import { hasFaceFixture, FIXTURE_SKIP_REASON } from "./fixture-guard";
+import { runTrackingE2e, TRACKING_E2E_SKIP_REASON } from "./fixture-guard";
 
 const FIXTURE = path.join(
   process.cwd(),
@@ -123,9 +123,9 @@ afterAll(async () => {
   if (server) await new Promise<void>((r) => server!.close(() => r()));
 });
 
-if (!hasFaceFixture) console.info(`[skip] ${FIXTURE_SKIP_REASON}`);
+if (!runTrackingE2e) console.info(`[skip] ${TRACKING_E2E_SKIP_REASON}`);
 
-describe.skipIf(!hasFaceFixture)("face-detection two-stage pipeline (e2e via Playwright)", () => {
+describe.skipIf(!runTrackingE2e)("face-detection two-stage pipeline (e2e via Playwright)", () => {
   it("detects faces with anchor hints (Path A) — anchor crop succeeds where full-frame FaceLandmarker fails", async () => {
     const skip = skipReason();
     if (skip) { console.warn("SKIP:", skip); return; }

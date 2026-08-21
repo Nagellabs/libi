@@ -5,7 +5,7 @@ import path from "node:path";
 import { build as esbuild } from "esbuild";
 import { type Browser } from "playwright-core";
 import { tryLaunchChromium } from "@/__tests__/helpers/playwright-browser";
-import { hasFaceFixture, FIXTURE_SKIP_REASON } from "./fixture-guard";
+import { runTrackingE2e, TRACKING_E2E_SKIP_REASON } from "./fixture-guard";
 
 const FIXTURE = path.join(
   process.cwd(),
@@ -160,9 +160,9 @@ afterAll(async () => {
   if (server) await new Promise<void>((r) => server!.close(() => r()));
 });
 
-if (!hasFaceFixture) console.info(`[skip] ${FIXTURE_SKIP_REASON}`);
+if (!runTrackingE2e) console.info(`[skip] ${TRACKING_E2E_SKIP_REASON}`);
 
-describe.skipIf(!hasFaceFixture)("runFaceTracker full pipeline (production track-entry bundle)", () => {
+describe.skipIf(!runTrackingE2e)("runFaceTracker full pipeline (production track-entry bundle)", () => {
   it("emits visible:true samples on the non-selfie fixture", async () => {
     const skip = skipReason();
     if (skip) { console.warn("SKIP:", skip); return; }
