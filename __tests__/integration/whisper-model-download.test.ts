@@ -73,7 +73,17 @@ describe("whisperModelDownloadRunner", () => {
     expect(res.alreadyInstalled).toBe(false);
   });
 
-  it("forwards granular per-file download progress to reportProgress", async () => {
+  // This test used to assert `(2, 5, "files")` — the per-file counter. That
+  // contract was REMOVED on purpose, not weakened: faster-whisper ticks once per
+  // completed file, and the repo is a few tiny configs plus one large weights
+  // file, so the counter reported 0/1 for a whole ~5 minute download (measured
+  // on published 0.1.2). Progress is now measured in bytes on disk and reported
+  // in MB, matching tts_model_download and music_model_download. Units are NOT
+  // mixed within one job because the rolling ETA averages ms-per-unit.
+  //
+  // The file callback still exists and is still passed — its job is now to POKE
+  // a re-measure, since a completed file is exactly when on-disk bytes jump.
+  it("reports download progress in MB, and never in file counts", async () => {
     vi.mocked(downloadModel).mockImplementationOnce(
       async (_model: string, onProgress?: (d: number, t: number) => void) => {
         onProgress?.(2, 5);
@@ -83,8 +93,19 @@ describe("whisperModelDownloadRunner", () => {
     );
     const c = ctx({ model: "base" });
     await whisperModelDownloadRunner.run(c as never);
-    expect(c.reportProgress).toHaveBeenCalledWith(2, 5, "files");
-    expect(c.reportProgress).toHaveBeenCalledWith(5, 5, "files");
+
+    const calls = vi.mocked(c.reportProgress).mock.calls as Array<
+      [number, number, string]
+    >;
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.some(([, , unit]) => unit === "files")).toBe(false);
+    expect(calls.every(([, , unit]) => unit === "MB")).toBe(true);
+
+    // "base" is ~145 MB in the catalogue, and the job must end pinned at 100%.
+    expect(c.reportProgress).toHaveBeenCalledWith(145, 145, "MB");
+
+    // The poke callback is still handed to the downloader.
+    expect(downloadModel).toHaveBeenCalledWith("base", expect.any(Function));
   });
 
   it("FAILS instead of reporting success when no model files landed", async () => {
