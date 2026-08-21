@@ -169,7 +169,16 @@ function computeVendoredHash() {
   const h = crypto.createHash("sha256");
   for (const f of VENDORED_FONTS) {
     h.update(f.family);
-    for (const file of [...f.files.map((n) => path.join(f.dir, n)), f.licenseFile]) {
+    // `path.posix.join`, NOT `path.join`: the joined path is mixed INTO the
+    // hash below, so on Windows `path.join` would contribute
+    // `public\\fonts\\2d\\Inter-Regular.ttf` where every other platform
+    // contributes `public/fonts/2d/Inter-Regular.ttf` — a different digest for
+    // byte-identical fonts. That made `notices:check` fail on every Windows
+    // checkout, against files nobody had touched, and it blocked libi's first
+    // Windows build twice. `f.dir` and `f.licenseFile` are already
+    // forward-slash literals, so this preserves the digest on mac and Linux —
+    // the recorded marker does not change.
+    for (const file of [...f.files.map((n) => path.posix.join(f.dir, n)), f.licenseFile]) {
       const abs = path.join(ROOT, file);
       h.update(file);
       h.update(fs.existsSync(abs) ? sha256File(abs) : "MISSING");
