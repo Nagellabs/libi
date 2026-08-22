@@ -314,7 +314,8 @@ export function registerTrackingTools(server: McpServer): void {
       description:
         "Check whether the libi-tracking engine (uv Python env + ONNX models) is installed and its self-test passes. " +
         "Returns {ok, installed, missing[], versions}. Takes no parameters. " +
-        "Call this if a tracking tool returned tracking_engine_not_installed, and again after installing to confirm. " +
+        "Call this if a tracking tool returned tracking_engine_not_installed (if not installed, " +
+        "libi.install_tracking_engine runs the actual install), and again after installing to confirm. " +
         "On success this ALSO closes the lazy-install loop — it persists the tracking engine as installed in the dependency registry the tracking gate reads, so the next tracking call is unblocked with no manual DB patch and no update_dep_status needed.",
       inputSchema: VerifyInstallSchema,
     },

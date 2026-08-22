@@ -26,6 +26,7 @@ import type {
   PickCandidateParams,
   RefineTrackWithSam2Params,
   VerifyInstallParams,
+  InstallTrackingEngineParams,
   VerifyTrackedOverlayParams,
 } from "@/mcp/tools/schemas";
 import {
@@ -564,7 +565,8 @@ export async function computeObjectTrack(
           hint:
             "The libi-tracking engine isn't installed. Recover with: libi.verify_install " +
             "(if it returns ok:true you're done — retry this call); otherwise libi.get_install_plan " +
-            "(id 'libi-tracking') and run the install, then libi.verify_install, then retry. " +
+            "(mcpId 'libi-tracking'), disclose the ~2 GB / ~10-20 min cost and get the user's OK, " +
+            "then libi.install_tracking_engine, then libi.verify_install, then retry. " +
             "Do NOT diagnose/retry a 'libi-tracking' MCP — tracking tools are hosted by core libi; " +
             "only the Python engine is installed lazily.",
         },
@@ -1848,6 +1850,155 @@ export async function verifyTrackedOverlay(
       persistedFileIds: (json.persistedFileIds ?? {}) as Record<string, string>,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// install_tracking_engine — run the real engine install as a server job
+// ---------------------------------------------------------------------------
+
+/** Appended to every successful outcome: installing is not the last step —
+ *  verify_install runs the engine self-test AND persists the dependency row
+ *  the tracking gate reads. */
+const INSTALL_NEXT_STEP_HINT =
+  "Next call libi.verify_install — it runs the engine self-test and persists " +
+  "the dependency row the tracking tools gate on; then retry the original tracking call.";
+
+interface InstallTrackingEngineData {
+  status: "already_installed" | "installed" | "not_installed" | "test_mode";
+  jobId?: string;
+  clientKey?: string;
+  forced?: boolean;
+  attachedToRunning?: boolean;
+  matchedExisting?: boolean;
+  existingJob?: unknown;
+  hint?: string;
+}
+
+export async function installTrackingEngine(
+  params: InstallTrackingEngineParams,
+  extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
+): Promise<ToolResult<InstallTrackingEngineData, { hint: string }>> {
+  const force = params.force === true;
+
+  if (!force && trackingEngineInstalled()) {
+    return {
+      success: true,
+      data: {
+        status: "already_installed",
+        hint:
+          "The tracking engine is already installed — retry the tracking call directly. " +
+          "If the gate still reports it missing, call libi.verify_install (it self-heals the dependency row).",
+      },
+    };
+  }
+
+  // Test mode fakes generation MCPs, not this install: it is a real
+  // ~10–20 min, ~2 GB uv sync + model provisioning. Refuse cleanly here so
+  // an eval gets a structured answer instead of a failed job row (the
+  // runner guards this too).
+  if (isTestMode()) {
+    return {
+      success: false,
+      error: "test_mode_no_real_install",
+      data: {
+        hint:
+          "Test mode does not fake the tracking-engine install — it is a real ~2 GB, " +
+          "~10–20 minute uv sync + model download. Run it outside test mode " +
+          "(plain `npx @nagellabs/libi`), or install from Settings → MCP Servers.",
+      },
+    };
+  }
+
+  const clientKey = randomUUID();
+  try {
+    const resp = await runJobViaServer<{ alreadyInstalled: boolean }>(
+      "tracking_engine_install",
+      // No params: "install the tracking engine" is one piece of work with
+      // one output tree and therefore exactly one paramsHash. Force rides on
+      // the enqueue OPTIONS, where it can't fork job identity.
+      {},
+      {
+        extra,
+        clientKey,
+        forceNew: force,
+        // Deliberately NO `discardOutput` — do not "fix" this by copying
+        // music_download_model wholesale. Unlike ACE-Step's opaque weights,
+        // every tracking artifact is sha-verified on download and the
+        // install token is written LAST, so a half-install can never read
+        // as complete and there are no suspect bytes to throw away.
+        // Discarding would delete up to ~2 GB of provably-good artifacts
+        // just to re-download identical ones.
+      },
+    );
+
+    switch (resp.status) {
+      case "new": {
+        const forced =
+          "forced" in resp && resp.forced === true ? { forced: true } : {};
+        return {
+          success: true,
+          data: {
+            status: "installed",
+            jobId: resp.jobId,
+            clientKey: resp.clientKey,
+            ...forced,
+            hint: INSTALL_NEXT_STEP_HINT,
+          },
+        };
+      }
+      case "attached_running": {
+        return {
+          success: true,
+          data: {
+            status: "installed",
+            jobId: resp.jobId,
+            clientKey: resp.clientKey,
+            attachedToRunning: true,
+            existingJob: resp.existingJob,
+            hint:
+              (force
+                ? // A forced request that lands here was NOT honoured as a
+                  // restart, and saying so is the point: restarting would
+                  // have destroyed the running install's progress.
+                  "An install was already in progress — attached to it instead of restarting. " +
+                  "To genuinely start over, call libi.cancel_job on this jobId first, then re-run with force. "
+                : "") + INSTALL_NEXT_STEP_HINT,
+          },
+        };
+      }
+      case "matching_completed": {
+        // The cached terminal job row is NOT authoritative — a failed or
+        // cancelled prior job (or a completed one whose env was since
+        // removed) leaves no usable engine. The on-disk install token is
+        // the source of truth.
+        const installed = trackingEngineInstalled();
+        return {
+          success: true,
+          data: {
+            status: installed ? "installed" : "not_installed",
+            matchedExisting: true,
+            existingJob: resp.existingJob,
+            hint: installed
+              ? INSTALL_NEXT_STEP_HINT
+              : "A previous install attempt left no usable engine. " +
+                "Re-run libi.install_tracking_engine({ force: true }).",
+          },
+        };
+      }
+    }
+  } catch (err) {
+    if (err instanceof LibiServerUnavailableError) {
+      return {
+        success: false,
+        error: "libi_server_unavailable",
+        data: { hint: err.hint },
+      };
+    }
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

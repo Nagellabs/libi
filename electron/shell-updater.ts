@@ -326,6 +326,16 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     // before the bytes move, not after.
     reprobe();
     autoUpdater.autoDownload = probe.ok;
+    // Say what the probe decided, every time. Without this the blocked state
+    // is invisible unless an update happens to exist — `blockedReason` is null
+    // while up to date, and the cleanup below only speaks when it finds
+    // something. During the v0.1.3 verification that meant A0's verdict had to
+    // be inferred from a tidy-up line rather than read.
+    log(
+      probe.ok
+        ? `shell-updater: this install can replace its own bundle (${probe.targetDir})`
+        : `shell-updater: this install CANNOT replace its own bundle (${probe.reason}) — ${probe.path}`,
+    );
     if (!probe.ok) {
       // A build that shipped before this check may have left a whole update
       // parked on disk that nothing will ever install. On this machine that

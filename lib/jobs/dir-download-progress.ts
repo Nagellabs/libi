@@ -66,18 +66,23 @@ export interface DirDownloadProgress {
 /**
  * Poll `dir`'s size and report it as progress until `stop()` is called.
  *
+ * `dir` may be a single directory or an array; an array is summed each
+ * measurement (an install like tracking-pyenv lands bytes in two places — a
+ * venv and a models dir — and only their sum tracks the actual work).
+ *
  * `onBytes` receives a MONOTONIC, clamped byte count: never lower than a value
  * already reported, never above `totalBytes`. Both guarantees matter for the
  * ETA — a dip reads as negative progress and poisons the rolling rate, and
  * overshoot would render "104%".
  */
 export function trackDirectoryBytes(opts: {
-  dir: string;
+  dir: string | string[];
   totalBytes: number;
   intervalMs?: number;
   onBytes: (bytesDone: number, bytesTotal: number) => void;
 }): DirDownloadProgress {
-  const { dir, totalBytes, onBytes } = opts;
+  const { totalBytes, onBytes } = opts;
+  const dirs = Array.isArray(opts.dir) ? opts.dir : [opts.dir];
   const intervalMs = opts.intervalMs ?? 1500;
   let highWater = 0;
   let stopped = false;
@@ -96,7 +101,8 @@ export function trackDirectoryBytes(opts: {
     }
     inFlight = true;
     try {
-      const seen = await directoryBytes(dir);
+      let seen = 0;
+      for (const d of dirs) seen += await directoryBytes(d);
       if (stopped) return;
       const clamped = Math.min(Math.max(seen, highWater), totalBytes);
       if (clamped > highWater || highWater === 0) {

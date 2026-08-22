@@ -258,6 +258,38 @@ export async function runCategoryB(
   // is safe because each backfill probe is hard-capped (`PROBE_TIMEOUT_MS` in
   // lib/ffmpeg/probe.ts) — a hung ffprobe (stalled network mount) can no
   // longer stall the backfill forever and silently starve the 720p sweep.
+  // Reclaim staged runtimes the loader can never select again. A shell update
+  // raises the bundled version underneath anything staged, and since the A0b
+  // fix selection is by version — so a staged runtime at or below bundled is
+  // unreachable forever. ~1.3 GB each, and keep-2 cannot catch a user with
+  // exactly one stale one. Fire-and-forget and non-fatal, like the sweeps
+  // below: housekeeping must never block or fail boot.
+  void (async () => {
+    try {
+      const { pruneRuntimesBelowBundled, runningRuntimePrefix } = await import(
+        "@/lib/runtime/runtime-prune"
+      );
+      const { describeCurrentRuntime } = await import("@/lib/runtime/current-runtime");
+      const current = describeCurrentRuntime();
+      if (!current.updatesSupported || !current.bundledVersion) return;
+      const { removed } = pruneRuntimesBelowBundled({
+        bundledVersion: current.bundledVersion,
+        protectPrefix: runningRuntimePrefix(),
+      });
+      if (removed.length > 0) {
+        serverLogger.info(
+          { tag: "lifecycle", op: "pruned_unreachable_runtimes", count: removed.length },
+          "reclaimed staged runtimes the loader can never select again",
+        );
+      }
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "lifecycle", op: "prune_unreachable_runtimes_failed", err },
+        "could not prune unreachable staged runtimes",
+      );
+    }
+  })();
+
   void (async () => {
     try {
       const { sweepBackfillHasAlpha } = await import("@/lib/proxy/backfill-alpha");

@@ -22,10 +22,18 @@
  * explicitly by path from `build:electron`, exactly as build-cli prescribes.
  */
 
-const { assertRuntimeBundleFresh } = require("./build-runtime-bundle.js");
+const {
+  assertRuntimeBundleFresh,
+  assertPrebuiltExecutablesRunnable,
+} = require("./build-runtime-bundle.js");
 
 async function beforePackRuntimeBundleGuard() {
   const { stamp } = assertRuntimeBundleFresh();
+  // A helper the product spawns, shipped without its execute bit, produces an
+  // app that packages, signs, notarizes and boots perfectly — and whose
+  // built-in Terminal is dead, unfixably, because the .app is signed. That
+  // shipped through three releases before anyone clicked the right button.
+  assertPrebuiltExecutablesRunnable();
   process.stdout.write(
     `[runtime-bundle-guard] OK — bundling ${stamp.package}@${stamp.version} ` +
       `(shellApiVersion ${stamp.shellApiVersion}, abi ${stamp.abi}, .next ${stamp.buildId})\n`,

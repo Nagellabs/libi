@@ -40,13 +40,22 @@ import { detectIsPackaged } from "@/lib/runtime/registry-url";
 /** Env vars `electron/main.ts` publishes once a runtime is resolved. */
 export const RUNTIME_VERSION_ENV = "LIBI_RUNTIME_VERSION";
 export const RUNTIME_SOURCE_ENV = "LIBI_RUNTIME_SOURCE";
+/** Set by the shell since 0.1.4. Absent on older shells — degrade, never assume. */
+export const BUNDLED_VERSION_ENV = "LIBI_BUNDLED_VERSION";
 export const SHELL_API_MIN_ENV = "LIBI_SHELL_API_MIN";
 export const SHELL_API_MAX_ENV = "LIBI_SHELL_API_MAX";
 
 const LOG_TAG = "runtime-update";
 
-/** Where this runtime came from. `"dev"` = a working tree, not a snapshot. */
-export type RuntimeSource = "bundled" | "user" | "dev";
+/**
+ * Where this runtime came from.
+ *
+ * `"npm"` exists because `"dev"` used to cover it, and the UI renders `"dev"`
+ * as "development checkout" — which an `npx @nagellabs/libi` user was being
+ * shown for the install path the README leads with. Confirmed rendered on
+ * 2026-08-21 during the v0.1.3 verification.
+ */
+export type RuntimeSource = "bundled" | "user" | "npm" | "dev";
 
 export interface ShellApiRange {
   min: number;
@@ -68,6 +77,16 @@ export interface CurrentRuntime {
    * be offering something that cannot work.
    */
   updatesSupported: boolean;
+  /**
+   * Version of the snapshot inside the desktop app, whether or not it is the
+   * one running. Null on an older shell that does not publish it, and on any
+   * non-packaged install — treat null as "unknown", never as "none".
+   *
+   * With `version` this answers a question the UI could not previously ask:
+   * is a staged runtime being superseded by the bundled one? Before the A0b
+   * fix that state existed and the display called it "current".
+   */
+  bundledVersion: string | null;
 }
 
 export interface DescribeCurrentRuntimeOptions {
@@ -111,6 +130,24 @@ export function readRuntimeManifest(cwd: string): {
   }
 }
 
+/**
+ * Is this runtime an INSTALLED package rather than a working tree?
+ *
+ * A structural fact, not npm-internals sniffing: every npm install — global,
+ * local, or the `_npx` cache — puts the package under a `node_modules`
+ * directory, and a git checkout never sits inside one. Deliberately NOT keyed
+ * on the `_npx` path shape, which npm has changed before.
+ *
+ * The CLI chdirs into the runtime root in production (`lib/cli/studio.ts`), so
+ * `cwd` is the package directory by the time anyone asks.
+ */
+export function isInstalledPackage(cwd: string): boolean {
+  return path
+    .resolve(cwd)
+    .split(path.sep)
+    .includes("node_modules");
+}
+
 export function describeCurrentRuntime(
   opts: DescribeCurrentRuntimeOptions = {},
 ): CurrentRuntime {
@@ -127,7 +164,9 @@ export function describeCurrentRuntime(
       ? rawSource
       : isPackaged
         ? "bundled"
-        : "dev";
+        : isInstalledPackage(cwd)
+          ? "npm"
+          : "dev";
 
   const shellApiVersion = manifest.shellApiVersion;
   const min = readIntEnv(env, SHELL_API_MIN_ENV);
@@ -152,6 +191,7 @@ export function describeCurrentRuntime(
     shellApiVersion,
     source,
     shellApi,
+    bundledVersion: env[BUNDLED_VERSION_ENV]?.trim() || null,
     updatesSupported: isPackaged,
   };
 }

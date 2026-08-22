@@ -126,6 +126,8 @@ import {
   type MusicListStylesParams,
   type MusicDownloadModelParams,
   type GenerateMusicParams,
+  installTrackingEngineSchema,
+  type InstallTrackingEngineParams,
   musicDetectBeatsSchema,
   musicProfileSchema,
   musicInstallAnalysisDepsSchema,
@@ -313,6 +315,7 @@ import {
 import { whisperListModels, whisperDownloadModel } from "@/mcp/tools/whisper-tools";
 import { ttsListVoices, ttsDownloadModel, generateSpeech } from "@/mcp/tools/tts-tools";
 import { musicListStyles, musicDownloadModel, generateMusic } from "@/mcp/tools/music-tools";
+import { installTrackingEngine } from "@/mcp/tools/tracking-tools";
 import {
   musicDetectBeats,
   musicProfile,
@@ -3618,6 +3621,23 @@ export function createLibiMcpServer(): McpServer {
       } catch (err) {
         return makeError(err);
       }
+    },
+  );
+
+  server.registerTool(
+    "libi.install_tracking_engine",
+    {
+      title: "Install the local tracking engine",
+      description:
+        "Install the libi-tracking engine (uv Python env + ONNX models) as a background job with streamed progress. This is a REAL install: ~2 GB of downloads, typically 10–20 minutes — tell the user the cost and get their OK first (libi.get_install_plan, mcpId 'libi-tracking', holds the full disclosure). Free — no API key, everything runs on-device. Idempotent and resumable: artifacts are sha-pinned, so a re-call after a failure repairs/resumes rather than starting over, and `force:true` is almost never needed. " +
+        "On success the NEXT step is libi.verify_install — it runs the engine self-test and persists the dependency row the tracking tools gate on; only then retry the original tracking call. " +
+        "Dedup signals — `attachedToRunning:true` means the server attached this call to a still-running install and BLOCKED until it finished (the engine IS now on disk; mention elapsed time from `existingJob.startedAt`). `matchedExisting:true` means a cached prior job matched; trust the `status` field, which re-checks the disk. " +
+        "This install runs on the SERVER: if this call is interrupted, declined, or cancelled, the install KEEPS GOING — check `libi.list_jobs({ status: \"running\" })` before telling the user nothing was installed.",
+      inputSchema: installTrackingEngineSchema.shape,
+    },
+    async (args: InstallTrackingEngineParams, extra) => {
+      const result = await installTrackingEngine(args, extra);
+      return makeContent(result);
     },
   );
 

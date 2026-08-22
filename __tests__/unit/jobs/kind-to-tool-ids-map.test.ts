@@ -37,6 +37,9 @@ describe("getJobKindToToolIdsMap", () => {
     expect(map.get("remote_fetch")).toEqual([
       makeMcpToolId("libi", "libi.import_remote_files"),
     ]);
+    expect(map.get("tracking_engine_install")).toEqual([
+      makeMcpToolId("libi", "libi.install_tracking_engine"),
+    ]);
   });
 
   it("excludes server-internal runners (no mcpToolId)", () => {

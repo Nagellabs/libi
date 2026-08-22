@@ -42,10 +42,15 @@
  *   8. verify what the registry actually serves (npm view)
  */
 const { spawnSync } = require("node:child_process");
-const { existsSync, readFileSync } = require("node:fs");
+const { existsSync, readFileSync, rmSync } = require("node:fs");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
 const { recordGatesPassed } = require("./lib/gate-provenance");
+const {
+  decideDistElectron,
+  decideBump,
+  needsVersionPush,
+} = require("./lib/release-preflight");
 
 const ROOT = path.resolve(__dirname, "..");
 const PKG_NAME = "@nagellabs/libi";
@@ -56,13 +61,15 @@ function sleepSync(ms) {
 }
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
-const bump = args.find((a) => !a.startsWith("--"));
+// No argument = work it out. An explicit one still wins; see `decideBump`.
+const explicitBump = args.find((a) => !a.startsWith("--")) ?? null;
 
-if (!["patch", "minor", "major", "none"].includes(bump ?? "")) {
+if (explicitBump !== null && !["patch", "minor", "major", "none"].includes(explicitBump)) {
   console.error(
-    "usage: npm run release:npm -- <patch|minor|major|none> [--dry-run]\n" +
-      "  none      publish the version already in package.json (no bump)\n" +
-      "  --dry-run run everything, but `npm publish --dry-run` at the end",
+    "usage: npm run release:npm -- [patch|minor|major|none] [--dry-run]\n" +
+      "  (no argument)  work out from npm + git whether a bump is needed\n" +
+      "  none           publish the version already in package.json (no bump)\n" +
+      "  --dry-run      run everything, but `npm publish --dry-run` at the end",
   );
   process.exit(1);
 }
@@ -119,18 +126,46 @@ if (dirty === null || dirty !== "") {
 // `dist-electron/` blocks the pack — but the guard that says so lives in
 // `prepack`, which runs inside `registry:e2e`, which is step 6. Discovering it
 // there costs the whole gate run first; it cost exactly that on 2026-08-14.
-// Deliberately refuses rather than deleting: a running `npm run electron` loads
-// its entire process tree from that directory.
-if (existsSync(path.join(ROOT, "dist-electron"))) {
-  console.error(
-    "❌ dist-electron/ is present — `npm pack` would refuse (npm force-includes\n" +
-      "   whatever package.json#main points at, even against the `files`\n" +
-      "   allowlist, so the Electron main-process build would ship inside the\n" +
-      "   npm CLI tarball).\n\n" +
-      "   Stop anything using it, then: rm -rf dist-electron\n" +
-      "   (Regenerate any time with `npm run compile:electron`.)",
-  );
-  process.exit(1);
+//
+// It then blocked 0.1.2 and 0.1.3 on consecutive release days, because the
+// trigger is "opened the desktop shell since the last release" — a normal
+// thing to do. So the two questions are now asked separately: is it there, and
+// is anything USING it. The original refusal survives for the case it was
+// written for (a running `npm run electron` loads its whole process tree from
+// that directory); it just no longer fires when nothing is running.
+{
+  const distElectron = path.join(ROOT, "dist-electron");
+  const exists = existsSync(distElectron);
+  // `pgrep -f` covers darwin and linux; `decideDistElectron` refuses outright
+  // on win32 rather than trust a probe that cannot answer there.
+  const somethingRunning =
+    exists &&
+    process.platform !== "win32" &&
+    spawnSync("pgrep", ["-f", distElectron], { encoding: "utf-8" }).status === 0;
+
+  switch (decideDistElectron({ exists, somethingRunning, platform: process.platform })) {
+    case "remove":
+      rmSync(distElectron, { recursive: true, force: true });
+      console.log(
+        "  removed a stale dist-electron/ (nothing was running from it).\n" +
+          "  Regenerate any time with `npm run compile:electron`.",
+      );
+      break;
+    case "refuse":
+      console.error(
+        "❌ dist-electron/ is present and in use — `npm pack` would refuse (npm\n" +
+          "   force-includes whatever package.json#main points at, even against the\n" +
+          "   `files` allowlist, so the Electron main-process build would ship inside\n" +
+          "   the npm CLI tarball).\n\n" +
+          "   Something is running out of that directory — quit it, then re-run.\n" +
+          "   (Refusing rather than deleting: a running `npm run electron` loads its\n" +
+          "   entire process tree from there.)",
+      );
+      process.exit(1);
+      break;
+    default:
+      break;
+  }
 }
 
 // Publish credentials, checked in seconds rather than after ~12 minutes of
@@ -232,6 +267,68 @@ function syncNoticesAfterBump() {
 }
 
 // ── 4. version ─────────────────────────────────────────────────────────────
+// Work out whether a bump is needed rather than trusting the maintainer to
+// remember which flag this run wants. See `scripts/lib/release-preflight.js`
+// for why one signal settles it and why every other branch is a refusal.
+const bump = (() => {
+  const pkgVersion = pkg().version;
+  const tag = `v${pkgVersion}`;
+
+  const versionDocStatus = capture("curl", [
+    "-s", "-o", "/dev/null", "-w", "%{http_code}",
+    `https://registry.npmjs.org/${encodeURIComponent(PKG_NAME)}/${pkgVersion}`,
+  ]);
+  // The per-version document is authoritative and updates BEFORE the
+  // packument — step 8 documents the lag that makes the reverse unreliable.
+  const publishedThisVersion = versionDocStatus === "200";
+
+  // `time` still lists a version that was unpublished; `versions` does not.
+  // That difference is the only way to see a number npm will never take again.
+  let everPublishedThisVersion = publishedThisVersion;
+  if (!publishedThisVersion) {
+    const packument = capture("curl", ["-s", `https://registry.npmjs.org/${encodeURIComponent(PKG_NAME)}`]);
+    try {
+      everPublishedThisVersion = Boolean(JSON.parse(packument)?.time?.[pkgVersion]);
+    } catch {
+      everPublishedThisVersion = false; // unreachable registry: fall through to the git checks
+    }
+  }
+
+  const tagExists =
+    spawnSync("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: ROOT }).status === 0;
+  const tagAtHead =
+    tagExists &&
+    capture("git", ["rev-list", "-n", "1", tag]) === capture("git", ["rev-parse", "HEAD"]);
+
+  const decision = decideBump({
+    pkgVersion,
+    publishedThisVersion,
+    everPublishedThisVersion,
+    tagExists,
+    tagAtHead,
+    explicitBump,
+  });
+
+  if (decision.action === "refuse") {
+    console.error(`❌ ${decision.reason}`);
+    process.exit(1);
+  }
+  if (decision.action === "publish-as-is") {
+    console.log(
+      explicitBump === "none"
+        ? `  no bump requested — publishing ${pkgVersion} as it stands`
+        : `  ${pkgVersion} is bumped and tagged but not on npm — resuming that publish, not bumping again`,
+    );
+    return "none";
+  }
+  console.log(
+    explicitBump
+      ? `  bumping (${decision.bump}, as asked)`
+      : `  ${pkgVersion} is already on npm — bumping (${decision.bump})`,
+  );
+  return decision.bump;
+})();
+
 if (bump !== "none") {
   run(`version bump (${bump})`, "npm", ["version", bump]);
   syncNoticesAfterBump();
@@ -314,9 +411,15 @@ console.log(
   `\n✅ ${PKG_NAME}@${version} is live.\n` +
     "   Desktop installs see it via the in-app update check (within ~6h);\n" +
     "   `npx @nagellabs/libi` picks it up on next invocation." +
-    // Only true when `npm version` actually ran. Under `none` — the mode a
-    // first release and any re-publish use — there is no commit and no tag,
-    // and telling someone to push them sends them looking for something that
-    // does not exist.
-    (bump === "none" ? "" : "\n   Don't forget: git push the version commit + tag."),
+    // Ask what is TRUE OF THE REPO, not what this run happened to do. The old
+    // check was `bump !== "none"` — "did I bump this run?" — so on 0.1.3, where
+    // the bump had happened in an earlier aborted run, the reminder was
+    // suppressed on the one run that needed it.
+    (needsVersionPush({
+      commitUnpushed: capture("git", ["log", "--oneline", "origin/main..HEAD"]) !== "",
+      tagUnpushed:
+        capture("git", ["ls-remote", "--tags", "origin", `v${version}`]) === "",
+    })
+      ? "\n   Don't forget: git push the version commit + tag."
+      : ""),
 );

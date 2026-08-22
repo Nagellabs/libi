@@ -156,4 +156,37 @@ describe("trackDirectoryBytes", () => {
     await vi.waitFor(() => expect(seen.at(-1)).toBe(1000));
     p.stop();
   });
+
+  it("sums an array of directories, keeping the monotonic clamp", async () => {
+    // tracking-pyenv lands bytes in TWO places (the uv venv and the models
+    // dir); only their sum tracks the actual work.
+    const second = fs.mkdtempSync(path.join(os.tmpdir(), "libi-dirbytes2-"));
+    try {
+      const seen: number[] = [];
+      write("a", 300);
+      fs.writeFileSync(path.join(second, "weights.onnx"), Buffer.alloc(200));
+      const p = trackDirectoryBytes({
+        dir: [tmp, second],
+        totalBytes: 1000,
+        intervalMs: 5,
+        onBytes: (done) => seen.push(done),
+      });
+      await vi.waitFor(() => expect(seen.at(-1)).toBe(500));
+
+      // Growth in EITHER directory moves the bar…
+      fs.writeFileSync(path.join(second, "more.onnx"), Buffer.alloc(400));
+      await vi.waitFor(() => expect(seen.at(-1)).toBe(900));
+
+      // …and the summed total still clamps at totalBytes.
+      write("overshoot", 5000);
+      await vi.waitFor(() => expect(seen.at(-1)).toBe(1000));
+      p.stop();
+
+      for (let i = 1; i < seen.length; i++) {
+        expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]);
+      }
+    } finally {
+      fs.rmSync(second, { recursive: true, force: true });
+    }
+  });
 });

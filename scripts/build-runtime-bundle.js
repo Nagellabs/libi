@@ -394,6 +394,60 @@ function installBundle({ outDir, spec, registry }) {
   ];
   if (registry) args.push(`--registry=${registry}`);
   run("npm", args, { cwd: outDir });
+  restorePrebuiltExecutables(outDir);
+}
+
+/**
+ * Prebuilt helper binaries that npm unpacks WITHOUT the execute bit, and that
+ * nothing later puts back inside a packaged app.
+ *
+ * `lib/terminal/pty.ts` already carries a runtime `chmod +x` for node-pty's
+ * `spawn-helper`, and in a dev tree or an `npx` install that works — those
+ * live somewhere writable. **It cannot work in the desktop app.** The bundle
+ * ends up inside a signed, notarized `.app`, where chmod is refused outright:
+ *
+ *   EPERM: operation not permitted, chmod
+ *     '/Applications/Libi.app/Contents/Resources/libi-bundle/node_modules/
+ *      node-pty/prebuilds/darwin-arm64/spawn-helper'
+ *
+ * node-pty posix_spawn()s that helper on EVERY pty launch, so a non-executable
+ * one means the built-in Terminal cannot start at all — the user gets a bare
+ * "posix_spawn failed." and, if they are signed out of Codex, no way to sign
+ * in, because that remedy opens a terminal.
+ *
+ * Found in the v0.1.3 FULL verification against the shipped dmg, where the
+ * helper was mode 644 in both the installed app and the pristine image.
+ *
+ * Fixing it HERE is the only place that works: this runs before
+ * electron-builder packages and signs, so the bit is part of what gets signed
+ * rather than something we try to change afterwards.
+ */
+function restorePrebuiltExecutables(outDir) {
+  // Not a glob over "anything without an extension" — that would flip bits on
+  // arbitrary files a dependency happens to ship. Name what we mean.
+  const relative = [
+    ["node-pty", "prebuilds", "darwin-arm64", "spawn-helper"],
+    ["node-pty", "prebuilds", "darwin-x64", "spawn-helper"],
+    ["node-pty", "prebuilds", "linux-x64", "spawn-helper"],
+    ["node-pty", "prebuilds", "linux-arm64", "spawn-helper"],
+    ["node-pty", "build", "Release", "spawn-helper"],
+  ];
+  const fixed = [];
+  for (const parts of relative) {
+    const helper = path.join(outDir, "node_modules", ...parts);
+    let stat;
+    try {
+      stat = fs.statSync(helper);
+    } catch {
+      continue; // a platform this bundle doesn't carry
+    }
+    if ((stat.mode & 0o111) !== 0) continue;
+    fs.chmodSync(helper, stat.mode | 0o755);
+    fixed.push(path.join(...parts));
+  }
+  if (fixed.length > 0) {
+    log(`restored the execute bit on ${fixed.length} prebuilt helper(s): ${fixed.join(", ")}`);
+  }
 }
 
 /**
@@ -1135,6 +1189,48 @@ function assertRuntimeBundleFresh(opts = {}) {
   return result;
 }
 
+/**
+ * Fail the build if a prebuilt helper the product SPAWNS is not executable.
+ *
+ * `restorePrebuiltExecutables` sets these at install time; this is the check
+ * that says so out loud. It exists because the failure it guards against is
+ * invisible until a user clicks something: the app packages, signs, notarizes
+ * and boots perfectly, and only the built-in Terminal is dead — with a bare
+ * "posix_spawn failed." and no way to fix it, because the bundle is signed.
+ *
+ * That shipped. It was found in the v0.1.3 FULL verification, not by any gate.
+ */
+function assertPrebuiltExecutablesRunnable(outDir = path.join(ROOT, OUT_DIRNAME)) {
+  const helperDir = path.join(outDir, "node_modules", "node-pty", "prebuilds");
+  let entries;
+  try {
+    entries = fs.readdirSync(helperDir, { withFileTypes: true });
+  } catch {
+    return; // no node-pty prebuilds in this bundle — nothing to assert
+  }
+  const broken = [];
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const helper = path.join(helperDir, e.name, "spawn-helper");
+    try {
+      if ((fs.statSync(helper).mode & 0o111) === 0) broken.push(helper);
+    } catch {
+      /* that platform's helper isn't present */
+    }
+  }
+  if (broken.length > 0) {
+    throw new Error(
+      "[runtime-bundle] node-pty's spawn-helper is NOT executable in the bundle:\n" +
+        broken.map((b) => `     ${b}`).join("\n") +
+        "\n   node-pty posix_spawn()s it on every pty launch, so the built-in Terminal\n" +
+        "   would be dead in the packaged app — and unfixable at runtime, because the\n" +
+        "   .app is signed and chmod inside it is refused (EPERM).\n" +
+        "   `restorePrebuiltExecutables` in this file is what sets the bit; if this\n" +
+        "   fires, that ran too early, or npm added a prebuild it does not name yet.",
+    );
+  }
+}
+
 module.exports = {
   OUT_DIRNAME,
   STAMP_NAME,
@@ -1144,6 +1240,8 @@ module.exports = {
   buildRuntimeBundle,
   verifyRuntimeBundle,
   assertRuntimeBundleFresh,
+  assertPrebuiltExecutablesRunnable,
+  restorePrebuiltExecutables,
   electronAbi,
 };
 

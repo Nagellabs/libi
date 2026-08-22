@@ -117,6 +117,79 @@ export function pruneUserRuntimes(opts: PruneOptions = {}): PruneResult {
 }
 
 /**
+ * Delete staged runtimes the loader can never choose again.
+ *
+ * Since the A0b fix (`electron/runtime-loader.ts`), selection is by VERSION
+ * across every candidate — each staged prefix and the bundled snapshot alike.
+ * So once a shell update raises the bundled version, any staged runtime at or
+ * below it is unreachable by definition: bundled outranks it on version, and
+ * wins the tie too. It is pure disk cost, and a runtime is ~1.3 GB.
+ *
+ * `pruneUserRuntimes`' keep-2 rule cannot catch these. Its job is ROLLBACK —
+ * keep the previous version so a broken new one falls back — and it counts
+ * versions, so a user with exactly one stale staged runtime keeps it forever.
+ * That is the observed case: 0.1.1 staged, shell updated to 0.1.3, 1.3 GB
+ * stranded.
+ *
+ * Rollback is not weakened by this. Anything NEWER than bundled is left alone,
+ * and bundled itself is always present and integrity-checked at build time —
+ * it IS the floor to fall back to.
+ *
+ * A null/unparseable `bundledVersion` prunes NOTHING. An older shell does not
+ * publish it, and "unknown" must never be read as "everything is stale".
+ */
+export function pruneRuntimesBelowBundled(opts: {
+  bundledVersion: string | null;
+  protectPrefix?: string | null;
+  rootDir?: string;
+}): PruneResult {
+  const { bundledVersion } = opts;
+  if (!bundledVersion) return { removed: [], kept: [] };
+
+  const root = opts.rootDir ?? userRuntimeDir();
+  const protectedPrefix = opts.protectPrefix ? path.resolve(opts.protectPrefix) : null;
+
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(root, { withFileTypes: true });
+  } catch {
+    return { removed: [], kept: [] };
+  }
+
+  const removed: string[] = [];
+  const kept: string[] = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith(".") || e.name.includes(".old-")) continue;
+    const full = path.join(root, e.name);
+    // Never the running one. Deleting the tree you are executing out of is a
+    // uniquely bad way to save disk — and a staged runtime CAN be running
+    // when it is newer than bundled, which is exactly when we keep it anyway.
+    if (protectedPrefix && path.resolve(full) === protectedPrefix) {
+      kept.push(full);
+      continue;
+    }
+    if (compareVersions(e.name, bundledVersion) > 0) {
+      kept.push(full); // newer than bundled — still selectable, still a rollback target
+      continue;
+    }
+    try {
+      fs.rmSync(full, { recursive: true, force: true });
+      removed.push(full);
+      logger.info(
+        { tag: LOG_TAG, op: "prune_below_bundled", dir: full, bundledVersion },
+        "pruned a staged runtime the loader can never select again",
+      );
+    } catch (err) {
+      logger.warn(
+        { tag: LOG_TAG, op: "prune_failed", dir: full, err: (err as Error).message },
+        "could not prune runtime directory",
+      );
+    }
+  }
+  return { removed, kept };
+}
+
+/**
  * The prefix this process is running out of, or null.
  *
  * The runtime root is `<prefix>/node_modules/@nagellabs/libi` and

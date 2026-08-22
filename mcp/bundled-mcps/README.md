@@ -3,7 +3,10 @@
 Optional MCP servers that libi suggests to the agent for specific user
 intents (e.g. "use the YouTube downloader when the user asks to download
 a YouTube video"). They are NOT installed at libi startup — the agent
-installs them on demand via `libi.get_install_plan` and friends.
+installs them on demand: `libi.get_install_plan` returns the plan, and the
+plan's own steps — shell commands, or a dedicated install tool like
+`libi.install_tracking_engine` — do the installing.
+(`libi.update_dep_status` only records status for the Settings badge.)
 
 ## Adding a new bundled MCP
 
@@ -19,7 +22,10 @@ installs them on demand via `libi.get_install_plan` and friends.
    isn't installed, and install on demand.
 
 That's it. No install code lives in this directory — the agent owns the
-install loop. Your job is to author clear instructions for the agent.
+install loop. Your job is to author clear instructions for the agent. When
+the install is too heavy for agent-run shell steps (a long job with progress
+and resume, like the tracking engine), put the work behind a dedicated
+agent-callable tool and have the plan name it.
 
 ## NOT for libi's own binary deps
 

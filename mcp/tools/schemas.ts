@@ -1772,6 +1772,18 @@ export type RemoveBackgroundParams = z.infer<typeof RemoveBackgroundSchema>;
 export const VerifyInstallSchema = z.object({});
 export type VerifyInstallParams = z.infer<typeof VerifyInstallSchema>;
 
+export const installTrackingEngineSchema = z.object({
+  force: z
+    .boolean()
+    .optional()
+    .describe(
+      "Re-run the installer even though the engine already looks installed. Normally unnecessary — every artifact is sha-pinned and the installer is idempotent, so a plain re-call resumes/repairs a partial install on its own. If an install is ALREADY running this attaches to it and reports its progress instead of restarting; cancel that job first (libi.cancel_job) if you genuinely mean to start over.",
+    ),
+});
+export type InstallTrackingEngineParams = z.infer<
+  typeof installTrackingEngineSchema
+>;
+
 // Background jobs — generic status + cancel
 // ---------------------------------------------------------------------------
 

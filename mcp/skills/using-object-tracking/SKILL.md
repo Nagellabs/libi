@@ -10,9 +10,11 @@ when_to_use: When the user asks to follow / cover / blur / mask / sticker / labe
 > old `tracking-overlay` skill — do not look for a separate overlay skill.
 
 > **Engine install:** If a tracking tool returns `tracking_engine_not_installed`,
-> follow the libi-tracking install plan: call `libi.get_install_plan` (id
-> `libi-tracking`), drive the install, then `libi.verify_install` until
-> `ok:true`, then retry. **Do NOT gate on `chromium` / `mediapipe-vision`** —
+> follow the libi-tracking install plan: `libi.get_install_plan`
+> (`mcpId: "libi-tracking"`) → disclose ~10–20 min / ~2 GB and get the user's
+> approval → `libi.install_tracking_engine` (the actual installer) →
+> `libi.verify_install` until `ok:true` → retry.
+> **Do NOT gate on `chromium` / `mediapipe-vision`** —
 > those are the legacy MediaPipe path, not the default `yoloe+botsort` engine.
 
 The tracker is **shot-segmented and composable**. You drive it; it reports
@@ -93,8 +95,9 @@ SAM2 for this.
 
 It ships **with** the tracking engine (same `tracking-pyenv` install). If a
 tracking tool reports the engine is not installed, follow the **libi-tracking
-install plan** (`libi.get_install_plan` id `libi-tracking` → drive install →
-`libi.verify_install` until `ok:true` → retry) — the SAME loop as for the
+install plan** (`libi.get_install_plan` `mcpId: "libi-tracking"` → user
+approval → `libi.install_tracking_engine` → `libi.verify_install` until
+`ok:true` → retry) — the SAME loop as for the
 person path; there is no separate generalized-detector install step, no new
 error kind.
 

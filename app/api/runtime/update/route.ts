@@ -39,6 +39,8 @@ export interface RuntimeUpdateDto {
     version: string | null;
     source: string;
     shellApiVersion: number | null;
+    /** What the desktop app ships, whether or not it is what is running. */
+    bundledVersion: string | null;
   };
   shellApi: { min: number; max: number } | null;
   update: UpdateStatus;
@@ -173,6 +175,7 @@ export async function GET(req: Request): Promise<Response> {
       version: current.version,
       source: current.source,
       shellApiVersion: current.shellApiVersion,
+      bundledVersion: current.bundledVersion,
     },
     shellApi: current.shellApi,
     update,

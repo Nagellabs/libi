@@ -453,6 +453,13 @@ app.on("ready", async () => {
   // shell driving a newer runtime degrades rather than breaks.
   process.env.LIBI_RUNTIME_VERSION = runtime.version;
   process.env.LIBI_RUNTIME_SOURCE = runtime.source;
+  // What this .app ships, whether or not it won the selection. The runtime
+  // knows what it IS, not what it was chosen over — and it needs the latter to
+  // prune staged runtimes that can never be selected again (~1.3 GB each), and
+  // to say which runtime is actually live when a staged one was superseded.
+  if (resolved.bundledVersion) {
+    process.env.LIBI_BUNDLED_VERSION = resolved.bundledVersion;
+  }
   process.env.LIBI_SHELL_API_MIN = String(MIN_SHELL_API_VERSION);
   process.env.LIBI_SHELL_API_MAX = String(MAX_SHELL_API_VERSION);
   // A rejected candidate with a working fallback is NOT a user-facing error —

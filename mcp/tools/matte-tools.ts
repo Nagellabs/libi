@@ -109,8 +109,9 @@ export async function removeBackground(
         hint:
           "The local matte engine rides the libi-tracking Python env. Recover " +
           "with libi.verify_install (ok:true → retry this call); otherwise " +
-          "libi.get_install_plan (id 'libi-tracking'), run the install, " +
-          "verify, then retry — or offer the paid fal path.",
+          "libi.get_install_plan (mcpId 'libi-tracking'), get the user's OK on the " +
+          "~2 GB / ~10-20 min cost, then libi.install_tracking_engine, then " +
+          "libi.verify_install, then retry — or offer the paid fal path.",
       },
     };
   }

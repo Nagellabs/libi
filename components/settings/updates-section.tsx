@@ -159,6 +159,9 @@ function BlockedCard({ blocked }: { blocked: BlockedShellUpdate }) {
 function sourceLabel(source: string): string {
   if (source === "user") return "installed by in-app update";
   if (source === "bundled") return "bundled with the desktop app";
+  // Was "development checkout" for this case too, which is what an
+  // `npx @nagellabs/libi` user — the README's primary install path — saw.
+  if (source === "npm") return "installed from npm";
   return "development checkout";
 }
 

@@ -12,8 +12,10 @@ libi's EXISTING compositing. Never write custom compositing code for this.
 
 > **Engine install:** if `libi.remove_background` returns
 > `dependency_not_ready` / `tracking_engine_not_installed`, follow the
-> libi-tracking install plan (`libi.get_install_plan` with id `libi-tracking`,
-> then `libi.verify_install` until `ok:true`, then retry) — or offer the paid
+> libi-tracking install plan (`libi.get_install_plan` with
+> `mcpId: "libi-tracking"`, then — after disclosing ~10–20 min / ~2 GB on the
+> user's machine and getting approval — `libi.install_tracking_engine`, then
+> `libi.verify_install` until `ok:true`, then retry) — or offer the paid
 > fal path if the user prefers not to wait.
 
 ## Route the request (decide FIRST)

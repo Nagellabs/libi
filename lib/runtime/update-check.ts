@@ -130,6 +130,12 @@ export function classifyUpdate(args: {
   latest: LatestManifest | null;
   shellApi: ShellApiRange | null;
   updatesSupported: boolean;
+  /**
+   * Version of the snapshot inside the desktop app, when the shell publishes
+   * it. See the `latest <= bundled` branch below. Null/absent means "unknown"
+   * and changes nothing.
+   */
+  bundledVersion?: string | null;
   now?: number;
 }): UpdateStatus {
   const checkedAt = args.now ?? Date.now();
@@ -142,6 +148,17 @@ export function classifyUpdate(args: {
   if (!args.updatesSupported) return { ...base, state: "unsupported" };
   if (!args.currentVersion || !args.latest) return { ...base, state: "unknown" };
   if (!isNewer(args.latest.version, args.currentVersion)) {
+    return { ...base, state: "up-to-date" };
+  }
+  // Newer than what is RUNNING, but not newer than what this .app already
+  // carries. Downloading it from npm would fetch ~1.3 GB of something that is
+  // already on disk, and the loader would pick the bundled copy anyway.
+  //
+  // Since the A0b fix this is mostly self-correcting — bundled gets selected,
+  // so `currentVersion` becomes the higher number and the check above catches
+  // it. Stating it explicitly is what keeps that true if selection changes
+  // again: the two rules would otherwise disagree silently.
+  if (args.bundledVersion && !isNewer(args.latest.version, args.bundledVersion)) {
     return { ...base, state: "up-to-date" };
   }
   // Newer — but is it runnable HERE?
@@ -309,6 +326,7 @@ export async function checkForRuntimeUpdate(
     latest,
     shellApi: current.shellApi,
     updatesSupported: true,
+    bundledVersion: current.bundledVersion,
     now,
   });
 

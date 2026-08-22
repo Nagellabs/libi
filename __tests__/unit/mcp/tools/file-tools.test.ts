@@ -267,3 +267,54 @@ describe("uploadFile", () => {
     expect(row?.folderId).toBe(folder.id);
   });
 });
+
+/**
+ * B3 — a file's category used to be decided by the client's `Content-Type`
+ * and nothing else.
+ *
+ * Found on 2026-08-21 while reproducing QA-O0 against the running server: a
+ * direct `POST /api/upload` with no content type (curl's default is
+ * `application/octet-stream`) landed a 3s `.m4a` as `type: "other"`. Nothing
+ * probed it either, because the ffprobe gate keys off the category — so it
+ * also arrived with `mediaDuration: null` and `hasAudio: false`.
+ *
+ * The UI path was never affected: the browser sets a real type before posting.
+ * This only ever bit scripts, curl, and anything driving the API directly.
+ */
+describe("categorizeFileType — falling back to the filename", () => {
+  // THE regression this change most needs to not have. A caller that labelled
+  // its file correctly must keep exactly the category it had before.
+  it("never lets the filename override a real content type", () => {
+    expect(categorizeFileType("video/mp4", "song.mp3")).toBe("video");
+    expect(categorizeFileType("image/png", "clip.mov")).toBe("image");
+    expect(categorizeFileType("audio/wav", "photo.png")).toBe("audio");
+    expect(categorizeFileType("application/pdf", "movie.mp4")).toBe("document");
+  });
+
+  it("uses the extension when the content type says only 'bytes'", () => {
+    expect(categorizeFileType("application/octet-stream", "tone.m4a")).toBe("audio");
+    expect(categorizeFileType("application/octet-stream", "clip.mp4")).toBe("video");
+    expect(categorizeFileType(null, "photo.jpg")).toBe("image");
+    expect(categorizeFileType("", "Inter.ttf")).toBe("font");
+  });
+
+  it("handles a content type carrying parameters", () => {
+    expect(categorizeFileType("application/octet-stream; charset=binary", "a.wav")).toBe("audio");
+  });
+
+  it("stays 'other' for an extension it does not recognise", () => {
+    expect(categorizeFileType("application/octet-stream", "archive.xyz")).toBe("other");
+    expect(categorizeFileType(null, "notes.tar.gz")).toBe("other");
+  });
+
+  // A dotfile is not an extension, and neither is a bare name.
+  it("does not read a bare name or a dotfile as an extension", () => {
+    expect(categorizeFileType(null, "README")).toBe("other");
+    expect(categorizeFileType(null, "mp4")).toBe("other");
+  });
+
+  it("is unchanged when no filename is supplied at all", () => {
+    expect(categorizeFileType("application/octet-stream")).toBe("other");
+    expect(categorizeFileType(null)).toBe("other");
+  });
+});

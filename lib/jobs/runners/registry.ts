@@ -16,6 +16,7 @@ import { extraAnalysisModelRunner } from "@/lib/jobs/runners/extra-analysis-mode
 import { remoteFetchRunner } from "@/lib/jobs/runners/remote-fetch";
 import { matteGenRunner } from "@/lib/jobs/runners/matte-gen";
 import { runtimeUpdateRunner } from "@/lib/jobs/runners/runtime-update";
+import { trackingEngineInstallRunner } from "@/lib/jobs/runners/tracking-engine-install";
 import { devSlowRunner } from "@/lib/jobs/runners/dev-slow";
 import { onboardingPieceRunner } from "@/lib/jobs/runners/onboarding-piece";
 
@@ -88,6 +89,7 @@ export function registerBuiltinRunners(): void {
     remoteFetchRunner,
     matteGenRunner,
     runtimeUpdateRunner,
+    trackingEngineInstallRunner,
     onboardingPieceRunner,
     devSlowRunner,
   ]) {

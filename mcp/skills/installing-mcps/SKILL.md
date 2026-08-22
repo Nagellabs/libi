@@ -13,7 +13,7 @@ The install plan is the single source of truth. This skill is the generic wrappe
 
 ## INSTALL flow
 
-1. **Signal start.** Call `libi.update_dep_status({ mcpId, status: "installing" })` immediately. This flips the UI badge to "Installing…" so the user knows work is underway.
+1. **Signal start.** Call `libi.update_dep_status({ mcpId, status: "installing" })` immediately. This flips the UI badge to "Installing…" so the user knows work is underway. It records status only — no `update_dep_status` call ever installs anything; the plan's install steps do that.
 
 2. **Fetch the plan.**
 
@@ -23,7 +23,7 @@ The install plan is the single source of truth. This skill is the generic wrappe
 
    Read the entire plan before acting. It specifies exact tool calls, shell commands, model sizes, and consent checkpoints. The plan is the authority — this skill is only the driver.
 
-3. **Follow the plan step-by-step.** Use your native Bash tool for shell commands the plan asks you to run; use Read / Write for files. Keep the user informed at meaningful checkpoints (e.g. "Downloading model weights (~480 MB)…", "uv sync complete"). Do not narrate every sub-step.
+3. **Follow the plan step-by-step.** Use your native Bash tool for shell commands the plan asks you to run; use Read / Write for files. Some plans install through a dedicated tool instead of shell commands — e.g. `libi-tracking` installs via `libi.install_tracking_engine` — and when the plan names such a tool, call it; do not improvise the install by hand. Keep the user informed at meaningful checkpoints (e.g. "Downloading model weights (~480 MB)…", "uv sync complete"). Do not narrate every sub-step.
 
 4. **On success — mark installed and verify.**
 

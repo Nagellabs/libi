@@ -212,9 +212,58 @@ export async function duplicateFile(params: DuplicateFileParams): Promise<ToolRe
 }
 
 /**
- * Maps a MIME content type to a general file category.
+ * Extensions worth trusting when the client's MIME type tells us nothing.
+ *
+ * Deliberately a short list of what libi actually works with, not an
+ * exhaustive mime database: a wrong guess here mislabels a user's file, and
+ * "other" is a safe, honest answer for anything not named.
  */
-export function categorizeFileType(contentType: string | null): string {
+const EXTENSION_CATEGORIES: Record<string, string> = {
+  mp4: "video", mov: "video", webm: "video", mkv: "video", avi: "video", m4v: "video",
+  mp3: "audio", wav: "audio", m4a: "audio", aac: "audio", flac: "audio", ogg: "audio", opus: "audio",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", svg: "image", heic: "image", avif: "image",
+  pdf: "document", txt: "document", md: "document", json: "document", csv: "document", srt: "document", vtt: "document",
+  ttf: "font", otf: "font", woff: "font", woff2: "font",
+};
+
+/**
+ * A content type that carries no information. `application/octet-stream` is
+ * what curl, `fetch` with a Blob, and most scripts send when nobody set one —
+ * it means "bytes", not "unknown binary format we should respect".
+ */
+function isUninformative(contentType: string | null): boolean {
+  if (!contentType) return true;
+  const t = contentType.split(";")[0].trim().toLowerCase();
+  return t === "" || t === "application/octet-stream" || t === "binary/octet-stream";
+}
+
+/**
+ * Maps a file to a general category.
+ *
+ * The client's MIME type is the PRIMARY signal and is never second-guessed:
+ * a file the caller labelled correctly keeps exactly the category it had
+ * before this function learned about filenames. That is the regression this
+ * most needs to not have.
+ *
+ * The filename is a FALLBACK, consulted only when the content type carries no
+ * information. Found on 2026-08-21: a direct `POST /api/upload` with no
+ * content type — curl's default is `application/octet-stream` — landed a 3s
+ * `.m4a` as `type: "other"`, which then meant nothing probed it either,
+ * because the ffprobe gate keys off the category. The UI path was never
+ * affected; it sets a real type in the browser.
+ */
+export function categorizeFileType(
+  contentType: string | null,
+  filename?: string | null,
+): string {
+  if (isUninformative(contentType)) {
+    const ext = filename?.split(".").pop()?.toLowerCase();
+    if (ext && ext !== filename?.toLowerCase()) {
+      const guess = EXTENSION_CATEGORIES[ext];
+      if (guess) return guess;
+    }
+    return "other";
+  }
   if (!contentType) return "other";
   if (contentType.startsWith("image/")) return "image";
   if (contentType.startsWith("video/")) return "video";
@@ -361,7 +410,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
   let resolvedWidth = mediaWidth;
   let resolvedHeight = mediaHeight;
   let probedVideoCodec: string | undefined;
-  const category = categorizeFileType(contentType);
+  const category = categorizeFileType(contentType, sanitizedFilename);
   const needsProbe =
     category === "video"
       ? resolvedHasAudio === undefined || resolvedHasAlpha === undefined

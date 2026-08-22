@@ -32,6 +32,10 @@ describe("Runner mcpToolId coverage", () => {
       music_model_download: makeMcpToolId("libi", "libi.music_download_model"),
       tts_model_download: makeMcpToolId("libi", "libi.tts_download_model"),
       extra_analysis_model: makeMcpToolId("libi", "libi.extra_analysis_model"),
+      tracking_engine_install: makeMcpToolId(
+        "libi",
+        "libi.install_tracking_engine",
+      ),
       remote_fetch: makeMcpToolId("libi", "libi.import_remote_files"),
       dev_slow: makeMcpToolId("libi", "libi.dev_slow_job"),
     };

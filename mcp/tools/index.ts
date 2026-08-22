@@ -37,6 +37,7 @@ export {
   listIdentityCandidates,
   pickCandidate,
   refineTrackWithSam2,
+  installTrackingEngine,
   verifyInstall,
   verifyTrackedOverlay,
 } from "./tracking-tools";

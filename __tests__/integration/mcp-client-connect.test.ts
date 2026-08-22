@@ -66,6 +66,20 @@ describe("MCP client → libi server", () => {
     expect(toolNames).toContain("libi.get_version");
     expect(toolNames).toContain("libi.list_jobs");
 
+    // The tracking-engine installer must be agent-reachable over tools/list —
+    // before it existed, an agent hitting tracking_engine_not_installed had
+    // no tool that actually ran the install (B0). Its `force` knob must
+    // survive the Zod→JSON-schema conversion too.
+    expect(toolNames).toContain("libi.install_tracking_engine");
+    const installTool = result.tools.find(
+      (t) => t.name === "libi.install_tracking_engine",
+    );
+    const installProps = (installTool!.inputSchema.properties ?? {}) as Record<
+      string,
+      unknown
+    >;
+    expect(installProps).toHaveProperty("force");
+
     // libi.list_jobs exists so an agent can discover work it has no jobId for —
     // the situation that made it report "nothing has been downloaded" over a
     // running 6 GB download (session 9c3ce4d0). Every filter must actually reach

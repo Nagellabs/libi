@@ -63,6 +63,11 @@ assertions:
   the cost ($0.14/second per `get_pricing`) rather than spending silently.
   (Under this harness the agent is pre-authorized, so USING it is not a
   failure — failing to disclose it would be.)
-- If the engine was not installed, it followed the install-plan loop
-  (`libi.get_install_plan` → `libi.verify_install`) or offered alternatives —
-  it did not spin on retries.
+- If the engine was not installed, it followed the install-plan loop to a tool
+  that can actually close it (`libi.get_install_plan` → cost disclosure →
+  `libi.install_tracking_engine` → `libi.verify_install`) or offered
+  alternatives — it did not spin on retries, and it did not mistake
+  `libi.update_dep_status` for something that installs. (Under this harness the
+  install tool refuses with `test_mode_no_real_install`; handling that honestly
+  is the pass. The dedicated coverage is
+  `using-object-tracking/03-engine-install-loop-closes`.)

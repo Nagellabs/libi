@@ -25,7 +25,9 @@ export function trackingNotInstalledError(): TrackingNotInstalled {
     data: {
       hint:
         "The libi-tracking engine is not installed yet. Call libi.get_install_plan " +
-        "for libi-tracking and run the install, then libi.verify_install, then retry.",
+        "(mcpId 'libi-tracking') and follow it — disclose the ~2 GB / ~10-20 min cost and get " +
+        "the user's OK, then call libi.install_tracking_engine (it runs the real install " +
+        "as a background job), then libi.verify_install, then retry.",
       installPlanPath: "mcp/bundled-mcps/plans/libi-tracking.md",
     },
   };

@@ -26,7 +26,7 @@ let dto: RuntimeUpdateDto;
 
 function baseDto(): RuntimeUpdateDto {
   return {
-    current: { version: "0.1.0", source: "bundled", shellApiVersion: 1 },
+    current: { version: "0.1.0", source: "bundled", shellApiVersion: 1, bundledVersion: null },
     shellApi: { min: 1, max: 1 },
     update: {
       state: "update-available",

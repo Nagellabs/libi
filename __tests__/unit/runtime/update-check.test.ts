@@ -22,6 +22,7 @@ const CURRENT: CurrentRuntime = {
   shellApiVersion: 1,
   source: "bundled",
   shellApi: { min: 1, max: 1 },
+  bundledVersion: null,
   updatesSupported: true,
 };
 
@@ -338,5 +339,112 @@ describe("describeCurrentRuntime", () => {
     });
     expect(c.version).toBeNull();
     expect(c.shellApi).toBeNull();
+  });
+});
+
+/**
+ * B2b — don't fetch what the shell already ships.
+ *
+ * libi versions the shell and the runtime independently, so a shell update
+ * can raise the BUNDLED runtime above whatever npm last advertised. Fetching
+ * it then downloads ~1.3 GB of something already on disk, and the loader
+ * picks the bundled copy regardless.
+ *
+ * Since the A0b fix this is mostly self-correcting — bundled gets selected,
+ * so `currentVersion` becomes the higher number. Stating it explicitly is
+ * what keeps the two rules from disagreeing silently if selection changes.
+ */
+describe("classifyUpdate — a runtime the .app already carries", () => {
+  const shellApi = { min: 1, max: 1 };
+
+  it("reports up-to-date when latest is not newer than bundled", () => {
+    const s = classifyUpdate({
+      currentVersion: "0.1.1",
+      latest: { version: "0.1.3", shellApiVersion: 1 },
+      shellApi,
+      updatesSupported: true,
+      bundledVersion: "0.1.3",
+    });
+    expect(s.state).toBe("up-to-date");
+  });
+
+  it("still offers a runtime genuinely newer than bundled", () => {
+    const s = classifyUpdate({
+      currentVersion: "0.1.3",
+      latest: { version: "0.1.4", shellApiVersion: 1 },
+      shellApi,
+      updatesSupported: true,
+      bundledVersion: "0.1.3",
+    });
+    expect(s.state).toBe("update-available");
+  });
+
+  // An older shell does not publish the bundled version. "Unknown" must
+  // change nothing — never be read as "everything is already bundled".
+  it("behaves exactly as before when the shell publishes no bundled version", () => {
+    const s = classifyUpdate({
+      currentVersion: "0.1.1",
+      latest: { version: "0.1.3", shellApiVersion: 1 },
+      shellApi,
+      updatesSupported: true,
+      bundledVersion: null,
+    });
+    expect(s.state).toBe("update-available");
+  });
+});
+
+/**
+ * B6 — an `npx` user was told they run a "development checkout".
+ *
+ * `RuntimeSource` had only bundled | user | dev, so anything not packaged
+ * fell to "dev", which Settings renders as "development checkout". Confirmed
+ * RENDERED in an npx instance on 2026-08-21 — the install path the README
+ * leads with.
+ *
+ * The signal is structural, not npm-internals sniffing: every npm install
+ * (global, local, or the `_npx` cache) sits under a `node_modules` directory,
+ * and a git checkout never does.
+ */
+describe("describeCurrentRuntime — telling npm installs from a checkout", () => {
+  const base = { env: {}, isPackaged: false };
+
+  it("calls an npx install what it is", () => {
+    const r = describeCurrentRuntime({
+      ...base,
+      cwd: "/Users/x/.npm/_npx/30d11906cd2a8c8a/node_modules/@nagellabs/libi",
+    });
+    expect(r.source).toBe("npm");
+  });
+
+  it("calls a global or local npm install the same thing", () => {
+    expect(
+      describeCurrentRuntime({ ...base, cwd: "/usr/local/lib/node_modules/@nagellabs/libi" }).source,
+    ).toBe("npm");
+    expect(
+      describeCurrentRuntime({ ...base, cwd: "/Users/x/proj/node_modules/@nagellabs/libi" }).source,
+    ).toBe("npm");
+  });
+
+  it("still calls a working tree a dev checkout", () => {
+    expect(describeCurrentRuntime({ ...base, cwd: "/Users/x/Documents/dev/libi" }).source).toBe("dev");
+  });
+
+  // A directory that merely CONTAINS the string must not match — this is a
+  // path-segment test, not a substring one.
+  it("does not match a directory that only looks like node_modules", () => {
+    expect(
+      describeCurrentRuntime({ ...base, cwd: "/Users/x/my-node_modules-backup/libi" }).source,
+    ).toBe("dev");
+  });
+
+  // The packaged shell's own answer must be untouched, and so must the rule
+  // that decides who gets in-app updates.
+  it("leaves the packaged shell and updatesSupported alone", () => {
+    const r = describeCurrentRuntime({ env: {}, isPackaged: true, cwd: "/Applications/Libi.app" });
+    expect(r.source).toBe("bundled");
+    expect(r.updatesSupported).toBe(true);
+    expect(
+      describeCurrentRuntime({ ...base, cwd: "/x/node_modules/@nagellabs/libi" }).updatesSupported,
+    ).toBe(false);
   });
 });

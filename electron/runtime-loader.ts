@@ -480,6 +480,17 @@ export interface ResolveRuntimeResult {
   runtime: LoadedRuntime | null;
   /** Every candidate that was tried and refused, in order. For the splash. */
   rejections: RuntimeInspection[];
+  /**
+   * Version of the snapshot inside this `.app`, whether or not it won.
+   *
+   * The runtime cannot see this: it knows what it is, not what it was chosen
+   * over. Two things need it — pruning staged runtimes that can never be
+   * selected again (they are ~1.3 GB each and bundled outranks them), and
+   * telling the user which runtime is actually live when a staged one has
+   * been superseded. Null when the bundled snapshot could not be inspected
+   * at all, which is a broken install, not a normal state.
+   */
+  bundledVersion: string | null;
 }
 
 /**
@@ -498,7 +509,7 @@ export function resolveRuntime(opts: ResolveRuntimeOptions): ResolveRuntimeResul
 
   if (!opts.isPackaged) {
     log("runtime-loader: unpackaged — the working tree is the runtime, not loading a snapshot");
-    return { runtime: null, rejections };
+    return { runtime: null, rejections, bundledVersion: null };
   }
 
   const abi = opts.abi ?? process.versions.modules;
@@ -534,11 +545,15 @@ export function resolveRuntime(opts: ResolveRuntimeOptions): ResolveRuntimeResul
   // Candidates that fail inspection are rejections (a damaged or incompatible
   // runtime, which the splash reports). A valid candidate that merely loses the
   // comparison is NOT a rejection — nothing is wrong with it.
-  const usable = candidates
-    .map((candidate) => ({
-      ...candidate,
-      inspection: inspectRuntimePrefix(candidate.prefix, inspectOpts),
-    }))
+  const inspected = candidates.map((candidate) => ({
+    ...candidate,
+    inspection: inspectRuntimePrefix(candidate.prefix, inspectOpts),
+  }));
+  // Recorded whether or not it wins — see `ResolveRuntimeResult.bundledVersion`.
+  const bundledVersion =
+    inspected.find((c) => c.source === "bundled")?.inspection.version ?? null;
+
+  const usable = inspected
     .filter(({ inspection, source, prefix }) => {
       if (inspection.ok) return true;
       log(
@@ -609,10 +624,11 @@ export function resolveRuntime(opts: ResolveRuntimeOptions): ResolveRuntimeResul
         api,
       },
       rejections,
+      bundledVersion,
     };
   }
 
-  return { runtime: null, rejections };
+  return { runtime: null, rejections, bundledVersion };
 }
 
 /**

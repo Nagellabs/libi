@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {
   pruneUserRuntimes,
+  pruneRuntimesBelowBundled,
   runningRuntimePrefix,
   DEFAULT_KEEP,
 } from "@/lib/runtime/runtime-prune";
@@ -12,6 +13,10 @@ import {
   listInstalledRuntimes,
   pendingRuntimeVersion,
 } from "@/lib/runtime/installed-runtimes";
+import {
+  SHELL_API_MIN_ENV,
+  SHELL_API_MAX_ENV,
+} from "@/lib/runtime/current-runtime";
 
 let root: string;
 
@@ -131,5 +136,105 @@ describe("listInstalledRuntimes / pendingRuntimeVersion", () => {
 
   it("has nothing pending when no runtime has been fetched", () => {
     expect(pendingRuntimeVersion("0.1.0", root)).toBeNull();
+  });
+});
+
+describe("pendingRuntimeVersion — only counts what the shell would load (B2d)", () => {
+  // The stamps in `makeRuntime` default to shellApiVersion 1 / abi "135";
+  // this gate mirrors the loader's gates 2–3, so a shell accepting [1, 2]
+  // on ABI 135 loads the defaults.
+  const gate = { [SHELL_API_MIN_ENV]: "1", [SHELL_API_MAX_ENV]: "2" };
+  const abi = "135";
+
+  it("does not report a runtime staged for a NEWER shell (api above max)", () => {
+    // The B2d bug: Settings said "restart to update", the loader refused the
+    // candidate (`api-too-new`), and the restart silently changed nothing.
+    makeRuntime("0.1.5", { shellApiVersion: 3 });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+  });
+
+  it("does not report a runtime below the shell's minimum", () => {
+    makeRuntime("0.1.5", { shellApiVersion: 0 });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+  });
+
+  it("reports an in-range newer runtime exactly as before — boundaries inclusive", () => {
+    // The loader accepts min <= api <= max, so both ends must count.
+    makeRuntime("0.1.5", { shellApiVersion: 2 });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBe("0.1.5");
+    fs.rmSync(path.join(root, "0.1.5"), { recursive: true, force: true });
+    makeRuntime("0.1.6", { shellApiVersion: 1 });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBe("0.1.6");
+  });
+
+  it("gates nothing when the shell has published no range (npx / dev / old shell)", () => {
+    // No env vars → no loader whose verdict could be contradicted. Hiding a
+    // pending runtime because the env happened to be missing would be a worse
+    // bug than the one the gate fixes.
+    makeRuntime("0.1.5", { shellApiVersion: 99, abi: "999" });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: {}, abi })).toBe("0.1.5");
+  });
+
+  it("gates nothing on half a range", () => {
+    makeRuntime("0.1.5", { shellApiVersion: 99 });
+    expect(
+      pendingRuntimeVersion("0.1.3", root, {
+        env: { [SHELL_API_MIN_ENV]: "1" },
+        abi,
+      }),
+    ).toBe("0.1.5");
+    expect(
+      pendingRuntimeVersion("0.1.3", root, {
+        env: { [SHELL_API_MAX_ENV]: "2" },
+        abi,
+      }),
+    ).toBe("0.1.5");
+  });
+
+  it("treats a missing or non-integer shellApiVersion as not loadable", () => {
+    // The loader rejects such a stamp outright ("api-not-an-integer"), so
+    // counting it pending would re-open the bug in a different costume.
+    makeRuntime("0.1.5", { shellApiVersion: undefined });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+    fs.rmSync(path.join(root, "0.1.5"), { recursive: true, force: true });
+    makeRuntime("0.1.5", { shellApiVersion: "one" });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+    // …but without a published range it still counts, exactly as today.
+    expect(pendingRuntimeVersion("0.1.3", root, { env: {}, abi })).toBe("0.1.5");
+  });
+
+  it("treats a wrong or missing ABI as not loadable", () => {
+    makeRuntime("0.1.5", { abi: "999" });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+    fs.rmSync(path.join(root, "0.1.5"), { recursive: true, force: true });
+    makeRuntime("0.1.5", { abi: undefined });
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBeNull();
+  });
+
+  it("falls through to an older IN-RANGE candidate when the newest is refusable", () => {
+    // The loader picks the newest candidate it accepts, not newest-or-nothing
+    // — so must this. `installed[0]`-only would answer null here and undersell
+    // a restart that genuinely applies 0.1.5.
+    makeRuntime("0.1.6", { shellApiVersion: 5 }); // staged for a future shell
+    makeRuntime("0.1.5"); // loadable, and newer than current
+    expect(pendingRuntimeVersion("0.1.3", root, { env: gate, abi })).toBe("0.1.5");
+    // …and the fallback candidate still has to beat the RUNNING version.
+    expect(pendingRuntimeVersion("0.1.5", root, { env: gate, abi })).toBeNull();
+  });
+
+  it("pruning still sees runtimes the shell cannot load", () => {
+    // The gate lives in pendingRuntimeVersion, NOT in listInstalledRuntimes:
+    // pruning exists to reclaim exactly these unloadable directories (B2a/B2b)
+    // and must never have them hidden from it.
+    makeRuntime("0.1.5", { shellApiVersion: 99, abi: "999" });
+    makeRuntime("0.1.4", { shellApiVersion: 99, abi: "999" });
+    expect(listInstalledRuntimes(root).map((r) => r.version)).toEqual([
+      "0.1.5",
+      "0.1.4",
+    ]);
+    const surplus = pruneUserRuntimes({ rootDir: root, keep: 1 });
+    expect(surplus.removed.map((p) => path.basename(p))).toEqual(["0.1.4"]);
+    const below = pruneRuntimesBelowBundled({ bundledVersion: "0.1.6", rootDir: root });
+    expect(below.removed.map((p) => path.basename(p))).toEqual(["0.1.5"]);
   });
 });
