@@ -310,6 +310,39 @@ function shapeOf(
   };
 }
 
+describe("release.yml gates vs test.yml: the same run, or a weaker one", () => {
+  // The release gates exist to re-run ordinary CI before anything publishes.
+  // On 2026-08-28 they were WEAKER than it: gates ran
+  // `node scripts/ensure-native-modules.js`, which only ever repairs
+  // better-sqlite3, while test.yml ran `npm rebuild better-sqlite3 node-pty`.
+  // `npm ci --ignore-scripts` leaves pty.node uncompiled, so the ws-origin and
+  // ws-port suites did not fail — they failed to LOAD, taking two files' worth
+  // of tests out of the run. test.yml's own comment predicts this exactly, and
+  // the first release dispatch hit it anyway, because nothing tied the two
+  // files together.
+  const testWf = load(
+    readFileSync(path.join(ROOT, ".github/workflows/test.yml"), "utf8"),
+  ) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+
+  const nativeStep = (steps: Array<Record<string, unknown>>) =>
+    steps.find((st) => String(st.name ?? "").toLowerCase().includes("native"));
+
+  it("builds the same native modules before running the same suite", () => {
+    const gatesStep = nativeStep(stepsOf("gates"));
+    const ciStep = nativeStep(Object.values(testWf.jobs)[0].steps);
+    expect(gatesStep, "release.yml gates has no native-module step").toBeDefined();
+    expect(ciStep, "test.yml has no native-module step").toBeDefined();
+    expect(String(gatesStep!.run).trim()).toBe(String(ciStep!.run).trim());
+  });
+
+  it("rebuilds node-pty specifically, whichever way that step is written", () => {
+    // Named because it is the one whose absence is silent: a missing
+    // better-sqlite3 SIGKILLs the worker loudly, a missing pty.node just
+    // removes two files from the count.
+    expect(String(nativeStep(stepsOf("gates"))!.run)).toContain("node-pty");
+  });
+});
+
 describe("release.yml: skip_electron (the npm-only run)", () => {
   it("is offered as an input at all", () => {
     const inputs = (

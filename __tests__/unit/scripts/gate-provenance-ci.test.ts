@@ -54,10 +54,30 @@ describe("gatesPassedOnAncestor", () => {
   it("rejects an unrelated commit rather than reaching for a merge base", () => {
     // The empty tree is a real object in every git repo and is not an ancestor
     // of anything — a cheap way to assert the ancestry check is actually run.
+    // `git commit-tree` needs an author identity, and a CI runner has none —
+    // this test passed on every dev machine and failed on the first CI run
+    // ("empty ident name (for <runner@...>)"). Supplied here rather than
+    // configured in the workflow so the test is hermetic: it must not depend
+    // on the ambient git config of whoever runs it, and a contributor with no
+    // global user.name is in exactly the runner's position.
+    //
+    // Identity ONLY. No GIT_AUTHOR_DATE / GIT_COMMITTER_DATE: this object is
+    // dangling and thrown away, but the repo's rule against synthesised commit
+    // dates has no carve-out worth arguing about, and the test does not need
+    // one.
     const emptyTreeCommit = execFileSync(
       "git",
       ["commit-tree", "-m", "unrelated", "4b825dc642cb6eb9a060e54bf8d69288fbee4904"],
-      { encoding: "utf8" },
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "libi tests",
+          GIT_AUTHOR_EMAIL: "tests@libi.invalid",
+          GIT_COMMITTER_NAME: "libi tests",
+          GIT_COMMITTER_EMAIL: "tests@libi.invalid",
+        },
+      },
     ).trim();
     const r = gatesPassedOnAncestor(emptyTreeCommit);
     expect(r.ok).toBe(false);

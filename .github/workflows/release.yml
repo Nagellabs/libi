@@ -117,8 +117,21 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      # better-sqlite3 ships no prebuild for every runner/Node pairing, and
+      # `npm ci --ignore-scripts` above leaves it unbuilt regardless. node-pty
+      # is in the same boat: its install script is what compiles pty.node, so
+      # with scripts skipped the ws-origin/ws-port suites fail to even LOAD
+      # ("Failed to load native module: pty.node") and take two files' worth of
+      # tests out of the run with them.
+      #
+      # This mirrors test.yml deliberately. It read
+      # `node scripts/ensure-native-modules.js` until 2026-08-28, which only
+      # ever repairs better-sqlite3 — so the release gates were strictly weaker
+      # than the ordinary CI they are supposed to re-run, and the very first
+      # dispatch failed on exactly the two suites test.yml's comment predicts.
+      # If one of these grows a step, so does the other.
       - name: Build native modules for this Node
-        run: node scripts/ensure-native-modules.js
+        run: npm rebuild better-sqlite3 node-pty
 
       - name: Lint
         run: npm run lint
