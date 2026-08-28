@@ -235,6 +235,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.npm.outputs.tag }}
+          # Full history, not the default depth-1. `--skip-checks` is honoured
+          # only against LIBI_GATES_SHA, and proving it is an ancestor needs the
+          # ancestor to BE here. At depth 1 the checkout holds the tagged commit
+          # and nothing behind it, so the gates commit is simply absent and the
+          # build dies with "<sha> is not a commit in this checkout" — which it
+          # did, on the first real release, about a minute after npm had already
+          # published and become irreversible.
+          #
+          # `publish` keeps the shallow checkout on purpose: it downloads
+          # artifacts and cuts a release at a tag, and needs no ancestry.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -298,6 +309,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.npm.outputs.tag }}
+          # Full history, not the default depth-1. `--skip-checks` is honoured
+          # only against LIBI_GATES_SHA, and proving it is an ancestor needs the
+          # ancestor to BE here. At depth 1 the checkout holds the tagged commit
+          # and nothing behind it, so the gates commit is simply absent and the
+          # build dies with "<sha> is not a commit in this checkout" — which it
+          # did, on the first real release, about a minute after npm had already
+          # published and become irreversible.
+          #
+          # `publish` keeps the shallow checkout on purpose: it downloads
+          # artifacts and cuts a release at a tag, and needs no ancestry.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:

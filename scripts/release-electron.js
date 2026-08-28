@@ -220,16 +220,38 @@ if (publishRelease && spawnSync("gh", ["auth", "status"], { cwd: ROOT }).status 
 }
 
 // ── 3. registry preflight ──────────────────────────────────────────────────
+// A publish's WRITES land before its READS do, and this check used to be a
+// single `npm view` that failed closed on the gap. release-npm.js learned that
+// on 2026-08-14 and polls; this script did not, and on 2026-08-28 the Windows
+// shell — which starts seconds after the npm job finishes — asked the registry
+// for a version it had just published and was told "(nothing)". The release
+// died on a race, with npm already irreversible.
+//
+// Poll the PER-VERSION document rather than the packument: `npm view pkg@x.y.z`
+// is what `--from-registry` actually needs to resolve, it is authoritative, and
+// it updates first. The aggregated packument can lag it by minutes.
 const version = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf-8")).version;
-const served = capture("npm", ["view", "@nagellabs/libi", "version"]);
-if (served !== version) {
-  console.error(
-    `❌ package.json says ${version} but the registry serves ${served ?? "(nothing)"}.\n` +
-      "   The shell bundles a PUBLISHED runtime (--from-registry). Publish first\n" +
-      "   (npm run release:npm), or check out the tag that produced the published\n" +
-      "   version.",
+const REGISTRY_ATTEMPTS = 20;
+const REGISTRY_DELAY_MS = 15_000;
+let served = null;
+for (let attempt = 1; attempt <= REGISTRY_ATTEMPTS; attempt++) {
+  served = capture("npm", ["view", `@nagellabs/libi@${version}`, "version"]);
+  if (served === version) break;
+  if (attempt === REGISTRY_ATTEMPTS) {
+    console.error(
+      `❌ package.json says ${version} but after ${REGISTRY_ATTEMPTS} attempts the\n` +
+        `   registry still does not serve it (last answer: ${served ?? "(nothing)"}).\n` +
+        "   The shell bundles a PUBLISHED runtime (--from-registry). Publish first\n" +
+        "   (npm run release:npm), or check out the tag that produced the published\n" +
+        "   version.",
+    );
+    process.exit(1);
+  }
+  console.log(
+    `  [${attempt}/${REGISTRY_ATTEMPTS}] registry does not serve ${version} yet ` +
+      "— waiting for the CDN…",
   );
-  process.exit(1);
+  spawnSync(process.execPath, ["-e", `setTimeout(()=>{}, ${REGISTRY_DELAY_MS})`]);
 }
 console.log(`\n📦 building the shell around published @nagellabs/libi@${version}`);
 

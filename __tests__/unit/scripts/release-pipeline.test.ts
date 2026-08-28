@@ -310,6 +310,66 @@ function shapeOf(
   };
 }
 
+describe("the two failures of the first real release — 2026-08-28", () => {
+  // Both happened AFTER npm had published 0.1.5 and become irreversible, which
+  // is what makes them worth pinning rather than just fixing: everything in the
+  // shell jobs runs on the far side of the point of no return.
+
+  it("checks the shell jobs out with the history the gates check needs", () => {
+    // `--skip-checks` is honoured only against LIBI_GATES_SHA, and proving that
+    // commit is an ancestor requires it to be IN the checkout. actions/checkout
+    // defaults to fetch-depth 1, so at the tag the gates commit is simply
+    // absent: "4b38bb73 is not a commit in this checkout", about a minute after
+    // the npm publish.
+    for (const shell of ["mac", "windows"]) {
+      const co = stepsOf(shell).find((st) =>
+        String(st.uses ?? "").includes("actions/checkout"),
+      );
+      const w = (co?.with ?? {}) as Record<string, unknown>;
+      expect(w.ref, `${shell} must build the published tag`).toBeDefined();
+      expect(
+        String(w["fetch-depth"]),
+        `${shell} needs full history for the gates-provenance check`,
+      ).toBe("0");
+    }
+  });
+
+  it("lets publish stay shallow — it needs no ancestry", () => {
+    // Stated so the rule above reads as a requirement of the gates check rather
+    // than a blanket "deepen every checkout".
+    const co = stepsOf("publish").find((st) =>
+      String(st.uses ?? "").includes("actions/checkout"),
+    );
+    expect((co?.with as Record<string, unknown>)?.["fetch-depth"]).toBeUndefined();
+  });
+
+  it("polls the registry instead of failing closed on the publish lag", () => {
+    // A publish's writes land before its reads do. The Windows shell starts
+    // seconds after the npm job and asked for a version it had just published,
+    // and was told "(nothing)". release-npm.js had already learned this on
+    // 2026-08-14 and polls; this script had not, so one script carried the
+    // lesson and its sibling died of it.
+    const src = readFileSync(
+      path.join(ROOT, "scripts/release-electron.js"),
+      "utf8",
+    );
+    const preflight = src.slice(
+      src.indexOf("── 3. registry preflight"),
+      src.indexOf("── 4."),
+    );
+    expect(preflight, "registry preflight section not found").not.toBe("");
+    // Per-VERSION document, not the aggregated packument: it is what
+    // --from-registry must resolve, and it updates first.
+    expect(preflight).toMatch(/npm", \[\s*"view",\s*`@nagellabs\/libi@\$\{version\}`/);
+    expect(preflight).toContain("REGISTRY_ATTEMPTS");
+    // A single attempt is the bug; anything that cannot retry re-introduces it.
+    const attempts = Number(
+      /REGISTRY_ATTEMPTS = (\d+)/.exec(preflight)?.[1] ?? "1",
+    );
+    expect(attempts).toBeGreaterThan(1);
+  });
+});
+
 describe("release.yml gates vs test.yml: the same run, or a weaker one", () => {
   // The release gates exist to re-run ordinary CI before anything publishes.
   // On 2026-08-28 they were WEAKER than it: gates ran
