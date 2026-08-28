@@ -792,15 +792,28 @@ function materializeNextExternals(root) {
   // privilege ordinary users do not have). That is safe precisely because the
   // relocation this check guards against cannot happen on Windows — NSIS does
   // not store reparse points, so the farm never survives packaging and is
-  // always rebuilt in place at first boot. The check still binds macOS, where
+  // always rebuilt in place at first boot. The rule still binds macOS, where
   // the farm DOES ship inside the signed .app and an absolute target really
   // would dangle on every user's disk.
-  if (absolute.length > 0 && process.platform !== "win32") {
+  //
+  // Asserted per platform rather than skipped, and kept identical to check (9)
+  // in `verifyRuntimeBundle` — these two ran on the same artifact and disagreed
+  // once already: relaxing only this one let a Windows build materialise a
+  // perfectly good junction farm and then fail its own verification a second
+  // later.
+  const wantAbsolute = process.platform === "win32";
+  const wrongKind = wantAbsolute
+    ? links.filter((l) => !path.isAbsolute(fs.readlinkSync(l))).map((l) => path.relative(root, l))
+    : absolute;
+  if (wrongKind.length > 0) {
     throw new Error(
-      `[runtime-bundle] ${absolute.length} externals symlink(s) have ABSOLUTE targets: ` +
-        `${absolute.join(", ")}.\n` +
-        "   This bundle is copied into Libi.app/Contents/Resources/, so an absolute target\n" +
-        "   points at this build machine and would dangle on every user's disk.",
+      `[runtime-bundle] ${wrongKind.length} externals symlink(s) have ` +
+        `${wantAbsolute ? "RELATIVE" : "ABSOLUTE"} targets: ${wrongKind.join(", ")}.\n` +
+        (wantAbsolute
+          ? "   Windows builds this farm from junctions, which are absolute by construction,\n" +
+            "   so a relative one means something bypassed the junction branch."
+          : "   This bundle is copied into Libi.app/Contents/Resources/, so an absolute target\n" +
+            "   points at this build machine and would dangle on every user's disk."),
     );
   }
   if (dangling.length > 0) {
@@ -1165,14 +1178,32 @@ function verifyRuntimeBundle({ outDir, treeRoot = ROOT, abi: expectedAbi } = {})
         "every route that touches an externalised package would 500. Rebuild the bundle",
     };
   }
+  // The RELATIVE requirement is a macOS/Linux invariant, not a universal one.
+  // Windows builds the farm from junctions (see lib/install/next-externals.ts:
+  // a "dir" symlink there needs a privilege ordinary users do not have), and a
+  // junction is absolute by definition — Node resolves the target to an
+  // absolute path whatever you pass it. That is safe on Windows for the reason
+  // the relative rule exists elsewhere: the farm is only relative so it can
+  // survive being COPIED into Libi.app/Contents/Resources/, and on Windows NSIS
+  // stores no reparse points, so nothing survives packaging and every install
+  // rebuilds the farm in place at first boot.
+  //
+  // So assert the platform's actual invariant rather than switching the check
+  // off: absolute-and-resolvable on Windows, relative-and-resolvable elsewhere.
+  // A dangling link is refused on both.
+  const wantAbsolute = process.platform === "win32";
   for (const link of farmLinks) {
     const rel = path.relative(root, link);
-    if (path.isAbsolute(fs.readlinkSync(link))) {
+    const isAbsolute = path.isAbsolute(fs.readlinkSync(link));
+    if (isAbsolute !== wantAbsolute) {
       return {
         ok: false,
-        reason:
-          `externals symlink ${rel} has an ABSOLUTE target — it points at this build machine ` +
-          "and would dangle once the bundle is copied into Libi.app/Contents/Resources/",
+        reason: wantAbsolute
+          ? `externals symlink ${rel} has a RELATIVE target — Windows builds this farm from ` +
+            "junctions, which are absolute by construction, so a relative one means something " +
+            "bypassed materializeNextExternals"
+          : `externals symlink ${rel} has an ABSOLUTE target — it points at this build machine ` +
+            "and would dangle once the bundle is copied into Libi.app/Contents/Resources/",
       };
     }
     try {

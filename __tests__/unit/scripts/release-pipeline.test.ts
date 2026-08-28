@@ -50,6 +50,47 @@ const read = (f: string) => {
 const npmWf = read("release-npm.yml");
 const elWf = read("release-electron.yml");
 
+// The split's promise is "a shell fix costs a dispatch, not a version". That
+// held only for bugs fixable BEFORE the npm publish until `build_ref` existed:
+// every job pinned its checkout to `v<version>`, so a defect in
+// `release-electron.js` or `build-runtime-bundle.js` discovered afterwards
+// could not be rebuilt without minting a new version to move the tag. It cost
+// a Windows shell build on 0.1.9 to notice. The checkout supplies only build
+// TOOLING — the runtime comes from npm by version — so overriding it is sound.
+describe("release-electron can build from a ref newer than the tag", () => {
+  const inputs = elWf.on.workflow_dispatch.inputs ?? {};
+  const elText = readFileSync(path.join(ROOT, ".github/workflows/release-electron.yml"), "utf8");
+
+  it("takes a build_ref input, defaulting to blank", () => {
+    expect(Object.keys(inputs)).toContain("build_ref");
+    expect((inputs.build_ref as { default?: string }).default ?? "").toBe("");
+  });
+
+  it("a blank build_ref falls back to the version's tag", () => {
+    expect(elText).toContain('[ -n "$ref" ] || ref="v$v"');
+  });
+
+  it("every checkout uses the resolved ref, not the tag directly", () => {
+    const viaRef = elText.match(/ref: \$\{\{ needs\.resolve\.outputs\.ref \}\}/g) ?? [];
+    const viaTag = elText.match(/ref: \$\{\{ needs\.resolve\.outputs\.tag \}\}/g) ?? [];
+    expect(viaRef.length, "gates, mac, windows and publish all check out the ref").toBe(4);
+    expect(viaTag.length, "a checkout left pinned to the tag would ignore build_ref").toBe(0);
+  });
+
+  it("resolve exposes the ref it computed", () => {
+    const outputs = (elWf.jobs.resolve as { outputs?: Record<string, string> }).outputs ?? {};
+    expect(Object.keys(outputs)).toContain("ref");
+  });
+
+  it("but the GitHub Release is still cut against the real tag", () => {
+    // Whatever tooling built the shells, the Release must name the VERSION's
+    // tag — that is what electron-updater's feeds and the site's stable
+    // download links hang off.
+    expect(elText).toContain("--tag=${{ needs.resolve.outputs.tag }}");
+  });
+});
+
+
 /** Look a job up in whichever of the two workflows defines it. */
 const job = (name: string) => {
   const j = npmWf.jobs[name] ?? elWf.jobs[name];

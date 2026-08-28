@@ -34,6 +34,10 @@ on:
         description: "Ship without the Windows installer"
         type: boolean
         default: false
+      build_ref:
+        description: "Commit/branch supplying the BUILD TOOLING (blank = the version's tag)"
+        type: string
+        default: ""
 
 concurrency:
   group: release-electron
@@ -55,6 +59,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
+      ref: ${{ steps.v.outputs.ref }}
     steps:
       - name: Resolve and verify it is actually published
         id: v
@@ -73,7 +78,24 @@ jobs:
           fi
           echo "version=$v"  >> "$GITHUB_OUTPUT"
           echo "tag=v$v"     >> "$GITHUB_OUTPUT"
-          echo "wrapping @nagellabs/libi@$v (tag v$v)"
+          # What the jobs actually CHECK OUT. Normally the tag; overridable
+          # because the checkout supplies only BUILD TOOLING — the runtime
+          # itself is fetched from npm by version (`--from-registry`), never
+          # from this tree. So a bug in `release-electron.js` or
+          # `build-runtime-bundle.js` found after the tag was cut can be fixed
+          # and rebuilt against the SAME published runtime, which is the whole
+          # point of taking the version as an input. Without this the split's
+          # promise — "a shell fix costs a dispatch, not a version" — held only
+          # for bugs that happened to be fixable before the npm publish.
+          # It cost a Windows build on 0.1.9 to notice.
+          #
+          # The gates job checks out this same ref and `release-electron.js
+          # --skip-checks` still proves the tested commit is an ancestor of what
+          # it builds, so an override is gated exactly as the tag is.
+          ref="${{ inputs.build_ref }}"
+          [ -n "$ref" ] || ref="v$v"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "wrapping @nagellabs/libi@$v (tag v$v), building from ref $ref"
 
   # ── the publishing window ────────────────────────────────────────────────
   # This workflow ends by publishing a GitHub Release, which is the moment
@@ -115,7 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - name: Record the tested commit
         id: sha
@@ -159,14 +181,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.ref }}
           # Full history, not the default depth-1. `--skip-checks` is honoured
           # only against LIBI_GATES_SHA, and proving that commit is an ancestor
           # needs the ancestor to BE here. At depth 1 the checkout holds the
-          # tagged commit and nothing behind it, so the gates commit is simply
+          # resolved commit and nothing behind it, so the gates commit is simply
           # absent and the build dies with "<sha> is not a commit in this
           # checkout" — which it did, on the first real release, a minute after
-          # npm had already published and become irreversible.
+          # npm had already published and become irreversible. (Gates check out
+          # the SAME ref, so the two are the same commit and the ancestry check
+          # is trivially satisfied — but only with real history present.)
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -248,7 +272,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.ref }}
           fetch-depth: 0   # same reason as mac, above
 
       - uses: actions/setup-node@v4
@@ -296,7 +320,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.resolve.outputs.tag }}
+          ref: ${{ needs.resolve.outputs.ref }}
 
       - uses: actions/download-artifact@v4
         with:
