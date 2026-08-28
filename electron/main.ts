@@ -475,6 +475,22 @@ app.on("ready", async () => {
   }
   process.env.LIBI_SHELL_API_MIN = String(MIN_SHELL_API_VERSION);
   process.env.LIBI_SHELL_API_MAX = String(MAX_SHELL_API_VERSION);
+  // Analytics opt-in, the same one `bin/libi.js` sets for the npx launcher.
+  // WITHOUT IT THE DESKTOP APP SENDS NOTHING: `resolveAnalyticsEnabled` gates on
+  // this flag, so `startAnalyticsDrain()` returns immediately and every event
+  // the funnel enqueues sits in `analytics_queue` forever, at `attempts = 0`,
+  // never even tried. Found on the v0.1.8 dmg with nine undelivered rows and
+  // no `analytics_first_hit` milestone, while the npx instance on the same
+  // machine had drained an identical funnel clean — the two launchers were the
+  // whole difference. A packaged shell is by definition a real install, so
+  // unlike bin/libi.js there is no dev-checkout branch to make here; `??=`
+  // keeps an explicit export (a contributor forcing it off) winning.
+  //
+  // The flag is read through `resolveAnalyticsEnabled(env)`, which indexes a
+  // PASSED object rather than writing `process.env.NEXT_PUBLIC_…` inline, so
+  // Next's build-time NEXT_PUBLIC_ substitution cannot fold it and a runtime
+  // assignment here genuinely reaches the server bundle.
+  process.env.NEXT_PUBLIC_LIBI_ANALYTICS ??= "1";
   // A rejected candidate with a working fallback is NOT a user-facing error —
   // the app works. It is logged and nothing else.
   for (const r of resolved.rejections) {

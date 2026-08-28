@@ -42,6 +42,7 @@ import path from "path";
 import next from "next";
 
 import { ensureNextExternalSymlinks } from "@/lib/install/next-externals";
+import { isWindows } from "@/lib/platform";
 
 export interface StartNextServerOptions {
   /**
@@ -116,12 +117,36 @@ export async function startNextServer(
   // shipped farm was missing or wrong and we just wrote into the (signed,
   // possibly read-only) app bundle to repair it: worth seeing in the log
   // rather than discovering as a codesign failure later.
-  const externals = ensureNextExternalSymlinks(path.join(dir, ".next"));
+  //
+  // Wrapped so the failure is not silent. When this threw on Windows (the
+  // privileged-symlink bug fixed in lib/install/next-externals.ts) the shell
+  // logged "about to startNextServer" and then NOTHING — the process died
+  // between two lines, leaving a splash screen that never resolves and no
+  // evidence of why. The throw is still fatal, and should be: a server that
+  // cannot resolve its externals 500s every route. It just says so first.
+  let externals: ReturnType<typeof ensureNextExternalSymlinks>;
+  try {
+    externals = ensureNextExternalSymlinks(path.join(dir, ".next"));
+  } catch (err) {
+    log(
+      `startNextServer: FATAL — could not materialise the Next.js externals farm at ` +
+        `${path.join(dir, ".next", "node_modules")}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    throw err;
+  }
+  // A non-zero `created` is a WARNING on macOS and NORMAL on Windows, and the
+  // line says which so nobody re-investigates the Windows case. NSIS stores no
+  // reparse points, so the farm materialised into the bundle at build time
+  // never reaches the installed tree — every Windows boot legitimately builds
+  // one, into a per-user directory that is neither signed nor read-only.
+  const expectedRepair = isWindows();
   log(
     `startNextServer: externals created=${externals.created.length} verified=${externals.verified.length}` +
-      (externals.created.length > 0
-        ? ` — WARNING: repaired ${externals.created.length} externals symlink(s) at boot; a packaged runtime should ship this farm already built`
-        : ""),
+      (externals.created.length === 0
+        ? ""
+        : expectedRepair
+          ? ` — built ${externals.created.length} externals junction(s) at boot, as Windows always must (NSIS does not ship the farm)`
+          : ` — WARNING: repaired ${externals.created.length} externals symlink(s) at boot; a packaged runtime should ship this farm already built`),
   );
 
   // `ready` is a manually-resolved deferred, created and assigned BEFORE

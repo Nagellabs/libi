@@ -563,7 +563,11 @@ export const ONBOARDING_PIECE_V1: OnboardingPieceDefinition = {
       rect: { x: 1010, y: 745, width: 460, height: 80 },
       z: 21,
       opacity: 1,
-      content: "Or download for Mac",
+      // Platform-neutral on purpose: the desktop app ships for Windows as
+      // well as macOS from v0.1.8, and this card is the first thing a
+      // Windows user sees. Kept to the same 19 characters as the string it
+      // replaced so it still fits the 460px pill beside the npx one.
+      content: "Or download the app",
       font: "48px Inter",
       color: "#cdd3de",
       align: "center",

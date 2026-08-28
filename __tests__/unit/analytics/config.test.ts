@@ -24,4 +24,21 @@ describe("resolveAnalyticsDebug", () => {
   it("is false in production installs", () => {
     expect(resolveAnalyticsDebug({ NODE_ENV: "production" })).toBe(false);
   });
+  // Without this opt-in a RELEASED build can never reach GA4 DebugView — every
+  // published artifact is built with NODE_ENV=production — and DebugView is the
+  // only view that shows a hit's parameters, so release-day QA could confirm
+  // that events arrived but never that they carried the right enums.
+  it("a released build opts in with LIBI_ANALYTICS_DEBUG=1", () => {
+    expect(
+      resolveAnalyticsDebug({ NODE_ENV: "production", LIBI_ANALYTICS_DEBUG: "1" }),
+    ).toBe(true);
+  });
+  it("only the exact value 1 opts in", () => {
+    expect(
+      resolveAnalyticsDebug({ NODE_ENV: "production", LIBI_ANALYTICS_DEBUG: "true" }),
+    ).toBe(false);
+    expect(resolveAnalyticsDebug({ NODE_ENV: "production", LIBI_ANALYTICS_DEBUG: "0" })).toBe(
+      false,
+    );
+  });
 });

@@ -25,9 +25,22 @@ export function resolveAnalyticsEnabled(env: EnvLike): boolean {
   return env.LIBI_ANALYTICS_DISABLED !== "1" && env.NEXT_PUBLIC_LIBI_ANALYTICS === "1";
 }
 
-/** debug_mode → GA4 DebugView; true only in `next dev` (sandbox), never packaged. */
+/** debug_mode → GA4 DebugView.
+ *
+ * On by default outside production, so a dev clone's events land in DebugView
+ * instead of the real reports. `LIBI_ANALYTICS_DEBUG=1` turns it on explicitly,
+ * and that opt-in is the ONLY way to inspect a RELEASED build: every artifact we
+ * publish is built with NODE_ENV=production, so without it a shipped install can
+ * never appear in DebugView — which is where a hit's full parameter payload is
+ * visible, and therefore the only place "the funnel sends the right enums" can
+ * actually be checked. Realtime shows that events arrived; it does not show what
+ * they carried. Release-day QA sets this on the QA instance and nowhere else.
+ *
+ * The cost of leaving it on is real, which is why it stays opt-in: GA4 excludes
+ * debug_mode hits from standard reports, so a user who set it would go
+ * uncounted. */
 export function resolveAnalyticsDebug(env: EnvLike): boolean {
-  return env.NODE_ENV !== "production";
+  return env.LIBI_ANALYTICS_DEBUG === "1" || env.NODE_ENV !== "production";
 }
 
 /** Process-resolved values for runtime use. */

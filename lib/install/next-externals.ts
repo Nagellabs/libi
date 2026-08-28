@@ -91,6 +91,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { isWindows } from "@/lib/platform";
+
 export interface ExternalSymlinkEntry {
   /** Path of the symlink, relative to `.next/node_modules/`. */
   link: string;
@@ -348,7 +350,40 @@ export function ensureNextExternalSymlinks(nextDir: string): EnsureResult {
     // target it resolves that probe against `process.cwd()` rather than
     // against the link's own directory — so it guesses "file" and produces
     // a symlink Windows won't traverse as a directory.
-    fs.symlinkSync(path.relative(linkDir, targetDir), linkPath, "dir");
+    //
+    // ...except that on Windows a `"dir"` symlink is a PRIVILEGED operation.
+    // Creating one needs SeCreateSymbolicLinkPrivilege, which an ordinary
+    // account does not hold and which UAC strips from an administrator's
+    // token unless Developer Mode is on. A JUNCTION is the unprivileged
+    // equivalent for directory targets and is what Windows gets instead.
+    //
+    // This is not a hypothetical. NSIS does not store symlinks, so unlike the
+    // signed `.app` — where the farm survives packaging and boot only
+    // verifies it — the Windows install arrives with NO farm and MUST build
+    // one at first boot. On v0.1.8 that meant libi did not start at all for a
+    // normal Windows user: `mkdirSync` succeeded, this line threw EPERM
+    // ("Administrator privilege required"), and the shell died between
+    // "about to startNextServer" and any further log line — a splash screen
+    // that never resolves and nothing to explain it. It reached QA green only
+    // because the QA box runs an ELEVATED administrator, which is precisely
+    // the privilege a real user lacks. Verified on that box under a
+    // trustlevel-0x20000 token: the `"dir"` symlink is refused and the
+    // junction is created, side by side.
+    //
+    // Junctions take an ABSOLUTE target (Node resolves the argument to one
+    // regardless), which costs nothing here: the only Windows farm that is
+    // ever USED is the one built in place at boot, in its final location.
+    // A farm baked at build time is stripped by NSIS before it can be moved
+    // anywhere, so there is no relocation for an absolute target to survive.
+    // `isWindows()` and not `process.platform === "win32"`: Turbopack folds
+    // that comparison against the BUILD machine and drops the dead branch, so
+    // a macOS-built runtime would ship a Windows shell that still takes the
+    // symlink path — the exact fix, deleted by the compiler. See lib/platform.ts.
+    if (isWindows()) {
+      fs.symlinkSync(targetDir, linkPath, "junction");
+    } else {
+      fs.symlinkSync(path.relative(linkDir, targetDir), linkPath, "dir");
+    }
     result.created.push(entry);
   }
 

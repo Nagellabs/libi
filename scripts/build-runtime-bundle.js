@@ -787,7 +787,15 @@ function materializeNextExternals(root) {
       dangling.push(path.relative(root, link));
     }
   }
-  if (absolute.length > 0) {
+  // Windows builds junctions, which are absolute by definition (see the long
+  // note in lib/install/next-externals.ts: a `"dir"` symlink there needs a
+  // privilege ordinary users do not have). That is safe precisely because the
+  // relocation this check guards against cannot happen on Windows — NSIS does
+  // not store reparse points, so the farm never survives packaging and is
+  // always rebuilt in place at first boot. The check still binds macOS, where
+  // the farm DOES ship inside the signed .app and an absolute target really
+  // would dangle on every user's disk.
+  if (absolute.length > 0 && process.platform !== "win32") {
     throw new Error(
       `[runtime-bundle] ${absolute.length} externals symlink(s) have ABSOLUTE targets: ` +
         `${absolute.join(", ")}.\n` +
@@ -803,7 +811,7 @@ function materializeNextExternals(root) {
   }
 
   log(
-    `externals farm: ${links.length} relative symlink(s) materialised ` +
+    `externals farm: ${links.length} ${process.platform === "win32" ? "junction" : "relative symlink"}(s) materialised ` +
       `(${result.created.length} created, ${result.verified.length} already correct)`,
   );
 }
