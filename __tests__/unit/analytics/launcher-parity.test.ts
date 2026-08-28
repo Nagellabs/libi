@@ -26,20 +26,22 @@ describe("analytics opt-in parity across launchers", () => {
     expect(read("bin/libi.js")).toContain(`env.${FLAG} =`);
   });
 
-  it("the Electron shell sets the flag too", () => {
-    expect(read("electron/main.ts")).toContain(`process.env.${FLAG} ??= "1"`);
+  it("the Electron shell sets the flag too, and only for a real install", () => {
+    expect(read("electron/main.ts")).toContain(`if (!isDev) process.env.${FLAG} ??= "1"`);
   });
 
-  it("the shell sets it where the packaged Next server will see it", () => {
+  it("the shell sets it BEFORE it requires any runtime module", () => {
+    // `ANALYTICS_ENABLED` is a module-level const, evaluated the first time
+    // `lib/analytics/config` is loaded. Assigning after something has already
+    // pulled that module in is a no-op that still reads as a fix — so the
+    // assignment must precede `resolveRuntime`, which is what first requires
+    // runtime code (`shell-api`, and everything it reaches).
     const src = read("electron/main.ts");
-    // The dev path returns before the runtime block, so the assignment has to
-    // sit after `resolveRuntime` and before `startNextServer` — landing it
-    // above the dev early-return would switch analytics on in dev checkouts,
-    // which is the policy bin/libi.js exists to enforce.
     const resolveAt = src.indexOf("const resolved = resolveRuntime(");
     const flagAt = src.indexOf(`process.env.${FLAG} ??=`);
     expect(resolveAt).toBeGreaterThan(-1);
-    expect(flagAt).toBeGreaterThan(resolveAt);
+    expect(flagAt).toBeGreaterThan(-1);
+    expect(flagAt).toBeLessThan(resolveAt);
   });
 
   it("the flag the launchers set is the one the gate reads", () => {

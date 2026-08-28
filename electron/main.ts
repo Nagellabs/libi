@@ -84,6 +84,31 @@ process.on("unhandledRejection", (reason) => {
 const isDev = !app.isPackaged;
 mainSyncLog(`main.ts: isDev=${isDev} __dirname=${__dirname}`);
 
+// Analytics opt-in, the same one `bin/libi.js` sets for the npx launcher.
+// WITHOUT IT THE DESKTOP APP SENDS NOTHING: `resolveAnalyticsEnabled` gates on
+// this flag, so `startAnalyticsDrain()` returns immediately and every event the
+// funnel enqueues sits in `analytics_queue` forever at `attempts = 0`, never
+// even tried. Found on the v0.1.8 dmg — nine undelivered rows and no
+// `analytics_first_hit` milestone — beside an npx instance on the same machine
+// whose identical funnel had drained clean. The launcher was the whole
+// difference.
+//
+// Set HERE, before any runtime module is required, and not next to the other
+// `process.env` publishing further down. `ANALYTICS_ENABLED` is a module-level
+// const evaluated the first time `lib/analytics/config` is loaded, so an
+// assignment made after something has already pulled that module in is a no-op
+// that still reads as a fix. Nothing above this line touches runtime code.
+//
+// `!isDev` rather than relying on the dev path returning before the later
+// block: in a dev checkout `bin/libi.js` owns this decision (and runs Next in
+// its own process anyway), and the policy is that a checkout does not report.
+// `??=` keeps an explicit export winning either way.
+//
+// The flag survives to the server because `resolveAnalyticsEnabled(env)` INDEXES
+// a passed object instead of writing `process.env.NEXT_PUBLIC_…` inline, which
+// is the form Next substitutes at build time.
+if (!isDev) process.env.NEXT_PUBLIC_LIBI_ANALYTICS ??= "1";
+
 // Opt-in escape hatch for unstable GPU environments (some headless / remote /
 // virtualized dev hosts SIGTRAP the renderer on a GPU-process crash). Set
 // LIBI_DISABLE_GPU=1 to force software compositing (SwiftShader). WebGL still
@@ -475,22 +500,6 @@ app.on("ready", async () => {
   }
   process.env.LIBI_SHELL_API_MIN = String(MIN_SHELL_API_VERSION);
   process.env.LIBI_SHELL_API_MAX = String(MAX_SHELL_API_VERSION);
-  // Analytics opt-in, the same one `bin/libi.js` sets for the npx launcher.
-  // WITHOUT IT THE DESKTOP APP SENDS NOTHING: `resolveAnalyticsEnabled` gates on
-  // this flag, so `startAnalyticsDrain()` returns immediately and every event
-  // the funnel enqueues sits in `analytics_queue` forever, at `attempts = 0`,
-  // never even tried. Found on the v0.1.8 dmg with nine undelivered rows and
-  // no `analytics_first_hit` milestone, while the npx instance on the same
-  // machine had drained an identical funnel clean — the two launchers were the
-  // whole difference. A packaged shell is by definition a real install, so
-  // unlike bin/libi.js there is no dev-checkout branch to make here; `??=`
-  // keeps an explicit export (a contributor forcing it off) winning.
-  //
-  // The flag is read through `resolveAnalyticsEnabled(env)`, which indexes a
-  // PASSED object rather than writing `process.env.NEXT_PUBLIC_…` inline, so
-  // Next's build-time NEXT_PUBLIC_ substitution cannot fold it and a runtime
-  // assignment here genuinely reaches the server bundle.
-  process.env.NEXT_PUBLIC_LIBI_ANALYTICS ??= "1";
   // A rejected candidate with a working fallback is NOT a user-facing error —
   // the app works. It is logged and nothing else.
   for (const r of resolved.rejections) {

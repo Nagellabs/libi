@@ -1,6 +1,6 @@
 ---
 name: windows-qa
-description: Build, install and verify a libi desktop build on the Windows QA VM. Use before shipping anything Windows-facing, or whenever a build must be put in front of a real Windows user. Encodes the traps that have each cost hours — npm ci vs npm install, CI=1, processes dying with the SSH session, and what "installed" actually means.
+description: Build, install and verify a libi desktop build on the Windows QA VM. Use before shipping anything Windows-facing, or whenever a build must be put in front of a real Windows user. Encodes the traps that have each cost hours — npm ci vs npm install, CI=1, processes dying with the SSH session, what "installed" actually means, and the big one — the VM is an elevated administrator, so an elevated pass proves nothing about a real user.
 ---
 
 # Windows QA — driving a test build onto the VM
@@ -11,6 +11,8 @@ evidence.
 **Connection details, the VM's name and its firewall rules are NOT in this
 repo** — they are in `docs-local/release/windows-qa-runbook.md`, which also
 carries the fuller narrative. Read that first; this file is the rule list.
+
+**Start with "The VM is an ADMINISTRATOR" below.** It is the newest rule and the only one that has let a broken build reach users.
 
 ## Getting the code there
 
@@ -118,6 +120,44 @@ reporting a headless check as if it were a launch.
 
 Server-side paths can be exercised headlessly by running the packaged runtime
 without Electron under an S4U task.
+
+## The VM is an ADMINISTRATOR. Real users are not.
+
+Added 2026-08-28, after this cost a shipped release.
+
+`libiqa` is in `Administrators`, an SSH session on the box is **elevated**, and
+its token holds `SeCreateSymbolicLinkPrivilege`. A real user's token does not:
+UAC strips it from administrators and ordinary accounts never had it, unless
+Developer Mode is on (it is off there, and off by default everywhere).
+
+v0.1.8 shipped a Windows build that **did not start for any ordinary user** and
+passed every QA pass on this box, because the whole product's boot depends on
+creating a directory symlink and this account is allowed to. The app died
+between two log lines with no error: a splash screen that never resolved.
+
+So: **an elevated pass is not evidence for anything privilege-sensitive** —
+symlinks, junctions, writes outside the user profile, service registration,
+firewall rules. Re-run those under a genuinely unprivileged principal:
+
+```powershell
+schtasks /create /tn Probe /tr "C:\path\to\probe.exe" /sc once /st 00:00 ^
+  /ru "NT AUTHORITY\LOCAL SERVICE" /f
+schtasks /run /tn Probe
+schtasks /query /tn Probe /v /fo LIST | findstr "Last Result"
+```
+
+LOCAL SERVICE needs no password, so this puts no credential on the box. Give it
+a working directory it can actually read — it cannot see `libiqa`'s profile, so
+copy any binary it needs to something like `C:\junctest\`.
+
+**Do NOT use `runas /trustlevel:0x20000` for this.** It is a SAFER *restricted*
+token, not a UAC-filtered one, and it fails in ways real users never see —
+junctions it creates are structurally perfect and permanently unreadable, which
+looked exactly like a second product bug and cost an hour to disprove.
+
+The GUI half still needs a screen. Launching over SSH gives an elevated token,
+so "it booted over SSH" says nothing about a real first run; do that check at
+an RDP session.
 
 ## Two habits that prevent most of the above
 
