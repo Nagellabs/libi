@@ -387,7 +387,9 @@ run(
 // three artifacts a user and an updater need actually exist.
 let assets;
 if (!isMacTarget) {
-  const installer = path.join(ROOT, "release", `Libi Setup ${version}.exe`);
+  // Must match `nsis.artifactName` in electron-builder.yml exactly — see the
+  // comment there for why the name may not contain spaces. Pinned by a test.
+  const installer = path.join(ROOT, "release", `Libi-Setup-${version}.exe`);
   // electron-updater on Windows resolves `latest.yml` and the blockmap beside
   // it. Ship the installer alone and every Windows user gets a shell whose
   // update check fails silently, forever — confirmed live on Linux, where a
@@ -422,7 +424,7 @@ if (!isMacTarget) {
 
   const mb = (f) => (statSync(f).size / 1024 / 1024).toFixed(1);
   console.log(
-    `\n✔ release/Libi Setup ${version}.exe (${mb(installer)} MB), its blockmap and\n` +
+    `\n✔ release/Libi-Setup-${version}.exe (${mb(installer)} MB), its blockmap and\n` +
       "  latest.yml are present, plus release/Libi-Setup-x64.exe — the same bytes\n" +
       "  under a version-free name, so libi-site can link to\n" +
       "  releases/latest/download/Libi-Setup-x64.exe permanently.\n" +

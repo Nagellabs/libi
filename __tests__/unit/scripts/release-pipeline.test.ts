@@ -280,6 +280,28 @@ describe("release-github.js: the one outward step", () => {
     expect(r.out).toContain("deliberately shipping WITHOUT: win");
   });
 
+  it("refuses a feed that points at a file the asset set does not contain", () => {
+    // The failure v0.1.8 actually shipped. `latest.yml` named
+    // Libi-Setup-0.1.8.exe while the artifact was "Libi Setup 0.1.8.exe", so
+    // the feed published, the release looked complete, and electron-updater
+    // got a 404 — permanently, not just for that version. The
+    // feed-is-present check above went green through all of it.
+    const dir = "__tests__/fixtures/release-assets/dangling-feed";
+    const r = run([`--assets=${dir}`, "--dry-run"]);
+    expect(r.status).toBe(1);
+    expect(r.out).toContain("points at files that are not in the asset set");
+    expect(r.out).toContain("Libi-Setup-0.0.0.exe");
+  });
+
+  it("refuses any asset name containing a space", () => {
+    // The whole class, not the one instance: GitHub rewrites spaces to dots at
+    // UPLOAD time, so a name that is self-consistent on disk can still stop
+    // matching its feed once published.
+    const dir = "__tests__/fixtures/release-assets/dangling-feed";
+    const r = run([`--assets=${dir}`, "--dry-run"]);
+    expect(r.status).toBe(1);
+  });
+
   it("accepts a complete two-platform asset set", () => {
     const dir = "__tests__/fixtures/release-assets/both";
     const r = run([`--assets=${dir}`, "--dry-run"]);
@@ -307,8 +329,28 @@ describe("the Windows installer ships under a second, version-free name", () => 
     // name across versions breaks blockmap differential downloads.
     expect(SRC).toContain('copyFileSync(installer, stableInstaller)');
     expect(SRC).toContain('"Libi-Setup-x64.exe"');
-    // The versioned original must still be the thing latest.yml describes.
-    expect(SRC).toContain('`Libi Setup ${version}.exe`');
+    // The versioned original must still be the thing latest.yml describes, and
+    // it must carry NO SPACES — GitHub rewrites those to dots on upload while
+    // electron-builder writes hyphens into the feed, and v0.1.8 shipped with
+    // the two disagreeing. This name has to equal `nsis.artifactName`.
+    expect(SRC).toContain('`Libi-Setup-${version}.exe`');
+    expect(SRC).not.toContain('`Libi Setup ${version}.exe`');
+  });
+
+  it("looks the installer up under the name electron-builder actually writes", () => {
+    // Two files have to agree on one string. If electron-builder.yml is changed
+    // alone the build fails at verification with "missing artifacts"; if the
+    // script is changed alone it looks for a file that was never produced.
+    const ebYaml = readFileSync(path.join(ROOT, "electron-builder.yml"), "utf8");
+    const artifactName = /^\s*artifactName:\s*"([^"]+)"/m.exec(
+      ebYaml.slice(ebYaml.indexOf("\nnsis:")),
+    )?.[1];
+    expect(artifactName, "nsis.artifactName is not set in electron-builder.yml").toBe(
+      "Libi-Setup-${version}.exe",
+    );
+    expect(artifactName).not.toContain(" ");
+    // The script's template literal uses the same text with JS interpolation.
+    expect(SRC).toContain(`\`${artifactName}\``);
   });
 
   it("attaches both names to the release", () => {

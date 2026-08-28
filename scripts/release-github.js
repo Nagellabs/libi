@@ -22,7 +22,7 @@
  * --allow-missing=mac|win rather than letting an absent file pass unnoticed.
  */
 const { spawnSync } = require("node:child_process");
-const { existsSync, readdirSync, statSync } = require("node:fs");
+const { existsSync, readdirSync, readFileSync, statSync } = require("node:fs");
 const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -86,6 +86,55 @@ if (missingFeeds.length > 0) {
       "   updater permanently — not just for this version.\n\n" +
       "   If a platform was deliberately not built, say so:\n" +
       `     node scripts/release-github.js --assets=${assetsDir} --allow-missing=${missingFeeds.map(([p]) => p).join(",")}`,
+  );
+  process.exit(1);
+}
+
+// A feed that EXISTS but points at a file that does not is worse than a missing
+// feed: the check above goes green, the release looks complete, and every
+// installed app on that platform gets a 404 forever. v0.1.8 shipped exactly
+// that — `latest.yml` named `Libi-Setup-0.1.8.exe` while the artifact on disk
+// was `Libi Setup 0.1.8.exe`, because electron-builder had no `nsis
+// .artifactName` and sanitized the two differently.
+//
+// Parsed with a regex rather than a YAML library on purpose: js-yaml is not a
+// direct dependency of this repo, and a release script is the last place to
+// add one. The shape here is fixed and simple — `url:` under `files:`.
+const feedTargets = [];
+for (const [platform, file] of Object.entries(FEEDS)) {
+  if (allowMissing.includes(platform)) continue;
+  const feed = found.find((f) => path.basename(f) === file);
+  if (!feed) continue;
+  for (const m of readFileSync(feed, "utf-8").matchAll(/^\s*-?\s*url:\s*(.+)$/gm)) {
+    feedTargets.push({ feed: file, name: m[1].trim().replace(/^["']|["']$/g, "") });
+  }
+}
+const danglingTargets = feedTargets.filter(
+  (t) => !found.some((f) => path.basename(f) === t.name),
+);
+if (danglingTargets.length > 0) {
+  console.error(
+    "❌ an update feed points at files that are not in the asset set:\n" +
+      danglingTargets.map((t) => `   - ${t.name}  (named by ${t.feed})`).join("\n") +
+      "\n\n   The feed would publish, the release would look complete, and every\n" +
+      "   installed app on that platform would get a 404 when it tried to\n" +
+      "   update — permanently, not just for this version.\n\n" +
+      "   Usually this means an artifactName and the feed disagree about\n" +
+      "   spaces; see the nsis block in electron-builder.yml.",
+  );
+  process.exit(1);
+}
+
+// GitHub rewrites spaces in an asset name at UPLOAD time (to dots), so a name
+// that is self-consistent locally can still stop matching its feed once it is
+// published. Refuse the whole class rather than the one instance.
+const spaced = found.filter((f) => path.basename(f).includes(" "));
+if (spaced.length > 0) {
+  console.error(
+    "❌ asset filenames must not contain spaces:\n" +
+      spaced.map((f) => `   - ${path.basename(f)}`).join("\n") +
+      "\n\n   GitHub rewrites spaces to dots on upload, so the published name\n" +
+      "   stops matching whatever the update feed calls it.",
   );
   process.exit(1);
 }

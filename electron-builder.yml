@@ -149,6 +149,28 @@ dmg:
   sign: true
 win:
   target: [nsis]
+nsis:
+  # WITHOUT THIS, electron-builder defaults to `${productName} Setup
+  # ${version}.exe` — "Libi Setup 0.1.8.exe", WITH SPACES — and two different
+  # sanitizations then disagree about what the file is called:
+  #
+  #   on disk            Libi Setup 0.1.8.exe   (spaces)
+  #   GitHub asset       Libi.Setup.0.1.8.exe   (spaces → dots, on upload)
+  #   latest.yml says    Libi-Setup-0.1.8.exe   (spaces → hyphens, by electron-builder)
+  #
+  # electron-updater reads latest.yml and fetches the name IT was given, so the
+  # download 404s and Windows auto-update is dead — permanently, not just for
+  # that version. v0.1.8 shipped exactly that and had to be repaired by renaming
+  # the published assets by hand.
+  #
+  # A name with no spaces cannot be mangled, so all three agree by construction.
+  # The mac side has always been safe for the same reason and not by luck:
+  # `dmg.artifactName` is pinned below, and the mac zip's default happens to
+  # contain no spaces either.
+  #
+  # `scripts/release-electron.js` looks the installer up by this exact name, and
+  # a test asserts the two still agree.
+  artifactName: "Libi-Setup-${version}.exe"
 linux:
   target: [AppImage, deb]
   category: "AudioVideo"
