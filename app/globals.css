@@ -247,6 +247,54 @@
   transform-origin: center;
 }
 
+/* "This session is working" beat, for the sidebar row.
+ *
+ * Opacity only. No transform, no box-shadow, no expanding ring — and that
+ * restraint is the whole point, because this mark has now rendered as a SQUARE
+ * twice, from two different techniques:
+ *
+ *   1. `animate-ping` scaled a filled box. A scaled element is promoted to its
+ *      own compositing layer and that layer rasterised without the
+ *      border-radius, so the halo was a hard-edged square.
+ *   2. Replacing it with a box-shadow ring moved the problem rather than fixing
+ *      it: a running animation still promotes the layer, and a shadow's corner
+ *      arc is derived from the border-radius — which `rounded-full` sets to
+ *      `calc(infinity * 1px)`, clamped to 2^24px. That value does not survive
+ *      the arc computation, so the ring squared off for part of the cycle.
+ *
+ * Both were invisible to `getComputedStyle`, which reported a correct radius
+ * throughout, and neither reproduced reliably in a screenshot — a paused
+ * animation is not composited the way a running one is, so freezing a frame to
+ * inspect it hides the very bug you are looking for.
+ *
+ * A plain opacity fade cannot fail this way: the element's shape is painted
+ * into its layer once from a `50%` radius and is never transformed, shadowed,
+ * or re-clipped. The dot is round in every frame by construction. It also
+ * turned out to be the half that actually carried the signal — the ring was
+ * legible in only two frames of the cycle and too faint against the sidebar to
+ * read as motion at 8px.
+ *
+ * 1.4s ease-in-out: alive, but slow enough that a column of busy rows does not
+ * strobe. */
+@keyframes libi-working-beat {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.libi-working-beat {
+  animation: libi-working-beat 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .libi-working-beat {
+    animation: none;
+  }
+}
+
+
 /* Export trigger button — gradient pill + one-shot hover sheen + inline
    progress fill (running). Shares the sheen/shimmer idiom with the in-dialog
    <ExportProgressBar> so the two read as one system. */

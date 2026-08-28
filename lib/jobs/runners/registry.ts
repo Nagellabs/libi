@@ -17,6 +17,7 @@ import { remoteFetchRunner } from "@/lib/jobs/runners/remote-fetch";
 import { matteGenRunner } from "@/lib/jobs/runners/matte-gen";
 import { runtimeUpdateRunner } from "@/lib/jobs/runners/runtime-update";
 import { trackingEngineInstallRunner } from "@/lib/jobs/runners/tracking-engine-install";
+import { agentInstallRunner } from "@/lib/jobs/runners/agent-install";
 import { devSlowRunner } from "@/lib/jobs/runners/dev-slow";
 import { onboardingPieceRunner } from "@/lib/jobs/runners/onboarding-piece";
 
@@ -90,6 +91,7 @@ export function registerBuiltinRunners(): void {
     matteGenRunner,
     runtimeUpdateRunner,
     trackingEngineInstallRunner,
+    agentInstallRunner,
     onboardingPieceRunner,
     devSlowRunner,
   ]) {

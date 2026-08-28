@@ -45,6 +45,7 @@
 
 import path from "node:path";
 import { getLibiBinDir, getLibiHome } from "@/lib/libi-home";
+import { isWindows } from "@/lib/platform";
 
 /** Root of every uv-managed artifact libi creates. */
 export function uvStateRoot(): string {
@@ -164,7 +165,7 @@ export function buildUvEnv(
     if (typeof env[key] !== "string") delete env[key];
   }
 
-  const pathSep = process.platform === "win32" ? ";" : ":";
+  const pathSep = isWindows() ? ";" : ":";
   env.PATH = `${getLibiBinDir()}${pathSep}${process.env.PATH ?? ""}`;
 
   Object.assign(env, uvEnvVars(), {

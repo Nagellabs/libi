@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSessionManager } from "@/lib/sessions/session-manager";
 import { formatFileSize } from "@/lib/utils/format";
 import { trackServerEvent } from "@/lib/analytics/server";
+import { markAnalyticsMilestoneOnce } from "@/lib/db/settings";
 import { serverLogger as logger } from "@/lib/logger";
 
 interface AttachmentInfo {
@@ -91,6 +92,23 @@ export async function POST(request: Request) {
     provider: sm.getSession(sessionId)?.agentId ?? "unknown",
     has_attachments: !!(attachments && attachments.length),
   });
+
+  // Funnel step 11 (Task 14): the first message this INSTALL ever sent —
+  // mark-once through the same primitive `POST /api/analytics/milestone`
+  // wraps for client callers (this route is already server-side, so it
+  // calls it directly rather than looping back through its own HTTP API —
+  // same pattern as `first_launch` in instrumentation.ts). Deliberately NOT
+  // `agent_message_sent` above: that fires every send, which would make this
+  // step a message counter instead of a funnel step. Wrapped — a DB hiccup
+  // here must never fail a send, same discipline as `markAgentConnected`
+  // (lib/sessions/session-manager.ts).
+  try {
+    if (markAnalyticsMilestoneOnce("first_message")) {
+      trackServerEvent("first_message_sent");
+    }
+  } catch {
+    // best-effort; never break the send path
+  }
 
   return NextResponse.json({ success: true });
 }

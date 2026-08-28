@@ -6,10 +6,20 @@ import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
 // denylist bypass (RC-C) compiles and runs attacker-controlled JS, the CSP
 // prevents it from opening a network connection to any host other than the
 // app's own origin — so it cannot exfiltrate data off-machine, MODULO the
-// three narrow, deliberate allowlist relaxations below (GA4, the marketing
-// site, Sentry), each scoped to one specific host we operate rather than an
+// two narrow, deliberate allowlist relaxations below (the marketing site,
+// Sentry), each scoped to one specific host we operate rather than an
 // arbitrary attacker target. Read those trade-off blocks before assuming
 // `'self'` is the whole story.
+//
+// GA4 analytics used to be a third relaxation here — script-src/connect-src/
+// img-src allowlisted the two GA4 web-stream hosts so client-side gtag.js
+// could run in the renderer. That transport is gone (see
+// lib/analytics/client.ts): the browser now POSTs same-origin to
+// `/api/analytics/event`, and only the Next server process — not the
+// renderer, so not subject to this CSP at all — talks to the analytics
+// endpoint, via lib/analytics/collect-url.ts. So this file no longer grants
+// a renderer-side denylist bypass any exfil path off-machine through
+// analytics; removing the allowlist was pure upside, not a trade-off.
 //
 // Several relaxations are REQUIRED for the app to function and must not be
 // removed:
@@ -25,23 +35,14 @@ import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
 //     `<embed type="application/pdf">` (asset-media-view.tsx); `'none'` blocks
 //     it. `'self'` still forbids cross-origin plugins.
 //
-// DELIBERATE TRADE-OFF (product decision): the GA4 analytics hosts below are
-// allowlisted in script-src / connect-src / img-src so client-side gtag.js
-// (`lib/analytics/client.ts`) works in packaged/npx builds. This narrowly
-// weakens the anti-exfil guarantee — a denylist-bypassing renderer script could
-// beacon data to Google's collect endpoints — but ONLY to those two Google
-// origins, not to an arbitrary attacker host. Analytics is opt-out (Settings →
-// Privacy). If the anti-exfil guarantee is later prioritised over client
-// analytics, drop these and rely on the server-side Measurement Protocol.
-//
-// SECOND DELIBERATE TRADE-OFF: the marketing site's origin is allowlisted in
+// FIRST DELIBERATE TRADE-OFF: the marketing site's origin is allowlisted in
 // connect-src so the libi Pro waitlist card (`lib/waitlist-api.ts`) can POST an
-// address the user typed to `/api/waitlist`. Same shape of weakening as the GA
-// entry — one known origin we operate, not an arbitrary host — and the endpoint
-// it reaches is write-only by construction (its service account holds
-// `datastore.entities.create` and nothing else), so it is not a read-back
-// channel. Without this the POST is blocked by the browser and the card can
-// only ever report "couldn't reach the server".
+// address the user typed to `/api/waitlist`. One known origin we operate, not
+// an arbitrary host — and the endpoint it reaches is write-only by
+// construction (its service account holds `datastore.entities.create` and
+// nothing else), so it is not a read-back channel. Without this the POST is
+// blocked by the browser and the card can only ever report "couldn't reach
+// the server".
 //
 // It tracks NEXT_PUBLIC_LIBI_SITE_URL rather than being hardcoded, so pointing
 // the app at a staging site does not require editing the CSP — the two would
@@ -51,7 +52,7 @@ const SITE_CONNECT = (
   process.env.NEXT_PUBLIC_LIBI_SITE_URL ?? "https://libi.nagellabs.com"
 ).replace(/\/+$/, "");
 
-// THIRD DELIBERATE TRADE-OFF: the Sentry ingest host is allowlisted in
+// SECOND DELIBERATE TRADE-OFF: the Sentry ingest host is allowlisted in
 // connect-src so client-side crash reports can leave the renderer at all.
 // Verified, not assumed: booting with Sentry forced on
 // (`scripts/dev-sentry-live.js --real-dsn`) and throwing a renderer error
@@ -61,7 +62,7 @@ const SITE_CONNECT = (
 // `lib/sentry/config.ts` and the Settings "Send crash reports" toggle promise.
 // After adding the host below, the same probe reached Sentry.
 //
-// Same shape of weakening as the two entries above — one host we operate (our
+// Same shape of weakening as the entry above — one host we operate (our
 // Sentry org), not an arbitrary attacker target — but the cost is real and
 // worth stating plainly: Sentry's ingest endpoint is designed to accept
 // arbitrary JSON envelopes from any client holding the (non-secret, publicly
@@ -94,9 +95,6 @@ const SENTRY_CONNECT = (() => {
 })();
 
 // The directives are emitted verbatim by `proxy.ts` on every app/page response.
-const GA_SCRIPT = "https://www.googletagmanager.com";
-const GA_CONNECT = "https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com";
-const GA_IMG = "https://www.google-analytics.com https://*.google-analytics.com";
 
 // Terminal-surface WebSocket (lib/terminal/ws-server.ts): PTY I/O rides a
 // dedicated `ws` server on a SEPARATE loopback port (App Router can't upgrade
@@ -113,17 +111,17 @@ const TERMINAL_WS = "ws://127.0.0.1:*";
 // SENTRY_CONNECT is "" when Sentry is disabled (see above) — filter it out
 // rather than interpolate directly, or the directive would carry a stray
 // trailing space.
-const CONNECT_SRC = ["'self'", TERMINAL_WS, GA_CONNECT, SITE_CONNECT, SENTRY_CONNECT]
+const CONNECT_SRC = ["'self'", TERMINAL_WS, SITE_CONNECT, SENTRY_CONNECT]
   .filter(Boolean)
   .join(" ");
 
 const CSP_DIRECTIVES: readonly string[] = [
   "default-src 'self'",
   `connect-src ${CONNECT_SRC}`,
-  `img-src 'self' data: blob: ${GA_IMG}`,
+  "img-src 'self' data: blob:",
   "media-src 'self' blob: data:",
   "style-src 'self' 'unsafe-inline'",
-  `script-src 'self' 'unsafe-eval' 'unsafe-inline' ${GA_SCRIPT}`,
+  "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
   "worker-src 'self' blob:",
   "frame-src 'self'",
   "object-src 'self'",

@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { getLibiModelsDir } from "@/lib/libi-home";
+import { isMac } from "@/lib/platform";
 
 /** ACE-Step git revision (SHA on github.com/ace-step/ACE-Step) — frozen by
  *  the gated Layer-2 E2E (LIBI_MUSIC_E2E=1). Bump only if that test fails
@@ -201,8 +202,7 @@ export function isAceStepModelInstalled(): boolean {
  *  seconds; other CPUs ~12x. Used to decide the confirm gate; the real
  *  job is cancellable regardless. */
 export function estimateGenerationSeconds(durationSeconds: number): number {
-  const appleSilicon =
-    process.platform === "darwin" && process.arch === "arm64";
+  const appleSilicon = isMac() && process.arch === "arm64";
   const factor = appleSilicon ? 0.6 : 12;
   return Math.ceil(durationSeconds * factor) + 8; // +cold model load
 }

@@ -1,0 +1,378 @@
+name: Release
+
+# The whole release, as one dispatch: npm, then the macOS shell and the Windows
+# shell in parallel, then ONE GitHub Release carrying both.
+#
+# Before this existed, a release was three manual acts on one maintainer's Mac —
+# a browser login for npm, a keychain profile for notarization, and a `gh`
+# upload — and only macOS ever got a desktop artifact. The parts that broke in
+# real windows were the manual ones: an expired npm token discovered after the
+# merge had gone public, and the notices/lockfile trap, twice.
+#
+# THREE SHAPES OF RUN, all from this one dispatch:
+#   default            npm + macOS shell + Windows shell + one GitHub Release
+#   skip_windows       the above without the Windows installer — the escape
+#                      hatch for a Windows build that fails on the day, so a
+#                      broken installer costs the installer and not the window
+#   skip_electron      npm ONLY: no shells, and deliberately no GitHub Release
+#                      (see the publish job for why an asset-less release is
+#                      actively harmful). For weeks where nothing under
+#                      electron/ changed and the new runtime reaches desktop
+#                      users through ~/.libi/runtime/ on its own.
+#
+# WHAT DOES NOT CHANGE: the gates. `release-npm.js` and `release-electron.js`
+# run here exactly as they run locally, same tests, same licence and notices
+# checks, same artifact verification. A CI release must not be a weaker release,
+# and the local path stays working as the escape hatch — signing failures on a
+# runner are miserable to debug at 11pm on a release day.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
+      dry_run:
+        description: "Rehearse everything, publish nothing"
+        type: boolean
+        default: false
+      skip_electron:
+        description: "npm only — no desktop shells, no GitHub Release"
+        type: boolean
+        default: false
+      skip_windows:
+        description: "Ship without the Windows installer (it is still unproven)"
+        type: boolean
+        default: false
+
+# Two releases at once would race on the version bump and the tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Least privilege by default; each job elevates only what it needs.
+permissions:
+  contents: read
+
+jobs:
+  # ── the publishing window ────────────────────────────────────────────────
+  # Everything downstream is outward-facing. This repo's work happens on
+  # weekdays and lands publicly on weekends, so the pipeline refuses to publish
+  # on a work day rather than relying on whoever clicks Run remembering.
+  #
+  # There is deliberately NO override input: a bypass anyone can tick is not a
+  # policy. Changing the window means editing this file, which is a considered
+  # act with a diff. A dry run rehearses any day, because it publishes nothing.
+  window:
+    name: Publishing window
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to publish on a work day
+        run: |
+          day=$(date -u +%u)   # 1=Mon … 5=Fri, 6=Sat, 7=Sun
+          echo "UTC day: $(date -u '+%A %Y-%m-%d') (day=$day)"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry run — window not enforced, nothing will be published."
+            exit 0
+          fi
+          if [ "$day" != "5" ] && [ "$day" != "6" ]; then
+            echo "::error::Releases publish on Friday or Saturday. Today is $(date -u '+%A')."
+            exit 1
+          fi
+          echo "Weekend — proceeding."
+
+  # ── gates ────────────────────────────────────────────────────────────────
+  # Run once, before anything publishes, rather than three times on three
+  # runners. `release-npm.js` re-runs them in the publish job too — that is
+  # deliberate and cheap relative to a bad publish, and it is what records the
+  # gate provenance the electron build later verifies.
+  gates:
+    name: Gates (test · lint · licences · notices)
+    needs: window
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      # The commit the suite actually ran against. The build jobs check out a
+      # LATER commit (the version bump), and `release-electron.js --ci
+      # --skip-checks` refuses unless it can prove nothing but that bump
+      # separates the two. Without this output there is no evidence to check.
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record the tested commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `--ignore-scripts` for the same reason test.yml does it: `postinstall`
+      # runs `electron-builder install-app-deps`, which rebuilds better-sqlite3
+      # against ELECTRON's ABI — and that ABI SIGKILLs vitest workers, silently
+      # losing ~250 test files from both the passed and failed columns.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build native modules for this Node
+        run: node scripts/ensure-native-modules.js
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Licences
+        run: npm run check:licenses
+
+      - name: Third-party notices are current
+        run: npm run notices:check
+
+  # ── npm ──────────────────────────────────────────────────────────────────
+  # The shell bundles a PUBLISHED runtime (`--from-registry`), so npm must go
+  # first: the mac and Windows jobs below check out the tag this creates and
+  # build around the version it publishes.
+  npm:
+    name: Publish to npm
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write   # push the version commit and tag
+      id-token: write   # mint the OIDC token npm trades for a publish credential
+    outputs:
+      version: ${{ steps.publish.outputs.version }}
+      tag: ${{ steps.publish.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `npm version` commits, and the push below needs real history.
+          fetch-depth: 0
+          # The default GITHUB_TOKEN can push to a protected branch only if the
+          # ruleset allows it; see the manual-setup notes in next-release.md.
+          token: ${{ secrets.RELEASE_PUSH_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships an older one.
+      # release-npm.js --ci refuses rather than falling through to an anonymous
+      # publish that fails at the very last step.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Identify the committer
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish
+        id: publish
+        run: |
+          node scripts/release-npm.js ${{ inputs.bump }} --ci ${{ inputs.dry_run && '--dry-run' || '' }}
+          v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"    >> "$GITHUB_OUTPUT"
+
+      # The version commit and tag are what the build jobs check out. Pushing
+      # them is also what makes the tag resolvable when the release is created.
+      - name: Push the version commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: git push --follow-tags origin HEAD:main
+
+      # An npm-only run ends here, and the job that normally writes the
+      # summary (publish) never starts — so without this the run reports
+      # nothing at all about a release that DID go out.
+      - name: What shipped (npm-only run)
+        if: ${{ !inputs.dry_run && inputs.skip_electron }}
+        run: |
+          v=$(node -p "require('./package.json').version")
+          {
+            echo "### Libi $v released to npm"
+            echo ""
+            echo "- npm: \`@nagellabs/libi@$v\`"
+            echo "- desktop shells: skipped (\`skip_electron\`)"
+            echo "- GitHub Release: none, deliberately — an asset-less release"
+            echo "  would break electron-updater and the site download links."
+            echo ""
+            echo "Tag \`v$v\` is pushed. Installed desktop apps pick this up as"
+            echo "a runtime under \`~/.libi/runtime/\` without a new shell."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── macOS shell ──────────────────────────────────────────────────────────
+  mac:
+    name: macOS shell (signed + notarized)
+    needs: [gates, npm]
+    if: ${{ !inputs.dry_run && !inputs.skip_electron }}
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.npm.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # notarytool takes a FILE, and a secret is a string. Write it outside the
+      # checkout so no build step can sweep it into an artifact.
+      - name: Materialise the App Store Connect key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          install -m 700 -d "$RUNNER_TEMP/notary"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary/key.p8"
+          chmod 600 "$RUNNER_TEMP/notary/key.p8"
+
+      - name: Build, sign, notarize, staple
+        env:
+          CSC_LINK: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          LIBI_GATES_SHA: ${{ needs.gates.outputs.sha }}
+        run: |
+          export APPLE_API_KEY="$RUNNER_TEMP/notary/key.p8"
+          node scripts/release-electron.js --target=mac --ci --no-github-release --skip-checks
+
+      - name: Shred the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/notary"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libi-macos
+          path: |
+            release/Libi-arm64.dmg
+            release/Libi-*-arm64-mac.zip
+            release/Libi-*-arm64-mac.zip.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── Windows shell ────────────────────────────────────────────────────────
+  # UNSIGNED by design — signing is sequenced after the flow works end to end,
+  # so SmartScreen's wording gets observed on the unsigned build rather than
+  # guessed. No secrets, so no `environment:` here.
+  windows:
+    name: Windows shell (unsigned)
+    needs: [gates, npm]
+    if: ${{ !inputs.dry_run && !inputs.skip_electron && !inputs.skip_windows }}
+    # Pinned, NOT `windows-latest`: that image moved to VS2026, which the
+    # lockfile's node-gyp cannot detect, and `npm ci` dies rebuilding node-pty
+    # with "Could not find any Visual Studio installation to use".
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.npm.outputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Scripts are NOT skipped here: `postinstall` runs `electron-builder
+      # install-app-deps`, rebuilding better-sqlite3 and node-pty against
+      # Electron's ABI — which is exactly what a packaged app needs.
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the installer
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          LIBI_GATES_SHA: ${{ needs.gates.outputs.sha }}
+        run: node scripts/release-electron.js --target=win --ci --no-github-release --skip-checks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libi-windows
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 14
+
+  # ── the one outward step ─────────────────────────────────────────────────
+  # Deliberately last and deliberately separate. Whichever build finished first
+  # must NOT create the release: a release carrying only one platform's
+  # `latest*.yml` leaves the other platform's installed apps with an update
+  # check that fails silently, forever.
+  publish:
+    name: Publish the GitHub Release
+    needs: [npm, mac, windows]
+    # `always()` so a DELIBERATELY skipped Windows job does not cancel the
+    # release. A FAILED one is different and must not publish: shipping
+    # mac-only because Windows broke would look identical in the release list
+    # to shipping mac-only on purpose, and nobody would notice for a version.
+    # So: mac must have succeeded, and Windows must be either success or the
+    # skip the operator asked for.
+    #
+    # `skip_electron` skips this job ENTIRELY rather than cutting an
+    # asset-less release, and that is load-bearing, not tidiness. Two things
+    # resolve against the LATEST release rather than against a version:
+    # electron-updater's `provider: github` reads `latest-mac.yml` /
+    # `latest.yml` from it (see scripts/release-github.js), and libi-site's
+    # download buttons point at `releases/latest/download/<stable name>`. A
+    # release carrying neither would therefore stop every installed desktop
+    # app from seeing updates AND 404 both download buttons — for a run whose
+    # only intent was to move the npm package. The tag still exists (the npm
+    # job pushes it); it simply has no GitHub Release, which is what an
+    # npm-only week actually means.
+    if: >-
+      ${{ !inputs.dry_run && !inputs.skip_electron && always()
+          && needs.mac.result == 'success'
+          && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.npm.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          pattern: libi-*
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-github.js \
+            --assets=dist-release \
+            --tag=${{ needs.npm.outputs.tag }} \
+            ${{ needs.windows.result == 'skipped' && '--allow-missing=win' || ' ' }}
+
+      - name: What shipped
+        run: |
+          echo "### Libi ${{ needs.npm.outputs.version }} released" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- npm: \`@nagellabs/libi@${{ needs.npm.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- macOS: ${{ needs.mac.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Windows: ${{ needs.windows.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The Windows installer is UNSIGNED and must be booted on the QA VM before it is announced." >> "$GITHUB_STEP_SUMMARY"

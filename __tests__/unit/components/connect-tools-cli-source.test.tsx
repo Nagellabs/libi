@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import type { CodexConnectState } from "@/lib/queries/codex-connect";
 
 /**
@@ -35,7 +35,14 @@ vi.mock("@/lib/queries/terminals", () => ({
 }));
 
 vi.mock("@/lib/editor-state-context", () => ({
-  useEditorState: () => ({ selectAgent: vi.fn(), setActiveTerminalId: vi.fn() }),
+  // `setRightRegionMode` is required: useRunRemedyInTerminal leaves the connect
+  // takeover when it opens the sign-in terminal, and without it the hook throws
+  // before it can report the funnel event this file is about.
+  useEditorState: () => ({
+    selectAgent: vi.fn(),
+    setActiveTerminalId: vi.fn(),
+    setRightRegionMode: vi.fn(),
+  }),
 }));
 
 // `usePathname` is needed because the remedy action now goes through the
@@ -48,6 +55,7 @@ vi.mock("next/navigation", () => ({
 vi.mock("sonner", () => ({ toast: { info: vi.fn(), error: vi.fn() } }));
 vi.mock("@/lib/shell/client", () => ({ revealFile: vi.fn() }));
 vi.mock("@/lib/analytics/client", () => ({ trackEvent: vi.fn() }));
+import { trackEvent } from "@/lib/analytics/client";
 
 vi.mock("@/components/ui/tooltip", () => {
   const Pass = ({ children }: { children?: React.ReactNode }) => <div>{children}</div>;
@@ -185,5 +193,33 @@ describe("ConnectToolsSection — server refusals stay visible", () => {
 
     expect(document.body.textContent).toContain("/home/u/.codex/config.toml");
     expect(document.body.textContent).toContain("[mcp_servers.libi]");
+  });
+});
+
+/**
+ * This row is on the MCPs & Skills SETTINGS page, not the sidebar. The two
+ * genuine sidebar callers of `useRunRemedyInTerminal` (app-sidebar.tsx,
+ * sidebar-session-list.tsx) legitimately report `surface: "sidebar"` —
+ * tagging this row the same way would mix two different surfaces into one
+ * analytics bucket, defeating the reason `surface` exists at all.
+ */
+describe("ConnectToolsSection — analytics surface", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setConnectError = null;
+    createTerminalMutate.mockResolvedValue({ id: "t1" });
+  });
+
+  it("reports the sign-in click as surface 'settings', not 'sidebar'", async () => {
+    state = base({ cliSource: "none", remedy: INSTALL_REMEDY });
+    render(<ConnectToolsSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: INSTALL_REMEDY.label }));
+
+    await vi.waitFor(() => expect(createTerminalMutate).toHaveBeenCalled());
+    expect(trackEvent).toHaveBeenCalledWith("agent_sign_in_opened", {
+      agent: "codex",
+      surface: "settings",
+    });
   });
 });

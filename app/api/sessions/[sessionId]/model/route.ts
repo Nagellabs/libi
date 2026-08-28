@@ -4,17 +4,21 @@ import { getSessionManager } from "@/lib/sessions/session-manager";
 /**
  * GET /api/sessions/[sessionId]/model
  *
- * Returns the model state for the session, or { supported: false } when the
- * agent advertises no model option (→ UI hides the picker).
+ * Returns the model state for the session. `{ supported: false, pending: true }`
+ * means "not known yet" (configOptions not captured — activation replay in
+ * flight, or the session not yet registered after a restart); the UI shows a
+ * skeleton and waits for the agent-config-options SSE event.
+ * `{ supported: false, pending: false }` means the agent genuinely advertises
+ * no model select — the UI hides the picker.
  */
 export async function GET(
   _req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ): Promise<Response> {
   const { sessionId } = await params;
-  const state = getSessionManager().getSessionModelState(sessionId);
-  if (!state) return NextResponse.json({ supported: false });
-  return NextResponse.json({ supported: true, ...state });
+  const snapshot = getSessionManager().getSessionModelSnapshot(sessionId);
+  if (!snapshot) return NextResponse.json({ supported: false, pending: true });
+  return NextResponse.json(snapshot);
 }
 
 /**

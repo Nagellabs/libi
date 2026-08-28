@@ -120,7 +120,7 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
         // pipeline uses as its encoder) and downloaded on the user's machine
         // at runtime, never redistributed.
         // See `capabilityCheck` below — the guard that would have caught this.
-        pinnedInstallToken: "2026-08-16",
+        pinnedInstallToken: "2026-08-23",
         requireBundled: true,
         // Actually exec `ffmpeg -version` after install — an existing binary
         // that can't run (wrong CPU arch) is treated as not-installed and
@@ -146,8 +146,20 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
           // BtbN, not johnvansickle — see the 2026-08-16 note above.
           linux:
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+          // BtbN, not gyan.dev — 2026-08-23. Same move linux made on 2026-08-16,
+          // and for a sharper reason: gyan.dev is one person's server with no
+          // mirror, and it served HTTP 503 for three straight attempts during
+          // the first Windows QA run. ffmpeg is not tier-1, so Category A
+          // reported "complete" and libi came up as a video studio with no
+          // ffmpeg at all. GitHub release assets are not immune to outages,
+          // but they are not a single host, and this is now the SAME archive
+          // linux pulls — one upstream to reason about instead of two.
+          //
+          // "essentials" was also the wrong build to depend on: the name
+          // advertises a REDUCED feature set, which is exactly the shape of
+          // the Linux drawtext defect (F5). The gpl build is the full one.
           win32:
-            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
         },
         archive: {
           format: "zip", // macOS; Linux/Windows actually deliver zip + tar.xz — DependencyManager auto-detects via `tar -xf`
@@ -158,8 +170,9 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
             // BtbN tar extracts ffmpeg-*-linux64-gpl/bin/ffmpeg — note the
             // `bin/` level, which johnvansickle's layout did not have.
             linux: "ffmpeg-*-linux64-gpl/bin/ffmpeg",
-            // gyan.dev zip extracts ffmpeg-*-essentials_build/bin/ffmpeg.exe
-            win32: "ffmpeg-*-essentials_build/bin/ffmpeg.exe",
+            // BtbN zip extracts ffmpeg-*-win64-gpl/bin/ffmpeg.exe — the same
+            // shape as the linux tar above, which is the point of moving.
+            win32: "ffmpeg-*-win64-gpl/bin/ffmpeg.exe",
           },
         },
       },
@@ -173,7 +186,7 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
         // from the same upstream archive — they are a matched pair, and mixing
         // a BtbN ffmpeg with a johnvansickle ffprobe would mean probing with a
         // different build than the one doing the encoding.
-        pinnedInstallToken: "2026-08-16",
+        pinnedInstallToken: "2026-08-23",
         requireBundled: true,
         runCheck: ["-version"],
         // No capabilityCheck: ffprobe has no filter graph. Its counterpart
@@ -186,15 +199,27 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
           },
           linux:
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz",
+          // BtbN, not gyan.dev — 2026-08-23. Same move linux made on 2026-08-16,
+          // and for a sharper reason: gyan.dev is one person's server with no
+          // mirror, and it served HTTP 503 for three straight attempts during
+          // the first Windows QA run. ffmpeg is not tier-1, so Category A
+          // reported "complete" and libi came up as a video studio with no
+          // ffmpeg at all. GitHub release assets are not immune to outages,
+          // but they are not a single host, and this is now the SAME archive
+          // linux pulls — one upstream to reason about instead of two.
+          //
+          // "essentials" was also the wrong build to depend on: the name
+          // advertises a REDUCED feature set, which is exactly the shape of
+          // the Linux drawtext defect (F5). The gpl build is the full one.
           win32:
-            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
         },
         archive: {
           format: "zip",
           binaryPathInArchive: {
             darwin: "ffprobe",
             linux: "ffmpeg-*-linux64-gpl/bin/ffprobe",
-            win32: "ffmpeg-*-essentials_build/bin/ffprobe.exe",
+            win32: "ffmpeg-*-win64-gpl/bin/ffprobe.exe",
           },
         },
       },
@@ -249,7 +274,15 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
               x64: "uv-x86_64-apple-darwin/uv",
             },
             linux: "uv-x86_64-unknown-linux-gnu/uv",
-            win32: "uv-x86_64-pc-windows-msvc/uv.exe",
+            // NOT "uv-x86_64-pc-windows-msvc/uv.exe", by symmetry with the
+            // lines above. astral-sh publishes the unix builds as tarballs
+            // that unpack into a directory named after the target, and the
+            // Windows build as a zip with the executables at the ROOT:
+            //   uv.exe, uvw.exe, uvx.exe
+            // Assuming the symmetry cost libi every Windows boot — uv is a
+            // tier-1 dep, so the lookup failure aborted Category A and the
+            // app could not start at all (observed on Windows 11, 2026-08-22).
+            win32: "uv.exe",
           },
         },
       },
@@ -322,7 +355,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
               x64: "uv-x86_64-apple-darwin/uv",
             },
             linux: "uv-x86_64-unknown-linux-gnu/uv",
-            win32: "uv-x86_64-pc-windows-msvc/uv.exe",
+            // zip root, not a target directory — see the uv dep above.
+            win32: "uv.exe",
           },
         },
       },
@@ -433,7 +467,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
               x64: "uv-x86_64-apple-darwin/uv",
             },
             linux: "uv-x86_64-unknown-linux-gnu/uv",
-            win32: "uv-x86_64-pc-windows-msvc/uv.exe",
+            // zip root, not a target directory — see the uv dep above.
+            win32: "uv.exe",
           },
         },
       },
@@ -485,7 +520,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
               x64: "uv-x86_64-apple-darwin/uv",
             },
             linux: "uv-x86_64-unknown-linux-gnu/uv",
-            win32: "uv-x86_64-pc-windows-msvc/uv.exe",
+            // zip root, not a target directory — see the uv dep above.
+            win32: "uv.exe",
           },
         },
       },
@@ -537,7 +573,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
               x64: "uv-x86_64-apple-darwin/uv",
             },
             linux: "uv-x86_64-unknown-linux-gnu/uv",
-            win32: "uv-x86_64-pc-windows-msvc/uv.exe",
+            // zip root, not a target directory — see the uv dep above.
+            win32: "uv.exe",
           },
         },
       },

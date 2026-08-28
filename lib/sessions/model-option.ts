@@ -51,6 +51,29 @@ export function extractModelOption(
 }
 
 /**
+ * The model picker's server answer, with "not known yet" kept distinct from
+ * "not supported". Sessions discovered from the agent's history register with
+ * `configOptions: []` and stay empty until activation's loadSession response
+ * fills them — for that window (and only that window) the honest answer is
+ * `pending: true`, not a terminal `supported: false`. A non-empty option list
+ * with no `model` select means the agent genuinely offers none.
+ */
+export type SessionModelSnapshot =
+  | ({ supported: true } & ModelState)
+  | { supported: false; pending: boolean };
+
+export function deriveModelSnapshot(
+  configOptions: SessionConfigOption[] | null | undefined,
+): SessionModelSnapshot {
+  const state = extractModelOption(configOptions);
+  if (state) return { supported: true, ...state };
+  return {
+    supported: false,
+    pending: !configOptions || configOptions.length === 0,
+  };
+}
+
+/**
  * Explicit prettified labels for model ids whose default transform below would
  * mangle them. Keep this SMALL — only entries the generic prettifier gets
  * wrong. Codex-acp advertises no leading "<Name> <version>" description token,

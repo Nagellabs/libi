@@ -446,6 +446,7 @@ export async function ensureBuiltModel(
   try {
     ({ stdout, stderr } = await exec(uvPath(), args, {
       cwd: proj,
+      windowsHide: true,
       timeout: 15 * 60_000, // first run resolves the CLIP overlay + exports
       maxBuffer: 32 * 1024 * 1024,
       env: buildUvEnv({
@@ -530,6 +531,7 @@ export async function runTrackingPyenvInstall(): Promise<void> {
   // drift between the lockfile we ship and the env we build.
   await pexec(uvPath(), ["sync", "--locked"], {
     cwd: proj,
+    windowsHide: true,
     timeout: 10 * 60_000, // first sync resolves torch + boxmot + opencv
     maxBuffer: 32 * 1024 * 1024,
     // buildUvEnv prepends `~/.libi/bin` so uv-spawned subprocesses (python,

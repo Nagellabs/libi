@@ -62,6 +62,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { getLibiBinDir } from "@/lib/libi-home";
 import { cachedShellPathDirs } from "@/lib/shell-path-cache";
 import { sidecarMajorsIn } from "@/lib/runtime/node-abi-sidecars";
+import { isWindows } from "@/lib/platform";
 // `native-binding.ts` imports nothing but `node:fs`/`node:path`, so this is a
 // leaf dependency, not a layering inversion — and it is the ONE module that
 // knows where a runtime's better-sqlite3 build dir lives. Re-deriving that
@@ -81,7 +82,7 @@ import {
  */
 function runCommand(cmd: string, args: string[], opts: { timeout?: number } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, opts, (err) => (err ? reject(err) : resolve()));
+    execFile(cmd, args, { ...opts, windowsHide: true }, (err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -99,10 +100,12 @@ export const PINNED_NODE_VERSION = "v24.18.0";
 
 /**
  * Minimum acceptable major version for a SYSTEM node. tsx (which runs the libi
- * MCP) and the ACP adapters both target modern Node; an ancient system node
- * would fail in ways far harder to diagnose than "we ignored it".
+ * MCP) and the ACP adapters both target modern Node — claude-agent-acp 0.70.0
+ * declares engines node>=22 and its bundle uses `import … with {type:"json"}`,
+ * so an older system node would fail with a parse error far harder to
+ * diagnose than "we ignored it and downloaded our own".
  */
-export const MIN_NODE_MAJOR = 20;
+export const MIN_NODE_MAJOR = 22;
 
 /** sha256 of the official archive, keyed `<platform>-<arch>`. */
 const NODE_ARCHIVE_SHA256: Record<string, string> = {
@@ -176,7 +179,7 @@ function isExecutableFile(p: string): boolean {
   try {
     const st = fs.statSync(p);
     if (!st.isFile()) return false;
-    if (process.platform === "win32") return true;
+    if (isWindows()) return true;
     fs.accessSync(p, fs.constants.X_OK);
     return true;
   } catch {
@@ -256,6 +259,7 @@ export function versionManagerDirs(): string[] {
 export function nodeMajorVersion(binary: string): number | null {
   try {
     const out = execFileSync(binary, ["-v"], {
+      windowsHide: true,
       encoding: "utf8",
       timeout: 5_000,
       stdio: ["ignore", "pipe", "ignore"],
@@ -273,7 +277,7 @@ export function nodeMajorVersion(binary: string): number | null {
  * install roots.
  */
 export function defaultNodeSearchDirs(): string[] {
-  const pathDirs = (process.env.PATH ?? "").split(process.platform === "win32" ? ";" : ":");
+  const pathDirs = (process.env.PATH ?? "").split(isWindows() ? ";" : ":");
   return [...pathDirs, ...cachedShellPathDirs(), ...versionManagerDirs()];
 }
 
@@ -418,7 +422,7 @@ async function downloadPinnedNode(onProgress?: (p: NodeRuntimeProgress) => void)
   try {
     const archivePath = path.join(
       tmpDir,
-      process.platform === "win32" ? "node.zip" : "node.tar.gz",
+      isWindows() ? "node.zip" : "node.tar.gz",
     );
     onProgress?.({ phase: "downloading", bytesDownloaded: 0, bytesTotal: null });
     // ── Why the stall guard, and not the 60s total timeout this used ───────

@@ -5,6 +5,7 @@ import { reanchorWindow, REANCHOR_WINDOW_SEC } from "@/lib/tracking/manual-ancho
 import { recomputeTrackSegmentServerSide } from "@/lib/tracking/recompute-segment";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { serverLogger as logger } from "@/lib/logger";
+import { isSafePieceId, isSafeTrackId } from "@/lib/security/pieceId";
 
 type Ctx = { params: Promise<{ pieceId: string; trackId: string }> };
 
@@ -23,6 +24,11 @@ type Ctx = { params: Promise<{ pieceId: string; trackId: string }> };
  */
 export async function POST(req: Request, { params }: Ctx) {
   const { pieceId, trackId } = await params;
+  // RC-D: raw URL params flow into the track-sidecar path builders; reject
+  // traversal-shaped ids with a 400 before any filesystem op.
+  if (!isSafePieceId(pieceId) || !isSafeTrackId(trackId)) {
+    return NextResponse.json({ error: "invalid id" }, { status: 400 });
+  }
 
   let parsed: { anchorIds?: unknown };
   try {

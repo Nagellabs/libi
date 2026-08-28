@@ -52,7 +52,7 @@ export async function probeMedia(filePath: string): Promise<ProbedMedia> {
         "-show_streams",
         filePath,
       ],
-      { timeout: PROBE_TIMEOUT_MS, killSignal: "SIGKILL" },
+      { timeout: PROBE_TIMEOUT_MS, killSignal: "SIGKILL", windowsHide: true },
     );
     const data = JSON.parse(stdout);
     const videoStream = data.streams?.find(

@@ -9,7 +9,7 @@ import http from "http";
 import path from "path";
 import fs from "fs";
 import { bootstrapPath } from "./path-bootstrap";
-import { mainSyncLog } from "./sync-log";
+import { createRendererConsoleForwarder, mainSyncLog } from "./sync-log";
 import { navigationDecision, windowOpenExternal } from "./nav-guard";
 import { initShellUpdater } from "./shell-updater";
 import {
@@ -242,6 +242,19 @@ function createMainWindow(port: number) {
 
   mainWindow.webContents.on("did-finish-load", () => {
     mainSyncLog("createMainWindow: did-finish-load");
+  });
+  // Renderer console.error → electron-main-sync.log. In production nothing
+  // else puts client-side errors on disk: Next's `[browser]` relay into
+  // server.log is dev-only, and the packaged app has no DevTools for the user
+  // to read. Errors-only, truncated, capped — see sync-log.ts.
+  const forwardRendererConsole = createRendererConsoleForwarder();
+  mainWindow.webContents.on("console-message", (details) => {
+    forwardRendererConsole({
+      level: details.level,
+      message: details.message,
+      sourceId: details.sourceId,
+      lineNumber: details.lineNumber,
+    });
   });
   mainWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
     mainSyncLog(`createMainWindow: did-fail-load ${code} ${desc} url=${url}`);

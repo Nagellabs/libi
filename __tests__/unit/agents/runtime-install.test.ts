@@ -109,6 +109,42 @@ function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
   }
 }
 
+/**
+ * Capture the structured records this module logs, for the tests that assert
+ * on them.
+ *
+ * Two of those records are the ONLY evidence of their event anywhere: the
+ * `claude_adapter_repair` warn (with its `reason`) is how a drift-triggered
+ * reinstall is greppable in ~/.libi/logs/libi.log at all, and
+ * `claude_adapter_upgrade_failed_stale_kept` is the only signal that an
+ * upgrade failed and the old tree was kept — the returned value is otherwise
+ * `installed: true`, and a boot on which the rollout reached nobody looks
+ * exactly like one on which it reached everybody. Both were deletable with
+ * this whole suite still green until these assertions existed.
+ *
+ * Must be called BEFORE the dynamic `import()` of the module under test, and
+ * paired with `vi.doUnmock("@/lib/logger")` in `afterEach`.
+ */
+type LogRecord = Record<string, unknown>;
+function captureLogs(): LogRecord[] {
+  const records: LogRecord[] = [];
+  const sink = (obj: unknown) => {
+    if (obj && typeof obj === "object") records.push(obj as LogRecord);
+  };
+  const fake = { info: sink, warn: sink, error: sink, debug: sink, child: () => fake };
+  vi.doMock("@/lib/logger", () => ({
+    serverLogger: fake,
+    mcpLogger: fake,
+    ffmpegLogger: fake,
+    mediabunnyLogger: fake,
+    proxyLogger: fake,
+    exportLogger: fake,
+    overlayLogger: fake,
+    scriptAnalysisLogger: fake,
+  }));
+  return records;
+}
+
 describe("resolveInstalledAdapterBin", () => {
   afterEach(() => rmSync(agentsRoot, { recursive: true, force: true }));
 
@@ -173,9 +209,9 @@ describe("ensureClaudeAdapterInstalled", () => {
     vi.doUnmock("@/lib/install/npm-root");
   });
 
-  it("short-circuits without installing when the bin AND its native binary already exist", async () => {
-    seedExecutable(adapterBin);
-    seedNativeBinary(agentsRoot);
+  it("short-circuits without installing when the tree is complete AND matches the pin", async () => {
+    const { CLAUDE_ADAPTER_PACKAGE } = await import("@/lib/agents/runtime-packages");
+    simulateSuccessfulAdapterInstall(agentsRoot, CLAUDE_ADAPTER_PACKAGE.pinnedVersion);
 
     const execFile = vi.fn();
     vi.doMock("node:child_process", () => ({ execFile }));
@@ -430,10 +466,10 @@ describe("ensureClaudeAdapterInstalled", () => {
     const first = await ensureClaudeAdapterInstalled({ repoRoot });
     expect(first.installed).toBe(false);
 
-    // Simulate a COMPLETE install landing on disk out-of-band (not via this
-    // module's install path) after the cached failure.
-    seedExecutable(adapterBin);
-    seedNativeBinary(agentsRoot);
+    // Simulate a COMPLETE, PIN-MATCHING install landing on disk out-of-band
+    // (not via this module's install path) after the cached failure.
+    const { CLAUDE_ADAPTER_PACKAGE } = await import("@/lib/agents/runtime-packages");
+    simulateSuccessfulAdapterInstall(agentsRoot, CLAUDE_ADAPTER_PACKAGE.pinnedVersion);
 
     const second = await ensureClaudeAdapterInstalled({ repoRoot });
     expect(second).toEqual({ installed: true, binPath: adapterBin });
@@ -582,6 +618,191 @@ describe("partial install (native binary missing)", () => {
   });
 });
 
+/**
+ * Completeness is not currency: a user with a healthy tree at YESTERDAY'S pin
+ * passed the old fast path forever, so a pin bump reached nobody who already
+ * had libi — the drift check lives inside installAgentPackages, which the
+ * fast-path return never reached. That is how an adapter bump meant to give
+ * every user the current Claude models shipped to fresh installs only.
+ */
+describe("version drift on the healthy fast path", () => {
+  let repoRoot: string;
+
+  beforeEach(() => {
+    vi.resetModules();
+    repoRoot = makeEmptyRepoRoot();
+    vi.stubEnv("CLAUDE_CODE_EXECUTABLE", "");
+  });
+
+  afterEach(() => {
+    rmSync(agentsRoot, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.doUnmock("node:child_process");
+    vi.doUnmock("@/lib/logger");
+  });
+
+  it("REINSTALLS a complete tree whose adapter version drifts from the pin", async () => {
+    const { CLAUDE_ADAPTER_PACKAGE } = await import("@/lib/agents/runtime-packages");
+    // A COMPLETE tree (bin + native binary), at yesterday's version.
+    simulateSuccessfulAdapterInstall(agentsRoot, "0.0.1-previous");
+    const logs = captureLogs();
+
+    let npmRuns = 0;
+    vi.doMock("node:child_process", () => ({
+      execFile: (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+      ) => {
+        npmRuns++;
+        simulateSuccessfulAdapterInstall(agentsRoot, CLAUDE_ADAPTER_PACKAGE.pinnedVersion);
+        cb(null, { stdout: "", stderr: "" });
+      },
+    }));
+
+    const { ensureClaudeAdapterInstalled } = await import("@/lib/agents/runtime-install");
+    const result = await ensureClaudeAdapterInstalled({ repoRoot });
+
+    // npm actually ran — the old completeness-only fast path would have
+    // returned {installed:true} without it.
+    expect(npmRuns).toBe(1);
+    expect(result).toEqual({ installed: true, binPath: adapterBin });
+
+    // …and the reinstall is greppable, saying WHICH condition failed. Without
+    // `reason` the log cannot tell a drift repair from a partial-install
+    // repair, which is the whole diagnostic value of the line.
+    const repair = logs.find((r) => r.op === "claude_adapter_repair");
+    expect(repair).toBeDefined();
+    expect(String(repair?.reason)).toContain("version drift");
+    expect(String(repair?.reason)).toContain("0.0.1-previous");
+  });
+
+  it("claudeAdapterVersionCurrent answers from the on-disk manifest", async () => {
+    const { CLAUDE_ADAPTER_PACKAGE } = await import("@/lib/agents/runtime-packages");
+    const { claudeAdapterVersionCurrent } = await import("@/lib/agents/runtime-install");
+
+    expect(claudeAdapterVersionCurrent(agentsRoot)).toBe(false); // nothing installed
+    simulateSuccessfulAdapterInstall(agentsRoot, "0.0.1-previous");
+    expect(claudeAdapterVersionCurrent(agentsRoot)).toBe(false); // drifted
+    rmSync(agentsRoot, { recursive: true, force: true });
+    simulateSuccessfulAdapterInstall(agentsRoot, CLAUDE_ADAPTER_PACKAGE.pinnedVersion);
+    expect(claudeAdapterVersionCurrent(agentsRoot)).toBe(true); // current
+  });
+
+  it("a complete tree with NO adapter manifest is not vouched for — it reinstalls", async () => {
+    // `readInstalledVersion` returns null for a missing/unreadable manifest.
+    // Reading that as "current" would restore the very bug this closes, so
+    // unknown counts as drifted: the cost of being wrong is one reinstall.
+    const { CLAUDE_ADAPTER_PACKAGE } = await import("@/lib/agents/runtime-packages");
+    seedExecutable(adapterBin);
+    seedNativeBinary(agentsRoot);
+
+    let npmRuns = 0;
+    vi.doMock("node:child_process", () => ({
+      execFile: (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+      ) => {
+        npmRuns++;
+        simulateSuccessfulAdapterInstall(agentsRoot, CLAUDE_ADAPTER_PACKAGE.pinnedVersion);
+        cb(null, { stdout: "", stderr: "" });
+      },
+    }));
+
+    const { ensureClaudeAdapterInstalled } = await import("@/lib/agents/runtime-install");
+    const result = await ensureClaudeAdapterInstalled({ repoRoot });
+
+    expect(npmRuns).toBe(1);
+    expect(result).toEqual({ installed: true, binPath: adapterBin });
+  });
+
+  it("KEEPS a working-but-stale tree when the upgrade cannot be downloaded", async () => {
+    // The upgrade must never leave a user worse off than the outdated install
+    // they already had: offline, the reinstall fails and Claude Code has to
+    // stay available on the version already on disk. Reporting installed:false
+    // here would take a working agent away over a failed download.
+    simulateSuccessfulAdapterInstall(agentsRoot, "0.0.1-previous");
+    const logs = captureLogs();
+
+    let npmRuns = 0;
+    vi.doMock("node:child_process", () => ({
+      execFile: (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null) => void,
+      ) => {
+        npmRuns++;
+        cb(new Error("npm ERR! code ENOTFOUND registry.npmjs.org"));
+      },
+    }));
+
+    const { ensureClaudeAdapterInstalled } = await import("@/lib/agents/runtime-install");
+    const first = await ensureClaudeAdapterInstalled({ repoRoot });
+
+    // Usable — but NOT reported as a plain success. `upgradeError` is the only
+    // thing separating this from a real install; without it Category A logs
+    // "ready" and the agent_install job emits `agent_install_completed` for a
+    // rollout that reached nobody.
+    expect(first.installed).toBe(true);
+    expect(first.binPath).toBe(adapterBin);
+    expect(first.staleVersion).toBe("0.0.1-previous");
+    expect(first.upgradeError).toContain("ENOTFOUND");
+    expect(npmRuns).toBe(1);
+
+    // The failure is greppable in ~/.libi/logs/libi.log: it is the ONLY
+    // record that this boot failed to upgrade, since the return value says
+    // installed:true.
+    const kept = logs.find((r) => r.op === "claude_adapter_upgrade_failed_stale_kept");
+    expect(kept).toBeDefined();
+    expect(kept?.installed).toBe("0.0.1-previous");
+    expect(String(kept?.error)).toContain("ENOTFOUND");
+
+    // …and the doomed upgrade is not re-attempted for the rest of the process:
+    // every later caller would otherwise pay the npm timeout again for an
+    // install this process has already proven it cannot complete.
+    const second = await ensureClaudeAdapterInstalled({ repoRoot });
+    expect(npmRuns).toBe(1);
+    // The SECOND caller must hear the same verdict. A bare "we gave up" flag
+    // would re-open the fast path and hand it a clean success for exactly the
+    // tree the first caller just reported as a failed upgrade.
+    expect(second).toEqual(first);
+  });
+
+  it("reports a stale tree as usable-but-not-upgraded when npm exits 0 without landing the pin", async () => {
+    // A yanked version, or a registry serving a stale manifest: npm reports
+    // success and the pin still isn't on disk. Post-install verification is
+    // the only thing that notices, and its verdict has to reach the caller —
+    // an exit code of 0 must not become an unqualified success.
+    simulateSuccessfulAdapterInstall(agentsRoot, "0.0.1-previous");
+
+    vi.doMock("node:child_process", () => ({
+      execFile: (
+        _cmd: string,
+        _args: string[],
+        _opts: unknown,
+        cb: (err: Error | null, res: { stdout: string; stderr: string }) => void,
+      ) => cb(null, { stdout: "", stderr: "" }),
+    }));
+
+    const { ensureClaudeAdapterInstalled, installFailureReason } = await import(
+      "@/lib/agents/runtime-install"
+    );
+    const result = await ensureClaudeAdapterInstalled({ repoRoot });
+
+    expect(result.installed).toBe(true);
+    expect(result.staleVersion).toBe("0.0.1-previous");
+    // Bounded when it reaches analytics — the synthetic message deliberately
+    // uses describeDrift's wording so it maps, rather than landing in
+    // "unknown" and being indistinguishable from every other failure.
+    expect(installFailureReason(result.upgradeError!)).toBe("version_drift");
+  });
+});
+
 describe("Windows bin resolution", () => {
   afterEach(() => rmSync(agentsRoot, { recursive: true, force: true }));
 
@@ -668,7 +889,15 @@ describe("claudeAdapterUnavailableReason", () => {
     writeFileSync(lockPath, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
 
     const { claudeAdapterUnavailableReason } = await import("@/lib/agents/runtime-install");
-    expect(claudeAdapterUnavailableReason(null).code).toBe("installing");
+    const reason = claudeAdapterUnavailableReason(null);
+    expect(reason.code).toBe("installing");
+    // The figure, not just the code. This lock is held by the npm install of
+    // the WHOLE `~/.libi/agents` tree, so the number here must be the
+    // whole-install one (~345 MB) and not the platform binary's ~306 MB — the
+    // two were out of sync until 2026-08-26. Nothing else asserts this string
+    // against production: the agent-selector and install-progress fixtures feed
+    // their copy in as input props, so it could have drifted with a green suite.
+    expect(reason.message).toContain("345 MB");
   });
 
   it("ignores a STALE lock — an abandoned install must not read as 'installing' forever", async () => {

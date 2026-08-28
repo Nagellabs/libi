@@ -8,7 +8,7 @@
  * `~/.libi/agents/node_modules/`.
  *
  * The Claude ACP adapter transitively pulls @anthropic-ai/claude-agent-sdk
- * (+ its ~212MB platform binary), which is "© Anthropic PBC. All rights
+ * (+ its ~306MB platform binary), which is "© Anthropic PBC. All rights
  * reserved." libi is GPL-3.0 and holds no licence to redistribute it, so the
  * user installs it from npm — Anthropic's own channel — under their own terms.
  *
@@ -31,7 +31,7 @@ export interface RuntimeAgentPackage {
 
 export const CLAUDE_ADAPTER_PACKAGE: RuntimeAgentPackage = {
   npmPackage: "@agentclientprotocol/claude-agent-acp",
-  pinnedVersion: "0.44.0",
+  pinnedVersion: "0.70.0",
   binName: "claude-agent-acp",
 };
 

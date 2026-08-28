@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import {
   ACP_AUTH_REQUIRED_CODE,
@@ -117,5 +117,58 @@ describe("context-appropriate wording", () => {
     expect(promptErrorNote(authErr, "claude-code", "session-start")).toContain(
       "Claude Code",
     );
+  });
+});
+
+/**
+ * Finding 5: the de-hardcoding made Anthropic-specific advice reachable by
+ * agents it is wrong for.
+ *
+ * The branch was `if (agentId === "claude-code")`, where naming
+ * `ANTHROPIC_API_KEY` is correct. It became `if (setup?.install)` — "any agent
+ * libi has to install" — while every other string in the branch interpolates
+ * from the registry and that one stayed literal. A third installable agent
+ * would be told to set Anthropic's environment variable.
+ *
+ * The fix keeps the de-hardcoding: the variable is a registry field, and the
+ * sentence naming it is omitted entirely for an agent that declares none.
+ */
+describe("environment-variable advice comes from the registry, not the branch", () => {
+  const authErr = { code: -32000, message: "Authentication required" };
+
+  it("names ANTHROPIC_API_KEY for Claude Code, which declares it", async () => {
+    const { getAgentSetup } = await import("@/lib/agents/setup/registry");
+    expect(getAgentSetup("claude-code")!.signIn.envVar).toBe("ANTHROPIC_API_KEY");
+    expect(promptErrorNote(authErr, "claude-code")).toContain("ANTHROPIC_API_KEY");
+  });
+
+  it("omits the sentence entirely for an installable agent that declares no variable", async () => {
+    const { getAgentSetup } = await import("@/lib/agents/setup/registry");
+    const claude = getAgentSetup("claude-code")!;
+    const thirdAgent = {
+      ...claude,
+      id: "third-agent",
+      name: "Third Agent",
+      signIn: { ...claude.signIn, envVar: undefined },
+    };
+    vi.resetModules();
+    vi.doMock("@/lib/agents/setup/registry", () => ({
+      getAgentSetup: (id: string) => (id === "third-agent" ? thirdAgent : null),
+    }));
+    try {
+      const fresh = await import("@/lib/sessions/prompt-error-note");
+      const note = fresh.promptErrorNote(authErr, "third-agent") ?? "";
+      expect(note).toContain("Third Agent");
+      expect(note).not.toContain("ANTHROPIC_API_KEY");
+      // No dangling "or set ``" fragment where the variable used to be.
+      expect(note).not.toMatch(/or set/);
+    } finally {
+      vi.doUnmock("@/lib/agents/setup/registry");
+      vi.resetModules();
+    }
+  });
+
+  it("never mentions an env var for an agent libi already ships", () => {
+    expect(promptErrorNote(authErr, "codex")).not.toContain("API_KEY");
   });
 });

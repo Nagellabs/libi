@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
 import { getLibiBinDir } from "@/lib/libi-home";
+import { isWindows, exeSuffix } from "@/lib/platform";
 
 /**
  * Resolve the `uv` binary path with the same policy as `resolveStatus`
@@ -17,15 +18,13 @@ import { getLibiBinDir } from "@/lib/libi-home";
  * the three runners can't drift apart.
  */
 export function resolveUvBinary(): string | null {
-  const bundled = path.join(
-    getLibiBinDir(),
-    process.platform === "win32" ? "uv.exe" : "uv",
-  );
+  const bundled = path.join(getLibiBinDir(), `uv${exeSuffix()}`);
   if (fs.existsSync(bundled)) return bundled;
 
-  const lookup = process.platform === "win32" ? "where" : "which";
+  const lookup = isWindows() ? "where" : "which";
   try {
     const stdout = execFileSync(lookup, ["uv"], {
+      windowsHide: true,
       encoding: "utf8",
       timeout: 5_000,
     });
@@ -49,10 +48,7 @@ export function requireUvBinary(
 ): string {
   const uv = resolveUvBinary();
   if (uv) return uv;
-  const expected = path.join(
-    getLibiBinDir(),
-    process.platform === "win32" ? "uv.exe" : "uv",
-  );
+  const expected = path.join(getLibiBinDir(), `uv${exeSuffix()}`);
   throw new ErrorCtor(
     `uv not found at ${expected} or on PATH. ${featureLabel} requires the bundled uv (tier-1 dep).`,
   );

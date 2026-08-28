@@ -2,12 +2,13 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
+import { isWindows } from "@/lib/platform";
 
 const execFileAsync = promisify(execFile);
 
 async function resolveOnPath(name: string): Promise<string | null> {
   const pathEnv = process.env.PATH || "";
-  const sep = process.platform === "win32" ? ";" : ":";
+  const sep = isWindows() ? ";" : ":";
   for (const dir of pathEnv.split(sep)) {
     if (!dir) continue;
     const candidate = path.join(dir, name);
@@ -35,7 +36,7 @@ export interface AuxResult {
 export async function checkBinary(name: string): Promise<AuxResult> {
   const start = Date.now();
   try {
-    const { stdout } = await execFileAsync(name, ["--version"], { timeout: 3000 });
+    const { stdout } = await execFileAsync(name, ["--version"], { timeout: 3000, windowsHide: true });
     const ms = Date.now() - start;
     const version = stdout.split("\n")[0].trim();
     const resolved = await resolveOnPath(name);

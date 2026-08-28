@@ -346,12 +346,13 @@ export const onboardingPieceRunner: JobRunner<OnboardingPieceParams, OnboardingP
       throw err;
     }
 
-    // OUTSIDE the rollback scope on purpose. `trackServerEvent` is non-throwing
-    // by contract, so this is decoupling rather than a bug fix — but a piece
-    // that is fully built and marked must never become deletable because an
-    // analytics call went wrong. Bounded-cardinality param only: the definition
-    // version. A pieceId here would be unbounded user data.
-    await trackServerEvent("onboarding_piece_built", { version });
+    // OUTSIDE the rollback scope on purpose. `trackServerEvent` is a
+    // synchronous enqueue that cannot throw, so this is decoupling rather
+    // than a bug fix — but a piece that is fully built and marked must never
+    // become deletable because an analytics call went wrong. Bounded-
+    // cardinality param only: the definition version. A pieceId here would
+    // be unbounded user data.
+    trackServerEvent("onboarding_piece_built", { version });
 
     return result;
   },

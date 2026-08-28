@@ -25,16 +25,24 @@ export async function PUT(req: Request): Promise<Response> {
 
   const cur = getAnalyticsSettings();
   if (cur.enabled && !parsed.data.enabled) {
-    // Disabling: record the opt-out on the server transport BEFORE the DB flag
-    // flips (trackServerEvent checks that flag), then persist the opt-out.
+    // Enqueue the opt-out event for completeness, but be honest about what
+    // this achieves: nothing. drainAnalyticsQueue purges the ENTIRE queue
+    // the instant it reads enabled === false (lib/analytics/queue.ts) —
+    // deliberately, on the grounds that holding events for someone who
+    // opted out is the one thing a privacy toggle must not do. The flag
+    // flips right after this call, synchronously, so the very next drain
+    // discards this event along with everything else. No ordering of these
+    // two lines changes that, and there is no second path to Google this
+    // event could take instead — adding one would defeat the opt-out.
+    // So: libi does not measure its own opt-out rate. By choice.
     const optOutAt = Date.now();
-    await trackServerEvent("analytics_opt_out", { opted_out_at: optOutAt });
+    trackServerEvent("analytics_opt_out", { opted_out_at: optOutAt });
     const next = setAnalyticsSettings(applyOptOut(cur, optOutAt));
     return NextResponse.json({ enabled: next.enabled, optOutAt: next.optOutAt });
   }
   if (!cur.enabled && parsed.data.enabled) {
     const next = setAnalyticsSettings(applyOptIn(cur));
-    void trackServerEvent("analytics_opt_in");
+    trackServerEvent("analytics_opt_in");
     return NextResponse.json({ enabled: next.enabled, optOutAt: next.optOutAt });
   }
   return NextResponse.json({ enabled: cur.enabled, optOutAt: cur.optOutAt });

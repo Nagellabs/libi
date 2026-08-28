@@ -7,7 +7,7 @@ import path from "node:path";
  * WHY THIS EXISTS — the partial-install trap:
  *
  * `@agentclientprotocol/claude-agent-acp` (~40KB of JS) depends on
- * `@anthropic-ai/claude-agent-sdk`, whose actual ~212MB CLI binary arrives as
+ * `@anthropic-ai/claude-agent-sdk`, whose actual ~306MB CLI binary arrives as
  * a PLATFORM-SPECIFIC **optionalDependency** (`@anthropic-ai/claude-agent-sdk-
  * <platform>-<arch>`). npm **exits 0 when an optional dependency fails to
  * install** — so a network blip mid-download, a full disk, a proxy timeout on
@@ -184,7 +184,7 @@ export function claudeNativeBinaryMissingError(
   return (
     `the Claude native binary for ${platform}-${arch} is missing from ${root} ` +
     `(${expected} did not install). npm exits 0 when an optional dependency ` +
-    `fails, so this is usually an interrupted or blocked download of its ~212MB ` +
+    `fails, so this is usually an interrupted or blocked download of its ~306MB ` +
     `tarball — check network/proxy access to registry.npmjs.org and free disk ` +
     `space, then restart libi to retry. Alternatively set CLAUDE_CODE_EXECUTABLE ` +
     `to an existing Claude Code binary.`

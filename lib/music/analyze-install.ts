@@ -35,6 +35,7 @@ export async function installMusicAnalysisDeps(timeoutMs = 5 * 60_000): Promise<
   ];
   await new Promise<void>((resolve, reject) => {
     const child = spawn(uv, args, {
+        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: buildUvEnv(),
       });

@@ -30,3 +30,22 @@ export function assertSafePieceId(pieceId: string | null): void {
     throw new Error("unsafe_piece_id");
   }
 }
+
+/**
+ * Same guard, for a `trackId`. Track ids are concatenated into an on-disk
+ * filename (`<storage>/<pieceId>/_tracks/<trackId>.json`), so a `trackId` like
+ * `"../../evil"` escapes the piece directory exactly as an unsafe `pieceId`
+ * would. Real track ids are `trk-<uuid-segment>` (hex + hyphens), so the same
+ * strict allowlist is safe and non-regressing. Unlike `pieceId`, a `trackId` is
+ * never null.
+ */
+export function isSafeTrackId(trackId: string): boolean {
+  return SAFE_PIECE_ID.test(trackId);
+}
+
+/** Throws `Error("unsafe_track_id")` when `trackId` is not safe. */
+export function assertSafeTrackId(trackId: string): void {
+  if (!isSafeTrackId(trackId)) {
+    throw new Error("unsafe_track_id");
+  }
+}

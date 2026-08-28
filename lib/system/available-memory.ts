@@ -1,5 +1,6 @@
 import os from "os";
 import { execFileSync } from "child_process";
+import { isMac } from "@/lib/platform";
 
 /**
  * Cross-platform "available memory" — what the kernel can hand to a new
@@ -21,7 +22,7 @@ import { execFileSync } from "child_process";
  * - win32:   `os.freemem()` is "physical free" which is the right knob.
  */
 export function getAvailableMemoryBytes(): number {
-  if (process.platform !== "darwin") {
+  if (!isMac()) {
     return os.freemem();
   }
   return getDarwinAvailableMemoryBytes() ?? os.freemem();

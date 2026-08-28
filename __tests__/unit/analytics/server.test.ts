@@ -1,70 +1,48 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildMpPayload, trackServerEvent } from "@/lib/analytics/server";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { trackServerEvent } from "@/lib/analytics/server";
+import { enqueueAnalyticsEvent } from "@/lib/analytics/queue";
 
-afterEach(() => vi.unstubAllEnvs());
+// trackServerEvent used to be a Measurement Protocol client (buildMpPayload +
+// a direct fetch to mp/collect, gated on an api_secret nothing ever set — see
+// lib/analytics/config.ts). It is now a one-line delegation to
+// enqueueAnalyticsEvent (lib/analytics/queue.ts), so this file's only job is
+// to prove that delegation — name and params forwarded, synchronous, never
+// throws. The queue's own durability, opt-out and retry behaviour is Task
+// 2's surface and is thoroughly covered by queue.test.ts, which owns the
+// real, file-backed DB round-trip; re-proving it here against the same
+// on-disk table would race that file's own worker process (both hit the
+// same LIBI_HOME DB — vitest.config.ts isolates it once per run, not per
+// worker) and produce a flaky, cross-file-dependent test for no coverage
+// gained. Mock the queue at the module boundary instead.
+vi.mock("@/lib/analytics/queue", () => ({
+  enqueueAnalyticsEvent: vi.fn(),
+}));
 
-describe("buildMpPayload", () => {
-  it("sets client_id + user_id to the uuid and includes the event", () => {
-    const p = buildMpPayload("uuid-1", "tool_used", { tool_name: "libi.x" }, false);
-    expect(p.client_id).toBe("uuid-1");
-    expect(p.user_id).toBe("uuid-1");
-    expect(p.events[0].name).toBe("tool_used");
-    expect(p.events[0].params.tool_name).toBe("libi.x");
+describe("trackServerEvent", () => {
+  beforeEach(() => {
+    vi.mocked(enqueueAnalyticsEvent).mockReset();
   });
-  it("adds debug_mode when debug is true", () => {
-    const p = buildMpPayload("uuid-1", "tool_used", {}, true);
-    expect(p.events[0].params.debug_mode).toBe(true);
-  });
-});
 
-describe("trackServerEvent gating", () => {
-  it("no-ops when analytics disabled (flag unset)", async () => {
-    const fetchImpl = vi.fn();
-    await trackServerEvent("tool_used", {}, {
-      fetchImpl,
-      getSettings: () => ({ enabled: true, userId: "u", optOutAt: null, firstRunNoticeShown: false, milestones: [] }),
-      apiSecret: "secret",
-      enabled: false,
-      debug: false,
-    });
-    expect(fetchImpl).not.toHaveBeenCalled();
+  it("forwards the name and params to the queue, unchanged", () => {
+    trackServerEvent("tool_used", { tool_name: "libi.x" });
+    expect(enqueueAnalyticsEvent).toHaveBeenCalledTimes(1);
+    expect(enqueueAnalyticsEvent).toHaveBeenCalledWith("tool_used", { tool_name: "libi.x" });
   });
-  it("no-ops when user opted out", async () => {
-    const fetchImpl = vi.fn();
-    await trackServerEvent("tool_used", {}, {
-      fetchImpl,
-      getSettings: () => ({ enabled: false, userId: "u", optOutAt: 1, firstRunNoticeShown: false, milestones: [] }),
-      apiSecret: "secret",
-      enabled: true,
-      debug: false,
-    });
-    expect(fetchImpl).not.toHaveBeenCalled();
+
+  it("forwards a call with no params as-is", () => {
+    trackServerEvent("tool_used");
+    expect(enqueueAnalyticsEvent).toHaveBeenCalledWith("tool_used", undefined);
   });
-  it("no-ops when api secret empty", async () => {
-    const fetchImpl = vi.fn();
-    await trackServerEvent("tool_used", {}, {
-      fetchImpl,
-      getSettings: () => ({ enabled: true, userId: "u", optOutAt: null, firstRunNoticeShown: false, milestones: [] }),
-      apiSecret: "",
-      enabled: true,
-      debug: false,
-    });
-    expect(fetchImpl).not.toHaveBeenCalled();
+
+  it("is synchronous — there is nothing for a caller to await", () => {
+    const r = trackServerEvent("tool_used", { tool_name: "libi.x" });
+    expect(r).toBeUndefined();
   });
-  it("POSTs to GA4 when fully enabled", async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(undefined);
-    await trackServerEvent("tool_used", { tool_name: "libi.x" }, {
-      fetchImpl,
-      getSettings: () => ({ enabled: true, userId: "u", optOutAt: null, firstRunNoticeShown: false, milestones: [] }),
-      apiSecret: "secret",
-      enabled: true,
-      debug: false,
+
+  it("never throws, even when the queue itself throws", () => {
+    vi.mocked(enqueueAnalyticsEvent).mockImplementation(() => {
+      throw new Error("queue exploded");
     });
-    expect(fetchImpl).toHaveBeenCalledOnce();
-    const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toContain("/mp/collect");
-    expect(url).toContain("measurement_id=");
-    expect(url).toContain("api_secret=secret");
-    expect(JSON.parse(init.body).client_id).toBe("u");
+    expect(() => trackServerEvent("tool_used")).not.toThrow();
   });
 });

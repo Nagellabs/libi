@@ -96,6 +96,7 @@ export async function runEngineSegment(
         UV_PROJECT_ENVIRONMENT: trackingVenvDir(),
         LIBI_TRACK_MODELS: process.env.LIBI_TRACK_MODELS ?? trackingModelsDir(),
       }),
+      windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     },
   );

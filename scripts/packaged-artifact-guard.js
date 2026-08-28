@@ -6,7 +6,7 @@
  *
  * libi ships GPL-3.0 and holds no licence to redistribute
  * `@anthropic-ai/claude-agent-sdk` ("© Anthropic PBC. All rights reserved.")
- * or its ~212MB platform binary. Two gates are supposed to keep them out, and
+ * or its ~306MB platform binary. Two gates are supposed to keep them out, and
  * BOTH have blind spots:
  *
  *   - `scripts/check-licenses.sh` scans `--production` only. The packaged app

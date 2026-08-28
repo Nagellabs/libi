@@ -195,7 +195,10 @@ export function ConnectToolsSection() {
                 size="sm"
                 className="cursor-pointer"
                 disabled={createTerminal.isPending}
-                onClick={() => void runRemedyInTerminal(remedy)}
+                // This row lives on the MCPs & Skills Settings page — a
+                // distinct surface from the sidebar's own remedy buttons —
+                // and this file is Codex-only, so the agent is hardcoded.
+                onClick={() => void runRemedyInTerminal(remedy, "codex", "settings")}
               >
                 {createTerminal.isPending && (
                   <Loader2 className="mr-1.5 size-3.5 animate-spin" />

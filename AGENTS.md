@@ -29,9 +29,15 @@ npm run test:e2e       # Playwright (web)  ·  npm run test:electron (desktop)
 Logs — **check both** when verifying a change:
 
 ```bash
-tail -f ~/.libi/logs/server.log                            # Next: compile errors, requests, [browser] errors
+tail -f ~/.libi/logs/server.log                            # Next: compile errors, requests, [browser] errors (dev only)
 tail -f ~/.libi/logs/libi.log | jq 'select(.tag == "…")'   # app-level structured logs
 ```
+
+`[browser]` relay is a Next **dev-server** feature — in production nothing forwards
+renderer console output to `server.log`. The packaged app writes renderer
+`console.error` lines to `~/.libi/logs/electron-main-sync.log` (electron/main.ts →
+sync-log.ts); under `npx` in a real browser they exist only in that browser's DevTools
+(plus Sentry for uncaught exceptions, unless opted out).
 
 Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export`, `overlay`,
 `analysis`, `tracking-engine`, `tracking-pyenv`, `matte`, `mcp-config`, `session-manager`,
@@ -82,7 +88,7 @@ Every one of these has broken something. Do not relax one without evidence.
 
 **Licensing — legal, not stylistic**
 - `@agentclientprotocol/claude-agent-acp` **MUST stay a `devDependency`.** It transitively
-  pulls a proprietary ~212 MB Anthropic binary that libi (GPL-3.0) has no licence to
+  pulls a proprietary ~306 MB Anthropic binary that libi (GPL-3.0) has no licence to
   redistribute. Three gates enforce it: `scripts/check-licenses.sh`,
   `electron-builder.yml`'s `files` exclusions, and the `afterPack` hook. `codex-acp` is
   Apache-2.0 and stays bundled. Same reasoning blocks hosting the AGPL-derived YOLOE

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { SessionEventHandler } from "@/lib/agents/session-event-handler";
+import { serverLogger } from "@/lib/logger";
 import type { SessionEntry } from "@/lib/sessions/types";
 import type { SessionNotification } from "@agentclientprotocol/sdk";
 
@@ -125,4 +126,108 @@ describe("SessionEventHandler context updates", () => {
     ]);
     expect(emit).not.toHaveBeenCalled();
   });
+
+  it("config_option_update replaces configOptions and emits agent-config-options", () => {
+    // These arrive when a model (or any config) is changed from OUTSIDE libi —
+    // or by libi's own pushModelToSession. They were explicitly discarded
+    // ("Informational updates — not surfaced to the UI"), so neither server
+    // nor client ever learned about a change it did not itself initiate.
+    const session = makeSession();
+    const { handler, emit } = makeHandler(session);
+    const configOptions = [
+      {
+        type: "select",
+        id: "model",
+        name: "Model",
+        currentValue: "opus",
+        options: [
+          { value: "opus", name: "Opus" },
+          { value: "haiku", name: "Haiku" },
+        ],
+      },
+    ];
+    handler.handleSessionUpdate("s1", {
+      sessionId: "s1",
+      update: { sessionUpdate: "config_option_update", configOptions },
+    } as unknown as SessionNotification);
+
+    // toEqual, not toHaveLength — a length check passes on "assigned
+    // something else of the same length", which is exactly the mistake a
+    // full-replacement assignment can make.
+    expect(session.configOptions).toEqual(configOptions);
+    expect(emit).toHaveBeenCalledWith("s1", {
+      type: "agent-config-options",
+      model: {
+        supported: true,
+        currentModelId: "opus",
+        availableModels: [
+          { id: "opus", name: "Opus", description: undefined },
+          { id: "haiku", name: "Haiku", description: undefined },
+        ],
+      },
+    });
+  });
+
+  it("config_option_update for an unknown session routes to the orphan stash (standby pre-claim)", () => {
+    // Same shape as the commands stash above: the standby session has no
+    // SessionEntry until it is claimed, and dropping the update would hand
+    // the claimed chat stale options.
+    const emit = vi.fn();
+    const stashConfig = vi.fn();
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      emit,
+      () => undefined,
+      undefined,
+      stashConfig,
+    );
+    const configOptions = [
+      { type: "select", id: "model", name: "Model", currentValue: "opus", options: [] },
+    ];
+    handler.handleSessionUpdate("standby-1", {
+      sessionId: "standby-1",
+      update: { sessionUpdate: "config_option_update", configOptions },
+    } as unknown as SessionNotification);
+
+    expect(stashConfig).toHaveBeenCalledWith("standby-1", configOptions);
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  // Context compaction arrived with @agentclientprotocol/sdk 1.x. libi does not
+  // surface it, and "does not surface" must mean SILENT rather than a fall
+  // through to the exhaustiveness default, which logs `unknown_session_update`
+  // once per chunk. No adapter can reach that today — these updates require
+  // the client to have advertised `ClientSessionCapabilities::compaction` and
+  // libi advertises `clientCapabilities: {}` — so this pins the DEFENSIVE
+  // handling: it is what will already be right on the day libi advertises it.
+  for (const update of [
+    { sessionUpdate: "compaction_update", compactionId: "c1", status: "in_progress" },
+    {
+      sessionUpdate: "compaction_summary_chunk",
+      compactionId: "c1",
+      content: { type: "text", text: "…summary so far" },
+    },
+  ]) {
+    it(`${update.sessionUpdate} is a silent no-op (no event, no unknown-update warning)`, () => {
+      const session = makeSession();
+      const { handler, emit } = makeHandler(session);
+      // try/finally, not a trailing restore: this suite sets neither
+      // `restoreMocks` nor `clearMocks`, so a failing assertion would skip the
+      // restore and the spy would accumulate calls into the NEXT iteration —
+      // turning one real failure into two, the second of them bogus.
+      const warn = vi.spyOn(serverLogger, "warn").mockImplementation(() => {});
+      try {
+        handler.handleSessionUpdate("s1", {
+          sessionId: "s1",
+          update,
+        } as unknown as SessionNotification);
+
+        expect(emit).not.toHaveBeenCalled();
+        expect(session.messageCache).toEqual([]);
+        expect(warn).not.toHaveBeenCalled();
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
 });

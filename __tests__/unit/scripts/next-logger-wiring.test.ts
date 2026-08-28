@@ -7,7 +7,8 @@ import path from "node:path";
 // Regression guard for `~/.libi/logs/server.log`.
 //
 // That file is where Next.js' OWN output goes — compile errors, request lines,
-// runtime exceptions, `[browser]`-relayed React errors — and it is the first
+// runtime exceptions, and (dev only — the relay is a dev-server feature)
+// `[browser]`-relayed React errors — and it is the first
 // thing anyone reads when a packaged app 500s. It is produced by `next-logger`
 // reading the pino factory in `next-logger.config.js`.
 //

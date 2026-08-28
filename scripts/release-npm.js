@@ -61,15 +61,22 @@ function sleepSync(ms) {
 }
 const args = process.argv.slice(2);
 const dryRun = args.includes("--dry-run");
+// Running inside .github/workflows/release.yml rather than on a maintainer's
+// Mac. The ONLY thing this changes is how the publish authenticates: a runner
+// has no `npm login`, and instead proves its identity to the registry with an
+// OIDC token (npm trusted publishing). Every gate, guard and verification below
+// runs identically — a CI release must not be a weaker release.
+const ci = args.includes("--ci");
 // No argument = work it out. An explicit one still wins; see `decideBump`.
 const explicitBump = args.find((a) => !a.startsWith("--")) ?? null;
 
 if (explicitBump !== null && !["patch", "minor", "major", "none"].includes(explicitBump)) {
   console.error(
-    "usage: npm run release:npm -- [patch|minor|major|none] [--dry-run]\n" +
+    "usage: npm run release:npm -- [patch|minor|major|none] [--dry-run] [--ci]\n" +
       "  (no argument)  work out from npm + git whether a bump is needed\n" +
       "  none           publish the version already in package.json (no bump)\n" +
-      "  --dry-run      run everything, but `npm publish --dry-run` at the end",
+      "  --dry-run      run everything, but `npm publish --dry-run` at the end\n" +
+      "  --ci           authenticate by OIDC instead of `npm login` (workflow only)",
   );
   process.exit(1);
 }
@@ -171,7 +178,33 @@ if (dirty === null || dirty !== "") {
 // Publish credentials, checked in seconds rather than after ~12 minutes of
 // gates. `release-electron.js` already fails fast on signing and `gh`; this is
 // the same idea for the one thing that can only fail at the very last step.
-{
+if (ci) {
+  // Trusted publishing: the runner exchanges a GitHub OIDC token for a
+  // short-lived registry credential, so there is no `npm login` to check and
+  // no token to leak. What CAN be checked cheaply is the two preconditions
+  // that make it work at all — both silently degrade into a plain
+  // unauthenticated publish (E404/E403 at the very last step) when absent.
+  const npmVersion = capture("npm", ["--version"]) ?? "0.0.0";
+  const [maj, min] = npmVersion.split(".").map((n) => Number.parseInt(n, 10));
+  if (maj < 11 || (maj === 11 && min < 5)) {
+    console.error(
+      `❌ npm ${npmVersion} does not support OIDC trusted publishing (needs >= 11.5.1).\n` +
+        "   The workflow installs a newer npm before this step — if you are seeing\n" +
+        "   this, that step did not run or did not take effect.",
+    );
+    process.exit(1);
+  }
+  if (!process.env.ACTIONS_ID_TOKEN_REQUEST_URL) {
+    console.error(
+      "❌ no OIDC token is available to this job — `permissions: id-token: write`\n" +
+        "   is missing from the publishing job in .github/workflows/release.yml.\n" +
+        "   Without it npm falls back to an anonymous publish and fails at the end,\n" +
+        "   after every gate has already run.",
+    );
+    process.exit(1);
+  }
+  console.log(`  npm ${npmVersion} · OIDC token available — publishing as a trusted publisher`);
+} else {
   const who = capture("npm", ["whoami"]);
   if (!who) {
     console.error(

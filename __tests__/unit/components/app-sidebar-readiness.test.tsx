@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 
@@ -154,6 +157,20 @@ function newChatButton(): HTMLButtonElement {
   return btn as HTMLButtonElement;
 }
 
+
+/**
+ * The sidebar reads onboarding state through React Query (the "Connect an
+ * agent" row), so it needs a client. A fresh one per render keeps the tests
+ * independent of each other's caches.
+ */
+function renderSidebar() {
+  return render(
+    <QueryClientProvider client={new QueryClient()}>
+      <AppSidebar />
+    </QueryClientProvider>,
+  );
+}
+
 describe("AppSidebar — the New chat button under an unusable agent", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -166,7 +183,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
     readiness = NEEDS_AUTH;
     // The exact live repro: the standby failed, so canCreate is false too.
     canCreate = false;
-    render(<AppSidebar />);
+    renderSidebar();
 
     expect(screen.queryByText(PREPARING)).not.toBeInTheDocument();
     expect(
@@ -178,7 +195,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
   it("says the real reason and offers the remedy", () => {
     readiness = NEEDS_AUTH;
     canCreate = false;
-    render(<AppSidebar />);
+    renderSidebar();
 
     const label = newChatButton().getAttribute("aria-label") ?? "";
     expect(label).toContain("Codex is installed but not signed in.");
@@ -188,7 +205,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
   it("leaves the button ENABLED so the remedy is reachable", () => {
     readiness = NEEDS_AUTH;
     canCreate = false;
-    render(<AppSidebar />);
+    renderSidebar();
     expect(newChatButton()).not.toBeDisabled();
   });
 
@@ -196,7 +213,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
     readiness = NEEDS_AUTH;
     canCreate = false;
     createTerminalMutate.mockResolvedValue({ id: "term-1" });
-    render(<AppSidebar />);
+    renderSidebar();
 
     fireEvent.click(newChatButton());
 
@@ -223,7 +240,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
   it("still says 'Preparing…' for a standby that IS genuinely being replenished", () => {
     readiness = { state: "unknown" };
     canCreate = false;
-    render(<AppSidebar />);
+    renderSidebar();
     expect(newChatButton().getAttribute("aria-label")).toBe(PREPARING);
   });
 
@@ -234,7 +251,7 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
       sessionId: null,
       error: "Authentication required",
     });
-    render(<AppSidebar />);
+    renderSidebar();
 
     fireEvent.click(newChatButton());
 
@@ -242,5 +259,86 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
       expect(toastError).toHaveBeenCalledWith("Authentication required"),
     );
     expect(routerPush).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Task 10: the sidebar's agent dropdown replaces the "restart libi to
+ * retry"/"restart libi to install it" dead-end sentence with a real Install
+ * chip (see agent-selector-unavailable.test.tsx). This file's AppSidebar
+ * doesn't render that row itself (agent-selector is mocked out above), but
+ * it independently renders the SAME `readiness.reason` text in the status
+ * dot's title and the "+" button's tooltip whenever the active agent's
+ * readiness is `not-installed` — so the retired sentence must not survive
+ * there either.
+ */
+describe("AppSidebar — the not-installed active agent never echoes the retired 'restart libi' copy", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    readiness = { state: "unknown" };
+    canCreate = true;
+    activeProviderId = "codex";
+  });
+
+  it("never renders 'restart libi' when the active agent's readiness is not-installed", () => {
+    readiness = {
+      state: "not-installed",
+      reason: "Claude Code support failed to install — restart libi to retry.",
+    };
+    canCreate = false;
+    activeProviderId = "claude-code";
+    renderSidebar();
+
+    expect(document.body.textContent).not.toContain("restart libi");
+    expect(newChatButton().getAttribute("aria-label")).not.toContain("restart libi");
+  });
+
+  it("still says SOMETHING about the agent needing installation, not silence", () => {
+    readiness = {
+      state: "not-installed",
+      reason: "Claude Code support failed to install — restart libi to retry.",
+    };
+    canCreate = false;
+    activeProviderId = "claude-code";
+    renderSidebar();
+
+    const label = newChatButton().getAttribute("aria-label") ?? "";
+    expect(label.length).toBeGreaterThan(0);
+    expect(label).not.toBe(PREPARING);
+  });
+
+  it("falls back to the server's own reason for an agent with no declared install step", () => {
+    // Not every not-installed agent has an Install action to point at —
+    // don't invent one. Codex declares `install: null` (libi ships its
+    // engine — see lib/agents/setup/registry.ts), so the raw reason is still
+    // the honest thing to show, as long as it isn't the retired copy.
+    readiness = {
+      state: "not-installed",
+      reason: "libi's bundled Codex adapter is missing from this install — reinstall libi to restore it.",
+    };
+    canCreate = false;
+    activeProviderId = "codex";
+    renderSidebar();
+
+    expect(newChatButton().getAttribute("aria-label")).toContain(
+      "libi's bundled Codex adapter is missing",
+    );
+  });
+});
+
+describe("starting a chat leaves the connect takeover", () => {
+  it("closes it on a successful create, rather than inferring from state", () => {
+    // The connect screen is a region mode, not a route, so a new session
+    // rendered it instead of the chat once the takeover latched on (Windows,
+    // 2026-08-25). Deriving the exit from "is a session active?" cannot work:
+    // that is equally true when the session list merely finishes loading,
+    // which slammed the screen shut on a deliberate visit. The click is the
+    // unambiguous signal, so the exit lives with the click.
+    const src = readFileSync(
+      join(process.cwd(), "components/layout/app-sidebar.tsx"),
+      "utf8",
+    );
+    const create = src.slice(src.indexOf("createSessionWithResult"));
+    expect(create).toContain('setRightRegionMode("editor");');
   });
 });

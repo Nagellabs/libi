@@ -26,6 +26,7 @@
 import fs from "fs";
 import path from "path";
 import { userCommandSearchDirs } from "@/lib/shell-path-cache";
+import { isWindows } from "@/lib/platform";
 
 /**
  * Names a bare `<command>` could resolve to on this platform.
@@ -36,7 +37,7 @@ import { userCommandSearchDirs } from "@/lib/shell-path-cache";
  * Windows as missing.
  */
 function candidateNames(command: string): string[] {
-  if (process.platform !== "win32") return [command];
+  if (!isWindows()) return [command];
   return [`${command}.cmd`, `${command}.exe`, `${command}.bat`, command];
 }
 
@@ -46,7 +47,7 @@ function isExecutableFile(candidate: string): boolean {
     if (!st.isFile()) return false;
     // Windows has no execute bit; presence in PATH with a PATHEXT suffix is
     // the whole test there.
-    if (process.platform === "win32") return true;
+    if (isWindows()) return true;
     fs.accessSync(candidate, fs.constants.X_OK);
     return true;
   } catch {

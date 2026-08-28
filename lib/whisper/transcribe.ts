@@ -127,6 +127,7 @@ function runUv(
   const uv = resolveUvPath();
   return new Promise((resolve, reject) => {
     const child = spawn(uv, args, {
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: buildUvEnv(),
     });

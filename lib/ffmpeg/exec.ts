@@ -3,9 +3,10 @@ import fs from "fs";
 import path from "path";
 import { getLibiBinDir } from "@/lib/libi-home";
 import { ffmpegLogger } from "@/lib/logger";
+import { exeSuffix } from "@/lib/platform";
 
 function resolveBin(name: string): string {
-  const exeName = process.platform === "win32" ? `${name}.exe` : name;
+  const exeName = `${name}${exeSuffix()}`;
   const bundled = path.join(getLibiBinDir(), exeName);
   if (fs.existsSync(bundled)) return bundled;
   return name; // PATH fallback
@@ -62,6 +63,9 @@ export function runFfmpeg(
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegPath, args, {
       cwd: opts.cwd,
+      // See lib/agents/process-manager.ts: without this every ffmpeg call
+      // flashes a console window in the packaged Windows app.
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
 

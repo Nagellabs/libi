@@ -454,8 +454,13 @@ function restorePrebuiltExecutables(outDir) {
  * Node majors to fetch a SIDECAR better-sqlite3 binding for.
  *
  * See `fetchNodeAbiSidecars` for why the Electron binding alone is not enough.
- * The range is `MIN_NODE_MAJOR` (lib/runtime/node-runtime.ts) through the major
- * of `PINNED_NODE_VERSION`.
+ * The range spans every major `ensureNodeRuntime()` has ever been able to put
+ * at `<LIBI_HOME>/bin/node`, through the major of `PINNED_NODE_VERSION`
+ * (lib/runtime/node-runtime.ts). Its floor trails MIN_NODE_MAJOR (now 22) on
+ * purpose — but NOT to keep already-provisioned 20/21 bindings valid, which it
+ * does not: a managed node below the minimum is de-provisioned and replaced.
+ * They earn their bytes on the degraded path, where `ensureNodeRuntime` fails
+ * and a bare system `node` 20/21 ends up running the binding.
  *
  * It is NOT the full set of interpreters that can reach the binding, and an
  * earlier version of this comment claimed it was while refuting itself in the
@@ -1201,6 +1206,29 @@ function assertRuntimeBundleFresh(opts = {}) {
  * That shipped. It was found in the v0.1.3 FULL verification, not by any gate.
  */
 function assertPrebuiltExecutablesRunnable(outDir = path.join(ROOT, OUT_DIRNAME)) {
+  // NTFS has no execute bit. Node reports 0666 for every regular file on
+  // Windows, so `mode & 0o111` is 0 for helpers that are perfectly fine, and
+  // this guard failed the FIRST Windows build with a list of DARWIN helpers a
+  // Windows package never spawns:
+  //
+  //   node-pty's spawn-helper is NOT executable in the bundle:
+  //     …/prebuilds/darwin-arm64/spawn-helper
+  //
+  // Keyed on the HOST, not the target: the question is whether this
+  // filesystem can express the bit at all, and a Windows host cannot — for
+  // any target. Nothing is lost for the case the guard was written for. It
+  // exists because a dead Terminal shipped in a signed macOS .app, where the
+  // bit cannot be repaired at runtime (chmod inside the bundle is EPERM); the
+  // macOS build still runs this check, on a filesystem that means it.
+  if (process.platform === "win32") {
+    console.log(
+      "[runtime-bundle] skipping the spawn-helper execute-bit check: NTFS has no\n" +
+        "   execute bit, so the assertion cannot be evaluated on this host. The macOS\n" +
+        "   build — the one whose signed bundle cannot be repaired at runtime — still\n" +
+        "   enforces it.",
+    );
+    return;
+  }
   const helperDir = path.join(outDir, "node_modules", "node-pty", "prebuilds");
   let entries;
   try {

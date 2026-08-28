@@ -33,6 +33,8 @@
  * system-authored chat noise.
  */
 
+import { getAgentSetup } from "@/lib/agents/setup/registry";
+
 /** ACP `RequestError.authRequired()` — see @agentclientprotocol/sdk. */
 export const ACP_AUTH_REQUIRED_CODE = -32000;
 
@@ -66,25 +68,35 @@ export function isAuthRequiredError(err: unknown): boolean {
 export type AuthNoteContext = "prompt" | "session-start";
 
 /**
- * Display name for an agent id. The canonical labels live on the registry
- * entries (`lib/agents/acp/agent-registry.ts` — `name: "Claude Code"`), but
- * importing that here would drag the whole detection stack into a module the
- * browser bundle reaches. Two ids, kept in sync by hand; anything else falls
- * back to the raw id rather than guessing a prettier form.
+ * Display name for an agent id. Reads `lib/agents/setup/registry.ts` — pure,
+ * no filesystem — rather than `lib/agents/acp/agent-registry.ts`, which would
+ * drag the whole detection stack into a module the browser bundle reaches.
+ * Was two ids kept in sync by hand (`if (agentId === "claude-code") return
+ * "Claude Code"; …`); anything the registry doesn't know still falls back to
+ * the raw id rather than guessing a prettier form.
  */
 function agentLabel(agentId: string): string {
-  if (agentId === "claude-code") return "Claude Code";
-  if (agentId === "codex") return "Codex";
-  return agentId;
+  return getAgentSetup(agentId)?.name ?? agentId;
 }
 
 /**
  * The note to post for a failed prompt or a failed session start, or null to
  * stay silent.
  *
+ * WAS two hardcoded `if (agentId === "claude-code") … if (agentId ===
+ * "codex") …` blocks; now it branches on the registry's `install` field
+ * instead — an agent libi must install (Claude Code today) gets the
+ * install-and-run wording, an agent libi already ships (`install: null`,
+ * Codex today) gets the "nothing to install" wording. Same two outputs, but
+ * derived from what the registry declares rather than from the id.
+ *
  * The Claude wording matches `components/onboarding/onboarding-panel.tsx`'s
  * install hint rather than inventing a second set of instructions — both name
- * a sign-in libi cannot perform on the user's behalf.
+ * a sign-in libi cannot perform on the user's behalf. The API-key alternative
+ * comes from `AgentSignInDeclaration.envVar`, so widening the branch from one
+ * agent id to "every agent libi installs" no longer carries Anthropic's
+ * variable to agents it is wrong for; an agent that declares none simply
+ * doesn't get that sentence.
  *
  * Codex gets its own wording because its remedy is genuinely different: libi
  * BUNDLES the codex engine (~271MB, verified running on a machine with no
@@ -103,18 +115,27 @@ export function promptErrorNote(
       ? "so it couldn't run that message"
       : "so libi can't start a chat with it";
 
-  if (agentId === "claude-code") {
+  const setup = getAgentSetup(agentId);
+
+  if (setup?.install) {
     const retry = context === "prompt" ? " — then send it again." : ".";
+    // The env-var alternative is a REGISTRY field, not a literal. It used to
+    // be `ANTHROPIC_API_KEY` hardcoded inside a branch that had just been
+    // widened from `agentId === "claude-code"` to "any agent libi installs" —
+    // so Anthropic's variable would have been recommended to the next
+    // installable agent's users. An agent that declares none loses the clause
+    // entirely rather than being handed someone else's.
+    const envClause = setup.signIn.envVar ? `, or set \`${setup.signIn.envVar}\`` : "";
     return (
-      `Claude Code isn't signed in on this machine, ${blocked}. ` +
-      "Sign in once — install Claude Code (`npm i -g @anthropic-ai/claude-code`) and run " +
-      `\`claude\`, or set \`ANTHROPIC_API_KEY\`${retry}`
+      `${setup.name} isn't signed in on this machine, ${blocked}. ` +
+      `Sign in once — install ${setup.name} (\`${setup.install.command}\`) and run ` +
+      `\`${setup.signIn.displayCommand}\`${envClause}${retry}`
     );
   }
-  if (agentId === "codex") {
+  if (setup) {
     return (
-      `Codex isn't signed in on this machine, ${blocked}. ` +
-      "Sign in using the Codex engine libi already ships — there's nothing to install."
+      `${setup.name} isn't signed in on this machine, ${blocked}. ` +
+      `Sign in using the ${setup.name} engine libi already ships — there's nothing to install.`
     );
   }
   return `${agentLabel(agentId)} isn't signed in on this machine, ${blocked}.`;

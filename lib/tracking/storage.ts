@@ -1,14 +1,23 @@
 import { mkdir, readFile, writeFile, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { getLibiStorageDir } from "@/lib/libi-home";
+import { assertSafePieceId, assertSafeTrackId } from "@/lib/security/pieceId";
 import type { Track } from "@/lib/tracking/types";
 import { normalizeTrack } from "@/lib/tracking/segments";
 
+// RC-D: these are the ONLY builders for track-sidecar paths, and they bypass
+// LocalFileStorage's guard entirely. `join()` normalizes `..`, so an unvalidated
+// `pieceId`/`trackId` (raw HTTP route param or agent-supplied MCP arg) escapes
+// the storage root. Guard here — at the single choke point — so every present
+// and future caller is covered, not just the routes that remember to check.
 function tracksDir(pieceId: string) {
+  assertSafePieceId(pieceId);
   return join(getLibiStorageDir(), pieceId, "_tracks");
 }
 
 function trackPath(pieceId: string, trackId: string) {
+  // `trackId` is concatenated into the filename, so it needs guarding too.
+  assertSafeTrackId(trackId);
   return join(tracksDir(pieceId), `${trackId}.json`);
 }
 

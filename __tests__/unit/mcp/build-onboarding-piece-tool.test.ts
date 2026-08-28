@@ -280,7 +280,16 @@ describe("build_onboarding_piece — results", () => {
       },
     });
 
-    const r = await buildOnboardingPiece({});
+    // Inject the pieceExists seam. The default reaches the real `getDb()`,
+    // which fails open (→ true) only while no DB exists; another test file
+    // that leaves `globalThis.__libi_test_db` installed hands this call a
+    // real, empty DB, the deleted-piece guard fires, and the assertions
+    // below never run. Which file lands in this worker first is a vitest
+    // scheduling detail, so without this the test is a coin flip — it went
+    // red the moment an unrelated jsdom file was added elsewhere in the repo.
+    const r = await buildOnboardingPiece({}, undefined, {
+      pieceExists: () => true,
+    });
     // Facts about the piece survive a cache hit…
     expect(r.data.pieceId).toBe("piece-onboarding-1");
     expect(r.data.version).toBe("v1");

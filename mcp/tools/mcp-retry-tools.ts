@@ -7,6 +7,7 @@ import { DependencyManager } from "@/mcp/registry/dependency-manager";
 import { serverLogger as logger } from "@/lib/logger";
 import type { ToolResult } from "./types";
 import type { RetryMcpServerParams } from "./schemas";
+import { isWindows } from "@/lib/platform";
 
 /**
  * Re-probe an external MCP server and refresh its serverStatus in the DB.
@@ -49,7 +50,7 @@ export async function retryMcpServer(params: RetryMcpServerParams): Promise<Tool
     .run();
 
   const libiBinDir = DependencyManager.getBinDir();
-  const pathSep = process.platform === "win32" ? ";" : ":";
+  const pathSep = isWindows() ? ";" : ":";
   const augmentedPath = `${libiBinDir}${pathSep}${process.env.PATH ?? ""}`;
   const userEnv: Record<string, string> = row.envVars ? JSON.parse(row.envVars) : {};
   const args: string[] = row.args ? JSON.parse(row.args) : [];

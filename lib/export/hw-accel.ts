@@ -42,7 +42,7 @@ export function buildEncoderProbeArgs(encoder: string): string[] {
 
 async function encoderProbeSucceeds(encoder: string): Promise<boolean> {
   try {
-    await execFileAsync(resolveFfmpegPath(), buildEncoderProbeArgs(encoder), { timeout: 15000 });
+    await execFileAsync(resolveFfmpegPath(), buildEncoderProbeArgs(encoder), { timeout: 15000, windowsHide: true });
     return true;
   } catch {
     return false;
@@ -52,7 +52,7 @@ async function encoderProbeSucceeds(encoder: string): Promise<boolean> {
 export async function detectAvailableEncoders(): Promise<Set<string>> {
   if (cached) return cached;
   try {
-    const { stdout } = await execFileAsync(resolveFfmpegPath(), ["-encoders"], { timeout: 5000 });
+    const { stdout } = await execFileAsync(resolveFfmpegPath(), ["-encoders"], { timeout: 5000, windowsHide: true });
     const listed = parseAvailableEncoders(stdout);
     const toProbe = HW_ENCODER_CANDIDATES.filter((enc) => listed.has(enc));
     const results = await Promise.all(toProbe.map(encoderProbeSucceeds));

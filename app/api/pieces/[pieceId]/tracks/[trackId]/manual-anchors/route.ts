@@ -11,11 +11,24 @@ import { recomputeTrackSegmentServerSide } from "@/lib/tracking/recompute-segmen
 import { navigationEmitter } from "@/lib/navigation-events";
 import { getSessionManager } from "@/lib/sessions/session-manager";
 import { serverLogger as logger } from "@/lib/logger";
+import { isSafePieceId, isSafeTrackId } from "@/lib/security/pieceId";
 
 type Ctx = { params: Promise<{ pieceId: string; trackId: string }> };
 
+// RC-D: `pieceId`/`trackId` arrive as raw URL params (percent-encoded traversal
+// survives Next's decode into the param) and flow straight into the track-sidecar
+// path builders. Reject a traversal-shaped id with a 400 before any filesystem op.
+function invalidIds(pieceId: string, trackId: string): NextResponse | null {
+  if (!isSafePieceId(pieceId) || !isSafeTrackId(trackId)) {
+    return NextResponse.json({ error: "invalid id" }, { status: 400 });
+  }
+  return null;
+}
+
 export async function GET(_req: Request, { params }: Ctx) {
   const { pieceId, trackId } = await params;
+  const bad = invalidIds(pieceId, trackId);
+  if (bad) return bad;
   const track = await readTrack(pieceId, trackId);
   if (!track) return NextResponse.json({ error: "track not found" }, { status: 404 });
   return NextResponse.json({ anchors: track.manualAnchors ?? [] });
@@ -23,6 +36,8 @@ export async function GET(_req: Request, { params }: Ctx) {
 
 export async function POST(req: Request, { params }: Ctx) {
   const { pieceId, trackId } = await params;
+  const bad = invalidIds(pieceId, trackId);
+  if (bad) return bad;
   let parsed: { time?: unknown; bbox?: unknown; retrack?: unknown };
   try {
     parsed = await req.json();
@@ -139,6 +154,8 @@ export async function POST(req: Request, { params }: Ctx) {
 
 export async function DELETE(_req: Request, { params }: Ctx) {
   const { pieceId, trackId } = await params;
+  const bad = invalidIds(pieceId, trackId);
+  if (bad) return bad;
   const track = await readTrack(pieceId, trackId);
   if (!track) return NextResponse.json({ error: "track not found" }, { status: 404 });
   await writeTrack(pieceId, { ...track, manualAnchors: [] });

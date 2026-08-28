@@ -55,6 +55,9 @@ next-env.d.ts
 # release build and by `prepack`; never committed.
 /dist-cli/
 
+# `npm pack` output — regenerated on demand (release, or shipping a build to a QA box)
+/*.tgz
+
 # playwright
 test-results/
 playwright-report/

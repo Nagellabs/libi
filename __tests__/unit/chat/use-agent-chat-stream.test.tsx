@@ -9,8 +9,15 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { StrictMode, type ReactNode } from "react";
-import { renderHook, act, cleanup } from "@testing-library/react";
-import { useAgentChat } from "@/hooks/sessions/use-agent-chat";
+import { render, renderHook, act, cleanup } from "@testing-library/react";
+import {
+  useAgentChat,
+  usePendingApprovalCount,
+  useSessionGenerating,
+  useSessionUnviewed,
+  setViewedSession,
+} from "@/hooks/sessions/use-agent-chat";
+import { useSessionList } from "@/hooks/sessions/use-session-list";
 import { loadDraft } from "@/lib/chat/draft-store";
 
 const SESSION = "sess-test-1";
@@ -310,5 +317,312 @@ describe("useAgentChat send failure", () => {
 
     // Delivered — the backup must not resurface in the composer later.
     expect(loadDraft(SESSION)).toBe("");
+  });
+});
+
+describe("useAgentChat background completion", () => {
+  /** Emit for an arbitrary session, not just the file-level SESSION. */
+  function emitFor(sessionId: string, event: Record<string, unknown>) {
+    lastES().onmessage?.({ data: JSON.stringify({ sessionId, ...event }) });
+  }
+
+  /** Reproduces the observed repro: send a prompt in session B, switch to
+   *  session A while it runs, let B's turn finish while backgrounded, then
+   *  switch back to B. B has no mounted handler at the moment its terminal
+   *  event arrives, so only the SSE singleton can record it. */
+  async function runBackgroundTurn(
+    bg: string,
+    fg: string,
+    terminal: Record<string, unknown>,
+  ) {
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useAgentChat(id),
+      { initialProps: { id: bg } },
+    );
+    await act(async () => {});
+
+    // The turn is in flight in `bg`.
+    act(() => emitFor(bg, { type: "agent-status", status: "thinking" }));
+    expect(result.current.isLoading).toBe(true);
+
+    // Switch away. `bg` now has no mounted handler; `fg` keeps the single
+    // global EventSource alive, exactly as the sidebar switch does.
+    rerender({ id: fg });
+    await act(async () => {});
+
+    // `bg`'s turn ends while nobody is listening for it.
+    act(() => emitFor(bg, terminal));
+
+    // Switch back.
+    rerender({ id: bg });
+    await act(async () => {});
+    return result;
+  }
+
+  it("a turn that completes while backgrounded does not leave a stuck Stop button", async () => {
+    const result = await runBackgroundTurn("bg-complete", "fg-complete", {
+      type: "agent-complete",
+      stopReason: "end_turn",
+    });
+
+    expect(result.current.status).toBe("connected");
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it("a turn cancelled while backgrounded settles the same way", async () => {
+    // Cancellation reaches the client as the same `agent-complete` frame,
+    // only with `stopReason: "cancelled"` — there is no separate event.
+    const result = await runBackgroundTurn("bg-cancel", "fg-cancel", {
+      type: "agent-complete",
+      stopReason: "cancelled",
+    });
+
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it("a turn that errors while backgrounded settles too (via agent-status)", async () => {
+    // Unlike completion, the failure terminal IS an `agent-status` frame, so
+    // the pre-existing status caching already covered it. Pinned so a future
+    // change to the error path can't quietly reintroduce the stuck state.
+    const result = await runBackgroundTurn("bg-error", "fg-error", {
+      type: "agent-status",
+      status: "error",
+      error: "boom",
+    });
+
+    expect(result.current.status).toBe("error");
+    expect(result.current.isLoading).toBe(false);
+  });
+});
+
+describe("useSessionGenerating (the sidebar's working indicator)", () => {
+  /** The sidebar renders rows for sessions whose chat hook is NOT mounted, so
+   *  every assertion here deliberately drives events at a session that has no
+   *  `useAgentChat` anywhere — the singleton's status cache is the only thing
+   *  that can answer for it. */
+  function emitFor(sessionId: string, event: Record<string, unknown>) {
+    lastES().onmessage?.({ data: JSON.stringify({ sessionId, ...event }) });
+  }
+
+  it("reports a backgrounded session as working, and stops when its turn ends", async () => {
+    const { result } = renderHook(() => useSessionGenerating("dot-bg"));
+    await act(async () => {});
+    expect(result.current).toBe(false);
+
+    act(() => emitFor("dot-bg", { type: "agent-status", status: "thinking" }));
+    expect(result.current).toBe(true);
+
+    // Success emits `agent-complete` and no closing `agent-status`. If the
+    // singleton did not cache that terminal, this dot would spin forever on a
+    // session the user has switched away from — the exact stuck state fixed in
+    // `Clear the Stop button when a turn finishes in a backgrounded session`.
+    act(() => emitFor("dot-bg", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current).toBe(false);
+  });
+
+  it("subscribes to ONE session, not to any session that happens to be busy", async () => {
+    const { result } = renderHook(() => useSessionGenerating("dot-quiet"));
+    await act(async () => {});
+
+    act(() => emitFor("dot-noisy", { type: "agent-status", status: "thinking" }));
+    expect(result.current).toBe(false);
+  });
+
+  it("holds the one global EventSource open on its own", async () => {
+    // The sidebar can be the ONLY subscriber — no chat hook is mounted on
+    // /settings. If this hook did not count as a handler, an unrelated
+    // unsubscribe would close the stream and the dots would silently stop
+    // updating instead of visibly breaking.
+    const before = FakeEventSource.instances.length;
+    const dot = renderHook(() => useSessionGenerating("dot-stream"));
+    const approvals = renderHook(() => usePendingApprovalCount("dot-stream"));
+    await act(async () => {});
+    expect(FakeEventSource.instances.length).toBeGreaterThan(before);
+
+    approvals.unmount();
+    expect(lastES().closed).toBe(false);
+    // …and it still delivers.
+    act(() => emitFor("dot-stream", { type: "agent-status", status: "thinking" }));
+    expect(dot.result.current).toBe(true);
+
+    dot.unmount();
+    // Last subscriber gone — the singleton closes rather than leaking.
+    expect(
+      FakeEventSource.instances[FakeEventSource.instances.length - 1].closed,
+    ).toBe(true);
+  });
+
+  it("stays false for a session that only ever streamed text (no status frame)", async () => {
+    // Guards the predicate itself: "generating" is the same thing the composer
+    // calls `isLoading`, and nothing else may light the dot.
+    const { result } = renderHook(() => useSessionGenerating("dot-text"));
+    await act(async () => {});
+    act(() => emitFor("dot-text", { type: "agent-text", text: "hi" }));
+    expect(result.current).toBe(false);
+  });
+});
+
+describe("useSessionUnviewed (finished while you were elsewhere)", () => {
+  /** Same rationale as the working-indicator suite: every session driven here
+   *  deliberately has NO mounted `useAgentChat`, because "a turn finished in a
+   *  session you are not looking at" is by definition a session with no
+   *  composer on screen. The SSE singleton is the only listener that can see
+   *  it. `agentId` rides along on the frames purely to prove it is ignored. */
+  function emitFor(sessionId: string, event: Record<string, unknown>) {
+    lastES().onmessage?.({ data: JSON.stringify({ sessionId, ...event }) });
+  }
+
+  /** Records EVERY value the hook ever rendered, not just the final one —
+   *  which is what lets the no-flash invariant be asserted rather than
+   *  assumed. */
+  function probe(sessionId: string) {
+    const seen: boolean[] = [];
+    function Probe() {
+      seen.push(useSessionUnviewed(sessionId));
+      return null;
+    }
+    render(<Probe />);
+    return seen;
+  }
+
+  beforeEach(() => {
+    // Module-level state outlives a test. Nothing is being viewed at the start
+    // of each one; ids are kept distinct per test so the unviewed set can't
+    // leak either.
+    setViewedSession(null);
+  });
+
+  it("marks a session whose turn completed while it was NOT the one on screen", async () => {
+    setViewedSession("uv-elsewhere");
+    const { result } = renderHook(() => useSessionUnviewed("uv-bg"));
+    await act(async () => {});
+    expect(result.current).toBe(false);
+
+    act(() => emitFor("uv-bg", { type: "agent-status", status: "thinking" }));
+    expect(result.current).toBe(false); // still working, not yet a result
+
+    act(() => emitFor("uv-bg", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current).toBe(true);
+  });
+
+  it("never marks the session that is on screen — not even for one render", async () => {
+    // The invariant that matters most: a "you haven't seen this" mark flashing
+    // on the session the user is staring at is worse than no feature at all.
+    // It must hold BY CONSTRUCTION (the completion is never recorded), not by
+    // a clear that races the paint — so this asserts on every rendered value,
+    // not on the settled one.
+    setViewedSession("uv-onscreen");
+    const seen = probe("uv-onscreen");
+
+    act(() => emitFor("uv-onscreen", { type: "agent-status", status: "thinking" }));
+    act(() => emitFor("uv-onscreen", { type: "agent-complete", stopReason: "end_turn" }));
+    await act(async () => {});
+
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((v) => v === false)).toBe(true);
+  });
+
+  it("clears the moment the user opens the session", async () => {
+    const { result } = renderHook(() => useSessionUnviewed("uv-open"));
+    await act(async () => {});
+    act(() => emitFor("uv-open", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current).toBe(true);
+
+    act(() => setViewedSession("uv-open"));
+    expect(result.current).toBe(false);
+  });
+
+  it("is cleared by VIEWING, not by any other navigation", async () => {
+    // Switching to a third session, or to /settings and back, must not eat the
+    // marker — otherwise the one signal that a background turn ever produced
+    // is lost silently, which is the failure this whole feature exists to fix.
+    const { result } = renderHook(() => useSessionUnviewed("uv-keep"));
+    await act(async () => {});
+    act(() => emitFor("uv-keep", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current).toBe(true);
+
+    act(() => setViewedSession("uv-third"));
+    act(() => setViewedSession("uv-fourth"));
+    expect(result.current).toBe(true);
+  });
+
+  it("gives way when the same session starts a new turn", async () => {
+    // The states are exclusive: a session that is working again no longer has
+    // a finished-but-unseen result, it has a turn in flight.
+    const unviewed = renderHook(() => useSessionUnviewed("uv-again"));
+    const working = renderHook(() => useSessionGenerating("uv-again"));
+    await act(async () => {});
+    act(() => emitFor("uv-again", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(unviewed.result.current).toBe(true);
+
+    act(() => emitFor("uv-again", { type: "agent-status", status: "thinking" }));
+    expect(unviewed.result.current).toBe(false);
+    expect(working.result.current).toBe(true);
+  });
+
+  it("ignores a turn the user cancelled themselves", async () => {
+    // Cancellation arrives as the same `agent-complete` frame with
+    // `stopReason: "cancelled"`. The user stopped that turn on purpose;
+    // telling them a result is waiting would be noise.
+    const { result } = renderHook(() => useSessionUnviewed("uv-cancel"));
+    await act(async () => {});
+    act(() => emitFor("uv-cancel", { type: "agent-complete", stopReason: "cancelled" }));
+    expect(result.current).toBe(false);
+  });
+
+  it("behaves identically for an agent that does not exist yet", async () => {
+    // The requirement is agent-agnostic BY CONSTRUCTION: nothing here reads
+    // `agentId`, so a third coding agent added tomorrow works with zero
+    // changes. Drive the same machine twice — once tagged as today's agent,
+    // once as an invented one — and demand the same answer.
+    const results: boolean[] = [];
+    for (const agentId of ["claude-code", "an-agent-invented-in-2027"]) {
+      const sessionId = `uv-agnostic-${agentId}`;
+      const { result } = renderHook(() => useSessionUnviewed(sessionId));
+      await act(async () => {});
+      act(() => emitFor(sessionId, { type: "agent-status", status: "thinking", agentId }));
+      act(() =>
+        emitFor(sessionId, { type: "agent-complete", stopReason: "end_turn", agentId }),
+      );
+      results.push(result.current);
+    }
+    expect(results).toEqual([true, true]);
+  });
+
+  it("holds the one global EventSource open on its own", async () => {
+    // Same gap the working indicator had: the sidebar can be the ONLY
+    // subscriber (no chat hook is mounted on /settings). If this hook did not
+    // count as a handler, an unrelated unsubscribe would close the stream and
+    // the marks would go quietly stale instead of visibly breaking.
+    const before = FakeEventSource.instances.length;
+    const unviewed = renderHook(() => useSessionUnviewed("uv-stream"));
+    const approvals = renderHook(() => usePendingApprovalCount("uv-stream"));
+    await act(async () => {});
+    expect(FakeEventSource.instances.length).toBeGreaterThan(before);
+
+    approvals.unmount();
+    expect(lastES().closed).toBe(false);
+    act(() => emitFor("uv-stream", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(unviewed.result.current).toBe(true);
+
+    unviewed.unmount();
+    expect(
+      FakeEventSource.instances[FakeEventSource.instances.length - 1].closed,
+    ).toBe(true);
+  });
+
+  it("is wired to the real session switch, not only to the setter", async () => {
+    // The state is worthless if nothing tells it what the user is looking at.
+    // `useSessionList` owns that answer for the whole app, so drive the actual
+    // hook rather than trusting the funnel to stay connected.
+    const { result } = renderHook(() => useSessionUnviewed("uv-wired"));
+    const list = renderHook(() => useSessionList());
+    await act(async () => {});
+
+    act(() => emitFor("uv-wired", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current).toBe(true);
+
+    act(() => list.result.current.switchSession("uv-wired"));
+    expect(result.current).toBe(false);
   });
 });

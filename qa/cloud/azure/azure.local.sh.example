@@ -4,11 +4,22 @@
 #
 #   cp qa/cloud/azure/azure.local.sh.example qa/cloud/azure/azure.local.sh
 
+# REQUIRED — every az call is pinned to this subscription; the tooling refuses
+# to run against whatever subscription the CLI happens to default to.
 export LIBI_AZ_SUBSCRIPTION="00000000-0000-0000-0000-000000000000"
 
 # Optional overrides — the defaults in lib/azure.sh are fine for most work.
-# export LIBI_AZ_LOCATION="westeurope"
-# export LIBI_AZ_SHUTDOWN_TIME="1900"        # daily deallocate, HHmm local
-# export LIBI_AZ_TIMEZONE="W. Europe Standard Time"
+# NOTE a region must clear four bars (accept new customers, offer the VM size,
+# host the Windows 11 client image, offer Microsoft.DevTestLab/schedules for
+# auto-shutdown) — see the README's "Which region" section before changing it.
+# Changing it with a resource group already created does NOT move the lab: the
+# tooling detects the mismatch and tells you what to do.
+# export LIBI_AZ_LOCATION="swedencentral"
+# export LIBI_AZ_SHUTDOWN_TIME="1900"        # daily deallocate, HHmm in UTC
+#                                            # (az takes no timezone; 1900 UTC = 21:00 CEST)
 # export LIBI_AZ_WIN_SIZE="Standard_D4s_v5"
 # export LIBI_AZ_LINUX_SIZE="Standard_D4s_v5"
+# Where `up win` looks for the Windows admin password in the macOS Keychain
+# (names only — never the password itself; see the README's password section).
+# export LIBI_AZ_WIN_PW_KEYCHAIN_SERVICE="libi-qa-win-rdp"
+# export LIBI_AZ_WIN_PW_KEYCHAIN_ACCOUNT="libiqa"   # defaults to $LIBI_AZ_ADMIN

@@ -176,6 +176,16 @@ export class AgentProcessManager {
     // variable is — gating on the agent id would leave the hole open for
     // whichever surface we forgot.
     const child = spawn(agentConfig.command, [...agentConfig.args], {
+      // windowsHide: Electron's main process is a GUI-subsystem process with no
+      // console, so Windows allocates a BRAND-NEW console for every
+      // console-subsystem child — which Windows 11 hands to Windows Terminal.
+      // The adapter is long-lived, so that window sat open for the whole
+      // session, empty (stdin/stdout are pipes; `inherit`ed stderr has no
+      // console to land in), with libi's node path as its title. Observed on
+      // the Azure QA box 2026-08-23. Harmless everywhere else: Node ignores
+      // this option off Windows, and under `npx` the parent already owns a
+      // console so no window was ever created.
+      windowsHide: true,
       stdio: ["pipe", "pipe", "inherit"],
       env: { ...process.env, MCP_TIMEOUT: "60000", CODEX_HOME: ensureCodexHome() },
     });

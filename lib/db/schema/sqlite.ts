@@ -231,6 +231,14 @@ export const settings = sqliteTable("settings", {
   agentEverConnected: integer("agent_ever_connected", { mode: "boolean" })
     .notNull()
     .default(false),
+  /** Set once, server-side, the first time an agent connects (same guard as
+   *  agentEverConnected) — arms the "Show me how it works" demo chip. Null =
+   *  never armed. */
+  onboardingDemoOfferedAt: integer("onboarding_demo_offered_at", { mode: "timestamp" }),
+  /** Set once the user dismisses OR takes the demo offer. Independent of
+   *  onboardingDemoOfferedAt so a dismissal can never be confused with
+   *  "never offered" — and, once set, is final: the offer never returns. */
+  onboardingDemoDismissedAt: integer("onboarding_demo_dismissed_at", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
@@ -520,6 +528,24 @@ export const jobs = sqliteTable("jobs", {
   statusIdx: index("jobs_status_idx").on(table.status),
   pieceIdx: index("jobs_piece_idx").on(table.pieceId),
   fileIdx: index("jobs_file_idx").on(table.fileId),
+}));
+
+/** Analytics events waiting to reach GA4.
+ *
+ *  Durable on purpose. libi's "server" is a process on the user's own machine
+ *  that stops when they quit the app, and the most valuable events in the
+ *  funnel are fired by people who are about to do exactly that — someone who
+ *  gives up during agent setup quits DURING the step we most need to see. A
+ *  fire-and-forget fetch loses precisely the events that matter most. */
+export const analyticsQueue = sqliteTable("analytics_queue", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  paramsJson: text("params_json").notNull().default("{}"),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: integer("next_attempt_at", { mode: "timestamp_ms" }).notNull().$defaultFn(() => new Date()),
+}, (table) => ({
+  dueIdx: index("analytics_queue_due_idx").on(table.nextAttemptAt),
 }));
 
 /** Site announcements this install has already displayed (see

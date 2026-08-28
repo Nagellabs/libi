@@ -17,6 +17,7 @@ import fs from "fs";
 import path from "path";
 import type { CustomInstaller } from "./types";
 import { trackingPyenvInstaller } from "./installers/tracking-pyenv";
+import { isWindows } from "@/lib/platform";
 
 /**
  * Force-rebuild lever for the uv-managed yt-dlp install. Custom-installer deps
@@ -129,7 +130,7 @@ const INSTALLERS: Record<string, CustomInstaller> = {
       // install "succeeded" and was then declared failed, which aborted boot.
       const target = path.join(
         binDir,
-        process.platform === "win32" ? "yt-dlp.cmd" : "yt-dlp",
+        isWindows() ? "yt-dlp.cmd" : "yt-dlp",
       );
       // Use lstat so a broken symlink (e.g. uv-managed install was wiped)
       // counts as "not installed" — installing again recreates the link.

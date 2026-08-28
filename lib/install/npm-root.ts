@@ -199,7 +199,7 @@ export function resolveVendoredNpmCli(): string {
 export interface RunNpmInstallOptions {
   /**
    * Hard timeout for the npm child process. Sized per-root: small MCP packages
-   * install in seconds, while the Claude ACP adapter drags a ~212MB platform
+   * install in seconds, while the Claude ACP adapter drags a ~306MB platform
    * binary behind it and needs a much longer ceiling on a slow connection.
    */
   timeoutMs: number;
@@ -450,7 +450,7 @@ export async function runNpmViaUtilityProcess(
     }, opts.timeoutMs);
 
     // Electron emits `'error'` on a non-continuable V8 fault (e.g. the npm
-    // child OOMing while pulling the ~212MB adapter on a low-RAM machine).
+    // child OOMing while pulling the ~306MB adapter on a low-RAM machine).
     // With NO listener, an `'error'` event on any EventEmitter — including a
     // `UtilityProcess` — THROWS instead of being ignored, so the Electron
     // MAIN process takes an uncaught throw and the whole app disappears with
@@ -515,6 +515,7 @@ export async function runNpmInstall(root: string, options: RunNpmInstallOptions)
         ...env,
         ELECTRON_RUN_AS_NODE: "1",
       } as unknown as NodeJS.ProcessEnv,
+      windowsHide: true,
       timeout: options.timeoutMs,
       maxBuffer: MAX_CAPTURE_BYTES,
     }));

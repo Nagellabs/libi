@@ -23,6 +23,7 @@ import { DEFAULT_TERMINAL_CLI_ID } from "@/lib/terminal/presets";
 import { useRouter } from "next/navigation";
 import { useSessionList, type UseSessionList } from "@/hooks/sessions/use-session-list";
 import { subscribeBroadcast } from "@/hooks/sessions/use-agent-chat";
+import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 
 // ── Agent provider types ───────────────────────────────────────────────
 
@@ -521,10 +522,16 @@ interface EditorStateContextValue {
   /** The MCP id to configure inline. Transient — not persisted. Null when no panel is open. */
   apiConfigMcpId: string | null;
   setApiConfigMcpId: (id: string | null) => void;
-  /** Transient first-run flag: set true when the user connects a real agent
-   *  out of the onboarding panel, so the chat surfaces a one-tap
-   *  "Show me how it works" demo suggestion. Cleared on tap or dismiss.
-   *  Not persisted. */
+  /** First-run flag: true when the user should see the one-tap "Show me how
+   *  it works" demo suggestion. In-memory here, but not purely
+   *  client-state: it's seeded from the server (armed by
+   *  lib/sessions/session-manager.ts#markAgentConnected on first agent
+   *  connect, so a reload before the user acts on it doesn't lose it),
+   *  re-read the moment `sessionList.readiness` reaches "ready" later in the
+   *  same session (a real connection, never just an agent *selection* — see
+   *  the effect below), and `setOnboardingDemoOffer(false)` persists that
+   *  resolution (dismissed OR taken; the chip treats both the same) back to
+   *  the server so it never returns. */
   onboardingDemoOffer: boolean;
   setOnboardingDemoOffer: (v: boolean) => void;
 
@@ -533,7 +540,13 @@ interface EditorStateContextValue {
   agentProvidersLoaded: boolean;
   activeProviderId: string | null;
   isAgentConnecting: boolean;
-  selectAgent: (providerId: string) => Promise<void>;
+  /**
+   * Switch to an agent. Resolves with what the server learned about it during
+   * the switch — `needs-auth` carries the sign-in remedy resolved on THIS
+   * machine — or null when the response said nothing useful. Callers that
+   * only want the side effect can keep ignoring the result.
+   */
+  selectAgent: (providerId: string) => Promise<AgentReadiness | null>;
   refreshAgentProviders: () => void;
 
   // Session list (shared across the app so the sidebar is identical on every page)
@@ -605,7 +618,75 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const rightRegionModeRef = useRef(rightRegionMode);
   rightRegionModeRef.current = rightRegionMode;
   const [apiConfigMcpId, setApiConfigMcpId] = useState<string | null>(null);
-  const [onboardingDemoOffer, setOnboardingDemoOffer] = useState(false);
+
+  // ── Onboarding demo offer (Task 13) ─────────────────────────────────
+  //
+  // Deliberately plain `fetch`, NOT React Query — same reasoning as
+  // `agentProviders` just above (see lib/queries/agent-setup.ts's header
+  // comment): EditorStateProvider is rendered without a QueryClientProvider
+  // ancestor across a couple dozen existing tests, and there is no other
+  // consumer of this specific read/write pair to share a cache with.
+  //
+  // `onboardingDemoOffer` starts false and is SEEDED true by a one-shot GET
+  // of /api/onboarding/state on mount, when the server reports the offer
+  // was armed (first agent connect — session-manager's markAgentConnected)
+  // and not yet resolved. That single fetch is what fixes the reload bug:
+  // previously this was a bare `useState(false)`, armed only by a
+  // client-side effect (page.tsx) that fires once per session and never
+  // again — a reload before the user acted on it lost the offer for good.
+  const [onboardingDemoOffer, setOnboardingDemoOfferState] = useState(false);
+  useEffect(() => {
+    fetch("/api/onboarding/state")
+      .then((r) => r.json())
+      .then((data: { demoOffered?: boolean }) => {
+        if (data.demoOffered) setOnboardingDemoOfferState(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Re-read the same endpoint once a connection has ACTUALLY succeeded, so
+  // the offer can still appear later in the same session (not only on
+  // reload). `sessionList.readiness` reaching "ready" is the client-visible
+  // mirror of the exact server event that arms the offer
+  // (session-manager.ts#markAgentReady / #markAgentConnected both fire off
+  // the same clean `session/new`) — unlike `activeProviderId`, which flips
+  // the moment an agent is merely SELECTED, before the handshake resolves or
+  // fails. Keyed on the primitive `.state`, not the readiness object, so this
+  // only re-fires on a genuine transition (e.g. unknown/needs-auth → ready),
+  // never once per render. Server truth for `demoOffered` already folds in
+  // `onboardingDemoDismissedAt`, so re-reading it can only ever affirm or
+  // stay silent — it cannot re-arm an offer the user already dismissed.
+  // Optional chaining: several existing test doubles for useSessionList
+  // predate the `readiness` field and omit it — the real hook always
+  // supplies it, but an incomplete mock must read as "not ready" rather
+  // than throw.
+  const readinessState = sessionList.readiness?.state;
+  useEffect(() => {
+    if (readinessState !== "ready") return;
+    fetch("/api/onboarding/state")
+      .then((r) => r.json())
+      .then((data: { demoOffered?: boolean }) => {
+        if (data.demoOffered) setOnboardingDemoOfferState(true);
+      })
+      .catch(() => {});
+  }, [readinessState]);
+
+  // Persists the resolution (dismissed OR taken — the chip treats both the
+  // same) whenever the offer is cleared, so it never reappears after a
+  // reload. Callers (chat-panel.tsx, terminal-panel.tsx) are unchanged —
+  // they already just call `setOnboardingDemoOffer(false)`. Fire-and-forget:
+  // a failed write only risks the chip resurfacing next session, never a
+  // broken UI now.
+  const setOnboardingDemoOffer = useCallback((v: boolean) => {
+    setOnboardingDemoOfferState(v);
+    if (!v) {
+      fetch("/api/onboarding/state", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dismissDemoOffer: true }),
+      }).catch(() => {});
+    }
+  }, []);
 
   // viewMode is not persisted — it always starts as "draft" and resets to
   // "draft" whenever the active piece changes so the user never sees stale
@@ -1027,7 +1108,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
 
   const sessionListRefresh = sessionList.refresh;
   const selectAgent = useCallback(
-    async (providerId: string) => {
+    async (providerId: string): Promise<AgentReadiness | null> => {
       setPendingProviderId(providerId);
       try {
         const res = await fetch("/api/agent/start", {
@@ -1039,6 +1120,12 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
           const json = await res.json().catch(() => ({}));
           throw new Error((json as { error?: string }).error ?? `Start failed (${res.status})`);
         }
+        // The body already carries the readiness this switch observed — it was
+        // being parsed nowhere and thrown away, which is why the sign-in card
+        // had no way to act on "it needs auth, and here is the command".
+        const body = (await res.json().catch(() => ({}))) as {
+          readiness?: AgentReadiness;
+        };
         // Kick a refetch so the server's activeAgentId catches up. We do NOT
         // clear `pendingProviderId` here: `/api/agent/start` returns BEFORE
         // `switchAgent` finishes (it's fire-and-forget server-side), so at
@@ -1048,6 +1135,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
         // The confirm effect below clears the override once the server
         // reports the switch is complete.
         sessionListRefresh();
+        return body.readiness ?? null;
       } catch (err) {
         // The switch failed to even start — drop the optimistic override so
         // the selector reverts to the real server agent.

@@ -1,0 +1,65 @@
+# Answer `az vm create`'s interactive Admin Password prompts from the macOS
+# Keychain, over the PTY this process allocates. Invoked only by
+# az_vm_create_with_keychain_pw (lib/azure.sh) — read the rationale there
+# before changing anything, because the SHAPE of this script is the security
+# property:
+#
+#   - the password is read HERE, by this process, straight from `security`;
+#     it exists in this process's memory and on az's pty, and NOWHERE else —
+#     never in any argv (which `ps` shows to every local process), never in
+#     any environment variable, never in a file, never in the calling shell.
+#     LAB_KC_SERVICE / LAB_KC_ACCOUNT in the environment are the entry's
+#     NAMES, not the secret.
+#   - it is sent only AFTER az prints its prompt, by which point getpass has
+#     already disabled echo on the pty — so it never appears in the terminal
+#     transcript either.
+#   - no code path may ever puts/log the value. Error paths report WHICH step
+#     failed, never data. Keep it that way.
+#
+# `security find-generic-password -w` may raise the macOS keychain-access
+# dialog (always on a locked keychain; on an unlocked one until the operator
+# clicks "Always Allow") — that is the operator approving the read, not a
+# hang. It does mean "unattended" has a caveat: a locked keychain still needs
+# a human once.
+#
+# Exit codes: az's own once the prompts are past; 64 = called without the
+# LAB_KC_* names; 70 = the prompt never appeared; 71 = az exited before
+# prompting (its own error is above); 72 = the Keychain read failed.
+
+if {![info exists env(LAB_KC_SERVICE)] || ![info exists env(LAB_KC_ACCOUNT)]} {
+  puts stderr "keychain-pw.expect: LAB_KC_SERVICE / LAB_KC_ACCOUNT are not set (this script is only called via az_vm_create_with_keychain_pw)"
+  exit 64
+}
+
+# On catch, $pw holds security's ERROR text, not a secret — and it is not
+# printed either way.
+if {[catch {exec security find-generic-password \
+      -a $env(LAB_KC_ACCOUNT) -s $env(LAB_KC_SERVICE) -w} pw]} {
+  puts stderr "keychain-pw.expect: could not READ the Keychain entry (access denied, or removed since the pre-check). Nothing was sent to az."
+  exit 72
+}
+
+# Client-side argument processing is normally seconds; 180 covers a slow CLI
+# start without letting a wedged one sit forever.
+set timeout 180
+
+spawn -noecho {*}$argv
+
+expect {
+  -exact "Admin Password:" { send -- "$pw\r" }
+  timeout { puts stderr "keychain-pw.expect: az never showed its password prompt"; exit 70 }
+  eof     { exit 71 }
+}
+expect {
+  -exact "Confirm Admin Password:" { send -- "$pw\r" }
+  timeout { puts stderr "keychain-pw.expect: az never asked to confirm the password"; exit 70 }
+  eof     { exit 71 }
+}
+set pw ""
+
+# The create itself takes minutes — from here on az owns the pacing, and its
+# output (progress, errors) flows through to the operator as usual.
+set timeout -1
+expect eof
+catch wait result
+exit [lindex $result 3]

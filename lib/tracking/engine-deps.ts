@@ -1,12 +1,10 @@
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { getLibiBinDir, getLibiHome } from "@/lib/libi-home";
+import { exeSuffix } from "@/lib/platform";
 
 export function uvPath(): string {
-  const p = join(
-    getLibiBinDir(),
-    process.platform === "win32" ? "uv.exe" : "uv",
-  );
+  const p = join(getLibiBinDir(), `uv${exeSuffix()}`);
   return existsSync(p) ? p : "uv";
 }
 

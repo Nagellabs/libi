@@ -64,6 +64,14 @@ export type AgentEvent =
       type: "agent-commands";
       commands: import("@/lib/sessions/usage").AvailableCommandInfo[];
     }
+  | {
+      /** The session's ACP config options changed (config_option_update from
+       *  the agent, or loadSession filling them on activation). Carries the
+       *  derived model state in the GET /api/sessions/[id]/model response
+       *  shape so the client patches its cache without a refetch. */
+      type: "agent-config-options";
+      model: import("@/lib/sessions/model-option").SessionModelSnapshot;
+    }
   | { type: "agent-status"; status: string; error?: string }
   | { type: "agent-complete"; stopReason: string }
   | {
@@ -120,7 +128,7 @@ export type AgentReadinessEvent = Extract<AgentEvent, { type: "agent-readiness" 
  *
  * Exists so an unavailable agent can be shown DISABLED WITH A REASON rather
  * than silently omitted from the selector: the Claude adapter is installed at
- * runtime (~212MB, see `lib/agents/runtime-install.ts`), so a first-boot user
+ * runtime (~306MB, see `lib/agents/runtime-install.ts`), so a first-boot user
  * waiting on that download would otherwise stare at a list their default agent
  * has simply vanished from, with the explanation reaching only
  * `~/.libi/logs/libi.log`.

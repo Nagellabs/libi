@@ -112,16 +112,25 @@ function ToolCallRow({ entry }: { entry: ToolCallEntry }) {
   return (
     <div className="py-0.5 min-w-0">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        {/* A pill, and it has to STAY one. `name` is agent-supplied and is not
+            always a tidy label — a shell tool reports its whole command, which
+            has run to hundreds of characters of inlined Python. Left to wrap,
+            this box goes many lines tall, and because `rounded-full` is
+            `calc(infinity * 1px)` a tall box paints as a giant ellipse behind
+            the text rather than a pill. So: never wrap, cap the width, and hang
+            the full name off `title` so nothing is actually lost. `min-w-0` is
+            what lets the inner span truncate inside the flex row. */}
         <span
+          title={name}
           className={cn(
-            "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1",
+            "inline-flex min-w-0 max-w-[26rem] items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ring-1",
             isFailed
               ? "bg-destructive/10 text-destructive ring-destructive/30"
               : "bg-[color:var(--accent-soft)] text-primary ring-primary/20",
           )}
         >
           {isFailed ? (
-            <span className="size-1.5 rounded-full bg-destructive" />
+            <span className="size-1.5 shrink-0 rounded-full bg-destructive" />
           ) : isDone ? (
             <svg
               width="11"
@@ -132,12 +141,13 @@ function ToolCallRow({ entry }: { entry: ToolCallEntry }) {
               strokeWidth="2.5"
               strokeLinecap="round"
               strokeLinejoin="round"
+              className="shrink-0"
               aria-hidden="true"
             >
               <path d="M5 13l4 4L19 7" />
             </svg>
           ) : isPending ? (
-            <span className="size-1.5 rounded-full bg-muted-foreground/40" aria-label="queued" />
+            <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" aria-label="queued" />
           ) : (
             <svg
               width="11"
@@ -148,14 +158,14 @@ function ToolCallRow({ entry }: { entry: ToolCallEntry }) {
               strokeWidth="2"
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="libi-sparkle"
+              className="libi-sparkle shrink-0"
               aria-hidden="true"
             >
               <path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6" />
             </svg>
           )}
-          <span>{name}</span>
-          {isFailed && <span>— failed</span>}
+          <span className="truncate">{name}</span>
+          {isFailed && <span className="shrink-0">— failed</span>}
         </span>
         {runningAt !== undefined && (isDone ? completedAt !== undefined : isRunning) && (
           <ToolCallTimer runningAt={runningAt} completedAt={completedAt} />

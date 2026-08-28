@@ -1,59 +1,50 @@
 // lib/analytics/client.ts
-// Browser GA4 transport via gtag.js (no firebase dependency). Loaded once by the
-// AnalyticsProvider with client_id + user_id pinned to the install UUID.
+// Browser analytics transport: POST to libi's own server, which owns the queue.
+//
+// This used to load gtag.js. It no longer does, for three reasons that all point
+// the same way:
+//
+//   1. The browser is not always there. libi's most interesting events happen
+//      around setup, and a window that is closed mid-setup takes its unsent
+//      events with it. The server process outlives the window.
+//   2. gtag no-op'd until it had loaded, so the earliest events in a new
+//      install's first session — the ones the funnel is made of — were dropped.
+//   3. One transport is testable. Two are a question about which of them was on.
+//
+// The server is not a "real" server in any sense that matters here: it runs on
+// the user's own machine, so it is a client, and it reports as one — with the
+// public measurement ID and no secret. See lib/analytics/collect-url.ts.
 "use client";
 
-import { ANALYTICS_DEBUG, MEASUREMENT_ID } from "./config";
 import { sanitizeParams } from "./events";
 
-declare global {
-  interface Window {
-    dataLayer?: unknown[];
-    gtag?: (...args: unknown[]) => void;
-  }
-}
-
-let initialized = false;
 let trackingEnabled = true;
 
-/** Inject gtag.js and configure GA4 with the install UUID. Idempotent. */
-export function initAnalytics(userId: string): void {
-  if (initialized || typeof window === "undefined") return;
-  initialized = true;
-
-  window.dataLayer = window.dataLayer || [];
-  window.gtag = function gtag(...args: unknown[]) {
-    window.dataLayer!.push(args);
-  };
-  window.gtag("js", new Date());
-  window.gtag("config", MEASUREMENT_ID, {
-    client_id: userId,
-    user_id: userId,
-    ...(ANALYTICS_DEBUG ? { debug_mode: true } : {}),
-    send_page_view: false, // we emit page_view explicitly with a normalized path
-  });
-
-  const s = document.createElement("script");
-  s.async = true;
-  s.src = `https://www.googletagmanager.com/gtag/js?id=${MEASUREMENT_ID}`;
-  document.head.appendChild(s);
+/** Kept for API compatibility with `AnalyticsProvider`. Identity is minted
+ *  server-side now, so there is nothing to configure in the browser. */
+export function initAnalytics(_userId: string): void {
+  trackingEnabled = true;
 }
 
-/** Log a GA4 event from the browser. No-ops until initAnalytics has run, or
- *  once the user has opted out via setClientAnalyticsEnabled(false). */
+/** Log an event. Fire-and-forget, and safe to call before anything has
+ *  initialised — the server holds the queue, so there is no window in which
+ *  events are silently discarded. */
 export function trackEvent(name: string, params?: Record<string, unknown>): void {
-  if (!trackingEnabled || !initialized || typeof window === "undefined" || !window.gtag) return;
-  window.gtag("event", name, sanitizeParams(params));
+  if (!trackingEnabled || typeof window === "undefined") return;
+  void fetch("/api/analytics/event", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, params: sanitizeParams(params) }),
+    keepalive: true,
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {
+    // Best-effort by contract. A failed analytics call must never reach a user.
+  });
 }
 
-/** Live opt-out/opt-in teardown for the client transport — stops gtag emitting
- *  WITHOUT a page reload. Flips our own guard AND GA4's documented
- *  `ga-disable-<MEASUREMENT_ID>` global (which gtag.js itself honors), so no
- *  further events leave the browser after opt-out. The authoritative gate is
- *  still server-side; this closes the client half. */
+/** Live opt-out/opt-in without a reload. The authoritative gate is still
+ *  server-side (the drain refuses, and clears the queue); this closes the
+ *  browser half immediately so nothing further even leaves the window. */
 export function setClientAnalyticsEnabled(on: boolean): void {
   trackingEnabled = on;
-  if (typeof window !== "undefined") {
-    (window as unknown as Record<string, boolean>)[`ga-disable-${MEASUREMENT_ID}`] = !on;
-  }
 }

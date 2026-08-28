@@ -67,7 +67,7 @@ const EXTERNALS = [
   // `require("@agentclientprotocol/claude-agent-acp")` that resolves in dev
   // (the devDependency is on disk there) and throws MODULE_NOT_FOUND in the
   // packaged app — a loud, fail-fast crash. Removing the entry instead would
-  // let esbuild silently inline the package (and the ~212MB proprietary
+  // let esbuild silently inline the package (and the ~306MB proprietary
   // Anthropic SDK behind it) straight into main.js, defeating the whole
   // point of excluding it and shipping proprietary code with no distribution
   // licence, undetected by both the license gate (which scans node_modules,

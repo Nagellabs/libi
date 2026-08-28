@@ -68,4 +68,83 @@ function gatesPassedOnHead() {
   return { ok: true, record };
 }
 
-module.exports = { recordGatesPassed, gatesPassedOnHead, GATE_RECORD_PATH: FILE };
+/**
+ * The CI equivalent of `gatesPassedOnHead`.
+ *
+ * On a runner the local record cannot exist: the gates run in their own job on
+ * their own machine, and the build jobs check out a DIFFERENT commit — the
+ * version bump `release:npm` creates after the gates have already passed. So
+ * "same sha" is the wrong question there, and simply trusting `--ci` would put
+ * back exactly the unverified claim this module was written to kill.
+ *
+ * The right question is whether anything that could change behaviour happened
+ * between the tested commit and this one. A release bump touches the version in
+ * package.json and package-lock.json, and the lockfile marker inside
+ * THIRD-PARTY-NOTICES.md. Nothing else. If the diff is a subset of those three
+ * files and the tested commit is an ancestor, the gates' result still holds —
+ * and that is checkable, not assertable.
+ */
+const RELEASE_BUMP_FILES = new Set([
+  "package.json",
+  "package-lock.json",
+  "THIRD-PARTY-NOTICES.md",
+]);
+
+function gatesPassedOnAncestor(gatesSha) {
+  const sha = headSha();
+  if (!sha) return { ok: false, reason: "could not resolve HEAD" };
+  if (!gatesSha) {
+    return {
+      ok: false,
+      reason:
+        "LIBI_GATES_SHA is empty — the workflow did not pass the commit its\n" +
+        "   gates job tested. Without it there is no evidence the suite ran.",
+    };
+  }
+  const known =
+    spawnSync("git", ["cat-file", "-e", `${gatesSha}^{commit}`], { cwd: ROOT }).status === 0;
+  if (!known) {
+    return { ok: false, reason: `${gatesSha.slice(0, 8)} is not a commit in this checkout` };
+  }
+  const ancestor =
+    spawnSync("git", ["merge-base", "--is-ancestor", gatesSha, sha], { cwd: ROOT }).status === 0;
+  if (!ancestor) {
+    return {
+      ok: false,
+      reason:
+        `the gates ran on ${gatesSha.slice(0, 8)}, which is not an ancestor of HEAD\n` +
+        `   (${sha.slice(0, 8)}) — they tested a different line of history.`,
+    };
+  }
+  const diff = spawnSync("git", ["diff", "--name-only", gatesSha, sha], {
+    cwd: ROOT,
+    encoding: "utf-8",
+  });
+  if (diff.status !== 0) {
+    return { ok: false, reason: `could not diff ${gatesSha.slice(0, 8)}..HEAD` };
+  }
+  const changed = diff.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+  const unexpected = changed.filter((f) => !RELEASE_BUMP_FILES.has(f));
+  if (unexpected.length > 0) {
+    return {
+      ok: false,
+      reason:
+        `code changed between the tested commit and HEAD:\n` +
+        unexpected.map((f) => `     ${f}`).join("\n") +
+        "\n   Only a version bump may separate them. Re-run the gates.",
+    };
+  }
+  return {
+    ok: true,
+    record: { sha: gatesSha, gates: ["test", "lint", "check:licenses", "notices:check"], at: "the gates job" },
+    bumpOnly: changed,
+  };
+}
+
+module.exports = {
+  recordGatesPassed,
+  gatesPassedOnHead,
+  gatesPassedOnAncestor,
+  RELEASE_BUMP_FILES,
+  GATE_RECORD_PATH: FILE,
+};

@@ -30,16 +30,26 @@ import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 
 import { useEditorState } from "@/lib/editor-state-context";
+import { getAgentSetup } from "@/lib/agents/setup/registry";
 import { useCreateTerminal } from "@/lib/queries/terminals";
 import type { TerminalRemedy } from "@/lib/agents/terminal-remedy";
+import { trackEvent } from "@/lib/analytics/client";
+import { toAgentEventId, type AnalyticsSurface } from "@/lib/analytics/events";
 
-export function useRunRemedyInTerminal(): (remedy: TerminalRemedy) => Promise<void> {
-  const { selectAgent, setActiveTerminalId } = useEditorState();
+export function useRunRemedyInTerminal(): (
+  remedy: TerminalRemedy,
+  /** The agent this remedy signs in — an unconstrained id from wherever the
+   *  caller got it (`AgentReadiness.agentId`, a hardcoded "codex", …).
+   *  Bounded via `toAgentEventId` before it ever reaches an event. */
+  agentId: string,
+  surface: AnalyticsSurface,
+) => Promise<void> {
+  const { selectAgent, setActiveTerminalId, setRightRegionMode } = useEditorState();
   const createTerminal = useCreateTerminal();
   const pathname = usePathname();
   const router = useRouter();
 
-  return async (remedy: TerminalRemedy) => {
+  return async (remedy: TerminalRemedy, agentId: string, surface: AnalyticsSurface) => {
     try {
       await selectAgent("terminal");
 
@@ -57,8 +67,35 @@ export function useRunRemedyInTerminal(): (remedy: TerminalRemedy) => Promise<vo
       });
 
       setActiveTerminalId(meta.id);
+      // Opening the sign-in terminal is a way OUT of the connect takeover —
+      // otherwise the terminal spawns behind a screen that is still asking you
+      // to connect an agent, which is what Windows showed: agent switched to
+      // Terminal, Shell session created, view unchanged.
+      //
+      // This used to happen by accident: a page-level effect left the takeover
+      // whenever `activeProviderId` changed, and `selectAgent("terminal")`
+      // above changes it. That effect has been removed — it could not tell a
+      // user's choice from the value merely populating at mount — so the exit
+      // has to be stated here, with the other three actions that mean it.
+      setRightRegionMode("editor");
+      // Funnel step 9 (Task 14): fired only NOW that the terminal has
+      // actually spawned — never on the click, which can still fail (a
+      // rejected selectAgent/createTerminal lands in the catch below and
+      // reports nothing).
+      const agent = toAgentEventId(agentId);
+      if (agent) trackEvent("agent_sign_in_opened", { agent, surface });
       if (pathname !== "/editor") router.push("/editor");
-      toast.info(`Terminal opened — press Enter to run: ${remedy.command}`);
+      // The terminal is a detour, not the destination — say so here, because
+      // this is the moment the agent selector visibly flips to Terminal and
+      // the chat the user was heading for disappears. Falls back to no
+      // sentence at all for an id the registry doesn't know, rather than
+      // naming "the agent" and telling them nothing.
+      const agentName = getAgentSetup(agentId)?.name;
+      toast.info(`Terminal opened — press Enter to run: ${remedy.command}`, {
+        description: agentName
+          ? `Once you're signed in, pick ${agentName} in the agent selector to chat with it inside libi.`
+          : undefined,
+      });
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Couldn't open a terminal.",

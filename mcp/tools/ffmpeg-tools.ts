@@ -85,7 +85,7 @@ export async function probeDuration(filePath: string): Promise<number | null> {
       "-print_format", "json",
       "-show_format",
       filePath,
-    ]);
+    ], { windowsHide: true });
     const data = JSON.parse(stdout) as { format?: { duration?: string } };
     return data.format?.duration ? parseFloat(data.format.duration) : null;
   } catch {
@@ -123,7 +123,7 @@ export async function probeMediaInfo(filePath: string): Promise<{
       "-show_format",
       "-show_streams",
       filePath,
-    ]);
+    ], { windowsHide: true });
     const data = JSON.parse(stdout) as {
       format?: { duration?: string };
       streams?: Array<{

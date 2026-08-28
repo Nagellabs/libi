@@ -4,23 +4,79 @@ Two disposable boxes for the tests that cannot run on a Mac: a **Windows 11**
 VM and an **Ubuntu 24.04** VM. Not a permanent environment — the whole point is
 that they exist for an afternoon and then stop costing money.
 
+The lab's lifecycle is **snapshot-and-restore**: at the end of *every* session
+the VMs are deleted and a snapshot kept, and the next session starts from that
+snapshot in minutes instead of re-provisioning for an hour. That is the happy
+path, not an optimisation — the cost table below shows why the cheapest option
+and the fastest option are the same one.
+
 ```bash
 cp qa/cloud/azure/azure.local.sh.example qa/cloud/azure/azure.local.sh   # once
 qa/cloud/azure/lab.sh doctor        # preflight, costs nothing
-qa/cloud/azure/lab.sh up win        # ~5 min
+
+# FIRST session only — a full build (~5 min create + ~1 h provisioning):
+qa/cloud/azure/lab.sh up win
 qa/cloud/azure/lab.sh connect win
-#   … do the work …
-qa/cloud/azure/lab.sh stop win      # a break WITHIN a session: compute billing stops
-qa/cloud/azure/lab.sh snapshot win  # end of session: keep a restorable image
-qa/cloud/azure/lab.sh down --keep-snapshots   # …then delete the VMs
-qa/cloud/azure/lab.sh restore win   # next session: skip provisioning entirely
-qa/cloud/azure/lab.sh down          # when the lab is finished for good
+#   … do the work …   (a break WITHIN a session: lab.sh stop win)
+
+# END OF EVERY SESSION — snapshot, then delete the VMs. This pair is the
+# normal way to put the lab away, not an advanced option:
+qa/cloud/azure/lab.sh snapshot win
+qa/cloud/azure/lab.sh down --keep-snapshots
+
+# EVERY LATER session — minutes, skips provisioning entirely:
+qa/cloud/azure/lab.sh restore win
+qa/cloud/azure/lab.sh allow-my-ip   # a restored box gets a NEW public IP
+
+qa/cloud/azure/lab.sh down          # only when the lab is finished for good
 ```
+
+## Which region — four bars, and all four are load-bearing
+
+The lab runs in **`swedencentral`** (`LIBI_AZ_LOCATION`). That default was not
+a preference: a region is only usable if it clears **all four** of these, and
+each one eliminated a real candidate on 2026-08-22:
+
+1. **Accepts new customers.** Azure closes popular regions to subscriptions
+   without prior footprint. `westeurope` — the original default — refuses new
+   customers entirely.
+2. **Offers the chosen VM size.** `northeurope` has no `Standard_D4s_v5`.
+3. **Hosts the Windows 11 client image**, which is the entire point of the
+   Windows box (`doctor` probes this with a validate-only deployment).
+4. **Offers `Microsoft.DevTestLab/schedules`** — the resource type behind
+   `az vm auto-shutdown`, i.e. the lab's *only* safety net against a forgotten
+   VM billing for a month. `israelcentral` cleared bars 1–3, passed every check
+   the tooling then had, and failed *here* — `LocationNotAvailableForResourceType`,
+   thrown only **after** the VM existed (the EXIT trap caught it and
+   deallocated; nothing leaked). In such a region the lab's core safety
+   guarantee cannot exist at all.
+
+`swedencentral` clears all four and was also the cheapest of the candidates
+tested ($0.388/hr Windows `D4s_v5` vs $0.408 in israelcentral).
+
+Bar 4 is now a hard precondition: `doctor` reports it as a line under "lab
+preconditions", and `scaffold`/`up`/`restore` refuse **before creating
+anything** — even the free scaffold, since a scaffold in such a region silently
+sets up a lab that can never be safe. The supported-region list is read from
+Azure each run (`az provider show -n Microsoft.DevTestLab`), not hardcoded,
+because the footprint drifts. Note the trap the check exists to name:
+*registering* the DevTestLab provider (subscription-wide) is not the same as
+the provider *offering* `schedules` in your region (per-region footprint).
+
+**Changing region later:** a resource group's location is fixed at creation,
+so editing `LIBI_AZ_LOCATION` with a group already present does **not** move
+the lab — it used to just keep building in the old region silently. The
+tooling now detects the mismatch (`doctor`, `status`, and any create path) and
+stops: either set `LIBI_AZ_LOCATION` back to the group's region, or `lab.sh
+down` the old lab first. Snapshots are regional and do not move with you.
 
 ## What it costs, and why the lab is deleted rather than kept
 
 Every number below came from the Azure retail price API (`prices.azure.com`)
 for **westeurope on 2026-08-21**. Re-check before quoting them; Azure moves.
+(The lab has since moved to `swedencentral` — the one rate re-checked there,
+Windows `D4s_v5`, was slightly *cheaper* at $0.388/hr vs 0.414. The tables
+keep the westeurope figures as sampled.)
 
 **Compute is not the problem.** The VMs only bill while running:
 
@@ -55,6 +111,16 @@ native/pyenv path, which is the kind that breaks per platform.
 So the lab now creates disks as `StandardSSD_LRS` explicitly rather than
 accepting the Premium default — that alone is the difference between $21.68 and
 $9.60 per box per month.
+
+One number you do not get to choose: the Windows 11 client image itself ships a
+**127 GiB** OS disk, and Azure can only *grow* an image's disk, never shrink it
+— so the Windows box always lands at 127 GB (E10, **$9.60/mo** idle) no matter
+what `LIBI_AZ_DISK_GB` asks for. `lab.sh up` clamps the request to that floor
+and prints the size actually provisioned, because that is the number the disk
+bills on. The 64 GB default applies in practice to the Ubuntu box only (its
+image is 30 GiB, so 64 is a genuine grow). This is one more reason
+snapshot-and-restore is the default: an idle 127 GB disk is the exact cost the
+end-of-session pair above deletes.
 
 **The decision.** Keeping both disks so you can `stop`/`start` costs about
 **$14.40/month**. Keeping only *snapshots* — a Windows box with ~50 GB used
@@ -115,9 +181,85 @@ the rule doing its job. Fix it with:
 qa/cloud/azure/lab.sh allow-my-ip
 ```
 
-The Windows admin password is prompted for by `az vm create` and goes straight
-to Azure. It is deliberately never generated, echoed, or written by these
-scripts, so it cannot end up in shell history or an agent transcript.
+### The Windows admin password — where it lives, and why not here
+
+`az vm create` prompts for it and it goes straight to Azure. These scripts
+deliberately never generate, echo, or write it, so it cannot end up in shell
+history, in this repo, or in an agent transcript. That is the point, and it
+has a consequence worth stating plainly: **nothing here remembers it for you.**
+
+You invent it at `lab.sh up win` — it is not an Azure credential, it is the
+local Windows Administrator account on the VM being created. The username is
+already fixed (`LIBI_AZ_ADMIN`, default `libiqa`); only the password is yours
+to choose. Azure requires 12–123 characters with at least three of lowercase,
+uppercase, digit, and symbol, rejects anything containing the username, and
+refuses passwords on its common-password list.
+
+Keep it in the macOS Keychain. `-w` with no value makes `security` prompt, so
+the password never appears in your shell history either:
+
+```bash
+# store, once, right after creating the VM
+security add-generic-password -a libiqa -s libi-qa-win-rdp -w
+
+# retrieve, when you need to RDP
+security find-generic-password -a libiqa -s libi-qa-win-rdp -w
+```
+
+Storing it there buys you a second thing: **`lab.sh up win` becomes
+unattended.** When that exact entry exists, `up win` answers `az`'s password
+prompt itself — no human at the TTY — and it does so without weakening the
+design above. The only argv-free input `az vm create` offers is its
+interactive prompt (there is no environment variable, no `@file`, and piped
+stdin is refused outright — established against the CLI's own source and
+verified with a `--validate` probe; `--admin-password <value>` is off the
+table because argv is readable by every local process via `ps`). So the
+tooling drives that prompt over a pseudo-terminal: `lib/keychain-pw.expect`
+reads the entry with `security` itself and types it straight to `az`. The
+value flows **Keychain → expect's memory → az's tty** and touches nothing
+else — not the shell (even `bash -x` shows nothing), not argv, not the
+environment, not a file, not the terminal (echo is already off), and not any
+error message.
+
+The details:
+
+- **Opt-in by existence.** No matching entry — or no macOS `security`, e.g.
+  on Linux — and `up win` prompts interactively exactly as before.
+- The names are configurable in `azure.local.sh`:
+  `LIBI_AZ_WIN_PW_KEYCHAIN_SERVICE` (default `libi-qa-win-rdp`) and
+  `LIBI_AZ_WIN_PW_KEYCHAIN_ACCOUNT` (default `$LIBI_AZ_ADMIN`).
+- **"Unattended" has one caveat:** reading the secret can raise the macOS
+  keychain-access dialog — always on a locked keychain, and on an unlocked
+  one until you click "Always Allow". That is the OS asking you to approve
+  the read, and it is a feature, not a bug.
+- `restore win` never needs the password at all: it rebuilds the VM around
+  the existing disk (`--attach-os-disk`), which carries the Administrator
+  account — and the password — it already had.
+- The scripts still only ever **read** the entry. Nothing here creates,
+  writes, or migrates a password.
+
+**An agent should not fetch it for you, and should decline if asked.** Handling
+a password in plaintext is exactly what the design above avoids, and routing it
+through a transcript undoes the protection in one step. The Keychain path is
+precisely the alternative: an agent (or you) runs `lab.sh up win` and the
+password still never enters a transcript, a variable, or an argument list. If
+you need it for RDP, retrieve it yourself and paste it into your RDP client.
+
+Most QA does not need it at all. `lab.sh exec` drives the box through the Azure
+control plane (`az vm run-command`) with no credential on the machine and no
+RDP session — so the password is only for the parts a human has to *look* at:
+SmartScreen, installer UX, and the app's own window. Reach for `exec` first and
+the password stays a rare requirement rather than a daily one.
+
+If it is ever lost, do not rebuild the VM — reset it in place:
+
+```bash
+az vm user update -g libi-qa -n libi-qa-win -u libiqa -p '<new password>'
+```
+
+That leaves the disk, the provisioned state, and any snapshot untouched. Note
+it does put the new password in your shell history; clear that line afterwards,
+or change it interactively through the portal instead.
 
 ## Windows 11 vs Windows Server — a real decision, not a detail
 
@@ -125,6 +267,16 @@ scripts, so it cannot end up in shell history or an agent transcript.
 client** image. Azure gates `MicrosoftWindowsDesktop` images behind
 subscription eligibility and enforces it at *deploy* time, so seeing it in
 `az vm image list` proves nothing — hence a real `--validate` probe.
+
+`doctor` checks the lab's preconditions first — resource providers registered,
+auto-shutdown capability in the region (see "Which region"), resource group
+present and in the *configured* region — and reports each separately. The probe only runs once
+they hold, and when it fails it prints Azure's error verbatim: a validate probe
+against a half-set-up lab fails for reasons that say nothing about entitlement,
+so an `UNAVAILABLE` verdict is only issued when it really means "this
+subscription cannot deploy the client image". `doctor` never fixes anything
+itself — it costs nothing and changes nothing; `lab.sh up` is what registers
+providers and builds the (free) scaffold.
 
 It matters which you get:
 

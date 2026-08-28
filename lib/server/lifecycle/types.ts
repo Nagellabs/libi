@@ -41,7 +41,7 @@ export interface CategoryAInstallProgressEvent {
    * Byte-level progress is only available for downloads libi performs itself
    * (the binary-dep phase). An `npm install` is opaque — it reports nothing
    * until it exits — yet the adapter's is the single largest download in
-   * Category A (~250MB) and can legitimately run for minutes. Without a tick
+   * Category A (~345MB) and can legitimately run for minutes. Without a tick
    * the UI sits motionless on "running" and reads as a hang, which users
    * resolve by force-quitting — the most plausible way to end up with the
    * half-installed tree `lib/agents/claude-native-binary.ts` exists to detect.

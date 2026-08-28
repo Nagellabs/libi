@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { spawn } from "node-pty";
 import { serverLogger as logger } from "@/lib/logger";
 import type { PtyFactory, PtyLike } from "./types";
+import { isWindows, isMac } from "@/lib/platform";
 
 /**
  * npm strips the execute bit when unpacking node-pty's prebuilt
@@ -15,7 +16,7 @@ import type { PtyFactory, PtyLike } from "./types";
  */
 let helperEnsured = false;
 function ensureSpawnHelperExecutable(): void {
-  if (helperEnsured || process.platform === "win32") return;
+  if (helperEnsured || isWindows()) return;
   helperEnsured = true;
   try {
     const require_ = createRequire(path.join(process.cwd(), "noop.js"));
@@ -55,12 +56,15 @@ function ensureSpawnHelperExecutable(): void {
  * a minimal PATH.
  */
 export function resolveShell(): { shell: string; args: string[] } {
-  if (process.platform === "win32") {
+  // isWindows()/isMac(), not `process.platform === ...` — see lib/platform.ts.
+  // Folded against the build machine, this whole function collapsed to
+  // `{shell: process.env.SHELL || "/bin/zsh", args: ["-l"]}` in the published
+  // 0.1.4, so the Windows terminal panel tried to spawn /bin/zsh and node-pty
+  // reported `File not found: ` with an empty path.
+  if (isWindows()) {
     return { shell: "powershell.exe", args: [] };
   }
-  const shell =
-    process.env.SHELL ||
-    (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash");
+  const shell = process.env.SHELL || (isMac() ? "/bin/zsh" : "/bin/bash");
   return { shell, args: ["-l"] };
 }
 

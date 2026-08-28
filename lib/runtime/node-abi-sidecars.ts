@@ -37,9 +37,17 @@ import path from "node:path";
 /**
  * Node majors a runtime fetches a sidecar binding for.
  *
- * The range is `MIN_NODE_MAJOR` (lib/runtime/node-runtime.ts) through the major
- * of `PINNED_NODE_VERSION` — the interpreters `ensureNodeRuntime()` can put at
- * `<LIBI_HOME>/bin/node`.
+ * The range spans every major `ensureNodeRuntime()` has ever been able to put
+ * at `<LIBI_HOME>/bin/node`, up through the major of `PINNED_NODE_VERSION`
+ * (lib/runtime/node-runtime.ts). Its floor deliberately trails MIN_NODE_MAJOR
+ * (now 22), and NOT because already-provisioned 20/21 bindings survive — they
+ * don't: `acceptable()` rejects a managed node below the minimum, so one gets
+ * de-provisioned and replaced with the pinned build. The 20/21 sidecars earn
+ * their bytes on the DEGRADED path instead: `resolveNativeBinding` keys purely
+ * on the running interpreter's major, so if `ensureNodeRuntime` fails outright
+ * and `resolveNodeCommand()` falls back to a bare `node` that happens to be a
+ * system 20 or 21, the binding is still there. Shrinking the list would also
+ * touch scripts/build-runtime-bundle.js's literal copy and its drift test.
  *
  * **This is not the full set of interpreters that can reach the binding.**
  * `ensureNodeRuntime` links any system node at or above the minimum with no

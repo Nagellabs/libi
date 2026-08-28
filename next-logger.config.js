@@ -1,7 +1,8 @@
 // next-logger picks up this file at the project root. It exports a `logger`
 // factory that next-logger calls with its default config; we return a pino
 // instance with a multi-target transport so every Next.js framework log line
-// (compile output, request logs, browser-relayed errors via `[browser]`)
+// (compile output, request logs, and — in dev only, the relay is a
+// dev-server feature — browser-relayed errors via `[browser]`)
 // gets written to BOTH the terminal AND ~/.libi/logs/server.log.
 //
 // This file MUST be CommonJS — next-logger requires() it directly during

@@ -24,6 +24,13 @@ export interface AppSettings {
   onboardingPersona: string | null;
   personaSelectedAt: Date | null;
   agentEverConnected: boolean;
+  /** Set once, server-side, the first time an agent connects. Null = the
+   *  first-run demo chip has never been armed. See lib/sessions/session-manager.ts#markAgentConnected. */
+  onboardingDemoOfferedAt: Date | null;
+  /** Set once the user dismisses OR takes the demo offer — final, and kept
+   *  independent of onboardingDemoOfferedAt so a dismissal is never confused
+   *  with "never offered". */
+  onboardingDemoDismissedAt: Date | null;
 }
 
 const DEFAULTS: AppSettings = {
@@ -38,6 +45,8 @@ const DEFAULTS: AppSettings = {
   onboardingPersona: null,
   personaSelectedAt: null,
   agentEverConnected: false,
+  onboardingDemoOfferedAt: null,
+  onboardingDemoDismissedAt: null,
 };
 
 /**
@@ -66,6 +75,8 @@ export function getSettings(): AppSettings {
     onboardingPersona: row.onboardingPersona ?? null,
     personaSelectedAt: row.personaSelectedAt ?? null,
     agentEverConnected: row.agentEverConnected,
+    onboardingDemoOfferedAt: row.onboardingDemoOfferedAt ?? null,
+    onboardingDemoDismissedAt: row.onboardingDemoDismissedAt ?? null,
   };
 }
 
@@ -89,6 +100,8 @@ export function updateSettings(partial: Partial<AppSettings>): void {
   if (partial.onboardingPersona !== undefined) set.onboardingPersona = partial.onboardingPersona;
   if (partial.personaSelectedAt !== undefined) set.personaSelectedAt = partial.personaSelectedAt;
   if (partial.agentEverConnected !== undefined) set.agentEverConnected = partial.agentEverConnected;
+  if (partial.onboardingDemoOfferedAt !== undefined) set.onboardingDemoOfferedAt = partial.onboardingDemoOfferedAt;
+  if (partial.onboardingDemoDismissedAt !== undefined) set.onboardingDemoDismissedAt = partial.onboardingDemoDismissedAt;
 
   // Upsert: insert defaults if row doesn't exist, update if it does
   db.insert(settings)

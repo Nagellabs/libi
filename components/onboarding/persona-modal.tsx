@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { trackEvent } from "@/lib/analytics/client";
 
 const OPTIONS: Array<{ id: string; label: string }> = [
   { id: "solo-creator", label: "Solo creator" },
@@ -21,18 +22,45 @@ export function PersonaModal() {
     queryFn: async () => (await fetch("/api/onboarding/state")).json(),
   });
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [lastPersona, setLastPersona] = useState<string | null>(null);
+
+  // Funnel step 2 (Task 14): the persona question actually painted on
+  // screen — not merely "the onboarding-state fetch resolved". Guarded by a
+  // ref (not a render count) so React re-rendering the modal while it's
+  // already up — including StrictMode's dev double-invoke of this same
+  // effect — never double-fires it.
+  const shownRef = useRef(false);
+  useEffect(() => {
+    if (data?.needsPersona !== true) return;
+    if (shownRef.current) return;
+    shownRef.current = true;
+    trackEvent("persona_prompt_shown");
+  }, [data?.needsPersona]);
 
   if (!data || data.needsPersona !== true) return null;
 
   async function pick(persona: string) {
     setSaving(true);
-    await fetch("/api/onboarding/persona", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ persona }),
-    });
-    await qc.invalidateQueries({ queryKey: ["onboarding-state"] });
-    setSaving(false);
+    setError(null);
+    setLastPersona(persona);
+    try {
+      const res = await fetch("/api/onboarding/persona", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ persona }),
+      });
+      if (!res.ok) {
+        setError(`Couldn't save — the server rejected the request (${res.status}).`);
+        setSaving(false);
+        return;
+      }
+      await qc.invalidateQueries({ queryKey: ["onboarding-state"] });
+      setSaving(false);
+    } catch {
+      setError("Couldn't save — check your connection and try again.");
+      setSaving(false);
+    }
   }
 
   return (
@@ -44,6 +72,18 @@ export function PersonaModal() {
         <p className="mb-6 text-sm text-muted-foreground">
           Which best describes you?
         </p>
+        {error && (
+          <div className="mb-4 flex items-center justify-between gap-3 rounded-lg border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <span>{error}</span>
+            <button
+              disabled={saving}
+              onClick={() => lastPersona && pick(lastPersona)}
+              className="cursor-pointer shrink-0 rounded-md border border-destructive/40 px-3 py-1 font-medium hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Retry
+            </button>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           {OPTIONS.map((o) => (
             <button

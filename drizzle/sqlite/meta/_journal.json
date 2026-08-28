@@ -337,6 +337,20 @@
       "when": 1786549137912,
       "tag": "0047_absurd_chameleon",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "6",
+      "when": 1787497563465,
+      "tag": "0048_skinny_red_ghost",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "6",
+      "when": 1787508854588,
+      "tag": "0049_ambitious_devos",
+      "breakpoints": true
     }
   ]
 }

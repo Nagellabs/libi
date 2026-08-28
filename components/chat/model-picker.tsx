@@ -8,6 +8,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useSessionModel, useSetSessionModel } from "@/lib/queries/session-model";
 import { modelDisplayLabel } from "@/lib/sessions/model-option";
 
@@ -16,8 +17,16 @@ export default function ModelPicker({ sessionId }: { sessionId: string | null })
   const setModel = useSetSessionModel(sessionId);
   const [error, setError] = useState<string | null>(null);
 
-  // Hidden until we know the session supports model selection.
-  if (!sessionId || isPending || !data || !data.supported) return null;
+  if (!sessionId) return null;
+
+  // While the answer isn't known yet (first fetch in flight, or a restored
+  // session whose options the activation replay hasn't filled), hold the
+  // pill's footprint with a skeleton so the real pill arrives without a
+  // layout jump. Hidden only on a genuine "no model select".
+  if (isPending || (data && !data.supported && data.pending)) {
+    return <Skeleton className="h-8 w-24 rounded-lg" />;
+  }
+  if (!data || !data.supported) return null;
 
   const { currentModelId, availableModels } = data;
   if (availableModels.length === 0) return null;

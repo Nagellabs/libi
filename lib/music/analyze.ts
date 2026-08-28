@@ -142,6 +142,7 @@ function runUv(args: string[], timeoutMs = 5 * 60_000): Promise<void> {
   const uv = requireUvBinary(MusicAnalyzeError, "Music analysis");
   return new Promise((resolve, reject) => {
     const child = spawn(uv, args, {
+      windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
       env: buildUvEnv(),
     });

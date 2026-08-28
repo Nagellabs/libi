@@ -22,6 +22,7 @@
  * Installing the CLI is a genuinely separate remedy, needed only for the
  * "use libi in your own tools" flow, which shells out to the USER's `codex`.
  */
+import { isWindows } from "@/lib/platform";
 import { resolveCodexNativeBinary } from "./codex-native-binary";
 
 export interface TerminalRemedy {
@@ -33,9 +34,49 @@ export interface TerminalRemedy {
   detail: string;
 }
 
-/** Quote a path for a POSIX/PowerShell login shell. */
+/**
+ * Quote a path for the shell libi's Terminal actually spawns —
+ * `lib/terminal/pty.ts#resolveShell`, which is PowerShell on Windows and the
+ * user's login `sh` everywhere else. The two disagree about quoting, so this
+ * cannot be one expression pretending to serve both (which it was).
+ */
 function shellQuote(p: string): string {
-  return /^[A-Za-z0-9._\-/\\:]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
+  // PowerShell: inside single quotes everything is literal and an embedded
+  // quote is escaped by DOUBLING it — the POSIX `'\''` idiom would end the
+  // string and leave a stray backslash. Always quoting is also the only safe
+  // default: the old "does it look tame?" character test let
+  // `…\@nagellabslibi\…` through as untamed (it has an `@`) and a plain
+  // `C:\…\claude.cmd` through as tame, so the two agent remedies took
+  // different branches and only one of them was ever exercised.
+  if (isWindows()) return `'${p.replace(/'/g, "''")}'`;
+  // POSIX: a backslash is an ESCAPE outside quotes, so it must not appear in
+  // the "safe to leave bare" set. It was in the old one, for Windows' benefit.
+  return /^[A-Za-z0-9._\-/:]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * A line that RUNS `bin` with `args` when typed into that shell.
+ *
+ * The Windows half is the whole point. PowerShell parses a statement that
+ * begins with a quoted string as an EXPRESSION, not a command: it evaluates
+ * to the string. So `'C:\…\codex.exe' login` is a parse error —
+ *
+ *     Unexpected token 'login' in expression or statement.
+ *
+ * — which is exactly what the "Sign in to Codex" button produced on Windows,
+ * and `'C:\…\claude.cmd'` on its own is worse, because PowerShell simply
+ * ECHOES the path and exits 0. Nothing runs, nothing complains.
+ *
+ * `&`, the call operator, is what tells PowerShell to treat the string as a
+ * command to invoke. Verified on the QA box against the real bundled engine:
+ * the quoted form errors, `& '<path>' --version` prints `codex-cli 0.148.0`.
+ *
+ * Bare command NAMES (`claude`, `npm`) are not paths and never take this
+ * treatment — they resolve through PATH in both shells as they are.
+ */
+function runBinaryLine(bin: string, ...args: string[]): string {
+  const line = [shellQuote(bin), ...args].join(" ");
+  return isWindows() ? `& ${line}` : line;
 }
 
 /**
@@ -51,7 +92,7 @@ export function codexSignInRemedy(root: string | null): TerminalRemedy | null {
   if (!bin) return null;
   return {
     label: "Sign in to Codex",
-    command: `${shellQuote(bin)} login`,
+    command: runBinaryLine(bin, "login"),
     detail: "Runs the Codex engine libi already ships — nothing to install.",
   };
 }
@@ -76,7 +117,7 @@ export function codexSignInRemedy(root: string | null): TerminalRemedy | null {
 export function claudeSignInRemedy(bin: string | null): TerminalRemedy {
   return {
     label: "Sign in to Claude Code",
-    command: bin ? shellQuote(bin) : "claude",
+    command: bin ? runBinaryLine(bin) : "claude",
     detail: "Opens Claude Code's own sign-in flow in a terminal.",
   };
 }

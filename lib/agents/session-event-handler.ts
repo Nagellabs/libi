@@ -1,6 +1,7 @@
 import {
   type Client,
   type SessionNotification,
+  type SessionConfigOption,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
@@ -32,6 +33,7 @@ import {
 import { getNotificationsSetting } from "@/lib/db/settings";
 import { pushIfBackgrounded } from "@/mcp/notify";
 import { applyUsageUpdate, toAvailableCommands } from "@/lib/sessions/usage";
+import { deriveModelSnapshot } from "@/lib/sessions/model-option";
 
 // usage_update is @experimental — on drift we keep the previous state and
 // warn ONCE per session (spec: never spam the log at stream rate).
@@ -157,6 +159,13 @@ export class SessionEventHandler {
     private readonly stashOrphanCommands?: (
       sessionId: string,
       commands: import("@/lib/sessions/usage").AvailableCommandInfo[],
+    ) => void,
+    /** Same fallback for config_option_update arriving before a SessionEntry
+     *  exists (the standby session pre-claim). The SessionManager stashes the
+     *  options on the standby record so the claimed entry starts current. */
+    private readonly stashOrphanConfigOptions?: (
+      sessionId: string,
+      configOptions: SessionConfigOption[],
     ) => void,
   ) {}
 
@@ -907,13 +916,42 @@ export class SessionEventHandler {
         break;
       }
 
+      case "config_option_update": {
+        // The full replacement set — a model changed from OUTSIDE libi (the
+        // agent's own /model, or pushModelToSession) becomes visible here.
+        if (session) {
+          session.configOptions = update.configOptions;
+          this.emit(sessionId, {
+            type: "agent-config-options",
+            model: deriveModelSnapshot(update.configOptions),
+          });
+        } else {
+          // No SessionEntry yet (standby session pre-claim) — let the
+          // SessionManager stash them for the eventual claim.
+          this.stashOrphanConfigOptions?.(sessionId, update.configOptions);
+        }
+        break;
+      }
+
       // Informational updates — not surfaced to the UI
       case "plan":
       case "plan_update":
       case "plan_removed":
       case "current_mode_update":
-      case "config_option_update":
       case "session_info_update":
+      // Context compaction, new in @agentclientprotocol/sdk 1.x and still
+      // flagged UNSTABLE in the schema (may change or vanish). Listed here
+      // because the exhaustiveness check below is a `never`: omitting them
+      // fails the TypeScript BUILD. It is not a log-noise fix — an agent may
+      // only send these when the client advertised
+      // `ClientSessionCapabilities::compaction`, and libi advertises
+      // `clientCapabilities: {}` (`lib/agents/process-manager.ts`), while
+      // claude-agent-acp 0.70.0 emits neither. So the silent handling is
+      // defensive, correct for the day libi does advertise the capability.
+      // Surfacing compaction progress in the chat is a separate feature
+      // decision, not part of the adapter bump.
+      case "compaction_update":
+      case "compaction_summary_chunk":
         break;
 
       default: {

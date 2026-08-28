@@ -157,6 +157,7 @@ async function runNpm(
     cwd,
     env: { ...env, ELECTRON_RUN_AS_NODE: "1" } as unknown as NodeJS.ProcessEnv,
     timeout: NPM_TIMEOUT_MS,
+    windowsHide: true,
     maxBuffer: MAX_CAPTURE_BYTES,
   });
 }
@@ -412,6 +413,7 @@ export async function fetchNodeAbiSidecars(opts: { prefix: string }): Promise<nu
         [bin, "--runtime=node", `--target=${major}.0.0`],
         {
           cwd: moduleDir,
+          windowsHide: true,
           env: buildSpawnEnv() as unknown as NodeJS.ProcessEnv,
           timeout: PREBUILD_TIMEOUT_MS,
           maxBuffer: MAX_CAPTURE_BYTES,
@@ -505,6 +507,7 @@ export async function fetchElectronPrebuild(opts: {
     // runtimes instead of a branch where only half was ever exercised.
     await execFileAsync(resolveNodeCommand(), nodeArgs, {
       cwd: moduleDir,
+      windowsHide: true,
       env: buildSpawnEnv() as unknown as NodeJS.ProcessEnv,
       timeout: PREBUILD_TIMEOUT_MS,
       maxBuffer: MAX_CAPTURE_BYTES,

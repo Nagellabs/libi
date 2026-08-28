@@ -47,6 +47,7 @@ export async function runEngineSelftest(): Promise<EngineSelftestResult> {
           process.env.LIBI_TRACK_MODELS ?? trackingModelsDir(),
       }),
       timeout: 170_000,
+      windowsHide: true,
       maxBuffer: 16 * 1024 * 1024,
     },
   );

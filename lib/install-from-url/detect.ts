@@ -92,7 +92,7 @@ export function parseGithubUrl(url: string): GithubRepoRef | null {
  */
 async function ensureTarAvailable(): Promise<void> {
   try {
-    await execFileAsync("tar", ["--version"], { timeout: 5_000 });
+    await execFileAsync("tar", ["--version"], { timeout: 5_000, windowsHide: true });
   } catch (err) {
     throw new Error(
       `tar is required to extract the GitHub tarball but was not found on PATH: ${(err as Error).message}`,
@@ -178,6 +178,7 @@ export async function fetchRepoTarball(
     try {
       await execFileAsync("tar", ["-xzf", tarballPath, "-C", installRoot], {
         timeout: 60_000,
+        windowsHide: true,
       });
     } catch (err) {
       lastError = new Error(`tar extract failed: ${(err as Error).message}`);

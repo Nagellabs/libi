@@ -24,7 +24,8 @@
  *     pure noise in front of a warning we already emit.
  *
  * The messages are DOWNGRADED, not swallowed: they still reach the console (and
- * `~/.libi/logs/server.log` via Next's browser-log forwarding) as warnings, so
+ * `~/.libi/logs/server.log` via Next's dev-only browser-log forwarding) as
+ * warnings, so
  * a real regression is still visible to anyone reading logs. Only the blocking
  * overlay card goes away.
  *

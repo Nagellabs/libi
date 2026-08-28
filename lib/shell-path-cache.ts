@@ -19,10 +19,11 @@
 import fs from "fs";
 import path from "path";
 import { getLibiHome } from "@/lib/libi-home";
+import { isWindows } from "@/lib/platform";
 
 /** PATH list separator for this platform. */
 export function pathSeparator(): string {
-  return process.platform === "win32" ? ";" : ":";
+  return isWindows() ? ";" : ":";
 }
 
 /**

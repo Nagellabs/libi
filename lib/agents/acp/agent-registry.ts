@@ -125,7 +125,7 @@ function resolveCodexBin(): CodexBinResolution {
  * runtime-installed copy under `~/.libi/agents` (see
  * `lib/agents/runtime-install.ts#resolveClaudeAdapterBin`). Unlike
  * `resolveBin` above, this NEVER falls back to npx — the adapter transitively
- * pulls `@anthropic-ai/claude-agent-sdk` (+ its ~212MB platform binary),
+ * pulls `@anthropic-ai/claude-agent-sdk` (+ its ~306MB platform binary),
  * which libi holds no licence to redistribute and is therefore installed at
  * runtime from npm, not bundled. An unpinned `npx claude-agent-acp` in a
  * packaged app would silently fetch an arbitrary version over the network —
@@ -239,7 +239,23 @@ function getBins(): Bins {
   return resolvedBins;
 }
 
-function getKnownAgents(): Omit<CliAgentConfig, "installed">[] {
+/**
+ * One entry per known agent, carrying its OWN detection dispatch alongside
+ * its static fields. `runDetection` below used to be a two-way
+ * `if (agent.id === "claude-code") ... else ...` — meaning a third agent
+ * added to the array here would silently run Codex's probe against it. Each
+ * entry now says how to detect itself, so adding an agent can't leave this
+ * fork out of date.
+ */
+type KnownAgent = Omit<CliAgentConfig, "installed"> & {
+  /** How this agent decides it is usable — `detectClaudeCode` / `detectCodex`,
+   *  unchanged in behaviour, just no longer chosen by an id comparison. */
+  detect: (agent: Omit<CliAgentConfig, "installed">, root: string | null) => CliAgentConfig;
+  /** How its npm-tree root is found, for the `detect` call above. */
+  resolveRoot: () => string | null;
+};
+
+function getKnownAgents(): KnownAgent[] {
   const bins = getBins();
   const claudeBin = bins["claude-agent-acp"]?.bin ?? null;
   return [
@@ -253,6 +269,8 @@ function getKnownAgents(): Omit<CliAgentConfig, "installed">[] {
       args: claudeBin?.args ?? [],
       detectCommand: "claude",
       envHints: ["ANTHROPIC_API_KEY"],
+      detect: detectClaudeCode,
+      resolveRoot: () => bins["claude-agent-acp"]?.root ?? null,
     },
     {
       id: "codex",
@@ -261,8 +279,25 @@ function getKnownAgents(): Omit<CliAgentConfig, "installed">[] {
       args: bins["codex-acp"].bin.args,
       detectCommand: "codex",
       envHints: ["OPENAI_API_KEY"],
+      detect: detectCodex,
+      resolveRoot: () => bins["codex-acp"].root,
     },
   ];
+}
+
+/**
+ * The ids this detection table dispatches on.
+ *
+ * Exists so a test can assert the three agent registries agree without
+ * merging them: `lib/agents/setup/registry.ts` (pure, browser-safe — what to
+ * SAY), this table (what to DETECT), and `sign-in-remedy.ts`'s resolvers
+ * (which binary, WHERE). The split is deliberate and stays; what was missing
+ * was anything asserting an id declared in one exists in the others. A setup
+ * entry with no detection entry is an agent the app offers to install and can
+ * never see.
+ */
+export function knownAgentIds(): string[] {
+  return getKnownAgents().map((a) => a.id);
 }
 
 let cachedAgents: CliAgentConfig[] | null = null;
@@ -278,7 +313,7 @@ let cachedAgents: CliAgentConfig[] | null = null;
  * bound to the SDK. It never reads PATH, and libi puts no `claude` on PATH —
  * `~/.libi/bin` holds ffmpeg, ffprobe, node, uv and yt-dlp. So a `which
  * claude` gate made a COMPLETE, successful runtime install report "not
- * installed": libi downloads the 212MB CLI and then refuses to admit it has
+ * installed": libi downloads the 306MB CLI and then refuses to admit it has
  * it, unless the user separately installed Claude Code — which every
  * developer machine has, which is why this hid for so long.
  *
@@ -286,8 +321,14 @@ let cachedAgents: CliAgentConfig[] | null = null;
  * `claude` once is how you get credentials), and the concern behind it is
  * real: with no credentials the adapter answers `initialize` and
  * `session/new` happily and then fails `session/prompt` with ACP
- * `-32000 Authentication required` (verified against adapter 0.44.0 with an
- * isolated empty HOME). But PATH is unsound as a proxy in BOTH directions:
+ * `-32000 Authentication required` (observed on adapter 0.44.0 with an
+ * isolated empty HOME. On 0.70.0 only the static half is established:
+ * `dist/acp-agent.js` still turns the CLI's "Please run /login" into
+ * `RequestError.authRequired()`, and the SDK still maps that to -32000. The
+ * SEQUENCE is not re-verified there — 0.70.0 added an `authRequired` throw
+ * inside session creation, gated on `shouldHideClaudeAuth()` plus a
+ * subscription account, so the failure may now land at `session/new`).
+ * But PATH is unsound as a proxy in BOTH directions:
  *   - `npm i -g @anthropic-ai/claude-code` and never logging in passes it,
  *     so it never actually prevented that failure; and
  *   - a signed-in user fails it in the very place this matters. A
@@ -320,7 +361,7 @@ function detectClaudeCode(
     return { ...agent, installed: false, unavailableReason: claudeAdapterUnavailableReason(null) };
   }
   // A resolved adapter bin is only HALF the install. The adapter is ~40KB of
-  // JS that must exec @anthropic-ai/claude-agent-sdk's ~212MB native binary,
+  // JS that must exec @anthropic-ai/claude-agent-sdk's ~306MB native binary,
   // which arrives as an optionalDependency — and npm exits 0 when an
   // optional dependency fails. Reporting "installed" off the adapter alone
   // therefore advertises an agent that throws `Claude native binary not
@@ -329,7 +370,7 @@ function detectClaudeCode(
   //
   // Unlike the install path, this does NOT exempt a dev checkout: a checkout
   // installed with --omit=optional genuinely cannot run Claude Code, and the
-  // reason to skip it there (avoiding a redundant 212MB download libi cannot
+  // reason to skip it there (avoiding a redundant 306MB download libi cannot
   // put in the repo anyway) is an install concern, not a reporting one.
   // CLAUDE_CODE_EXECUTABLE still counts as present — see
   // `resolveClaudeNativeBinary`.
@@ -365,13 +406,16 @@ function detectClaudeCode(
  * PATH. (Its separate `codex-acp login` subcommand DOES default to `"codex"`
  * on PATH — libi never invokes that, and it is not what availability means.)
  * Verified empirically (codex-acp 1.1.8, darwin-arm64, 2026-08-02): driven
- * from libi's OWN ACP SDK 0.25 client against an empty isolated CODEX_HOME,
- * it completes the `initialize` handshake with full capabilities (both sides
- * negotiate PROTOCOL_VERSION 1 despite the adapter shipping SDK 1.3, so the
- * 0.25<->1.3 gap is not a wire break); the only missing thing is auth —
- * `session/new` fails with ACP `-32000
- * Authentication required` (note: at session/new, earlier than Claude's
- * session/prompt). Auth is credentials (`~/.codex/auth.json` ChatGPT login,
+ * from libi's OWN ACP SDK client — 0.25 at that verification, 1.4 since the
+ * 2026-08-26 bump — against an empty isolated CODEX_HOME, it completes the
+ * `initialize` handshake with full capabilities (both sides negotiated
+ * PROTOCOL_VERSION 1 across the 0.25<->1.3 SDK gap of the day, so a version
+ * gap is not a wire break); the only missing thing is auth — `session/new`
+ * fails with ACP `-32000 Authentication required` (note: at session/new,
+ * earlier than Claude's session/prompt). NOT re-verified since the
+ * 2026-08-26 bump to codex-acp 1.6.2, which declares
+ * `@agentclientprotocol/sdk ^1.3.0` and resolves hoisted to 1.4.0. Auth is
+ * credentials (`~/.codex/auth.json` ChatGPT login,
  * CODEX_API_KEY, OPENAI_API_KEY), which — exactly as for Claude — no cheap
  * boot-time probe can answer honestly, so availability deliberately does NOT
  * mean "signed in".
@@ -453,13 +497,11 @@ function detectCodex(
 }
 
 function runDetection(): CliAgentConfig[] {
-  const bins = getBins();
-  const claudeRoot = bins["claude-agent-acp"]?.root ?? null;
-  const codexRoot = bins["codex-acp"].root;
-  return getKnownAgents().map((agent) => {
-    if (agent.id === "claude-code") return detectClaudeCode(agent, claudeRoot);
-    return detectCodex(agent, codexRoot);
-  });
+  // Destructure `detect`/`resolveRoot` off before handing `agent` to its own
+  // `detect` — otherwise the spread inside detectClaudeCode/detectCodex
+  // (`{ ...agent, installed: … }`) would carry those two functions into the
+  // CliAgentConfig this returns.
+  return getKnownAgents().map(({ detect, resolveRoot, ...agent }) => detect(agent, resolveRoot()));
 }
 
 /** Returns cached agent detection results. Always instant after warmup. */

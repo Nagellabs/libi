@@ -94,6 +94,7 @@ const defaultClone: CloneFn = (url, dir) =>
       ["clone", "--depth", "1", url, dir],
       {
         timeout: 60_000,
+        windowsHide: true,
         // Pin the transport allowlist regardless of host git config, so a
         // user's global `protocol.ext.allow=always` can't re-enable the RCE.
         env: { ...process.env, GIT_ALLOW_PROTOCOL: "http:https" },

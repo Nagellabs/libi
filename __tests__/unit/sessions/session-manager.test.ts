@@ -779,6 +779,71 @@ describe("SessionManager", () => {
       // Total active should still be MAX_ACTIVE_SESSIONS
       expect(sm.getActiveSessions()).toHaveLength(MAX_ACTIVE_SESSIONS);
     });
+
+    /** Fill the manager to capacity with staggered `lastUsed` (session-0
+     *  oldest), then add one inactive session ready to be activated. */
+    async function fillToCapacity(): Promise<string[]> {
+      await sm.loadInitialSessions("claude-code");
+
+      const sessionIds: string[] = [];
+      for (let i = 0; i < MAX_ACTIVE_SESSIONS; i++) {
+        const id = `gen-session-${i}`;
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: id });
+        await sm.createSession();
+        sessionIds.push(id);
+        sm.getSession(id)!.lastUsed = Date.now() - (MAX_ACTIVE_SESSIONS - i) * 1000;
+      }
+
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: "incoming", title: "Incoming", updatedAt: null }],
+        nextCursor: null,
+      });
+      await sm.syncSessions();
+
+      return sessionIds;
+    }
+
+    /** Mark a session as mid-turn the way `sendMessage` does. */
+    function markGenerating(sessionId: string) {
+      sm.getSession(sessionId)!.currentAgentMessage = {
+        id: `agent_${sessionId}`,
+        role: "agent",
+        parts: [],
+        timestamp: Date.now(),
+      };
+    }
+
+    it("skips a generating session and evicts the next-oldest idle one", async () => {
+      const sessionIds = await fillToCapacity();
+
+      // The oldest is the prime LRU candidate precisely BECAUSE it is
+      // generating: `lastUsed` is stamped at prompt time, so a long turn
+      // ages while it works. Evicting it closes the ACP session and cancels
+      // the in-flight prompt — silently destroying the work.
+      markGenerating(sessionIds[0]);
+
+      await sm.activateSession("incoming");
+
+      expect(sm.hasActiveSession(sessionIds[0])).toBe(true);
+      expect(sm.hasActiveSession(sessionIds[1])).toBe(false);
+      expect(sm.hasActiveSession("incoming")).toBe(true);
+      expect(sm.getActiveSessions()).toHaveLength(MAX_ACTIVE_SESSIONS);
+    });
+
+    it("evicts nobody when every candidate is generating", async () => {
+      const sessionIds = await fillToCapacity();
+      for (const id of sessionIds) markGenerating(id);
+
+      await sm.activateSession("incoming");
+
+      // Every generating session survives; the cap is exceeded by one rather
+      // than cancelling someone's turn. The cap is a resource heuristic, not
+      // a correctness constraint.
+      for (const id of sessionIds) expect(sm.hasActiveSession(id)).toBe(true);
+      expect(sm.hasActiveSession("incoming")).toBe(true);
+      expect(sm.getActiveSessions()).toHaveLength(MAX_ACTIVE_SESSIONS + 1);
+      expect(mockConnection.closeSession).not.toHaveBeenCalled();
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { subscribeBroadcast } from "./use-agent-chat";
+import { subscribeBroadcast, setViewedSession } from "./use-agent-chat";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 
 const UNKNOWN_READINESS: AgentReadiness = { state: "unknown" };
@@ -115,7 +115,20 @@ export function useSessionList(): UseSessionList {
   const [isCreating, setIsCreating] = useState(false);
   const [standbyReady, setStandbyReady] = useState(true);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [activeSessionId, setActiveSessionIdState] = useState<string | null>(
+    null,
+  );
+
+  /** The single funnel for "which session is the user looking at". Several
+   *  callers set it (this hook's `switchSession`, the editor page's restore,
+   *  the settings "set up with agent" flow), so the sidebar's unviewed-result
+   *  tracker is told here rather than at each of them — and synchronously, in
+   *  the same task as the click, so no arriving turn-completion can see a
+   *  stale answer and mark the session on screen as unseen. */
+  const setActiveSessionId = useCallback((sessionId: string | null) => {
+    setViewedSession(sessionId);
+    setActiveSessionIdState(sessionId);
+  }, []);
   const [readinessByAgent, setReadinessByAgent] = useState<
     Record<string, AgentReadiness>
   >({});
@@ -246,7 +259,7 @@ export function useSessionList(): UseSessionList {
     } finally {
       setIsCreating(false);
     }
-  }, [fetchSessions, isCreating]);
+  }, [fetchSessions, isCreating, setActiveSessionId]);
 
   const createSession = useCallback(
     async (): Promise<string | null> =>
@@ -276,7 +289,7 @@ export function useSessionList(): UseSessionList {
       // separate POST /activate round-trip and the race it introduced.
       setActiveSessionId(sessionId);
     },
-    [activeSessionId],
+    [activeSessionId, setActiveSessionId],
   );
 
   const groups = useMemo(() => groupSessionsByDay(sessions), [sessions]);

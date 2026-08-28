@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
-import { extractModelOption, modelDisplayLabel } from "@/lib/sessions/model-option";
+import {
+  deriveModelSnapshot,
+  extractModelOption,
+  modelDisplayLabel,
+} from "@/lib/sessions/model-option";
 
 function modelSelect(
   currentValue: string,
@@ -119,5 +123,33 @@ describe("modelDisplayLabel", () => {
 
   it("prefers a good name over the id for codex families", () => {
     expect(modelDisplayLabel({ id: "gpt-5.5", name: "GPT-5.5" })).toBe("GPT-5.5");
+  });
+});
+
+describe("deriveModelSnapshot", () => {
+  it("reports pending when options were never captured (empty or absent)", () => {
+    expect(deriveModelSnapshot([])).toEqual({ supported: false, pending: true });
+    expect(deriveModelSnapshot(null)).toEqual({ supported: false, pending: true });
+    expect(deriveModelSnapshot(undefined)).toEqual({ supported: false, pending: true });
+  });
+
+  it("reports genuinely unsupported when options exist but hold no model select", () => {
+    const opts = [
+      { type: "select", id: "mode", name: "Approval", currentValue: "auto", options: [] },
+    ] as unknown as SessionConfigOption[];
+    expect(deriveModelSnapshot(opts)).toEqual({ supported: false, pending: false });
+  });
+
+  it("wraps the extracted model state when a model select exists", () => {
+    const opts = [
+      modelSelect("claude-opus-4-8", [{ value: "claude-opus-4-8", name: "Opus 4.8" }]),
+    ];
+    expect(deriveModelSnapshot(opts)).toEqual({
+      supported: true,
+      currentModelId: "claude-opus-4-8",
+      availableModels: [
+        { id: "claude-opus-4-8", name: "Opus 4.8", description: undefined },
+      ],
+    });
   });
 });

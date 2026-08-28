@@ -217,6 +217,7 @@ export async function probeMcpServer(opts: ProbeOptions): Promise<ProbeResult> {
     try {
       child = spawn(command, args, {
         env: env as NodeJS.ProcessEnv,
+        windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
       pid = child.pid;

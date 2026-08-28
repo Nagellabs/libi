@@ -13,7 +13,7 @@ import { prepareTrackForRender } from "@/lib/tracking/prepare-overlay-tracks";
 import { resizeAnchorFromOffset } from "@/lib/tracking/size-stabilize";
 import { storeFile } from "@/mcp/tools/file-tools";
 import { serverLogger as logger } from "@/lib/logger";
-import { isSafePieceId } from "@/lib/security/pieceId";
+import { isSafePieceId, isSafeTrackId } from "@/lib/security/pieceId";
 import type { TrackedContent, TrackFit, TrackSmoothing } from "@/lib/tracking/types";
 
 interface Body {
@@ -37,6 +37,15 @@ export async function POST(req: Request) {
   if (body.pieceId !== undefined && !isSafePieceId(body.pieceId)) {
     return NextResponse.json(
       { success: false, error: "invalid pieceId" },
+      { status: 400 },
+    );
+  }
+  // `body.trackId` (pre-attach branch) is likewise raw client input that flows
+  // into readTrack's filename component. The post-attach branch's trackId comes
+  // from the trusted overlay manifest, so only guard the client-supplied one.
+  if (body.trackId !== undefined && !isSafeTrackId(body.trackId)) {
+    return NextResponse.json(
+      { success: false, error: "invalid trackId" },
       { status: 400 },
     );
   }

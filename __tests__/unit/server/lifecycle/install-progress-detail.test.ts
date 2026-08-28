@@ -56,11 +56,11 @@ describe("cliAdapter progress rendering", () => {
       item: ITEM,
       bytesDownloaded: 0,
       bytesTotal: null,
-      detail: "downloading ~250 MB, first run only — 12s elapsed",
+      detail: "downloading ~345 MB, first run only — 12s elapsed",
     });
 
     const line = spinners.at(-1)!.text;
-    expect(line).toContain("downloading ~250 MB, first run only — 12s elapsed");
+    expect(line).toContain("downloading ~345 MB, first run only — 12s elapsed");
     expect(line).not.toContain("0 B");
   });
 

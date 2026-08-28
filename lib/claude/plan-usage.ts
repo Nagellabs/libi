@@ -27,6 +27,7 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { serverLogger as logger } from "@/lib/logger";
+import { isMac } from "@/lib/platform";
 
 const execFileAsync = promisify(execFile);
 
@@ -130,7 +131,7 @@ async function readClaudeOAuthToken(): Promise<string | null> {
     // fall through to keychain
   }
   // 2. macOS Keychain (Claude Code's darwin storage)
-  if (process.platform === "darwin") {
+  if (isMac()) {
     try {
       const { stdout } = await execFileAsync("security", [
         "find-generic-password",

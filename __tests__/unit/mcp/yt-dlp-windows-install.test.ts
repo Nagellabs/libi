@@ -94,8 +94,12 @@ describe("the uv venv entry point uses the platform's layout", () => {
     // invariant that matters is that the DIRECTORY is chosen per-platform, not
     // just the filename — which is exactly what was wrong.
     const src = readFileSync("mcp/registry/dependency-manager.ts", "utf8");
+    // isWindows(), NOT `process.platform === "win32"`: the Next build folds
+    // that comparison against the build machine and deletes the losing
+    // branch, so the literal form is a bug here rather than a style choice.
+    // See lib/platform.ts.
     expect(src).toContain(
-      'const venvBinDir = process.platform === "win32" ? "Scripts" : "bin";',
+      'const venvBinDir = isWindows() ? "Scripts" : "bin";',
     );
     // Neither the yt-dlp entry point nor the python bin may hardcode "bin".
     expect(src).not.toMatch(/"yt-dlp",\s*\n\s*"bin",/);

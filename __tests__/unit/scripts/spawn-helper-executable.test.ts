@@ -103,4 +103,25 @@ describe("the packaged bundle's spawn-helper", () => {
     expect(() => assertPrebuiltExecutablesRunnable(tmp)).not.toThrow();
     expect(() => restorePrebuiltExecutables(tmp)).not.toThrow();
   });
+
+  // NTFS has no execute bit: Node reports 0666 for every regular file, so the
+  // assertion cannot be evaluated on a Windows host and reported EVERY helper
+  // as broken — listing DARWIN helpers a Windows package never spawns. That
+  // failed the first Windows Electron build outright.
+  //
+  // The platform is pinned rather than inherited: this test asserts Windows
+  // behaviour and must do so on the ubuntu CI runner too.
+  it("skips the check on a Windows host, where the bit cannot exist", () => {
+    makeBundle(0o644, ["darwin-arm64", "darwin-x64", "linux-x64"]);
+    // Sanity: on a POSIX host this exact bundle is a failure.
+    expect(() => assertPrebuiltExecutablesRunnable(tmp)).toThrow(/NOT executable/);
+
+    const real = process.platform;
+    Object.defineProperty(process, "platform", { value: "win32" });
+    try {
+      expect(() => assertPrebuiltExecutablesRunnable(tmp)).not.toThrow();
+    } finally {
+      Object.defineProperty(process, "platform", { value: real });
+    }
+  });
 });

@@ -74,7 +74,7 @@
 #     correctly "GPL-3.0-only".
 #
 # ── Anthropic packages are NOT excluded here (deliberately) ────────────────
-# @anthropic-ai/claude-agent-sdk (+ its ~212MB platform binary) is proprietary
+# @anthropic-ai/claude-agent-sdk (+ its ~306MB platform binary) is proprietary
 # — "© Anthropic PBC. All rights reserved." — and used to appear in this list
 # as a known-risk waiver, because the packaged Electron build genuinely
 # redistributed it. That is no longer true:

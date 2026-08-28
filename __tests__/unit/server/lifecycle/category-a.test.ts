@@ -175,7 +175,7 @@ describe("runCategoryA", () => {
       expect(ticks.length).toBeGreaterThan(0);
       const detail = (ticks[0] as { detail?: string }).detail ?? "";
       // The two facts that separate "working" from "hung" for the user.
-      expect(detail).toContain("250 MB");
+      expect(detail).toContain("345 MB");
       expect(detail).toContain("first run only");
       expect(detail).toMatch(/elapsed/);
     });
@@ -187,7 +187,7 @@ describe("runCategoryA", () => {
       expect(claudeAdapterProgressDetail(0)).toContain("0s elapsed");
       expect(claudeAdapterProgressDetail(45_000)).toContain("45s elapsed");
       expect(claudeAdapterProgressDetail(125_000)).toContain("2m 5s elapsed");
-      expect(claudeAdapterProgressDetail(125_000)).toContain("downloading ~250 MB, first run only");
+      expect(claudeAdapterProgressDetail(125_000)).toContain("downloading ~345 MB, first run only");
     });
 
     it("keeps ticking while npm runs, and stops the moment the phase ends", async () => {
@@ -261,6 +261,40 @@ describe("runCategoryA", () => {
       });
       // No fatal event — a real observable proof this never became an
       // InstallPhaseError.
+      expect(events.some((e) => e.kind === "fatal")).toBe(false);
+      expect(events.some((e) => e.kind === "category-a-done")).toBe(true);
+    });
+
+    it("does NOT report the adapter as newly installed when the upgrade failed and the old tree was kept", async () => {
+      // `installed: true` with `upgradeError` set means: usable, but still on
+      // the version the user already had. Reporting "installed" here makes a
+      // pin bump that reached nobody look exactly like one that reached
+      // everybody. It is still not a failure — the adapter runs — so the boot
+      // UI must not warn a user whose Claude Code works.
+      const calls: string[] = [];
+      await expect(
+        runCategoryA({
+          ensureBundledNpm: async () => { calls.push("npm"); },
+          installBinaryDeps: async () => { calls.push("binary"); },
+          probeMcp: async () => { calls.push("probe"); return { status: "up", error: null, durationMs: 0 }; },
+          defs: () => [fakeDef],
+          ensureNodeRuntime: okNodeRuntime,
+          ensureClaudeAdapter: async () => ({
+            installed: true,
+            binPath: "/fake/bin/claude-agent-acp",
+            staleVersion: "0.44.0",
+            upgradeError: "npm ERR! code ENOTFOUND registry.npmjs.org",
+          }),
+        }),
+      ).resolves.toBeUndefined();
+
+      // Phase 2.5 stays non-fatal: the rest of Category A still ran.
+      expect(calls).toEqual(["npm", "binary", "probe"]);
+      const done = events.find(
+        (e) => e.kind === "category-a-install-done" && e.item.id === "claude-adapter",
+      );
+      expect(done).toMatchObject({ result: "skipped" });
+      expect((done as { reason?: string }).reason).toContain("0.44.0");
       expect(events.some((e) => e.kind === "fatal")).toBe(false);
       expect(events.some((e) => e.kind === "category-a-done")).toBe(true);
     });

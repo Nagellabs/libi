@@ -24,15 +24,20 @@ it come together in a live preview.
 - **Node.js 20.9+** (only for the npm package — the desktop app bundles its own runtime)
 - **A CLI coding agent you're already signed in to** — [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex). libi installs the adapters it needs; you bring the account.
 - **~1 GB of free disk** for what libi downloads on first run (ffmpeg/ffprobe, a Chromium for rendering, the agent adapter). Object tracking and background removal pull their models on demand, later.
-- **macOS** — where libi is built and tested today. Windows and Linux support is coming.
+- **macOS or Windows** — Linux support is coming. The Windows installer is not
+  code-signed yet, so Windows will warn on first launch; see below.
 
 ## Run libi
 
 ### Desktop app
 
-Download the macOS build (`.dmg` or `.zip`) from the
+Download the build for your platform (macOS `.dmg` / `.zip`, Windows `.exe`) from the
 [Releases page](https://github.com/Nagellabs/libi/releases) and launch it. Nothing else to
-install. Windows and Linux desktop builds are coming in a future release.
+install. Linux desktop builds are coming in a future release.
+
+**On Windows, the installer is not code-signed yet.** SmartScreen will say *"Windows
+protected your PC"* — choose **More info → Run anyway**. Code signing is on the way; until
+it lands, the [npm route](#npm) below is unaffected and needs no such dismissal.
 
 The desktop app updates its own runtime from npm: when a new version ships, Settings →
 General offers to install it, and it takes effect on the next restart.

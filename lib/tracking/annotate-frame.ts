@@ -18,6 +18,7 @@ function isDrawtextAvailable(): boolean {
   if (drawtextAvailableCache !== null) return drawtextAvailableCache;
   try {
     const result = spawnSync(resolveFfmpegPath(), ["-hide_banner", "-filters"], {
+      windowsHide: true,
       encoding: "utf8",
     });
     drawtextAvailableCache = /\bdrawtext\b/.test(result.stdout || "");

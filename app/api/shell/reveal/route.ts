@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
+import { isMac, isWindows } from "@/lib/platform";
 
 /**
  * Open the OS file manager at a given path. Used as a fallback when the
@@ -45,10 +46,14 @@ export async function POST(req: Request): Promise<Response> {
     if ((abs.startsWith(home) || abs.startsWith(tmp)) && fs.existsSync(abs)) {
       // On macOS, `open -R <path>` reveals the file in Finder. Windows + Linux
       // don't have a native "reveal" — fall back to opening the containing folder.
-      const platform = process.platform;
-      if (platform === "darwin") {
+      // isMac()/isWindows(), not a `const platform = process.platform` alias —
+      // see lib/platform.ts. The bundler folds THROUGH such an alias: this
+      // block compiled down to `(process.platform, spawn("open", ["-R", e]))`
+      // in a real build, with the Windows and Linux branches deleted outright,
+      // so "reveal in folder" ran `open -R` on Windows.
+      if (isMac()) {
         spawn("open", ["-R", abs], { detached: true, stdio: "ignore" }).unref();
-      } else if (platform === "win32") {
+      } else if (isWindows()) {
         spawn("explorer.exe", [`/select,${abs}`], { detached: true, stdio: "ignore" }).unref();
       } else {
         const dir = fs.statSync(abs).isDirectory() ? abs : path.dirname(abs);

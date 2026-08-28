@@ -281,7 +281,11 @@ export async function renderUnitToPng(
   const { command, args, env } = resolveWorkerSpawn();
 
   return await new Promise<Buffer>((resolve, reject) => {
-    const child = spawn(command, args, { env, stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn(command, args, {
+      env,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];

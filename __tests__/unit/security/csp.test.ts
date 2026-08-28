@@ -95,18 +95,20 @@ describe("buildCsp", () => {
     expect(connectSrc).not.toContain("sentry.io");
   });
 
-  it("allowlists ONLY the GA4 hosts, our own marketing site, and (when enabled) the Sentry ingest host", async () => {
+  it("allowlists ONLY our own marketing site and (when enabled) the Sentry ingest host — no third-party host anywhere else", async () => {
     const csp = await buildCspWithSentryEnabled(true);
     const dir = (name: string) =>
       csp
         .split(";")
         .map((d) => d.trim())
         .find((d) => d.startsWith(name)) ?? "";
-    // gtag.js loads from googletagmanager; beacons go to google-analytics.
-    expect(dir("script-src")).toContain("https://www.googletagmanager.com");
-    expect(dir("connect-src")).toContain("https://www.google-analytics.com");
-    expect(dir("connect-src")).toContain("https://*.google-analytics.com");
-    expect(dir("img-src")).toContain("https://www.google-analytics.com");
+    // Analytics is server-only now (lib/analytics/collect-url.ts, sent from the
+    // Next process, never the renderer) — no GA4 host belongs in this CSP at
+    // all. gtag.js is gone; there is nothing left in script-src or img-src to
+    // allowlist for it.
+    expect(dir("script-src")).not.toContain("googletagmanager.com");
+    expect(dir("connect-src")).not.toContain("google-analytics.com");
+    expect(dir("img-src")).not.toContain("google-analytics.com");
     // The waitlist POST target (lib/waitlist-api.ts) — connect-src only. It has
     // no business in script-src or img-src, and must not drift into them.
     expect(dir("connect-src")).toContain("https://libi.nagellabs.com");
@@ -125,7 +127,7 @@ describe("buildCsp", () => {
       "\\$&",
     );
     const allowedHostPattern = new RegExp(
-      `google-analytics\\.com|googletagmanager\\.com|^https:\\/\\/libi\\.nagellabs\\.com$|^${sentryHostEscaped}$`,
+      `^https:\\/\\/libi\\.nagellabs\\.com$|^${sentryHostEscaped}$`,
     );
     for (const name of ["connect-src", "script-src", "img-src"]) {
       const hosts = dir(name).match(/https?:\/\/[^\s]+/g) ?? [];
@@ -139,10 +141,10 @@ describe("buildCsp", () => {
     const csp = await buildCspWithSentryEnabled(true);
     expect(csp).toBe(
       "default-src 'self'; " +
-        `connect-src 'self' ws://127.0.0.1:* https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com https://libi.nagellabs.com ${SENTRY_CONNECT}; ` +
-        "img-src 'self' data: blob: https://www.google-analytics.com https://*.google-analytics.com; " +
+        `connect-src 'self' ws://127.0.0.1:* https://libi.nagellabs.com ${SENTRY_CONNECT}; ` +
+        "img-src 'self' data: blob:; " +
         "media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://www.googletagmanager.com; " +
+        "script-src 'self' 'unsafe-eval' 'unsafe-inline'; " +
         "worker-src 'self' blob:; " +
         "frame-src 'self'; object-src 'self'; base-uri 'self'; form-action 'self'",
     );
@@ -152,10 +154,10 @@ describe("buildCsp", () => {
     const csp = await buildCspWithSentryEnabled(false);
     expect(csp).toBe(
       "default-src 'self'; " +
-        "connect-src 'self' ws://127.0.0.1:* https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com https://libi.nagellabs.com; " +
-        "img-src 'self' data: blob: https://www.google-analytics.com https://*.google-analytics.com; " +
+        "connect-src 'self' ws://127.0.0.1:* https://libi.nagellabs.com; " +
+        "img-src 'self' data: blob:; " +
         "media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; " +
-        "script-src 'self' 'unsafe-eval' 'unsafe-inline' https://www.googletagmanager.com; " +
+        "script-src 'self' 'unsafe-eval' 'unsafe-inline'; " +
         "worker-src 'self' blob:; " +
         "frame-src 'self'; object-src 'self'; base-uri 'self'; form-action 'self'",
     );

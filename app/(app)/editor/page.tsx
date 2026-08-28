@@ -32,8 +32,10 @@ import { usePieceState } from "@/lib/queries/snapshots";
 import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import { OnboardingPanel } from "@/components/onboarding/onboarding-panel";
 import { InlineApiConfigPanel } from "@/components/mcp-config/inline-api-config-panel";
+import { useRouter, useSearchParams } from "next/navigation";
 import { PersonaModal } from "@/components/onboarding/persona-modal";
 import { readinessAllowsChat } from "@/lib/agents/agent-readiness";
+import { trackEvent } from "@/lib/analytics/client";
 
 export default function EditorPage() {
   useReactRenderTelemetry("EditorPage");
@@ -59,7 +61,6 @@ export default function EditorPage() {
     rightRegionMode,
     setRightRegionMode,
     apiConfigMcpId,
-    setOnboardingDemoOffer,
   } = useEditorState();
 
   const queryClient = useQueryClient();
@@ -79,23 +80,58 @@ export default function EditorPage() {
     if (!onboardingState) return;
     if (onboardingState.needsPersona) return; // persona modal is still up
     if (!onboardingState.needsOnboarding) return; // already connected before
-    if (rightRegionMode !== "editor") return; // user has chosen another mode
+    if (rightRegionMode !== "editor") {
+      if (rightRegionMode === "onboarding") onboardingOpenedRef.current = true;
+      return; // already showing, or the user has chosen another mode
+    }
     onboardingOpenedRef.current = true;
     setRightRegionMode("onboarding");
   }, [onboardingState, rightRegionMode, setRightRegionMode]);
 
-  // Leave onboarding the moment an agent is connected — whether the user
-  // picked it from the onboarding panel OR the sidebar agent selector. This
-  // reveals the chat (or terminal) surface instead of stranding them on the
-  // connect screen, and arms the one-tap "Show me how it works" demo offer.
-  // Both surfaces honour the offer: the chat panel sends the prompt to the ACP
-  // agent; the terminal panel pastes it into the live PTY.
+  // Funnel step 4 (Task 14): the connect-an-agent takeover actually replaced
+  // the editor. Fires once per APPEARANCE (not once per render, and not
+  // once per install) — the ref resets the moment rightRegionMode leaves
+  // "onboarding", so a user who navigates away and is later routed back here
+  // again is counted again. No cleanup function needed for the StrictMode
+  // double-invoke guard: the ref alone survives it, same pattern as
+  // PersonaModal's `persona_prompt_shown`.
+  const agentConnectShownRef = useRef(false);
   useEffect(() => {
-    if (rightRegionMode !== "onboarding") return;
-    if (!activeProviderId) return; // nothing connected yet
-    setRightRegionMode("editor");
-    setOnboardingDemoOffer(true);
-  }, [activeProviderId, rightRegionMode, setRightRegionMode, setOnboardingDemoOffer]);
+    if (rightRegionMode !== "onboarding") {
+      agentConnectShownRef.current = false;
+      return;
+    }
+    if (agentConnectShownRef.current) return;
+    agentConnectShownRef.current = true;
+    trackEvent("agent_connect_shown");
+  }, [rightRegionMode]);
+
+  // `/editor?setup=agent` — the sidebar's "Connect an agent" row asking for
+  // the connect screen by name. Distinct from the auto-open above, which only
+  // ever fires for a user who has never chosen anything: this one is an
+  // explicit request and must win even mid-flow.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const setupParam = searchParams.get("setup");
+  const setupRequestRef = useRef(false);
+  useEffect(() => {
+    if (setupParam !== "agent") {
+      setupRequestRef.current = false;
+      return;
+    }
+    if (setupRequestRef.current) return;
+    setupRequestRef.current = true;
+    setRightRegionMode("onboarding");
+    router.replace("/editor", { scroll: false });
+  }, [setupParam, setRightRegionMode, router]);
+
+  // NOTE: there is deliberately no effect here watching `activeProviderId` to
+  // decide when to leave the takeover. Two attempts at that failed the same
+  // way: at mount the value is briefly null and then populates, which is
+  // indistinguishable from the user choosing an agent, so the screen closed
+  // the instant it opened. Leaving is now driven by the ACTIONS that mean it —
+  // the panel's own connect and Terminal buttons, the sidebar's agent
+  // selector, and starting a chat — each of which is unambiguous.
 
   const piecesQuery = usePieces();
   const createPiece = useCreatePiece();

@@ -8,6 +8,7 @@ import type {
   SessionUsageState,
   AvailableCommandInfo,
 } from "@/lib/sessions/usage";
+import type { SessionModelSnapshot } from "@/lib/sessions/model-option";
 import { toast } from "sonner";
 import { sanitizeInspectorGroup } from "@/lib/editor-state-context";
 import {
@@ -51,6 +52,141 @@ export type AgentChatStatus =
 // ── Module-level cache ──────────────────────────────────────────────
 
 const _cachedStatusMap = new Map<string, AgentChatStatus>();
+
+// ── Generating-status tracker ───────────────────────────────────────
+// The sidebar has to answer "is this session working right now?" for rows
+// whose chat hook is NOT mounted — that is the whole point of the indicator,
+// since a session the user can see the composer for already shows its own
+// state. `_cachedStatusMap` above already holds that answer for every session
+// the SSE singleton has seen, so this is a SUBSCRIPTION over that map rather
+// than a second source of truth that could disagree with the composer.
+//
+// Every write to the map goes through `_setCachedStatus` so no path can move
+// a session in or out of "working" without the sidebar hearing about it.
+
+const _generatingSubscribers = new Set<() => void>();
+
+function _setCachedStatus(sessionId: string, status: AgentChatStatus) {
+  const prev = _cachedStatusMap.get(sessionId);
+  _cachedStatusMap.set(sessionId, status);
+  // A session that is working again no longer has a finished-but-unseen
+  // result — it has a turn in flight. Clearing here rather than at the call
+  // sites keeps the two states exclusive on EVERY path into "working".
+  if (status === "thinking" || status === "streaming") _clearUnviewed(sessionId);
+  if (prev === status) return;
+  for (const sub of _generatingSubscribers) sub();
+}
+
+/** True while `sessionId`'s agent is mid-turn, according to the SSE
+ *  singleton's status cache. Mirrors `usePendingApprovalCount` below: it
+ *  shares the ONE global EventSource and answers for sessions with no mounted
+ *  chat hook, which is the only reason the sidebar can show this at all.
+ *
+ *  Correct termination in the background depends on the singleton caching
+ *  `agent-complete` (see `_ensureGlobalSSE`) — without it a backgrounded
+ *  session would read as working forever. */
+export function useSessionGenerating(sessionId: string | null): boolean {
+  const subscribe = useCallback((cb: () => void) => {
+    _generatingSubscribers.add(cb);
+    // Keep the stream alive while only the sidebar is mounted, exactly as the
+    // pending-approval subscription does.
+    _ensureGlobalSSE();
+    return () => {
+      _generatingSubscribers.delete(cb);
+      _closeGlobalSSEIfIdle();
+    };
+  }, []);
+  const getSnapshot = useCallback(() => {
+    if (!sessionId) return false;
+    const cached = _cachedStatusMap.get(sessionId);
+    // Deliberately the same predicate as `useAgentChat`'s `isLoading`: the dot
+    // and the composer's Stop button must never disagree about whether a turn
+    // is live.
+    return cached === "thinking" || cached === "streaming";
+  }, [sessionId]);
+  // SSR snapshot — nothing is generating on the server.
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
+}
+
+// ── Unviewed-result tracker ─────────────────────────────────────────
+// "This session finished while you were somewhere else." The working
+// indicator above answers a question that answers itself eventually — a busy
+// session will speak again. A session that FINISHED in the background goes
+// silent forever, so if the sidebar doesn't say so, nothing does.
+//
+// There is nowhere to put this but memory: `lib/db/schema/sqlite.ts` has no
+// sessions table (sessions live in each agent's own history and are discovered
+// over ACP), so a reload clears every marker. Accepted deliberately — a reload
+// is a fresh start, and localStorage persistence would need a story for
+// markers whose session no longer exists. Revisit only if it turns out to
+// matter in use.
+//
+// Nothing here reads `agentId`: `agent-complete` is an ACP-level frame that
+// every agent emits identically, so a third coding agent works with zero
+// changes to this file.
+
+const _unviewedSessions = new Set<string>();
+const _unviewedSubscribers = new Set<() => void>();
+
+/** The session the user currently has open, or null. Kept here rather than
+ *  read at render time because the marking decision happens in the SSE
+ *  handler: the completion of a turn in the session on screen must never be
+ *  RECORDED, not recorded and then cleared. A mark that appears for one paint
+ *  on the session the user is staring at is worse than no mark at all, so the
+ *  invariant holds by construction and cannot lose a race. */
+let _viewedSessionId: string | null = null;
+
+function _emitUnviewedChange() {
+  for (const sub of _unviewedSubscribers) sub();
+}
+
+function _clearUnviewed(sessionId: string) {
+  if (_unviewedSessions.delete(sessionId)) _emitUnviewedChange();
+}
+
+/** Tell the tracker which session the user is looking at. Called from the ONE
+ *  place that owns that answer for the whole app (`useSessionList`'s
+ *  `setActiveSessionId`), synchronously at the call site — not from an effect,
+ *  so there is no commit-timing window in which an arriving completion could
+ *  see a stale answer.
+ *
+ *  Opening a session is also the ONLY thing that clears its marker: switching
+ *  to a third session, or walking off to /settings, must leave it alone, or
+ *  the single signal a background turn ever produced is lost silently. */
+export function setViewedSession(sessionId: string | null) {
+  _viewedSessionId = sessionId;
+  if (sessionId) _clearUnviewed(sessionId);
+}
+
+function _markUnviewed(sessionId: string) {
+  if (sessionId === _viewedSessionId) return;
+  if (_unviewedSessions.has(sessionId)) return;
+  _unviewedSessions.add(sessionId);
+  _emitUnviewedChange();
+}
+
+/** True when `sessionId`'s last turn finished while the user was elsewhere and
+ *  they haven't opened it since. Mirrors `useSessionGenerating` above: one
+ *  shared EventSource, and it answers for sessions with no mounted chat hook —
+ *  which is every session this state can possibly describe. */
+export function useSessionUnviewed(sessionId: string | null): boolean {
+  const subscribe = useCallback((cb: () => void) => {
+    _unviewedSubscribers.add(cb);
+    // Keep the stream alive while only the sidebar is mounted, exactly as the
+    // pending-approval and working subscriptions do.
+    _ensureGlobalSSE();
+    return () => {
+      _unviewedSubscribers.delete(cb);
+      _closeGlobalSSEIfIdle();
+    };
+  }, []);
+  const getSnapshot = useCallback(
+    () => (sessionId ? _unviewedSessions.has(sessionId) : false),
+    [sessionId],
+  );
+  // SSR snapshot — the server has viewed nothing.
+  return useSyncExternalStore(subscribe, getSnapshot, () => false);
+}
 
 // ── Pending-approval count tracker ──────────────────────────────────
 // Tracks unresolved `permission-request` events per session so the
@@ -186,6 +322,42 @@ if (!globalForSessionContext.__libiSessionContextEmitter) {
 }
 export const sessionContextEmitter =
   globalForSessionContext.__libiSessionContextEmitter;
+
+// ── Session-model global emitter ────────────────────────────────────
+// agent-config-options events (tagged with sessionId) publish here at the
+// SSE-singleton level; `useSessionModel` (lib/queries/session-model.ts)
+// subscribes and patches the React Query cache. Same rationale as
+// sessionContextEmitter: delivery must not depend on which useAgentChat
+// instances happen to be mounted — the picker for a restored session mounts
+// BEFORE activation fills configOptions, and this event is what un-sticks it.
+
+export type SessionModelEvent = {
+  sessionId: string;
+  model: SessionModelSnapshot;
+};
+
+type SessionModelListener = (event: SessionModelEvent) => void;
+
+class SessionModelEmitter {
+  private listeners = new Set<SessionModelListener>();
+  on(fn: SessionModelListener): () => void {
+    this.listeners.add(fn);
+    return () => {
+      this.listeners.delete(fn);
+    };
+  }
+  emit(event: SessionModelEvent): void {
+    for (const fn of this.listeners) fn(event);
+  }
+}
+
+const globalForSessionModel = globalThis as unknown as {
+  __libiSessionModelEmitter?: SessionModelEmitter;
+};
+if (!globalForSessionModel.__libiSessionModelEmitter) {
+  globalForSessionModel.__libiSessionModelEmitter = new SessionModelEmitter();
+}
+export const sessionModelEmitter = globalForSessionModel.__libiSessionModelEmitter;
 
 // ── Global navigate emitter ─────────────────────────────────────────
 // `navigate` events (libi.show_piece / show_asset / show_preview) used to
@@ -371,7 +543,17 @@ function _hasAnyHandlers() {
   return (
     _sseSessionHandlers.size > 0 ||
     _sseBroadcastHandlers.size > 0 ||
-    _pendingApprovalSubscribers.size > 0
+    _pendingApprovalSubscribers.size > 0 ||
+    // The sidebar's working indicators can be the ONLY subscribers (a chat
+    // hook is not mounted on every route). Leaving them out here would let an
+    // unrelated unsubscribe close the stream, and would stop the reconnect
+    // below from reopening it — the dots would then quietly stop updating
+    // rather than visibly break.
+    _generatingSubscribers.size > 0 ||
+    // Same for the "finished while you were elsewhere" marks, which are even
+    // more dependent on the stream: their whole signal is a single frame that
+    // is never re-sent.
+    _unviewedSubscribers.size > 0
   );
 }
 
@@ -428,6 +610,28 @@ function _ensureGlobalSSE() {
           commands: data.commands as AvailableCommandInfo[],
         });
       }
+    }
+
+    // agent-config-options: the session's model select changed or became
+    // known (config_option_update from the agent, or activation ending —
+    // successfully or not). Published at the SINGLETON level — same rationale
+    // as agent-usage — so the model picker's React Query cache is patched
+    // even when no per-session handler is mounted for that session.
+    //
+    // This is the ONLY frame that resolves the picker's pending state. The
+    // server guarantees a terminal one on every activation exit
+    // (SessionManager#emitTerminalModelSnapshot), so there is nothing to
+    // infer from `agent-status: error` here — and inferring it was wrong:
+    // that frame also fires for mid-turn prompt failures and process
+    // crashes, which say nothing about whether the model select is known.
+    if (
+      data.type === "agent-config-options" &&
+      typeof data.sessionId === "string"
+    ) {
+      sessionModelEmitter.emit({
+        sessionId: data.sessionId,
+        model: data.model as SessionModelSnapshot,
+      });
     }
 
     // Same rationale as refresh_query above: publish navigate at the
@@ -504,7 +708,27 @@ function _ensureGlobalSSE() {
     }
 
     if (data.type === "agent-status") {
-      _cachedStatusMap.set(sessionId, data.status as AgentChatStatus);
+      _setCachedStatus(sessionId, data.status as AgentChatStatus);
+    }
+
+    // A turn ending SUCCESSFULLY is the one terminal the cache above misses:
+    // the server emits `agent-complete` and no closing `agent-status`
+    // (session-manager `sendMessage`), and chat-stream events for a session
+    // with no mounted handler are dropped a few lines up. So a turn that
+    // finishes while the user is looking at another session leaves the cache
+    // stuck on "thinking" — the reset effect restores it on switch-back and
+    // the history fetch only ever upgrades "connecting", so `isLoading` stays
+    // true forever and the user is shown a Stop button that cancels nothing.
+    // This is the ONLY place a background completion can be recorded.
+    // Cancellation arrives as this same frame (`stopReason: "cancelled"`), and
+    // the failure terminal is an `agent-status: error` already covered above.
+    if (data.type === "agent-complete") {
+      _setCachedStatus(sessionId, "connected");
+      // …and it is also the signal that a result is now waiting. A turn the
+      // user CANCELLED is excluded: they stopped it themselves, so "there's
+      // something here" would be noise. `_markUnviewed` drops the session the
+      // user is looking at, which is why that case never flashes.
+      if (data.stopReason !== "cancelled") _markUnviewed(sessionId);
     }
 
     // Track pending-approval counts globally so the sidebar can show an
@@ -647,7 +871,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
     sessionId ? (_cachedStatusMap.get(sessionId) ?? "idle") : "idle",
   );
   const setStatus = useCallback((s: AgentChatStatus) => {
-    if (sessionId) _cachedStatusMap.set(sessionId, s);
+    if (sessionId) _setCachedStatus(sessionId, s);
     setStatusRaw(s);
   }, [sessionId]);
 
@@ -908,7 +1132,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
     const next: AgentChatStatus =
       cached && cached !== "idle" ? cached : "connecting";
     setStatusRaw(next);
-    _cachedStatusMap.set(sessionId, next);
+    _setCachedStatus(sessionId, next);
   }, [sessionId]);
 
   // Fetch cached messages. `applyHistory` reconciles an in-flight turn:
@@ -929,7 +1153,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         // that an SSE event may have set while the fetch was in flight.
         const current = _cachedStatusMap.get(sessionId);
         if (current === "connecting") {
-          _cachedStatusMap.set(sessionId, "connected");
+          _setCachedStatus(sessionId, "connected");
           setStatusRaw("connected");
         }
       })

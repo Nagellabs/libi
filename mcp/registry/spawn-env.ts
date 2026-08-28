@@ -1,6 +1,7 @@
 import { getLibiBinDir } from "@/lib/libi-home";
 import { sqliteBuildDirForChildren } from "@/lib/db/native-binding";
 import { uvEnvVars } from "@/lib/uv-env/spawn-env";
+import { isWindows } from "@/lib/platform";
 
 /**
  * All MCP child spawns must build env via this function — both probe
@@ -21,7 +22,7 @@ export function buildSpawnEnv(
   userEnv: Record<string, string> = {},
 ): Record<string, string> {
   const libiBinDir = getLibiBinDir();
-  const pathSep = process.platform === "win32" ? ";" : ":";
+  const pathSep = isWindows() ? ";" : ":";
   const augmentedPath = `${libiBinDir}${pathSep}${process.env.PATH ?? ""}`;
 
   const inherited: Record<string, string> = {};

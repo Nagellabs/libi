@@ -57,6 +57,7 @@ export const ttsEnvVirtualDep: VirtualDep = {
     ];
     await new Promise<void>((resolve, reject) => {
       const child = spawn(uv, args, {
+        windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
         env: buildUvEnv(),
       });

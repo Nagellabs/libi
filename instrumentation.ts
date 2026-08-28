@@ -13,7 +13,10 @@ import * as Sentry from "@sentry/nextjs";
 
 export async function register(): Promise<void> {
   // `~/.libi/logs/server.log` — Next.js' OWN output (compile errors, request
-  // lines, runtime exceptions, `[browser]`-relayed React errors) routed through
+  // lines, runtime exceptions; plus `[browser]`-relayed React errors in DEV
+  // ONLY — the relay lives in next/dist/server/dev/, so in production renderer
+  // errors never reach this file; the packaged shell writes them to
+  // electron-main-sync.log instead, see electron/sync-log.ts) routed through
   // pino by `next-logger`, whose pino factory lives in `next-logger.config.js`
   // at the package root (discovered by lilconfig from `process.cwd()`, which is
   // the repo root in dev and the runtime root in a packaged/installed app).
@@ -94,8 +97,14 @@ export async function register(): Promise<void> {
     getOrCreateAnalyticsUserId();
     if (markAnalyticsMilestoneOnce("launch")) {
       const { trackServerEvent } = await import("./lib/analytics/server");
-      void trackServerEvent("first_launch");
+      trackServerEvent("first_launch");
     }
+    // Start the periodic queue drain in this process only — the Next server,
+    // same as the first_launch milestone above. Idempotent (a second call is
+    // a no-op), and gated internally on ANALYTICS_ENABLED, so this is safe to
+    // call unconditionally.
+    const { startAnalyticsDrain } = await import("./lib/analytics/queue");
+    startAnalyticsDrain();
   } catch (err) {
     const { serverLogger } = await import("./lib/logger");
     serverLogger.warn({ tag: "analytics", op: "boot_init_failed", err }, "Analytics boot init failed");

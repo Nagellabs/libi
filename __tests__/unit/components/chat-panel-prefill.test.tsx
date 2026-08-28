@@ -27,6 +27,9 @@ vi.mock("@/hooks/sessions/use-agent-chat", () => ({
   }),
   subscribeBroadcast: () => () => {},
   sessionContextEmitter: { on: () => () => {}, emit: vi.fn() },
+  // The model picker's query hook subscribes to this at mount; a partial mock
+  // of this module has to carry it or every ChatPanel render throws.
+  sessionModelEmitter: { on: () => () => {}, emit: vi.fn() },
 }));
 vi.mock("@/lib/queries/pieces", () => ({
   usePieces: () => ({ data: { pieces: [], openedPiece: null } }),
@@ -36,6 +39,13 @@ vi.mock("@/lib/queries/files", () => ({
   useGlobalFiles: () => ({ data: [] }),
   useFileUpload: () => ({ upload: vi.fn() }),
 }));
+
+// `useRunRemedyInTerminal` reaches for the app router, which this render does
+// not mount. It has its own tests; nothing here exercises it.
+vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
+  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
+}));
+
 vi.mock("@/hooks/use-scroll-to-bottom", () => ({
   useScrollToBottom: () => ({
     containerRef: { current: null },

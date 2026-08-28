@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import {
@@ -7,18 +7,46 @@ import {
   useEditorState,
 } from "@/lib/editor-state-context";
 
+// Mutable box so individual tests can flip `readiness` (and re-render) to
+// simulate a connection succeeding mid-session — see the "readiness-driven
+// re-read" describe block below. `vi.hoisted` is required because vi.mock's
+// factory is hoisted above this file's own top-level statements; a plain
+// `let` here would still be in the temporal dead zone when the factory runs.
+const sessionListMock = vi.hoisted(() => ({
+  current: {
+    sessions: [] as unknown[],
+    activeSessionId: null as string | null,
+    setActiveSessionId: vi.fn(),
+    isLoading: false,
+    activeAgentId: null as string | null,
+    refresh: vi.fn(),
+    createSession: vi.fn(),
+    // Mirrors UNKNOWN_READINESS from lib/agents/agent-readiness.ts — "nothing
+    // attempted yet", never a claim of health.
+    readiness: { state: "unknown" } as { state: string; [key: string]: unknown },
+  },
+}));
 vi.mock("@/hooks/sessions/use-session-list", () => ({
-  useSessionList: () => ({
-    sessions: [], activeSessionId: null, setActiveSessionId: vi.fn(),
-    isLoading: false, activeAgentId: null, refresh: vi.fn(), createSession: vi.fn(),
-  }),
+  useSessionList: () => sessionListMock.current,
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("@/hooks/sessions/use-agent-chat", () => ({
   subscribeBroadcast: () => () => {},
 }));
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  sessionListMock.current = {
+    sessions: [],
+    activeSessionId: null,
+    setActiveSessionId: vi.fn(),
+    isLoading: false,
+    activeAgentId: null,
+    refresh: vi.fn(),
+    createSession: vi.fn(),
+    readiness: { state: "unknown" },
+  };
+});
 
 function captureCtx() {
   const { result } = renderHook(() => useEditorState(), {
@@ -192,5 +220,172 @@ describe("agent providers — unavailable entries survive to the UI", () => {
     expect(claude.unavailableReason).toEqual({ code: "installing", message: "Installing…" });
 
     vi.unstubAllGlobals();
+  });
+});
+
+/**
+ * Task 13: the demo offer that vanishes on reload.
+ *
+ * `onboardingDemoOffer` used to be a bare `useState(false)` — a reload
+ * before the user acted on (or dismissed) it lost the offer for good. It's
+ * now seeded from, and its resolution persisted back to, the server-side
+ * onboarding-state record (lib/db/settings.ts, app/api/onboarding/state).
+ */
+describe("onboarding demo offer — seeded from + persisted to the server", () => {
+  function stubOnboardingFetch(demoOffered: boolean, calls: Array<{ url: string; init?: RequestInit }>) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({ url, init });
+        if (url.includes("/api/onboarding/state")) {
+          return { ok: true, json: async () => ({ demoOffered }) };
+        }
+        return { ok: true, json: async () => [] }; // /api/agent/providers
+      }),
+    );
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("seeds onboardingDemoOffer true from a fresh GET — the reload case", async () => {
+    stubOnboardingFetch(true, []);
+    const get = captureCtx();
+
+    expect(get().onboardingDemoOffer).toBe(false); // nothing seeded yet on first render
+    await vi.waitFor(() => expect(get().onboardingDemoOffer).toBe(true));
+  });
+
+  it("stays false when the server says the offer was never armed or already resolved", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    stubOnboardingFetch(false, calls);
+    const get = captureCtx();
+
+    await vi.waitFor(() => expect(get().agentProvidersLoaded).toBe(true));
+    await vi.waitFor(() => expect(calls.some((c) => c.url.includes("/api/onboarding/state"))).toBe(true));
+    expect(get().onboardingDemoOffer).toBe(false);
+  });
+
+  it("persists a dismissal (PUT dismissDemoOffer:true) when the offer is cleared", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    stubOnboardingFetch(false, calls);
+    const get = captureCtx();
+
+    act(() => get().setOnboardingDemoOffer(true));
+    expect(get().onboardingDemoOffer).toBe(true);
+
+    act(() => get().setOnboardingDemoOffer(false));
+    expect(get().onboardingDemoOffer).toBe(false); // chip's own behaviour: clears immediately
+
+    await vi.waitFor(() => {
+      const put = calls.find(
+        (c) => c.url.includes("/api/onboarding/state") && c.init?.method === "PUT",
+      );
+      expect(put).toBeTruthy();
+      expect(JSON.parse(put!.init!.body as string)).toEqual({ dismissDemoOffer: true });
+    });
+  });
+
+  it("does not fire a dismiss request when the offer is armed true", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    stubOnboardingFetch(false, calls);
+    const get = captureCtx();
+
+    act(() => get().setOnboardingDemoOffer(true));
+    await vi.waitFor(() => expect(get().agentProvidersLoaded).toBe(true));
+
+    expect(calls.some((c) => c.init?.method === "PUT")).toBe(false);
+  });
+});
+
+/**
+ * QA regression: the chat panel's Codex sign-in card ("Codex isn't signed
+ * in on this machine…") rendered directly beneath a green "You're all set!"
+ * demo-offer banner. Root cause was app/(app)/editor/page.tsx arming
+ * `onboardingDemoOffer` off `activeProviderId` — which flips the moment an
+ * agent is SELECTED, before the ACP handshake that would prove it can
+ * actually be chatted with resolves (or fails). That arming call is now
+ * gone; the offer is armed exclusively server-side, on an OBSERVED clean
+ * connection (session-manager.ts#markAgentConnected /
+ * #markAgentReady — both fire off the same successful `session/new`), and
+ * the client re-reads it the moment `sessionList.readiness` reaches "ready"
+ * (see the effect this describe block exercises, in
+ * lib/editor-state-context.tsx).
+ */
+describe("onboarding demo offer — armed by an observed connection, not by agent selection", () => {
+  function stubOnboardingFetch(getDemoOffered: () => boolean) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url.includes("/api/onboarding/state")) {
+          return { ok: true, json: async () => ({ demoOffered: getDemoOffered() }) };
+        }
+        return { ok: true, json: async () => [] }; // /api/agent/providers
+      }),
+    );
+  }
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("does not offer the demo tour when the agent was only selected, not connected", async () => {
+    // The server never arms the offer in this scenario — no clean
+    // session/new has ever happened — so GET /api/onboarding/state always
+    // answers demoOffered:false, exactly like the QA repro's DB snapshot
+    // (agent_ever_connected = 0, onboarding_demo_offered_at = NULL).
+    stubOnboardingFetch(() => false);
+    const { result, rerender } = renderHook(() => useEditorState(), {
+      wrapper: EditorStateProvider,
+    });
+
+    await vi.waitFor(() => expect(result.current.agentProvidersLoaded).toBe(true));
+    expect(result.current.onboardingDemoOffer).toBe(false);
+
+    // An agent gets selected, and the handshake comes back as an observed
+    // auth rejection (the QA repro's "Codex isn't signed in" card) — the
+    // exact opposite of the "ready" signal the fix requires. If anything
+    // still keyed off selection alone, this is where it would leak through.
+    sessionListMock.current = {
+      ...sessionListMock.current,
+      activeAgentId: "codex",
+      readiness: {
+        state: "needs-auth",
+        agentId: "codex",
+        message: "Codex isn't signed in on this machine",
+        remedy: null,
+      },
+    };
+    rerender();
+
+    // Let any effect scheduled by the re-render flush, then assert nothing
+    // armed the offer.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(result.current.onboardingDemoOffer).toBe(false);
+  });
+
+  it("offers the demo tour once a connection has actually succeeded", async () => {
+    // Fresh install: not armed yet when the provider first mounts.
+    let demoOffered = false;
+    stubOnboardingFetch(() => demoOffered);
+    const { result, rerender } = renderHook(() => useEditorState(), {
+      wrapper: EditorStateProvider,
+    });
+
+    await vi.waitFor(() => expect(result.current.agentProvidersLoaded).toBe(true));
+    expect(result.current.onboardingDemoOffer).toBe(false);
+
+    // The connection now genuinely succeeds: session-manager arms the offer
+    // server-side, and the client learns of the clean `session/new` via the
+    // `agent-readiness` SSE broadcast reaching useSessionList — mirrored
+    // here by flipping the mocked hook's readiness straight to "ready".
+    // This is the gap removing the page.tsx arming call opened: without a
+    // reload, the client must notice on its own.
+    demoOffered = true;
+    sessionListMock.current = {
+      ...sessionListMock.current,
+      activeAgentId: "codex",
+      readiness: { state: "ready" },
+    };
+    rerender();
+
+    await vi.waitFor(() => expect(result.current.onboardingDemoOffer).toBe(true));
   });
 });

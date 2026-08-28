@@ -19,9 +19,10 @@ import {
   folders,
   modelSchemas,
   seenAnnouncements,
+  analyticsQueue,
 } from "@/lib/db/schema/sqlite";
 
-const schema = { pieces, files, settings, mcpServers, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements };
+const schema = { pieces, files, settings, mcpServers, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue };
 
 declare global {
   // eslint-disable-next-line no-var
@@ -126,6 +127,8 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       onboarding_persona TEXT,
       persona_selected_at INTEGER,
       agent_ever_connected INTEGER NOT NULL DEFAULT 0,
+      onboarding_demo_offered_at INTEGER,
+      onboarding_demo_dismissed_at INTEGER,
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE TABLE mcp_servers (
@@ -298,6 +301,15 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       announcement_id TEXT PRIMARY KEY,
       seen_at INTEGER NOT NULL
     );
+    CREATE TABLE analytics_queue (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      params_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at INTEGER NOT NULL
+    );
+    CREATE INDEX analytics_queue_due_idx ON analytics_queue(next_attempt_at);
   `);
 
   const db = drizzle(sqlite, { schema });

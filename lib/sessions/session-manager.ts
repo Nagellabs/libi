@@ -8,10 +8,7 @@ import type { AgentMessage } from "@/lib/agents/message-types";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 import { isAuthRequiredError } from "@/lib/agents/agent-readiness";
 import type { TerminalRemedy } from "@/lib/agents/terminal-remedy";
-import { claudeSignInRemedy, codexSignInRemedy } from "@/lib/agents/terminal-remedy";
-import { codexCandidateTreeRoots } from "@/lib/agents/acp/agent-registry";
-import { resolveClaudeNativeBinary } from "@/lib/agents/claude-native-binary";
-import { getAgentInstallRoot } from "@/lib/agents/runtime-install";
+import { resolveSignInRemedy } from "@/lib/agents/acp/sign-in-remedy";
 import type { SessionEntry, GlobalSessionEventListener, SystemEvent } from "./types";
 import { SessionEventHandler } from "@/lib/agents/session-event-handler";
 import { MAX_ACTIVE_SESSIONS } from "./types";
@@ -24,7 +21,13 @@ import { getApprovalMode } from "@/lib/approval/settings";
 import { acpModeFor } from "@/lib/sessions/approval-mode-map";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
 import { matchToolCall, type ToolCallCandidate } from "@/lib/sessions/tool-call-matcher";
-import { extractModelOption, MODEL_CONFIG_ID, type ModelState } from "@/lib/sessions/model-option";
+import {
+  deriveModelSnapshot,
+  extractModelOption,
+  MODEL_CONFIG_ID,
+  type ModelState,
+  type SessionModelSnapshot,
+} from "@/lib/sessions/model-option";
 import { sessionMetaFor } from "@/lib/sessions/session-meta";
 import {
   promptErrorNote,
@@ -41,13 +44,17 @@ import type {
 /**
  * Flip `agentEverConnected` to true the first time a session successfully
  * connects, and emit the one-shot `agent_connected` analytics milestone.
+ * Also arms the first-run "Show me how it works" demo offer (Task 13) under
+ * the SAME guard, so it goes out exactly once per install, on a real
+ * connection — never on every session, and never lost to a reload, since it
+ * lives in the DB rather than client `useState`.
  * Exported so it can be unit-tested without constructing a SessionManager.
  * Errors are swallowed — a DB hiccup must never break a connection.
  */
 export function markAgentConnected(): void {
   try {
     if (!getSettings().agentEverConnected) {
-      updateSettings({ agentEverConnected: true });
+      updateSettings({ agentEverConnected: true, onboardingDemoOfferedAt: new Date() });
       void trackServerEvent("agent_connected");
     }
   } catch {
@@ -59,18 +66,11 @@ export function markAgentConnected(): void {
  * The Terminal command that fixes "this agent isn't signed in", or null when
  * we have nothing honest to offer.
  *
- * Resolution deliberately mirrors — rather than reaches into — the agent
- * registry, which keeps its resolved bins private:
- *
- *  - **codex**: the engine libi ALREADY SHIPS can perform the login, so we walk
- *    the same npm tree roots `detectCodex` walks (`codexCandidateTreeRoots`)
- *    and hand the first tree holding an engine binary to `codexSignInRemedy`.
- *    Nothing to install — that is the whole point of the remedy module.
- *  - **claude-code**: the CLI libi downloaded (`@anthropic-ai/claude-agent-sdk-*`)
- *    IS the sign-in flow, so we point at that binary rather than at the ACP
- *    adapter (running the adapter would start a stdio server, not a login) and
- *    fall back to the bare `claude` name, which resolves in the Terminal's
- *    LOGIN shell even though it would not resolve in this server process.
+ * Resolution is a lookup into `lib/agents/acp/sign-in-remedy.ts`, which
+ * mirrors — rather than reaches into — the agent registry (it keeps its
+ * resolved bins private) and knows, per agent, which real binary on this
+ * machine performs the sign-in. That module's own comments explain WHY each
+ * agent's remedy looks the way it does; this function only has to look it up.
  *
  * Exported for unit tests; there is no other caller.
  *
@@ -81,28 +81,14 @@ export function markAgentConnected(): void {
  */
 export function signInRemedyFor(agentId: string): TerminalRemedy | null {
   try {
-    if (agentId === "codex") {
-      for (const root of codexCandidateTreeRoots(process.cwd())) {
-        const remedy = codexSignInRemedy(root);
-        if (remedy) return remedy;
-      }
-      return null;
-    }
-    if (agentId === "claude-code") {
-      let bin: string | null = null;
-      for (const root of [process.cwd(), getAgentInstallRoot()]) {
-        bin = resolveClaudeNativeBinary(root);
-        if (bin) break;
-      }
-      return claudeSignInRemedy(bin);
-    }
+    return resolveSignInRemedy(agentId);
   } catch (err) {
     logger.warn(
       { tag: "session-manager", op: "sign_in_remedy_failed", agentId, err },
       "Could not resolve a sign-in remedy; reporting the problem without one",
     );
+    return null;
   }
-  return null;
 }
 
 /**
@@ -609,7 +595,15 @@ export class SessionManager {
     if (inflight) return inflight;
 
     const entry = this.sessions.get(sessionId);
-    if (!entry) throw new Error(`Session ${sessionId} not found`);
+    if (!entry) {
+      // No entry, so nothing will ever fill this session's options — the
+      // client's model skeleton has to end here. `emitForSession` still
+      // reaches the pending and global (SSE) listeners when the session map
+      // has no entry, which is exactly the case a client can be watching:
+      // it mounted a picker on the id it just asked to activate.
+      this.emitTerminalModelSnapshot(sessionId, undefined);
+      throw new Error(`Session ${sessionId} not found`);
+    }
 
     // Already fully loaded — return the warm cache immediately.
     if (entry.active) return entry.messageCache;
@@ -618,9 +612,49 @@ export class SessionManager {
     this.activatingSessions.set(sessionId, promise);
     try {
       return await promise;
+    } catch (err) {
+      // EVERY activation-failure exit publishes a terminal model snapshot.
+      // Without this the client would have to infer "the wait is over" from a
+      // generic `agent-status: error`, which (a) misses the exits that throw
+      // before any status frame at all — no process manager, no connection —
+      // and (b) can't tell an activation failure from a mid-turn prompt error,
+      // so it took a working picker away and put it back a moment later.
+      // Guaranteeing the terminal event server-side is what lets the client
+      // hold one rule: the skeleton clears only on agent-config-options.
+      this.emitTerminalModelSnapshot(sessionId, entry.configOptions);
+      throw err;
     } finally {
       this.activatingSessions.delete(sessionId);
     }
+  }
+
+  /**
+   * Publish this session's model state as a TERMINAL snapshot — one whose
+   * `supported: false` carries `pending: false`, i.e. "there is no answer
+   * coming", never "still waiting".
+   *
+   * `deriveModelSnapshot` reports `pending: true` for an empty option list
+   * because a history-restored session's options only arrive with
+   * `loadSession`. That is right for the pre-activation callers, but wrong
+   * once activation has ended: on the success path `LoadSessionResponse.
+   * configOptions` is optional, so an adapter that omits it leaves the list
+   * empty for good; on a failure path nothing is going to fill it either. A
+   * `pending: true` in either case strands the client on a loading skeleton
+   * that no later event clears.
+   *
+   * Options that ARE known still win — a session that was active before,
+   * got evicted, and fails to reactivate keeps its picker rather than having
+   * it collapse to "unsupported".
+   */
+  private emitTerminalModelSnapshot(
+    sessionId: string,
+    configOptions: SessionConfigOption[] | undefined,
+  ): void {
+    const snapshot = deriveModelSnapshot(configOptions);
+    this.emitForSession(sessionId, {
+      type: "agent-config-options",
+      model: snapshot.supported ? snapshot : { supported: false, pending: false },
+    });
   }
 
   private async performActivation(
@@ -732,6 +766,18 @@ export class SessionManager {
     // and never pushes an unadvertised id blind.
     await this.pushApprovalModeToSession(sessionId, agentId, undefined);
     await this.pushModelToSession(sessionId, agentId, entry.configOptions);
+
+    // The event that un-sticks the model picker for a restored session: its
+    // GET raced this activation, cached {supported:false, pending:true}, and
+    // nothing else invalidates sessionModelKeys. Emitted AFTER the model
+    // re-push above so the snapshot carries the RE-APPLIED saved model —
+    // `pushModelToSession` rewrites `entry.configOptions` on success, so an
+    // emit at the `loadSession` fill site would publish the pre-push
+    // currentValue and nothing later would correct it.
+    //
+    // Activation is also the point where "not known yet" becomes "not
+    // offered" — see `emitTerminalModelSnapshot`.
+    this.emitTerminalModelSnapshot(sessionId, entry.configOptions);
 
     this.emitForSession(sessionId, {
       type: "agent-status",
@@ -1101,6 +1147,17 @@ export class SessionManager {
     return extractModelOption(entry.configOptions);
   }
 
+  /**
+   * Pending-aware variant of `getSessionModelState` for the GET route: keeps
+   * "options not captured yet" (activation replay in flight) distinct from
+   * "the agent offers no model select". Null when the session is unknown.
+   */
+  getSessionModelSnapshot(sessionId: string): SessionModelSnapshot | null {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return null;
+    return deriveModelSnapshot(entry.configOptions);
+  }
+
   /** Usage + advertised-commands snapshot for GET /api/sessions/[id]/context.
    *  Null when the session is unknown. */
   getSessionContext(sessionId: string): {
@@ -1443,22 +1500,49 @@ export class SessionManager {
 
     if (activeSessions.length < MAX_ACTIVE_SESSIONS) return;
 
-    // Sort by lastUsed ascending — oldest first
-    activeSessions.sort((a, b) => a.lastUsed - b.lastUsed);
+    // A session mid-turn must never be an eviction candidate. Eviction runs
+    // `deactivateSession` → `conn.closeSession`, which cancels the in-flight
+    // prompt (see cancelTurn's contract above) — the user's generation dies
+    // with no event that explains why. And a generating session is the PRIME
+    // LRU candidate precisely because it is working: `lastUsed` is stamped
+    // once at prompt time (sendMessage), so a long turn only ages while it
+    // runs. `currentAgentMessage` is the in-flight signal — set when the
+    // prompt goes out and cleared on every terminal path.
+    const idleSessions = activeSessions.filter((s) => !s.currentAgentMessage);
 
-    const toEvict = activeSessions[0];
-    if (toEvict) {
-      logger.info(
+    // Sort by lastUsed ascending — oldest first
+    idleSessions.sort((a, b) => a.lastUsed - b.lastUsed);
+
+    const toEvict = idleSessions[0];
+    if (!toEvict) {
+      // Everyone is mid-turn. Exceed the cap rather than cancel someone's
+      // work: the cap is a resource heuristic, not a correctness constraint,
+      // and the overflow is self-limiting — turns finish, and the next
+      // activation trims back to it. Blocking the activation instead would
+      // deadlock the user out of their own sidebar. Logged so a genuine
+      // runaway is visible rather than silent.
+      logger.warn(
         {
           tag: "session-manager",
-          op: "lru_evict",
-          sessionId: toEvict.sessionId,
-          lastUsed: new Date(toEvict.lastUsed).toISOString(),
+          op: "lru_evict_skipped",
+          activeCount: activeSessions.length,
+          max: MAX_ACTIVE_SESSIONS,
         },
-        `LRU evicting session ${toEvict.sessionId}`,
+        "All active sessions are mid-turn — exceeding the active-session cap instead of cancelling a generation",
       );
-      await this.deactivateSession(toEvict.sessionId);
+      return;
     }
+
+    logger.info(
+      {
+        tag: "session-manager",
+        op: "lru_evict",
+        sessionId: toEvict.sessionId,
+        lastUsed: new Date(toEvict.lastUsed).toISOString(),
+      },
+      `LRU evicting session ${toEvict.sessionId}`,
+    );
+    await this.deactivateSession(toEvict.sessionId);
   }
 
   // -------------------------------------------------------------------------
@@ -1875,6 +1959,11 @@ export class SessionManager {
         (sessionId, commands) => {
           if (this.standbySession?.sessionId === sessionId) {
             this.standbySession.availableCommands = commands;
+          }
+        },
+        (sessionId, configOptions) => {
+          if (this.standbySession?.sessionId === sessionId) {
+            this.standbySession.configOptions = configOptions;
           }
         },
       );

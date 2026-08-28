@@ -35,6 +35,12 @@ now. A branch would have made that one reviewable commit, or none.
 - `/skill-eval` (`.claude/skills/skill-eval/`, canonical copy in `skill-eval/agent-skill/`)
   — runs the agent-driven scenarios. Token-costly; run only the scenarios a change
   warrants. Re-run `npm run skill:eval:index` after editing the canonical copy.
+- `/windows-qa` (`.claude/skills/windows-qa/`) — building, installing and verifying a
+  desktop build on the Windows QA VM. Read it BEFORE touching that machine; every rule
+  in it is a failure that already happened, and most of them look like something else
+  (a build that "succeeded" and shipped nothing, an app that reads as uninstalled, a
+  crash that is really session 0). Host details live in
+  `docs-local/release/windows-qa-runbook.md`.
 - Repo-specific MCP servers come from `.mcp.json`; launch targets from `.claude/launch.json`.
 
 ## Worktrees

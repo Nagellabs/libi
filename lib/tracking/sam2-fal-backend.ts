@@ -726,7 +726,7 @@ async function probeFrameInfo(videoPath: string, fallbackFps: number): Promise<F
       videoPath,
     ];
     const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(ffprobePath, args, { maxBuffer: 1024 * 1024 }, (err, out) => {
+      execFile(ffprobePath, args, { maxBuffer: 1024 * 1024, windowsHide: true }, (err, out) => {
         if (err) reject(err);
         else resolve(out);
       });
@@ -817,7 +817,7 @@ async function defaultExtractBboxesFromMaskVideo(
       "-select_streams",
       "v:0",
       tmpVideo,
-    ]);
+    ], { windowsHide: true });
     const probeData = JSON.parse(probeProc.stdout?.toString() ?? "{}") as {
       streams?: Array<{ width: number; height: number; nb_frames?: string; r_frame_rate?: string }>;
     };
@@ -860,7 +860,7 @@ async function defaultExtractBboxesFromMaskVideo(
         "pipe:1",
         "-v",
         "quiet",
-      ]);
+      ], { windowsHide: true });
 
       let pending = Buffer.alloc(0);
       let frameIndex = 0;

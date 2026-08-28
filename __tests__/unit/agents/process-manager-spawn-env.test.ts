@@ -22,8 +22,8 @@ vi.mock("@/lib/agents/acp/agent-registry", () => ({
   }),
 }));
 
-/** Spawn an agent and return the env the child was actually given. */
-async function spawnEnv(): Promise<Record<string, string>> {
+/** Spawn an agent and return the options object the child was actually given. */
+async function spawnOpts(): Promise<Record<string, unknown>> {
   const { AgentProcessManager } = await import("@/lib/agents/process-manager");
   const pm = new AgentProcessManager();
   try {
@@ -33,8 +33,15 @@ async function spawnEnv(): Promise<Record<string, string>> {
   }
   expect(spawnMock).toHaveBeenCalledTimes(1);
   const [, , opts] = spawnMock.mock.calls[0];
+  expect(opts).toBeDefined();
+  return opts as Record<string, unknown>;
+}
+
+/** Spawn an agent and return the env the child was actually given. */
+async function spawnEnv(): Promise<Record<string, string>> {
+  const opts = await spawnOpts();
   expect(opts.env).toBeDefined();
-  return opts.env;
+  return opts.env as Record<string, string>;
 }
 
 describe("AgentProcessManager spawn env", () => {
@@ -50,6 +57,17 @@ describe("AgentProcessManager spawn env", () => {
     const env = await spawnEnv();
     expect(env.MCP_TIMEOUT).toBe("60000");
     expect(env.PATH).toBe(process.env.PATH);
+  });
+
+  // Windows allocates a fresh console for a console-subsystem child of a
+  // console-less parent, and Electron's main process is exactly that. Without
+  // this flag, opening Claude Code or Codex in the packaged Windows app raised
+  // an empty Windows Terminal window titled with libi's node path, which then
+  // sat there for the whole session (observed on the QA box, 2026-08-23).
+  // Inert off Windows, so only this assertion can keep it from being dropped.
+  it("hides the child's console window, which Windows would otherwise open", async () => {
+    const opts = await spawnOpts();
+    expect(opts.windowsHide).toBe(true);
   });
 
   // The ACP child and the built-in Terminal's PTY (lib/terminal/manager.ts,

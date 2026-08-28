@@ -232,14 +232,14 @@ function formatElapsed(ms: number): string {
  * Status line for one adapter-install tick. Pure so the copy is testable.
  *
  * States the size and the once-only nature because both are the difference
- * between "this is working" and "this is hung": ~250MB on a slow link is
+ * between "this is working" and "this is hung": ~345MB on a slow link is
  * minutes of silence, and a user who believes it happens every boot will kill
  * it. Force-quitting mid-download is exactly what leaves the half-installed
  * tree behind (npm exits 0 on a failed optionalDependency), so this copy is
  * load-bearing, not decoration.
  */
 export function claudeAdapterProgressDetail(elapsedMs: number): string {
-  return `downloading ~250 MB, first run only — ${formatElapsed(elapsedMs)} elapsed`;
+  return `downloading ~345 MB, first run only — ${formatElapsed(elapsedMs)} elapsed`;
 }
 
 /**
@@ -460,7 +460,35 @@ export async function runCategoryA(
   const stopAdapterTicker = startClaudeAdapterTicker();
   try {
     const result = await deps.ensureClaudeAdapter();
-    if (result.installed) {
+    if (result.installed && result.upgradeError) {
+      // Usable, but NOT the version we set out to install: the upgrade failed
+      // and the user keeps the adapter they already had (see
+      // `EnsureAdapterResult.upgradeError`). Logging `claude_adapter_ready`
+      // here would make a pin bump that reached nobody look identical in
+      // ~/.libi/logs/libi.log to one that reached everybody — the whole
+      // reason this branch exists.
+      //
+      // "skipped", not "failed": the adapter runs, so the boot UI must not
+      // warn a user whose Claude Code is working. Nothing here throws, so
+      // Phase 2.5 stays non-fatal exactly as before.
+      logger.warn(
+        {
+          tag: "lifecycle",
+          phase: "category-a",
+          op: "claude_adapter_stale_kept",
+          binPath: result.binPath,
+          staleVersion: result.staleVersion,
+          error: result.upgradeError,
+        },
+        "Claude Code adapter upgrade failed — keeping the installed version",
+      );
+      lifecycleEvents.emit({
+        kind: "category-a-install-done",
+        item: CLAUDE_ADAPTER_ITEM,
+        result: "skipped",
+        reason: `kept ${result.staleVersion ?? "the installed version"} — upgrade failed`,
+      });
+    } else if (result.installed) {
       logger.info(
         { tag: "lifecycle", phase: "category-a", op: "claude_adapter_ready", binPath: result.binPath },
         "Claude Code adapter ready",
@@ -487,7 +515,10 @@ export async function runCategoryA(
         reason: result.error ?? "unknown error",
       });
     }
-    syncLog(`phase 2.5: ensureClaudeAdapter done (installed=${result.installed})`);
+    syncLog(
+      `phase 2.5: ensureClaudeAdapter done (installed=${result.installed}` +
+        `${result.upgradeError ? ", upgrade failed — kept the installed version" : ""})`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     syncLog(`phase 2.5: ensureClaudeAdapter threw unexpectedly: ${message}`);

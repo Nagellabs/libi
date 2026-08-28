@@ -85,8 +85,15 @@ export function PrivacyTab() {
   };
 
   const confirmOptOut = () => {
-    // Record the opt-out on the client transport BEFORE tearing it down, then
-    // stop the browser emitting any further events (no reload needed).
+    // This call is kept for completeness, not because it delivers anything:
+    // it reaches the same server-side queue as every other event, and
+    // drainAnalyticsQueue purges the whole queue the instant it next reads
+    // enabled === false — which setEnabled.mutate(false) below is about to
+    // make true. The event is discarded by the next drain, same as the
+    // server-side enqueue in app/api/settings/analytics/route.ts. That's
+    // the intended consequence of purging on opt-out: libi does not measure
+    // its own opt-out rate, by choice. Still call setClientAnalyticsEnabled
+    // below regardless — it stops the browser emitting anything further.
     trackEvent("analytics_opt_out", { opted_out_at: Date.now() });
     setClientAnalyticsEnabled(false);
     setEnabled.mutate(false);

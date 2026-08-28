@@ -16,6 +16,7 @@ import {
   NODE_COMMAND_SENTINEL,
 } from "./installers";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
+import { exeSuffix, isWindows } from "@/lib/platform";
 import type {
   BundledDependency,
   BundledMcpDef,
@@ -1273,6 +1274,7 @@ export class DependencyManager {
     try {
       await execFileAsync(binPath, args, {
         timeout: 10_000,
+        windowsHide: true,
         killSignal: "SIGKILL",
       });
       return true;
@@ -1306,6 +1308,7 @@ export class DependencyManager {
     try {
       const { stdout, stderr } = await execFileAsync(binPath, check.args, {
         timeout: 15_000,
+        windowsHide: true,
         killSignal: "SIGKILL",
         maxBuffer: 8 * 1024 * 1024,
       });
@@ -1458,6 +1461,7 @@ export class DependencyManager {
     );
     await execFileAsync(resolvedCommand, resolvedArgs, {
       timeout: timeoutMs ?? 60_000,
+      windowsHide: true,
       // Cap stdout/stderr — Playwright prints progress bars that can balloon.
       maxBuffer: 32 * 1024 * 1024,
     });
@@ -1494,9 +1498,9 @@ export class DependencyManager {
       // even when it's only on the system PATH (e.g. Homebrew). Mirror that.
       try {
         const { stdout } = await execFileAsync(
-          process.platform === "win32" ? "where" : "which",
+          isWindows() ? "where" : "which",
           ["uv"],
-          { timeout: 5_000 },
+          { timeout: 5_000, windowsHide: true },
         );
         uvBinary = stdout.split("\n")[0]?.trim();
         if (!uvBinary || !fs.existsSync(uvBinary)) {
@@ -1528,6 +1532,7 @@ export class DependencyManager {
       ["tool", "install", "yt-dlp", "--reinstall", "--python", "3.12", "--with", "certifi"],
       {
         timeout: timeoutMs ?? 5 * 60_000,
+        windowsHide: true,
         maxBuffer: 32 * 1024 * 1024,
         // Pins UV_TOOL_DIR / UV_TOOL_BIN_DIR / UV_CACHE_DIR /
         // UV_PYTHON_INSTALL_DIR under LIBI_HOME so the tool venv and the
@@ -1543,6 +1548,7 @@ export class DependencyManager {
     // corrupt the path otherwise (`[36m/path[39m`).
     const { stdout: toolDirStdout } = await execFileAsync(uvBinary, ["tool", "dir"], {
       timeout: 10_000,
+      windowsHide: true,
       env: buildUvEnv({ NO_COLOR: "1" }),
     });
     // eslint-disable-next-line no-control-regex
@@ -1552,12 +1558,12 @@ export class DependencyManager {
     // meant this threw "expected entry point not found" on every Windows boot —
     // and because yt-dlp is a tier-1 dep whose failure is fatal to Category A,
     // that took the whole app down before it ever served a page.
-    const venvBinDir = process.platform === "win32" ? "Scripts" : "bin";
+    const venvBinDir = isWindows() ? "Scripts" : "bin";
     const ytDlpEntry = path.join(
       toolDir,
       "yt-dlp",
       venvBinDir,
-      process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp",
+      `yt-dlp${exeSuffix()}`,
     );
     if (!fs.existsSync(ytDlpEntry)) {
       throw new Error(
@@ -1574,12 +1580,13 @@ export class DependencyManager {
       toolDir,
       "yt-dlp",
       venvBinDir,
-      process.platform === "win32" ? "python.exe" : "python3",
+      isWindows() ? "python.exe" : "python3",
     );
     let certifiPath = "";
     try {
       const { stdout } = await execFileAsync(pythonBin, ["-m", "certifi"], {
         timeout: 10_000,
+        windowsHide: true,
         env: { ...process.env, NO_COLOR: "1" },
       });
       certifiPath = stdout.replace(/\[[0-9;]*m/g, "").trim();
@@ -1598,7 +1605,7 @@ export class DependencyManager {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
 
-    if (process.platform === "win32") {
+    if (isWindows()) {
       // Windows: shim via .cmd. Symlinks on Windows require admin in many
       // setups, so a small .cmd wrapper is simpler. yt-dlp-mcp resolves
       // `yt-dlp` on PATH which finds .cmd extensions via PATHEXT.
@@ -1661,8 +1668,8 @@ export class DependencyManager {
 
   private binaryExistsOnPath(binary: string): boolean {
     try {
-      const cmd = process.platform === "win32" ? "where" : "which";
-      execSync(`${cmd} ${binary}`, { stdio: "ignore", timeout: 3000 });
+      const cmd = isWindows() ? "where" : "which";
+      execSync(`${cmd} ${binary}`, { stdio: "ignore", timeout: 3000, windowsHide: true });
       return true;
     } catch {
       return false;
@@ -1670,7 +1677,11 @@ export class DependencyManager {
   }
 
   private getBinaryPath(binary: string): string {
-    const name = process.platform === "win32" ? `${binary}.exe` : binary;
+    // exeSuffix(), not `process.platform === "win32"` — see lib/platform.ts.
+    // The Next build folds that comparison against the BUILD machine, which is
+    // how the shipped server came to look for `bin/uv` while Category A (built
+    // by esbuild, which does not fold) had written `bin/uv.exe`.
+    const name = `${binary}${exeSuffix()}`;
     return path.join(getLibiBinDir(), name);
   }
 
@@ -1796,7 +1807,7 @@ export class DependencyManager {
       fs.writeFileSync(binPath, buffer);
       // RC-E: verify (pinned sha) or warn (latest-alias) BEFORE chmod + token.
       await this.verifyBinaryIntegrity(dep, binPath);
-      if (process.platform !== "win32") fs.chmodSync(binPath, 0o755);
+      if (!isWindows()) fs.chmodSync(binPath, 0o755);
       this.writeInstallToken(dep);
       logger.info({ binary: dep.binary, path: binPath }, "Dependency installed");
       return;
@@ -1823,7 +1834,7 @@ export class DependencyManager {
         fs.copyFileSync(extracted, destPath);
         // RC-E: verify (pinned sha) or warn (latest-alias) BEFORE chmod + token.
         await this.verifyBinaryIntegrity(dep, destPath);
-        if (process.platform !== "win32") fs.chmodSync(destPath, 0o755);
+        if (!isWindows()) fs.chmodSync(destPath, 0o755);
         this.writeInstallToken(dep);
         logger.info({ binary: dep.binary, path: destPath }, "Dependency installed");
       }
@@ -1842,7 +1853,7 @@ export class DependencyManager {
 
   private async extractArchive(archivePath: string, destDir: string): Promise<void> {
     // Modern macOS/Linux/Win10+ all ship with `tar` that handles both zip and tar.xz.
-    await execFileAsync("tar", ["-xf", archivePath, "-C", destDir], { timeout: 60_000 });
+    await execFileAsync("tar", ["-xf", archivePath, "-C", destDir], { timeout: 60_000, windowsHide: true });
   }
 
 }

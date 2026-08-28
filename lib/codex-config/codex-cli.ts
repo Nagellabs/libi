@@ -27,6 +27,7 @@ import { getLibiHome } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 import { scrubSecrets } from "@/lib/security/secret-scrub";
 import type { McpServerEntry } from "@/lib/mcp-config";
+import { isWindows } from "@/lib/platform";
 
 const execFileAsync = promisify(execFile);
 
@@ -97,7 +98,7 @@ export function codexSearchDirs(): string[] {
 
 /** Executable file names a `codex` could have on this platform. */
 function codexBinNames(): string[] {
-  return process.platform === "win32"
+  return isWindows()
     ? ["codex.exe", "codex.cmd", "codex.bat", "codex"]
     : [CODEX_BIN];
 }
@@ -106,7 +107,7 @@ function defaultIsExecutable(candidate: string): boolean {
   try {
     const st = fs.statSync(candidate);
     if (!st.isFile()) return false;
-    if (process.platform === "win32") return true;
+    if (isWindows()) return true;
     fs.accessSync(candidate, fs.constants.X_OK);
     return true;
   } catch {
@@ -271,7 +272,10 @@ export type CodexSpawner = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 const defaultSpawner: CodexSpawner = (file, args, opts) =>
-  execFileAsync(file, args, opts);
+  // windowsHide: the Next server runs inside Electron's console-less main
+  // process on Windows, so a console child gets a fresh Windows Terminal
+  // window unless this is set — see lib/agents/process-manager.ts.
+  execFileAsync(file, args, { ...opts, windowsHide: true });
 
 export interface CodexCliOpts {
   /** Override the spawner (tests). Defaults to a real `execFile`. */
