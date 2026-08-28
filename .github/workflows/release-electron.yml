@@ -196,14 +196,27 @@ jobs:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           LIBI_GATES_SHA: ${{ needs.gates.outputs.sha }}
         run: |
-          # macOS defaults the per-process file-descriptor limit to 256, and
-          # codesign walks the whole app at once. The bundled runtime contains
-          # npm's own node_modules, so signing blew straight through it:
-          #   ⨯ EMFILE: too many open files, open '.../libnpmsearch/package.json'
-          # after the identity had loaded and the app had packaged. Raise it for
-          # this step, falling back to whatever the hard limit allows.
-          ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
-          echo "file descriptor limit for this build: $(ulimit -n)"
+          # EMFILE. `asar` packing is disabled by design (electron-builder.yml
+          # explains why), so electron-builder copies, hashes and signs every
+          # file of the bundled runtime individually — tens of thousands of
+          # them — and opens many at once. Two builds died here:
+          #   ⨯ EMFILE: too many open files ... npm/.../libnpmsearch/package.json
+          #   ⨯ EMFILE: too many open files ... hono/dist/types/hono-base.d.ts
+          # Different files each time, which is the signature of a concurrent
+          # open storm rather than one leaked handle.
+          #
+          # `ulimit -n` ALONE IS NOT ENOUGH, and this is the part worth
+          # remembering: macOS enforces a separate per-process ceiling in the
+          # kernel, and the shell will cheerfully report a limit above it. The
+          # second failure printed "file descriptor limit for this build: 65536"
+          # and then hit EMFILE anyway. Raise the kernel ceiling first, then the
+          # shell limit underneath it.
+          #
+          # The echo is deliberate: if this ever fails again, the log says which
+          # of the two numbers did not move.
+          sudo sysctl -w kern.maxfiles=524288 kern.maxfilesperproc=262144 || true
+          ulimit -n 262144 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+          echo "kern.maxfilesperproc=$(sysctl -n kern.maxfilesperproc)  ulimit -n=$(ulimit -n)"
           export APPLE_API_KEY="$RUNNER_TEMP/notary/key.p8"
           node scripts/release-electron.js --target=mac --ci --no-github-release --skip-checks
 

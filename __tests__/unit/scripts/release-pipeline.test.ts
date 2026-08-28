@@ -483,6 +483,41 @@ describe("three gates jobs, or three chances to drift apart", () => {
   });
 });
 
+describe("the mac build raises the file-descriptor ceiling before signing", () => {
+  // Three builds died on EMFILE, on a DIFFERENT file each time — the signature
+  // of a concurrent open storm, not a leaked handle. `asar` packing is disabled
+  // by design (electron-builder.yml explains why), so electron-builder copies,
+  // hashes and signs every file of the bundled runtime individually.
+  //
+  // The trap: `ulimit -n` alone does not fix it. macOS enforces a separate
+  // per-process ceiling in the kernel, and the shell reports a limit above it
+  // quite happily — one build printed a 65536 limit and hit EMFILE regardless.
+  const build = () =>
+    stepsIn(elWf, "mac").find((st) =>
+      String(st.name ?? "").toLowerCase().includes("build"),
+    );
+
+  it("raises the KERNEL ceiling, not only the shell limit", () => {
+    const run = String(build()?.run ?? "");
+    expect(run).toContain("kern.maxfilesperproc");
+    expect(run).toContain("ulimit -n");
+  });
+
+  it("raises it BEFORE the build, not after", () => {
+    const run = String(build()?.run ?? "");
+    expect(run.indexOf("kern.maxfilesperproc")).toBeLessThan(
+      run.indexOf("release-electron.js"),
+    );
+  });
+
+  it("prints both numbers, so a repeat failure says which one did not move", () => {
+    // The first fix looked correct and was not. Without the echo the second
+    // failure would have looked identical to the first.
+    const run = String(build()?.run ?? "");
+    expect(run).toMatch(/echo .*kern\.maxfilesperproc.*ulimit/);
+  });
+});
+
 describe("the npm workflow's FILENAME is trusted-publisher configuration", () => {
   // npm's trusted publisher (OIDC) is bound to org + repo + workflow filename.
   // Renaming this file stops publishing, and it fails as a 404 on the PUT
