@@ -1,5 +1,28 @@
 name: Release npm
 
+# ⚠️ THE FILENAME OF THIS FILE IS CONFIGURATION, NOT A NAME.
+#
+# npm's trusted publisher (OIDC) is bound to org + repo + WORKFLOW FILENAME. The
+# token this workflow mints carries `.../workflows/release-npm.yml` as a claim,
+# and npm checks it against the value registered on npmjs.com. Rename or move
+# this file and publishing stops — with a 404 on the PUT, not an auth error:
+#
+#   npm error 404 Not Found - PUT https://registry.npmjs.org/@nagellabs%2flibi
+#   npm error 404  ...could not be found or you do not have permission
+#
+# That is exactly what happened on 2026-08-28 when `release.yml` was split into
+# this file and `release-electron.yml`: identical code, identical OIDC token,
+# identical "publishing as a trusted publisher" line, and a 404, because npm was
+# still looking for `release.yml`.
+#
+# A dry run CANNOT catch this: `npm publish --dry-run` never PUTs, so it never
+# authenticates. It prints a clean trusted-publisher line either way. The only
+# proof is a real publish.
+#
+# TO RENAME THIS FILE: update the trusted publisher on npmjs.com
+# (@nagellabs/libi → Settings → Trusted Publisher) in the SAME change, and
+# expect the first publish afterwards to be the test of it.
+
 # The npm half of a release: gates, then publish `@nagellabs/libi` and push the
 # version commit and tag.
 #

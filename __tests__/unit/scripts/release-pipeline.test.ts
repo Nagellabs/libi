@@ -10,7 +10,7 @@
  * So the invariants are asserted against the YAML and the scripts directly.
  */
 import { describe, it, expect } from "vitest";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { load } from "js-yaml";
@@ -21,8 +21,26 @@ type Workflow = {
   on: { workflow_dispatch: { inputs?: Record<string, unknown> } };
   jobs: Record<string, Record<string, unknown>>;
 };
-const read = (f: string) =>
-  load(readFileSync(path.join(ROOT, ".github/workflows", f), "utf8")) as Workflow;
+const read = (f: string) => {
+  const at = path.join(ROOT, ".github/workflows", f);
+  if (!existsSync(at)) {
+    // These files are read at module scope, so a missing one would otherwise
+    // surface as a bare ENOENT with the whole suite reporting "no tests" — the
+    // least useful possible message for the most consequential possible edit.
+    throw new Error(
+      `.github/workflows/${f} is missing.\n\n` +
+        (f === "release-npm.yml"
+          ? "That filename is npm trusted-publisher CONFIGURATION, not just a name: " +
+            "npm binds the OIDC publisher to org + repo + workflow filename. If this " +
+            "file was renamed or moved, publishing is already broken and will fail " +
+            "with a 404 on the PUT. Update the trusted publisher on npmjs.com " +
+            "(@nagellabs/libi → Settings → Trusted Publisher) to the new name, and " +
+            "update EXPECTED in this file to match."
+          : "The release pipeline's invariants are asserted against this file."),
+    );
+  }
+  return load(readFileSync(at, "utf8")) as Workflow;
+};
 
 /** The release is TWO workflows as of 2026-08-28. `release-npm.yml` publishes
  *  the package; `release-electron.yml` wraps an already-published version in
@@ -460,6 +478,60 @@ describe("three gates jobs, or three chances to drift apart", () => {
     for (const gate of ["lint", "test", "licences", "notices"]) {
       expect(names.some((n) => n.includes(gate)), `missing gate: ${gate}`).toBe(
         true,
+      );
+    }
+  });
+});
+
+describe("the npm workflow's FILENAME is trusted-publisher configuration", () => {
+  // npm's trusted publisher (OIDC) is bound to org + repo + workflow filename.
+  // Renaming this file stops publishing, and it fails as a 404 on the PUT
+  // rather than as an auth error, so it reads like a missing package:
+  //
+  //   npm error 404  ...could not be found or you do not have permission
+  //
+  // It happened for real on 2026-08-28, splitting release.yml into two files.
+  // Nothing in the repo recorded that the name was load-bearing, because the
+  // configuration that depends on it lives on npmjs.com.
+  //
+  // This test cannot verify the npm-side setting — no API here reaches it. What
+  // it CAN do is make the rename impossible to do silently: change the filename
+  // and this fails, pointing at the setting that has to change with it.
+  const EXPECTED = "release-npm.yml";
+
+  it("is the exact filename registered with npm as a trusted publisher", () => {
+    expect(existsSync(path.join(ROOT, ".github/workflows", EXPECTED))).toBe(true);
+  });
+
+  it("is the file that actually runs the publish — the binding is to THIS name", () => {
+    // A guard on a filename is worthless if the publish later moves to another
+    // file. Assert the two are the same thing.
+    const publishStep = stepsIn(npmWf, "npm").find((st) =>
+      String(st.run ?? "").includes("release-npm.js"),
+    );
+    expect(publishStep, `${EXPECTED} does not run scripts/release-npm.js`).toBeDefined();
+  });
+
+  it("says so in the file, where someone renaming it would look", () => {
+    // A test alone fails AFTER the rename. The comment is what prevents it.
+    const src = readFileSync(
+      path.join(ROOT, ".github/workflows", EXPECTED),
+      "utf8",
+    );
+    expect(src).toMatch(/trusted publisher/i);
+    expect(src).toMatch(/rename/i);
+  });
+
+  it("keeps the publish out of every OTHER workflow, so one binding is enough", () => {
+    // If a second workflow could publish to npm it would need its own trusted
+    // publisher entry, and the one nobody registered would fail on release day.
+    const others = readdirSync(path.join(ROOT, ".github/workflows")).filter(
+      (f) => f !== EXPECTED,
+    );
+    for (const f of others) {
+      const src = readFileSync(path.join(ROOT, ".github/workflows", f), "utf8");
+      expect(src, `${f} must not run release-npm.js`).not.toContain(
+        "scripts/release-npm.js",
       );
     }
   });
