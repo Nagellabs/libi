@@ -35,7 +35,7 @@ on:
         type: boolean
         default: false
       build_ref:
-        description: "Commit/branch supplying the BUILD TOOLING (blank = the version's tag)"
+        description: "Build tooling ref: branch or FULL 40-char SHA (blank = the version's tag). A short SHA does not resolve."
         type: string
         default: ""
 

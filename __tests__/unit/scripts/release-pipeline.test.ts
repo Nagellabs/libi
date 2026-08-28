@@ -66,6 +66,15 @@ describe("release-electron can build from a ref newer than the tag", () => {
     expect((inputs.build_ref as { default?: string }).default ?? "").toBe("");
   });
 
+  it("warns that a short SHA will not resolve", () => {
+    // `actions/checkout` expands a ref into `+refs/heads/<ref>*` and
+    // `+refs/tags/<ref>*`, so an abbreviated commit matches nothing and the
+    // job dies in checkout before any gate runs — which is exactly how the
+    // first dispatch of this input failed.
+    const desc = (inputs.build_ref as { description?: string }).description ?? "";
+    expect(desc).toMatch(/full 40-char SHA/i);
+  });
+
   it("a blank build_ref falls back to the version's tag", () => {
     expect(elText).toContain('[ -n "$ref" ] || ref="v$v"');
   });
