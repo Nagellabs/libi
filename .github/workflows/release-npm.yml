@@ -182,6 +182,19 @@ jobs:
 
       - name: Publish
         id: publish
+        # `environment: release` makes this secret AVAILABLE to `secrets.*`; it
+        # does not put it in the process environment. Nothing does that but an
+        # explicit mapping, and without one `next-build-release.js` prints
+        #
+        #   ⚠️  Sentry source-map upload is DISABLED for this build.
+        #      → Production stack traces in Sentry will stay MINIFIED.
+        #
+        # and carries on. It is a warning, not a failure, so it shipped: 0.1.5,
+        # 0.1.6 and 0.1.7 all published with no maps uploaded. This job builds
+        # the code that actually reaches users — the shells only wrap the
+        # published runtime — so this is the one upload that matters.
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
         run: |
           node scripts/release-npm.js ${{ inputs.bump }} --ci ${{ inputs.dry_run && '--dry-run' || '' }}
           v=$(node -p "require('./package.json').version")

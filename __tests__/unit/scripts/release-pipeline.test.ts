@@ -483,6 +483,41 @@ describe("three gates jobs, or three chances to drift apart", () => {
   });
 });
 
+describe("Sentry source maps reach the build that actually ships", () => {
+  // The shell ships almost nothing of its own: `files:` is dist-electron plus
+  // package.json, and the product arrives as an installed @nagellabs/libi
+  // snapshot under extraResources, pulled --from-registry. So the maps that
+  // matter are the ones built during the npm PUBLISH, not during either shell
+  // build.
+  //
+  // That job had `environment: release` — which makes a secret available to
+  // `secrets.*` and does NOT put it in the process environment. Nothing does
+  // that but an explicit `env:` mapping, and the missing one is silent:
+  // next-build-release.js warns and carries on, so 0.1.5, 0.1.6 and 0.1.7 all
+  // published with production stack traces left minified.
+  it("passes SENTRY_AUTH_TOKEN into the npm publish step", () => {
+    const publish = stepsIn(npmWf, "npm").find((st) => st.name === "Publish");
+    expect(publish, "release-npm.yml has no Publish step").toBeDefined();
+    const env = (publish!.env ?? {}) as Record<string, string>;
+    expect(
+      env.SENTRY_AUTH_TOKEN,
+      "the publish builds the shipped runtime; without this its maps never upload",
+    ).toContain("secrets.SENTRY_AUTH_TOKEN");
+  });
+
+  it("does not require it in the Windows shell, and that is deliberate", () => {
+    // Windows has no `environment: release`, so it cannot see the secret at
+    // all. That is fine and must not be "fixed" by adding the environment: the
+    // .next it builds is discarded (the shipped one comes from the registry),
+    // dist-electron is not minified, and main-process crashes are reported
+    // through the RUNTIME's Sentry client, whose maps come from the npm job.
+    // Adding `environment: release` here would buy nothing and would add a
+    // reviewer pause to every dry run — the loop that makes shell bugs cost a
+    // dispatch instead of a version.
+    expect(jobIn(elWf, "windows").environment).toBeUndefined();
+  });
+});
+
 describe("the mac build raises the file-descriptor ceiling before signing", () => {
   // Three builds died on EMFILE, on a DIFFERENT file each time — the signature
   // of a concurrent open storm, not a leaked handle. `asar` packing is disabled
