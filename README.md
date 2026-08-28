@@ -40,7 +40,10 @@ protected your PC"* — choose **More info → Run anyway**. Code signing is on 
 it lands, the [npm route](#npm) below is unaffected and needs no such dismissal.
 
 The desktop app updates its own runtime from npm: when a new version ships, Settings →
-General offers to install it, and it takes effect on the next restart.
+General offers to install it, and it takes effect on the next restart. Most releases are
+runtime-only and arrive this way, so the newest entry on the Releases page is often older
+than the version you are running — that is expected, and it is not a sign you are behind.
+A new download only appears when the desktop shell itself changes.
 
 ### npm
 

@@ -72,6 +72,24 @@ a shipped log. **When a change lands that needs publishing, add it there in the 
 turn** — a merged feature nobody queued is a feature that misses the window. Read it at
 the start of any release, and empty it into the shipped log when the release is out.
 
+A release is **two workflows** (see `AGENTS.md` → Desktop shell vs runtime):
+
+1. **Release npm** — the release most weeks are. Ships the runtime, which reaches
+   installed desktop apps on its own.
+2. **Release electron** — only when `electron/` changed. Takes the published version as an
+   input, so it can be re-run against that same version as often as needed.
+
+Two consequences worth holding on to:
+
+- **Rehearse the shells before publishing them.** `release-electron.yml` with
+  `dry_run: true` builds both and uploads the artifacts without cutting a Release. Use it
+  after ANY change to the shell jobs or `release-electron.js` — that is the whole reason
+  the workflows are split, and it costs nothing.
+- **Recovery differs by cause.** A transient failure (notarization is a network
+  round-trip) takes *Re-run failed jobs*. A failure whose fix lands in code takes a fresh
+  dispatch, because the shell jobs check out the TAG and a re-run would build the same
+  unfixed commit.
+
 ## After a release
 
 Verify the *published* artifacts as a fresh user would receive them — not the working

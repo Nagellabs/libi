@@ -98,9 +98,54 @@ const ci = process.argv.includes("--ci");
 // it once, after both have finished.
 const publishRelease = !process.argv.includes("--no-github-release");
 
+/**
+ * `npm` and `npx` are `.cmd` shims on Windows, and since the fix for
+ * CVE-2024-27980 Node REFUSES to spawn a `.cmd` without a shell. It does not
+ * fail loudly: `spawnSync` returns a non-zero status, `capture` turns that into
+ * `null`, and the caller reads the result as "the command answered nothing".
+ *
+ * That is exactly how the first Windows release failed. The registry preflight
+ * asked npm which version was published, npm never ran at all, and the script
+ * reported `the registry serves (nothing)` about a version that was live —
+ * then, once the check learned to retry, spent five minutes asking a question
+ * that could not be answered. The same defect sat in front of every remaining
+ * step, since `compile:electron`, `next-build-release` and the runtime bundle
+ * all go through npm too.
+ *
+ * `process.platform` is safe to branch on here: this is a standalone node
+ * script, not something the Next build compiles, so nothing constant-folds it
+ * (see __tests__/unit/build/platform-fold-guard.test.ts, which scopes itself to
+ * lib/ mcp/ app/ for that reason).
+ */
+const SHIMMED_ON_WINDOWS = new Set(["npm", "npx"]);
+
+/**
+ * With `shell: true` Node hands the command line to cmd.exe and does NOT quote
+ * the arguments for you — it joins them with spaces — so an argument
+ * containing one would silently split into two. Quote them ourselves rather
+ * than relying on every present and future call site being space-free.
+ */
+function shellSafe(cmd, cmdArgs) {
+  if (process.platform !== "win32" || !SHIMMED_ON_WINDOWS.has(cmd)) {
+    return { cmdArgs, extra: {} };
+  }
+  return {
+    cmdArgs: cmdArgs.map((a) =>
+      /[\s"^&|<>]/.test(a) ? `"${String(a).replace(/"/g, '\\"')}"` : a,
+    ),
+    extra: { shell: true },
+  };
+}
+
 function run(title, cmd, cmdArgs, opts = {}) {
   console.log(`\n▶ ${title}\n  $ ${cmd} ${cmdArgs.join(" ")}`);
-  const res = spawnSync(cmd, cmdArgs, { stdio: "inherit", cwd: ROOT, ...opts });
+  const { cmdArgs: safeArgs, extra } = shellSafe(cmd, cmdArgs);
+  const res = spawnSync(cmd, safeArgs, {
+    stdio: "inherit",
+    cwd: ROOT,
+    ...extra,
+    ...opts,
+  });
   if (res.status !== 0) {
     console.error(`\n❌ step failed: ${title} (exit ${res.status})`);
     process.exit(res.status ?? 1);
@@ -108,7 +153,12 @@ function run(title, cmd, cmdArgs, opts = {}) {
 }
 
 function capture(cmd, cmdArgs) {
-  const res = spawnSync(cmd, cmdArgs, { cwd: ROOT, encoding: "utf-8" });
+  const { cmdArgs: safeArgs, extra } = shellSafe(cmd, cmdArgs);
+  const res = spawnSync(cmd, safeArgs, {
+    cwd: ROOT,
+    encoding: "utf-8",
+    ...extra,
+  });
   return res.status === 0 ? res.stdout.trim() : null;
 }
 

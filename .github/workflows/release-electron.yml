@@ -1,0 +1,313 @@
+name: Release electron
+
+# The desktop half of a release: build the macOS and Windows shells around an
+# ALREADY-PUBLISHED npm version, then collect both into one GitHub Release.
+#
+# Run this AFTER `release-npm.yml`, pointed at the version it published. Most
+# weeks you do not run it at all — the shell is a thin loader and an installed
+# app picks up a newer runtime from `~/.libi/runtime/` on its own.
+#
+# WHY IT IS SEPARATE (2026-08-28). It used to be the back half of one release
+# workflow, which meant the shell jobs ran only after an irreversible npm
+# publish — so every bug in them cost a version number to find. Two did, in one
+# afternoon: a shallow checkout that hid the gates commit, and npm being
+# unspawnable on Windows. Split out and taking a version as INPUT, this
+# workflow re-runs against the same published version as often as you like.
+#
+# `dry_run` here means something different from the npm workflow's, and the
+# difference is the whole point: the shells still BUILD and upload their
+# artifacts, only the GitHub Release is withheld. That is the loop for
+# debugging a shell without spending a version on it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published npm version to wrap (blank = current latest)"
+        type: string
+        default: ""
+      dry_run:
+        description: "Build both shells and upload artifacts, publish no Release"
+        type: boolean
+        default: false
+      skip_windows:
+        description: "Ship without the Windows installer"
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-electron
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── which version are we wrapping? ───────────────────────────────────────
+  # The shell bundles a PUBLISHED runtime (`--from-registry`), so the version
+  # must already exist on npm before anything here can build. Resolving it in
+  # its own job means the answer is recorded once, visible in the run, and
+  # identical for both shells — rather than each runner asking npm separately
+  # and possibly disagreeing.
+  resolve:
+    name: Resolve the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - name: Resolve and verify it is actually published
+        id: v
+        run: |
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v=$(npm view @nagellabs/libi version)
+            echo "no version given — using the current latest: $v"
+          fi
+          # Ask for the PER-VERSION document. It is what `--from-registry` has
+          # to resolve, and it becomes available before the aggregated
+          # packument does.
+          if ! npm view "@nagellabs/libi@$v" version > /dev/null 2>&1; then
+            echo "::error::@nagellabs/libi@$v is not on npm. Publish it first (Release npm)."
+            exit 1
+          fi
+          echo "version=$v"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"     >> "$GITHUB_OUTPUT"
+          echo "wrapping @nagellabs/libi@$v (tag v$v)"
+
+  # ── the publishing window ────────────────────────────────────────────────
+  # This workflow ends by publishing a GitHub Release, which is the moment
+  # every installed app starts being offered the update. Same rule, same
+  # absence of a bypass input, as release-npm.yml. A dry run rehearses any day
+  # because it publishes nothing.
+  window:
+    name: Publishing window
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to publish on a work day
+        run: |
+          day=$(date -u +%u)   # 1=Mon … 5=Fri, 6=Sat, 7=Sun
+          echo "UTC day: $(date -u '+%A %Y-%m-%d') (day=$day)"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry run — window not enforced, no Release will be published."
+            exit 0
+          fi
+          if [ "$day" != "5" ] && [ "$day" != "6" ]; then
+            echo "::error::Releases publish on Friday or Saturday. Today is $(date -u '+%A')."
+            exit 1
+          fi
+          echo "Weekend — proceeding."
+
+  # ── gates ────────────────────────────────────────────────────────────────
+  # Run against the TAG, not against main: this workflow can be dispatched days
+  # after the npm publish, and what it must vouch for is the code the shells are
+  # about to wrap. Once, before both shells, rather than twice on two runners.
+  gates:
+    name: Gates (test · lint · licences · notices)
+    needs: [resolve, window]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      # The commit the suite actually ran against. `release-electron.js --ci
+      # --skip-checks` refuses unless it can prove this commit is an ancestor of
+      # what it is building; without this output there is no evidence to check.
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - name: Record the tested commit
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Identical to release-npm.yml and test.yml — see the comment there for
+      # why node-pty specifically. If one of the three grows a step, so do the
+      # others.
+      - name: Build native modules for this Node
+        run: npm rebuild better-sqlite3 node-pty
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Licences
+        run: npm run check:licenses
+
+      - name: Third-party notices are current
+        run: npm run notices:check
+
+  # ── macOS shell ──────────────────────────────────────────────────────────
+  # Builds on a dry run too. Withholding the Release is what `dry_run` means
+  # here; withholding the build would defeat the reason this workflow exists.
+  mac:
+    name: macOS shell (signed + notarized)
+    needs: [resolve, gates]
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          # Full history, not the default depth-1. `--skip-checks` is honoured
+          # only against LIBI_GATES_SHA, and proving that commit is an ancestor
+          # needs the ancestor to BE here. At depth 1 the checkout holds the
+          # tagged commit and nothing behind it, so the gates commit is simply
+          # absent and the build dies with "<sha> is not a commit in this
+          # checkout" — which it did, on the first real release, a minute after
+          # npm had already published and become irreversible.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # notarytool takes a FILE, and a secret is a string. Write it outside the
+      # checkout so no build step can sweep it into an artifact.
+      - name: Materialise the App Store Connect key
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          install -m 700 -d "$RUNNER_TEMP/notary"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/notary/key.p8"
+          chmod 600 "$RUNNER_TEMP/notary/key.p8"
+
+      - name: Build, sign, notarize, staple
+        env:
+          CSC_LINK: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          LIBI_GATES_SHA: ${{ needs.gates.outputs.sha }}
+        run: |
+          # macOS defaults the per-process file-descriptor limit to 256, and
+          # codesign walks the whole app at once. The bundled runtime contains
+          # npm's own node_modules, so signing blew straight through it:
+          #   ⨯ EMFILE: too many open files, open '.../libnpmsearch/package.json'
+          # after the identity had loaded and the app had packaged. Raise it for
+          # this step, falling back to whatever the hard limit allows.
+          ulimit -n 65536 2>/dev/null || ulimit -n "$(ulimit -Hn)"
+          echo "file descriptor limit for this build: $(ulimit -n)"
+          export APPLE_API_KEY="$RUNNER_TEMP/notary/key.p8"
+          node scripts/release-electron.js --target=mac --ci --no-github-release --skip-checks
+
+      - name: Shred the key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/notary"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libi-macos
+          path: |
+            release/Libi-arm64.dmg
+            release/Libi-*-arm64-mac.zip
+            release/Libi-*-arm64-mac.zip.blockmap
+            release/latest-mac.yml
+          if-no-files-found: error
+
+  # ── Windows shell ────────────────────────────────────────────────────────
+  windows:
+    name: Windows shell (unsigned)
+    needs: [resolve, gates]
+    if: ${{ !inputs.skip_windows }}
+    # PINNED, and it must stay pinned. `windows-latest` moved to an image
+    # shipping VS2026, which the lockfile's node-gyp cannot detect, and
+    # `npm ci` then dies rebuilding node-pty with "Could not find any Visual
+    # Studio installation to use".
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0   # same reason as mac, above
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the installer
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          LIBI_GATES_SHA: ${{ needs.gates.outputs.sha }}
+        run: node scripts/release-electron.js --target=win --ci --no-github-release --skip-checks
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libi-windows
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/latest.yml
+          if-no-files-found: error
+
+  # ── the one outward step ─────────────────────────────────────────────────
+  publish:
+    name: Publish the GitHub Release
+    needs: [resolve, mac, windows]
+    # `always()` so a DELIBERATELY skipped Windows job does not cancel the
+    # release. A FAILED one is different and must not publish: shipping
+    # mac-only because Windows broke would look identical in the release list
+    # to shipping mac-only on purpose, and nobody would notice for a version.
+    #
+    # On a dry run this is the ONLY job that is withheld — the shells above
+    # have already built and uploaded their artifacts, which is the point.
+    if: >-
+      ${{ !inputs.dry_run && always()
+          && needs.mac.result == 'success'
+          && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist-release
+          pattern: libi-*
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-github.js \
+            --assets=dist-release \
+            --tag=${{ needs.resolve.outputs.tag }} \
+            ${{ needs.windows.result == 'skipped' && '--allow-missing=win' || ' ' }}
+
+      - name: What shipped
+        run: |
+          {
+            echo "### Libi ${{ needs.resolve.outputs.version }} desktop shells released"
+            echo ""
+            echo "- macOS: ${{ needs.mac.result }}"
+            echo "- Windows: ${{ needs.windows.result }}"
+            echo ""
+            echo "The Windows installer is UNSIGNED and must be booted on the QA VM before it is announced."
+            echo "Deploy libi-site only AFTER that — the download button is the announcement."
+          } >> "$GITHUB_STEP_SUMMARY"

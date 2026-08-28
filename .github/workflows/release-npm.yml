@@ -1,0 +1,186 @@
+name: Release npm
+
+# The npm half of a release: gates, then publish `@nagellabs/libi` and push the
+# version commit and tag.
+#
+# This is the release most weeks ARE. The desktop shell is a thin loader around
+# a published runtime, and an installed app picks up a newer runtime from
+# `~/.libi/runtime/` on its own — so a week that changes nothing under
+# `electron/` needs this workflow and nothing else.
+#
+# When a week DOES need new shells, run `release-electron.yml` afterwards,
+# pointed at the version this one published. The two were a single workflow
+# until 2026-08-28, and joining them had one fatal property: the shells could
+# only ever be exercised by publishing first, so every bug in a shell job cost
+# a version number to discover. Two of them did, in one afternoon.
+#
+# WHAT DOES NOT CHANGE: the gates. `release-npm.js` runs here exactly as it runs
+# locally — same tests, same licence and notices checks — and the local path
+# stays working as the escape hatch.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        options: [patch, minor, major, none]
+        default: patch
+      dry_run:
+        description: "Rehearse everything, publish nothing"
+        type: boolean
+        default: false
+
+# Two publishes at once would race on the version bump and the tag.
+concurrency:
+  group: release-npm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── the publishing window ────────────────────────────────────────────────
+  # This repo's work happens on weekdays and lands publicly on weekends, so the
+  # pipeline refuses to publish on a work day rather than relying on whoever
+  # clicks Run remembering.
+  #
+  # There is deliberately NO override input: a bypass anyone can tick is not a
+  # policy. Changing the window means editing this file, which is a considered
+  # act with a diff. A dry run rehearses any day, because it publishes nothing.
+  #
+  # NOTE the timezone: this is UTC. From UTC+7 the window opens 07:00 local
+  # Friday, so an early-morning Friday dispatch is Thursday here and is refused.
+  window:
+    name: Publishing window
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to publish on a work day
+        run: |
+          day=$(date -u +%u)   # 1=Mon … 5=Fri, 6=Sat, 7=Sun
+          echo "UTC day: $(date -u '+%A %Y-%m-%d') (day=$day)"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry run — window not enforced, nothing will be published."
+            exit 0
+          fi
+          if [ "$day" != "5" ] && [ "$day" != "6" ]; then
+            echo "::error::Releases publish on Friday or Saturday. Today is $(date -u '+%A')."
+            exit 1
+          fi
+          echo "Weekend — proceeding."
+
+  # ── gates ────────────────────────────────────────────────────────────────
+  gates:
+    name: Gates (test · lint · licences · notices)
+    needs: window
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `--ignore-scripts` for the same reason test.yml does it: `postinstall`
+      # runs `electron-builder install-app-deps`, which rebuilds better-sqlite3
+      # against ELECTRON's ABI — and that ABI SIGKILLs vitest workers, silently
+      # losing ~250 test files from both the passed and failed columns.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # better-sqlite3 ships no prebuild for every runner/Node pairing, and
+      # `--ignore-scripts` above leaves it unbuilt regardless. node-pty is in
+      # the same boat: its install script is what compiles pty.node, so with
+      # scripts skipped the ws-origin/ws-port suites fail to even LOAD
+      # ("Failed to load native module: pty.node") and take two files' worth of
+      # tests out of the run with them.
+      #
+      # This mirrors test.yml deliberately, and release-electron.yml carries the
+      # identical step. The release gates read `ensure-native-modules.js` until
+      # 2026-08-28 — which only ever repairs better-sqlite3 — so they were
+      # strictly weaker than the ordinary CI they exist to re-run, and the first
+      # dispatch failed on exactly the suites test.yml's comment predicts. If
+      # one of these three grows a step, so do the others.
+      - name: Build native modules for this Node
+        run: npm rebuild better-sqlite3 node-pty
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Licences
+        run: npm run check:licenses
+
+      - name: Third-party notices are current
+        run: npm run notices:check
+
+  # ── npm ──────────────────────────────────────────────────────────────────
+  npm:
+    name: Publish to npm
+    needs: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: write   # push the version commit and tag
+      id-token: write   # mint the OIDC token npm trades for a publish credential
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `npm version` commits, and the push below needs real history.
+          fetch-depth: 0
+          # The default GITHUB_TOKEN can push to a protected branch only if the
+          # ruleset allows it; see the manual-setup notes in next-release.md.
+          token: ${{ secrets.RELEASE_PUSH_TOKEN || github.token }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm >= 11.5.1; Node 22 ships an older one.
+      # release-npm.js --ci refuses rather than falling through to an anonymous
+      # publish that fails at the very last step.
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Identify the committer
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Publish
+        id: publish
+        run: |
+          node scripts/release-npm.js ${{ inputs.bump }} --ci ${{ inputs.dry_run && '--dry-run' || '' }}
+          v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=v$v"    >> "$GITHUB_OUTPUT"
+
+      # Pushing the tag is what makes it resolvable — release-electron.yml
+      # checks it out by name.
+      - name: Push the version commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: git push --follow-tags origin HEAD:main
+
+      - name: What shipped
+        if: ${{ !inputs.dry_run }}
+        run: |
+          v=${{ steps.publish.outputs.version }}
+          {
+            echo "### @nagellabs/libi@$v published"
+            echo ""
+            echo "Tag \`v$v\` is pushed. Installed desktop apps pick this up as a"
+            echo "runtime under \`~/.libi/runtime/\` without needing a new shell."
+            echo ""
+            echo "**If this week also needs desktop shells**, run the"
+            echo "**Release electron** workflow with \`version: $v\`."
+          } >> "$GITHUB_STEP_SUMMARY"

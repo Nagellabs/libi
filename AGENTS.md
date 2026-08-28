@@ -224,9 +224,24 @@ an installed snapshot inside the `.app` (and preferring a newer runtime under
 a runtime — `lib/runtime/shell-api.ts` — and `electron/main.ts` may not import runtime code
 any other way. Bump `SHELL_API_VERSION` **only** for a breaking change; bumping it for an
 added export strands every installed shell on its bundled snapshot. Native ABI is resolved
-by *fetching* Electron prebuilds, never compiling on a user's machine. The release cadences
-are documented in an internal runbook, not part of this repository — see
-`scripts/release-npm.js` and `scripts/release-electron.js` for the actual mechanics.
+by *fetching* Electron prebuilds, never compiling on a user's machine.
+
+That relationship is why a release is **two workflows, not one**:
+
+- `.github/workflows/release-npm.yml` — gates, publish `@nagellabs/libi`, push the version
+  commit and tag. This is what most weeks ship, and on its own it reaches every installed
+  desktop app through `~/.libi/runtime/`.
+- `.github/workflows/release-electron.yml` — takes an **already-published version** as an
+  input, builds the macOS and Windows shells around it, and cuts one GitHub Release
+  carrying both. Run it only when something under `electron/` changed.
+
+The split is load-bearing, not organisational. While they were one workflow the shell jobs
+could run only after an irreversible npm publish, so **every bug in a shell cost a version
+number to discover** — two did, in one afternoon on 2026-08-28. Because the electron half
+now takes the version as input, `dry_run: true` builds both shells and uploads their
+artifacts while publishing nothing, so a shell can be debugged for free. The release
+cadences themselves are in an internal runbook; `scripts/release-npm.js` and
+`scripts/release-electron.js` hold the actual mechanics.
 
 ## Electron + CDP (driving the desktop app)
 

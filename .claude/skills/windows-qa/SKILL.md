@@ -38,9 +38,20 @@ npm run build:electron -- --publish never
   `--publish never` states the intent.
 - Budget ~11 min for `npm ci` and ~13 min for `build:electron`. Skip `npm ci`
   on a rebuild whose lockfile has not changed.
-- `scripts/release-electron.js` **cannot run outside the Fri/Sat window** —
-  `assertReleaseWindow()` refuses, by design. Anything only that script
-  produces cannot be tested mid-week.
+- **You usually should not hand-build here at all any more.** Since the release
+  workflows were split (2026-08-28), `release-electron.yml` with
+  `dry_run: true` builds the real macOS and Windows shells in CI and uploads
+  their artifacts **without publishing anything**, on any day of the week. That
+  gives you the actual release artifact — the thing users get — rather than a
+  local approximation of it, so prefer downloading it from the run over
+  building on this box. Hand-building is still the right move when you are
+  testing an unpushed branch.
+- The `dry_run` escape applies to the CI path only. Run
+  `scripts/release-electron.js` **on a machine that configures a local window**
+  (`scripts/release-window.local.json`) outside Fri/Sat and
+  `assertReleaseWindow()` refuses, by design. Runners carry no such file, which
+  is why the workflow's own window job is what enforces the rule there — and
+  why a dry run is exempt from it.
 
 ## Installing
 

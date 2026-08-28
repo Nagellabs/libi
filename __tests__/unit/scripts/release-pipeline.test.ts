@@ -10,25 +10,46 @@
  * So the invariants are asserted against the YAML and the scripts directly.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { load } from "js-yaml";
 
 const ROOT = process.cwd();
-const WORKFLOW = path.join(ROOT, ".github/workflows/release.yml");
-const wf = load(readFileSync(WORKFLOW, "utf8")) as {
+
+type Workflow = {
+  on: { workflow_dispatch: { inputs?: Record<string, unknown> } };
   jobs: Record<string, Record<string, unknown>>;
 };
+const read = (f: string) =>
+  load(readFileSync(path.join(ROOT, ".github/workflows", f), "utf8")) as Workflow;
+
+/** The release is TWO workflows as of 2026-08-28. `release-npm.yml` publishes
+ *  the package; `release-electron.yml` wraps an already-published version in
+ *  desktop shells and cuts the GitHub Release. They were one workflow until
+ *  the shells could only be exercised by publishing first — which cost two
+ *  version numbers in an afternoon to discover two bugs. */
+const npmWf = read("release-npm.yml");
+const elWf = read("release-electron.yml");
+
+/** Look a job up in whichever of the two workflows defines it. */
 const job = (name: string) => {
+  const j = npmWf.jobs[name] ?? elWf.jobs[name];
+  if (!j) throw new Error(`neither release workflow has a job "${name}"`);
+  return j;
+};
+/** Disambiguates the jobs that exist in BOTH (window, gates). */
+const jobIn = (wf: Workflow, name: string) => {
   const j = wf.jobs[name];
-  if (!j) throw new Error(`release.yml has no job "${name}"`);
+  if (!j) throw new Error(`workflow has no job "${name}"`);
   return j;
 };
 const stepsOf = (name: string) =>
   (job(name).steps as Array<Record<string, unknown>>) ?? [];
+const stepsIn = (wf: Workflow, name: string) =>
+  (jobIn(wf, name).steps as Array<Record<string, unknown>>) ?? [];
 
-describe("release.yml: what must never drift", () => {
+describe("the release workflows: what must never drift", () => {
   it("builds each shell on its own OS", () => {
     // electron-builder rebuilds native modules for the HOST's ABI mid-build,
     // so a cross-built shell ships binaries the app cannot load.
@@ -43,22 +64,39 @@ describe("release.yml: what must never drift", () => {
     expect(job("windows")["runs-on"]).not.toBe("windows-latest");
   });
 
-  it("publishes to npm before either shell builds", () => {
-    // The shell bundles a PUBLISHED runtime (--from-registry), so a shell built
-    // before the publish would bundle the previous version.
+  it("will not build a shell around a version npm does not serve", () => {
+    // The shell bundles a PUBLISHED runtime (--from-registry). While the two
+    // halves were one workflow this was a `needs: npm` edge; now that the
+    // electron half can be dispatched on its own, days later, the ordering has
+    // to be checked rather than sequenced — so `resolve` asks npm and fails the
+    // run before either shell starts.
     for (const shell of ["mac", "windows"]) {
-      expect(job(shell).needs).toContain("npm");
+      expect(jobIn(elWf, shell).needs).toContain("resolve");
     }
+    const check = stepsIn(elWf, "resolve")
+      .map((st) => String(st.run ?? ""))
+      .join("\n");
+    expect(check).toContain("npm view");
+    expect(check).toContain("is not on npm");
+    // Per-VERSION document, not the aggregated packument: it is what
+    // --from-registry must resolve, and it becomes available first.
+    expect(check).toMatch(/npm view "@nagellabs\/libi@\$v"/);
   });
 
   it("gives the npm job an OIDC token and nothing more than it needs", () => {
-    const perms = job("npm").permissions as Record<string, string>;
+    const perms = jobIn(npmWf, "npm").permissions as Record<string, string>;
     // Without id-token:write npm silently falls back to an anonymous publish
     // and fails at the very last step, after every gate has run.
     expect(perms["id-token"]).toBe("write");
     expect(perms.contents).toBe("write");
-    // The top-level default must stay read so no other job inherits write.
-    expect((wf as unknown as { permissions: Record<string, string> }).permissions.contents).toBe("read");
+    // The top-level default must stay read in BOTH workflows so no other job
+    // inherits write.
+    for (const wf of [npmWf, elWf]) {
+      expect(
+        (wf as unknown as { permissions: Record<string, string> }).permissions
+          .contents,
+      ).toBe("read");
+    }
   });
 
   it("never lets a build job create the GitHub Release", () => {
@@ -99,14 +137,22 @@ describe("release.yml: what must never drift", () => {
   it("refuses to publish outside the weekend, with no bypass input", () => {
     // A window anyone can tick off is not a window. Changing it means editing
     // the file, which is a considered act with a diff.
-    const guard = stepsOf("window").map((s) => String(s.run ?? "")).join("\n");
-    expect(guard).toContain('date -u +%u');
-    const inputs = Object.keys(
-      ((wf as unknown as { on: { workflow_dispatch: { inputs: object } } }).on)
-        .workflow_dispatch.inputs,
-    );
-    expect(inputs).not.toContain("force");
-    expect(inputs).not.toContain("skip_window");
+    //
+    // BOTH workflows need their own guard, and that is the split's one real
+    // cost: two files can drift apart where one could not. Each publishes
+    // something outward-facing on its own — the package, and the GitHub Release
+    // that starts offering every installed app an update — so neither can
+    // borrow the other's window.
+    for (const wf of [npmWf, elWf]) {
+      const guard = stepsIn(wf, "window")
+        .map((st) => String(st.run ?? ""))
+        .join("\n");
+      expect(guard).toContain("date -u +%u");
+      expect(guard).toContain("Friday or Saturday");
+      const inputs = Object.keys(wf.on.workflow_dispatch.inputs ?? {});
+      expect(inputs).not.toContain("force");
+      expect(inputs).not.toContain("skip_window");
+    }
   });
 
   it("references exactly the secrets that exist in the `release` environment", () => {
@@ -115,8 +161,11 @@ describe("release.yml: what must never drift", () => {
     // day — GitHub substitutes an unset secret with an EMPTY STRING rather than
     // failing, so `CSC_LINK: ""` reaches electron-builder and the mac job dies
     // at signing with a message about the certificate, not about the typo.
+    const both = ["release-npm.yml", "release-electron.yml"]
+      .map((f) => readFileSync(path.join(ROOT, ".github/workflows", f), "utf8"))
+      .join("\n");
     const referenced = new Set(
-      [...readFileSync(WORKFLOW, "utf8").matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]),
+      [...both.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]),
     );
     expect([...referenced].sort()).toEqual([
       "APPLE_API_ISSUER",
@@ -250,19 +299,13 @@ describe("the Windows installer ships under a second, version-free name", () => 
 });
 
 /**
- * `skip_electron` — the npm-only run.
+ * The electron workflow's run SHAPES.
  *
- * Asserted here rather than exercised, for the reason at the top of this file:
- * the only way to observe a release shape is to publish it, and two of the
- * three shapes below cannot be rehearsed at all (`dry_run` skips every shell,
- * so it cannot distinguish "skipped because dry run" from "skipped because
- * skip_electron"). That leaves the YAML as the only thing testable before the
- * fact.
- *
- * The conditions are EVALUATED, not string-matched. A string match proves a
- * clause is present; it cannot prove the shape it produces, and the failure
- * that matters here is a shape — a run that cuts a GitHub Release carrying no
- * assets.
+ * The conditions are EVALUATED against each input set, not string-matched. A
+ * string match proves a clause is present; it cannot prove the shape that
+ * clause produces, and a shape is what goes wrong here — a Release published
+ * without the artifacts it is supposed to carry, or a dry run that quietly
+ * skips the very jobs it exists to rehearse.
  */
 type Ctx = {
   inputs: Record<string, boolean>;
@@ -287,18 +330,20 @@ function evalIf(expr: string, ctx: Ctx): boolean {
 /** Run the whole job graph for one set of inputs, honouring the fact that a
  *  job whose `if:` is false reports 'skipped' to everything downstream. */
 function shapeOf(
-  inputs: { dry_run?: boolean; skip_electron?: boolean; skip_windows?: boolean },
+  inputs: { dry_run?: boolean; skip_windows?: boolean },
   outcomes: { mac?: string; windows?: string } = {},
 ) {
-  const i = {
-    dry_run: false,
-    skip_electron: false,
-    skip_windows: false,
-    ...inputs,
-  };
+  const i = { dry_run: false, skip_windows: false, ...inputs };
   const ctx: Ctx = { inputs: i, needs: {} };
-  const macRuns = evalIf(String(job("mac").if), ctx);
-  const winRuns = evalIf(String(job("windows").if), ctx);
+  // A job with no `if:` runs unconditionally — which is exactly what mac is in
+  // release-electron.yml, and treating a missing condition as "false" would
+  // silently report every shape as "skipped".
+  const cond = (name: string) => {
+    const c = jobIn(elWf, name).if;
+    return c === undefined ? true : evalIf(String(c), ctx);
+  };
+  const macRuns = cond("mac");
+  const winRuns = cond("windows");
   ctx.needs.mac = { result: macRuns ? outcomes.mac ?? "success" : "skipped" };
   ctx.needs.windows = {
     result: winRuns ? outcomes.windows ?? "success" : "skipped",
@@ -306,7 +351,7 @@ function shapeOf(
   return {
     mac: ctx.needs.mac.result,
     windows: ctx.needs.windows.result,
-    publish: evalIf(String(job("publish").if), ctx) ? "runs" : "skipped",
+    publish: cond("publish") ? "runs" : "skipped",
   };
 }
 
@@ -370,114 +415,168 @@ describe("the two failures of the first real release — 2026-08-28", () => {
   });
 });
 
-describe("release.yml gates vs test.yml: the same run, or a weaker one", () => {
+describe("three gates jobs, or three chances to drift apart", () => {
   // The release gates exist to re-run ordinary CI before anything publishes.
-  // On 2026-08-28 they were WEAKER than it: gates ran
+  // On 2026-08-28 they were WEAKER than it: they ran
   // `node scripts/ensure-native-modules.js`, which only ever repairs
   // better-sqlite3, while test.yml ran `npm rebuild better-sqlite3 node-pty`.
-  // `npm ci --ignore-scripts` leaves pty.node uncompiled, so the ws-origin and
-  // ws-port suites did not fail — they failed to LOAD, taking two files' worth
-  // of tests out of the run. test.yml's own comment predicts this exactly, and
-  // the first release dispatch hit it anyway, because nothing tied the two
-  // files together.
-  const testWf = load(
-    readFileSync(path.join(ROOT, ".github/workflows/test.yml"), "utf8"),
-  ) as { jobs: Record<string, { steps: Array<Record<string, unknown>> }> };
+  // Both install with --ignore-scripts, so pty.node was never compiled and the
+  // ws-origin/ws-port suites did not fail — they failed to LOAD, taking two
+  // files' worth of tests out of the run. test.yml's own comment predicts this
+  // by name, and the first release dispatch hit it anyway, because nothing tied
+  // the files together.
+  //
+  // The split turned two gates jobs into three. That is more places to drift,
+  // not fewer, so this compares all of them.
+  const testWf = read("test.yml");
 
   const nativeStep = (steps: Array<Record<string, unknown>>) =>
     steps.find((st) => String(st.name ?? "").toLowerCase().includes("native"));
 
-  it("builds the same native modules before running the same suite", () => {
-    const gatesStep = nativeStep(stepsOf("gates"));
-    const ciStep = nativeStep(Object.values(testWf.jobs)[0].steps);
-    expect(gatesStep, "release.yml gates has no native-module step").toBeDefined();
+  const ciStep = nativeStep(Object.values(testWf.jobs)[0].steps as Array<Record<string, unknown>>);
+
+  it("test.yml still has a native-module step to compare against", () => {
     expect(ciStep, "test.yml has no native-module step").toBeDefined();
-    expect(String(gatesStep!.run).trim()).toBe(String(ciStep!.run).trim());
   });
 
-  it("rebuilds node-pty specifically, whichever way that step is written", () => {
-    // Named because it is the one whose absence is silent: a missing
+  it.each([
+    ["release-npm.yml", () => stepsIn(npmWf, "gates")],
+    ["release-electron.yml", () => stepsIn(elWf, "gates")],
+  ])("%s builds the same native modules as test.yml", (_name, steps) => {
+    const gatesStep = nativeStep(steps());
+    expect(gatesStep, "no native-module step in this gates job").toBeDefined();
+    expect(String(gatesStep!.run).trim()).toBe(String(ciStep!.run).trim());
+    // Named explicitly because its absence is the silent one: a missing
     // better-sqlite3 SIGKILLs the worker loudly, a missing pty.node just
     // removes two files from the count.
-    expect(String(nativeStep(stepsOf("gates"))!.run)).toContain("node-pty");
+    expect(String(gatesStep!.run)).toContain("node-pty");
+  });
+
+  it.each([
+    ["release-npm.yml", () => stepsIn(npmWf, "gates")],
+    ["release-electron.yml", () => stepsIn(elWf, "gates")],
+  ])("%s runs the full gate set, not a subset", (_name, steps) => {
+    const names = steps().map((st) => String(st.name ?? "").toLowerCase());
+    for (const gate of ["lint", "test", "licences", "notices"]) {
+      expect(names.some((n) => n.includes(gate)), `missing gate: ${gate}`).toBe(
+        true,
+      );
+    }
   });
 });
 
-describe("release.yml: skip_electron (the npm-only run)", () => {
-  it("is offered as an input at all", () => {
-    const inputs = (
-      wf as unknown as {
-        on: { workflow_dispatch: { inputs: Record<string, unknown> } };
-      }
-    ).on.workflow_dispatch.inputs;
-    expect(Object.keys(inputs)).toContain("skip_electron");
+describe("the split: two workflows, and what each half must guarantee", () => {
+  // `release.yml` became `release-npm.yml` + `release-electron.yml` on
+  // 2026-08-28. It briefly carried a `skip_electron` input for npm-only weeks;
+  // the split replaces it, because "don't run the second workflow" needs no
+  // flag, no extra job condition, and no way to get half-applied.
+
+  it("keeps the old single workflow deleted, so neither half is shadowed", () => {
+    // A leftover release.yml would still be dispatchable, and it would publish
+    // through the code paths this refactor exists to fix.
+    expect(existsSync(path.join(ROOT, ".github/workflows/release.yml"))).toBe(
+      false,
+    );
   });
 
-  it("skips BOTH shells, never just one", () => {
-    // The flag is skip_electron and not skip_mac on purpose: a release either
-    // has a desktop half or it does not, and a one-platform desktop release is
-    // what `skip_windows` exists for — a Windows build that failed on the day.
-    expect(shapeOf({ skip_electron: true })).toEqual({
-      mac: "skipped",
-      windows: "skipped",
-      publish: "skipped",
-    });
+  it("puts the npm publish in one workflow and the shells in the other", () => {
+    expect(Object.keys(npmWf.jobs)).toContain("npm");
+    expect(Object.keys(npmWf.jobs)).not.toContain("mac");
+    expect(Object.keys(npmWf.jobs)).not.toContain("windows");
+    // The GitHub Release carries the shells' artifacts, so it belongs with them.
+    expect(Object.keys(npmWf.jobs)).not.toContain("publish");
+    expect(Object.keys(elWf.jobs)).toEqual(
+      expect.arrayContaining(["resolve", "mac", "windows", "publish"]),
+    );
+    expect(Object.keys(elWf.jobs)).not.toContain("npm");
   });
 
-  it("cuts NO GitHub Release, rather than one carrying no assets", () => {
-    // WHY this matters: electron-updater's github provider reads
-    // latest-mac.yml / latest.yml from the LATEST release, and libi-site's
-    // download buttons point at releases/latest/download/<name>. An
-    // asset-less release becomes the latest one, so it would take out
-    // auto-update for every installed app and 404 both download links — as a
-    // side effect of a run whose only intent was to move the npm package.
-    expect(shapeOf({ skip_electron: true }).publish).toBe("skipped");
+  it("carries no skip_electron flag in either half", () => {
+    for (const wf of [npmWf, elWf]) {
+      expect(Object.keys(wf.on.workflow_dispatch.inputs ?? {})).not.toContain(
+        "skip_electron",
+      );
+    }
   });
 
-  it("states that guarantee in publish's OWN condition, not only via mac", () => {
-    // Read this with the test above. TODAY the outcome is already guaranteed
-    // by a different clause: skip_electron skips mac, and publish requires
-    // `needs.mac.result == 'success'`, so publish cannot run either way.
-    // Deleting `!inputs.skip_electron` from publish therefore changes NOTHING
-    // observable, and the outcome test above keeps passing — verified by
-    // mutation, which is the only reason this second test exists.
-    //
-    // The clause is not decoration, though. The foreseeable regression is
-    // someone giving mac the same treatment Windows has — a
-    // `|| needs.mac.result == 'skipped'` added for symmetry, so a deliberately
-    // skipped shell does not block the release. That edit is reasonable in
-    // isolation and would silently open the asset-less-release path. This
-    // assertion is what survives it.
-    expect(String(job("publish").if)).toContain("!inputs.skip_electron");
+  it("takes the version to wrap as an INPUT — this is the whole point", () => {
+    // While the halves were joined, a shell could only ever be built after an
+    // irreversible npm publish, so every bug in a shell job cost a version
+    // number to find. Two did, in one afternoon. Taking the version as input
+    // means the electron half re-runs against the same published version as
+    // often as needed.
+    expect(Object.keys(elWf.on.workflow_dispatch.inputs ?? {})).toContain(
+      "version",
+    );
   });
 
-  it("leaves the npm job alone — that is the entire point of the run", () => {
-    // npm has no `if:`; it must stay unconditional or the flag would skip the
-    // one thing it exists to ship.
-    expect(job("npm").if).toBeUndefined();
+  it("still BUILDS both shells on an electron dry run, and withholds only the Release", () => {
+    // The inverse of the npm workflow's dry run, and the reason this one is
+    // useful: a dry run that skipped the shells would rehearse nothing that has
+    // ever actually broken.
+    expect(String(jobIn(elWf, "mac").if ?? "")).not.toContain("dry_run");
+    expect(String(jobIn(elWf, "windows").if ?? "")).not.toContain("dry_run");
+    expect(String(jobIn(elWf, "publish").if)).toContain("!inputs.dry_run");
   });
 
-  it("changes nothing about the runs that do not set it", () => {
-    // Every condition reduces to its previous form when the flag is false, so
-    // adding it cannot have altered the shapes that already shipped releases.
+  it("uploads the update feed with each shell, or the release cannot be assembled", () => {
+    // release-github.js refuses an asset set missing a platform's feed, and on
+    // a dry run these artifacts are the only output there is.
+    const feeds: Record<string, string> = {
+      mac: "latest-mac.yml",
+      windows: "latest.yml",
+    };
+    for (const [shell, feed] of Object.entries(feeds)) {
+      const upload = stepsIn(elWf, shell).find((st) =>
+        String(st.uses ?? "").includes("upload-artifact"),
+      );
+      expect(String((upload?.with as Record<string, unknown>)?.path)).toContain(
+        feed,
+      );
+      // An empty upload must fail the job rather than yield a release with
+      // nothing in it.
+      expect((upload?.with as Record<string, unknown>)?.["if-no-files-found"]).toBe(
+        "error",
+      );
+    }
+  });
+});
+
+describe("release-electron.yml: the shapes a dispatch can produce", () => {
+  it("builds both shells and publishes, by default", () => {
     expect(shapeOf({})).toEqual({
       mac: "success",
       windows: "success",
       publish: "runs",
     });
+  });
+
+  it("builds both shells on a dry run and publishes nothing", () => {
+    // The distinguishing property of this workflow. Under the old joined
+    // workflow a dry run skipped the shells entirely, which is why neither of
+    // the two bugs that cost a version could ever have been rehearsed.
+    expect(shapeOf({ dry_run: true })).toEqual({
+      mac: "success",
+      windows: "success",
+      publish: "skipped",
+    });
+  });
+
+  it("still publishes when Windows was skipped on purpose", () => {
     expect(shapeOf({ skip_windows: true })).toEqual({
       mac: "success",
       windows: "skipped",
       publish: "runs",
     });
-    expect(shapeOf({ dry_run: true })).toEqual({
-      mac: "skipped",
-      windows: "skipped",
-      publish: "skipped",
-    });
-    // A FAILED Windows leg still blocks the release; the new flag must not
-    // have opened a path around that.
+  });
+
+  it("publishes nothing when either shell FAILED", () => {
+    // A failed Windows leg must not ship mac-only: in the release list that is
+    // indistinguishable from shipping mac-only on purpose, and nobody would
+    // notice for a version.
     expect(shapeOf({}, { windows: "failure" }).publish).toBe("skipped");
     expect(shapeOf({}, { mac: "failure" }).publish).toBe("skipped");
+    // Including on a dry run, where there is nothing to publish anyway.
+    expect(shapeOf({ dry_run: true }, { mac: "failure" }).publish).toBe("skipped");
   });
 });
