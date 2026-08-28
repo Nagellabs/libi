@@ -97,7 +97,12 @@ mainSyncLog(`main.ts: isDev=${isDev} __dirname=${__dirname}`);
 // `process.env` publishing further down. `ANALYTICS_ENABLED` is a module-level
 // const evaluated the first time `lib/analytics/config` is loaded, so an
 // assignment made after something has already pulled that module in is a no-op
-// that still reads as a fix. Nothing above this line touches runtime code.
+// that still reads as a fix. That is not a precaution — it is measured: the
+// first draft of this fix sat below `resolveRuntime`, and walking the compiled
+// require graph of the shipped 0.1.8 bundle shows `shell-api.js` reaching 310
+// modules, `lib/analytics/config.js` among them. `resolveRuntime` loads
+// shell-api, so the value was already frozen. Nothing above this line touches
+// runtime code.
 //
 // `!isDev` rather than relying on the dev path returning before the later
 // block: in a dev checkout `bin/libi.js` owns this decision (and runs Next in
