@@ -2,6 +2,12 @@
 
 **An AI video studio for coding agents.**
 
+[![npm](https://img.shields.io/npm/v/@nagellabs/libi?logo=npm&label=npm&color=cb3837)](https://www.npmjs.com/package/@nagellabs/libi)
+[![desktop](https://img.shields.io/github/v/release/Nagellabs/libi?logo=github&label=desktop)](https://github.com/Nagellabs/libi/releases)
+[![license](https://img.shields.io/npm/l/@nagellabs/libi?color=blue)](LICENSE)
+
+**`npx @nagellabs/libi`** — or [download the desktop app](https://github.com/Nagellabs/libi/releases) for macOS or Windows.
+
 libi treats video as code. Every frame is a JavaScript function drawing to a canvas, so an
 AI coding agent — the most capable form of AI available today — can write, edit and refine
 a video the same way it writes software. You describe what you want in chat; the agent
