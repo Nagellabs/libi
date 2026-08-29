@@ -329,8 +329,20 @@ export const playwrightDriver: RenderDriver = {
       );
     });
     page.on("requestfailed", (req) => {
-      exportLogger.warn(
-        { event: "playwright_request_failed", jobId, url: req.url(), failure: req.failure()?.errorText },
+      // ERR_ABORTED is not a failure here, it is how <video> loads. `/content`
+      // serves byte ranges, so each clip opens a probe request, then aborts it
+      // and reissues Range requests as the renderer seeks — Chromium reports
+      // every superseded request as `requestfailed`. A v0.1.8 export logged
+      // seven of these across three clips and produced a pixel-correct file;
+      // they were briefly filed as an unexplained defect purely because they
+      // arrived at warn level. A genuinely missing asset does NOT look like
+      // this — it surfaces as ERR_FAILED, a 404, or a blank frame — so keep
+      // everything else loud and demote only this one.
+      const failure = req.failure()?.errorText;
+      const log = failure === "net::ERR_ABORTED" ? exportLogger.debug : exportLogger.warn;
+      log.call(
+        exportLogger,
+        { event: "playwright_request_failed", jobId, url: req.url(), failure },
         "export.playwright_request_failed",
       );
     });
