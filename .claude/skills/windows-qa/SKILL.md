@@ -14,6 +14,32 @@ carries the fuller narrative. Read that first; this file is the rule list.
 
 **Start with "The VM is an ADMINISTRATOR" below.** It is the newest rule and the only one that has let a broken build reach users.
 
+## Getting on the box, and putting it away
+
+The VM is not left running between sessions, and it is not left *existing*
+either. The end-of-session move snapshots it and deletes the VM, disk, NIC and
+public IP, which drops the standing cost from ~$15/month to ~$3.
+
+Two consequences that will bite you if you assume otherwise:
+
+- **Start with `restore`, not `up`.** `up` builds a fresh box and re-runs an
+  hour of provisioning; `restore` attaches the snapshot and comes back with the
+  installed app, the app's data directory and the build tree exactly as they
+  were left.
+- **The public IP does not survive.** It is released on the way down and a new
+  one is allocated on the way back. Never hardcode it, in a script or in a doc
+  — resolve it, or use the lab wrapper's own ssh, which looks it up. The
+  runbook named a fixed IP in three places and all three went stale the first
+  time the lab was put away properly.
+
+Reaching it is gated on a firewall that allows exactly one source address, so a
+changed network — VPN on or off, a different wifi — makes the connection **time
+out rather than refuse**. That is the firewall, not a dead VM, and re-pointing
+it at your current address is a one-liner. Expect to need it after a restore.
+
+Host details, the commands and the cost table are in
+`docs-local/release/windows-qa-runbook.md`.
+
 ## Getting the code there
 
 The VM has an **extracted tarball at `C:\build\src`, not a clone** — no `.git`,
