@@ -85,10 +85,24 @@ Two consequences worth holding on to:
   `dry_run: true` builds both and uploads the artifacts without cutting a Release. Use it
   after ANY change to the shell jobs or `release-electron.js` — that is the whole reason
   the workflows are split, and it costs nothing.
-- **Recovery differs by cause.** A transient failure (notarization is a network
-  round-trip) takes *Re-run failed jobs*. A failure whose fix lands in code takes a fresh
-  dispatch, because the shell jobs check out the TAG and a re-run would build the same
-  unfixed commit.
+- **Recovery differs by cause.** A transient failure takes *Re-run failed jobs* — the ref
+  already carries the right code. Both halves of "transient" have now bitten: Apple
+  notarization is a network round-trip, and on 0.1.9 GitHub's CDN cut the connection
+  mid-download of electron's own zip. A failure whose fix lands in code takes a fresh
+  dispatch with **`build_ref`** set to the fixed commit, because a re-run rebuilds the
+  same commit. Give `build_ref` a branch or a FULL 40-char SHA: `actions/checkout`
+  expands a ref into `refs/heads/<ref>*` and `refs/tags/<ref>*`, so an abbreviated SHA
+  matches nothing and the job dies before a single gate runs.
+- **`build_ref` is why a shell bug no longer costs a version.** The jobs used to pin
+  their checkout to `v<version>`, so a defect found AFTER the npm publish — which is when
+  shell defects are found — needed a new version purely to move the tag. Overriding the
+  ref is sound because the checkout supplies only build TOOLING; the runtime is fetched
+  from npm by version (`--from-registry`), never from the tree. The Release is still cut
+  against the version's real tag.
+- **Never push to `main` while `release-npm.yml` is in flight.** Its last step is a plain
+  `git push --follow-tags origin HEAD:main` from the commit it checked out at dispatch;
+  anything you land meanwhile makes that push non-fast-forward, and it is rejected AFTER
+  npm has already published.
 
 ## After a release
 

@@ -159,6 +159,31 @@ The GUI half still needs a screen. Launching over SSH gives an elevated token,
 so "it booted over SSH" says nothing about a real first run; do that check at
 an RDP session.
 
+## Two ways to hurt yourself on this box
+
+**Never `icacls` a directory you are connected through.** Granting rights on
+`%USERPROFILE%` (or its parents) to test something as another principal resets
+the SSH session mid-command — sshd runs as that user. It happened on 2026-08-28,
+left the ACLs half-applied and the app tree without its farm, and cost two
+recovery passes. If you need another principal to reach the install, copy what
+it needs to `C:\<something>` instead and grant there.
+
+**Getting a CI artifact onto the box: hand it the signed URL, don't relay it.**
+The artifacts API 302s to a signed Azure blob URL, and the VM is itself in
+Azure — so it pulls 795 MB in about 25 seconds, against several minutes of
+uplink if you download locally and `scp` it up.
+
+```bash
+curl -s -o /dev/null -w "%{redirect_url}" \
+  -H "Authorization: token $(gh auth token)" \
+  -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/repos/Nagellabs/libi/actions/artifacts/<id>/zip"
+```
+
+Write that URL to a file, `scp` the file (it is a few hundred bytes), and have a
+`.ps1` on the box `Invoke-WebRequest` it. The URL is short-lived, so fetch it
+immediately before use.
+
 ## Two habits that prevent most of the above
 
 1. **Write a `.ps1`, `scp` it, run it with `-File`.** Quoting through
