@@ -112,7 +112,14 @@ describe("/api/shell/reveal — allowlist covers libi's own configurable roots",
     // The point of the change: before LIBI_HOME joined the allowlist this
     // spawned nothing and the user got a button that did nothing at all.
     expect(spawnMock).toHaveBeenCalledTimes(1);
-    expect(spawnMock.mock.calls[0]?.[1]).toContain(fileUnderLibiHome);
+    // Assert on the CONTAINING DIRECTORY, which every platform's argument
+    // references, rather than on the file path, which only macOS and Windows
+    // pass. Linux has no native "reveal", so the route opens the parent
+    // (`xdg-open <dirname>`) — asserting the file path here passed on a Mac
+    // and failed on ubuntu CI, which is the whole point of this repo's
+    // "a green suite on your Mac is not a green CI" rule.
+    const args = (spawnMock.mock.calls[0]?.[1] ?? []).join(" ");
+    expect(args).toContain(path.dirname(fileUnderLibiHome));
   });
 
   it("still refuses a path outside every allowed root", async () => {
