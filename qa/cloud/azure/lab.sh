@@ -429,6 +429,40 @@ Create the pair first (the private half never leaves this machine):
   az_note "          lab.sh ssh win '<cmd>'   (one command, full output, no 4KB cap)"
 }
 
+# Copy a PowerShell script to the Windows box, ASCII-safe.
+#
+# scp delivers bytes intact, but PowerShell 5.1 reads a BOM-less UTF-8 .ps1 as
+# Windows-1252 — so an em dash in a COMMENT becomes `a<EUR>"`, and that stray
+# double quote opens a string that swallows the rest of the parse. The failure
+# is reported tens of lines away ("Missing closing '}'"), which is how it cost
+# a 30-minute Electron build that never started.
+#
+# Same class as the mangling exec_on handles, different cause: there az
+# re-encodes upstream (a BOM does not help), here the file is fine and the
+# READER is wrong. Transliterating to ASCII fixes both, so both paths do it.
+#
+# Only for text scripts. Never route a tarball or any binary through this.
+push_script() {
+  local plat="${1:-}" src="${2:-}" dest="${3:-}"
+  [ "$plat" = win ] || az_die "usage: lab.sh push-script win <local.ps1> <remote-name>"
+  [ -f "$src" ] || az_die "no such file: $src"
+  [ -n "$dest" ] || az_die "usage: lab.sh push-script win <local.ps1> <remote-name>"
+  local vm ip; vm="$(az_vm_name win)"
+  ip="$(az vm show --resource-group "$LIBI_AZ_GROUP" --name "$vm" -d --query publicIps -o tsv 2>/dev/null || true)"
+  [ -n "$ip" ] || az_die "$vm has no public IP -- is it up?"
+  local tmp; tmp="$(mktemp -t libi-lab-push)" || az_die "could not create a temp file"
+  LC_ALL=en_US.UTF-8 sed \
+    -e 's/—/--/g' -e 's/–/-/g' -e 's/…/.../g' -e 's/→/->/g' \
+    -e "s/’/'/g" -e "s/‘/'/g" -e "s/“/'/g" -e "s/”/'/g" \
+    "$src" | LC_ALL=C tr -cd '\0-\177' > "$tmp"
+  cmp -s "$src" "$tmp" || az_note "note: $(basename "$src") contained non-ASCII; pushed transliterated"
+  scp -o StrictHostKeyChecking=accept-new -i "$LIBI_AZ_SSH_KEY" \
+    "$tmp" "$LIBI_AZ_ADMIN@$ip:C:/Users/$LIBI_AZ_ADMIN/$dest"
+  local rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
 # Open an RDP session to the Windows box on THIS Mac.
 #
 # Tier 2 of the playbook -- the half that needs eyes. It also unlocks
@@ -946,6 +980,7 @@ case "${1:-}" in
   ssh-setup)   shift; az_require_cli; ssh_setup "${1:-win}" ;;
   ssh)         shift; az_require_cli; ssh_to "$@" ;;
   rdp)         shift; az_require_cli; rdp "${1:-win}" ;;
+  push-script) shift; az_require_cli; push_script "$@" ;;
   provision)   shift; az_require_cli; provision "${1:-}" ;;
   exec)        shift; az_require_cli; exec_on "$@" ;;
   desktop)     shift; az_require_cli; desktop "${1:-}" ;;

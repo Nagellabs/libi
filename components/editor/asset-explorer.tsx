@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Folder, FolderPlus, FolderInput, Pencil, Trash2 } from "lucide-react";
+import { Folder, FolderPlus, FolderInput, Pencil, Trash2, FolderOpen } from "lucide-react";
+import { revealFileById, revealLabel, getShellPlatform } from "@/lib/shell/client";
+import { trackEvent } from "@/lib/analytics/client";
 import type { AssetFolderRecord, FileRecord } from "@/lib/db/schema/types";
 import {
   useAssetLevel,
@@ -175,6 +177,12 @@ export function AssetExplorer({
     }
     await deleteFolder.mutateAsync({ folderId, mode: "cascade", confirm: true });
   }
+  function menuRevealAsset(fileId: string) {
+    setMenu(null);
+    trackEvent("asset_revealed", { source: "asset_grid" });
+    void revealFileById(fileId);
+  }
+
   async function menuMoveAssetToRoot(fileId: string) {
     setMenu(null);
     try {
@@ -330,14 +338,30 @@ export function AssetExplorer({
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              onClick={() => menuMoveAssetToRoot(menu.id)}
-              className="cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
-            >
-              <FolderInput className="h-3.5 w-3.5" />
-              Move to root
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => menuMoveAssetToRoot(menu.id)}
+                className="cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
+              >
+                <FolderInput className="h-3.5 w-3.5" />
+                Move to root
+              </button>
+              {/* The Assets grid keeps its own context menu rather than the
+                  sidebar's ResourceContextMenu, so the reveal item has to be
+                  added here too — a user right-clicking an asset should get
+                  the same action wherever the asset is shown. Folders are
+                  excluded here for the same reason as in the sidebar: they
+                  are DB rows with nothing on disk. */}
+              <button
+                type="button"
+                onClick={() => menuRevealAsset(menu.id)}
+                className="cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
+              >
+                <FolderOpen className="h-3.5 w-3.5" />
+                {revealLabel(getShellPlatform())}
+              </button>
+            </>
           )}
         </div>
       )}

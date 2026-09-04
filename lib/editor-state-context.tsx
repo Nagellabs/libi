@@ -95,8 +95,6 @@ interface PersistedEditorState {
   previewTimelineSplit: number;
   /** Effects picker panel height in px. Global, shared across pieces. Clamped to [200, 560]. */
   effectsPanelHeight: number;
-  /** Timeline horizontal zoom in content px-per-second. null = "fit / not yet set". Global, shared across pieces. */
-  previewTimelineZoom: number | null;
   /** Effects picker panel open/closed. Global, persisted so it survives reload. */
   effectsPanelOpen: boolean;
   /** Whether the user dismissed the "Connect Codex" first-use nudge. Global, persisted. */
@@ -139,7 +137,6 @@ const DEFAULTS: PersistedEditorState = {
   scriptShotRailPct: 35,
   previewTimelineSplit: 72,
   effectsPanelHeight: 300,
-  previewTimelineZoom: null,
   effectsPanelOpen: false,
   codexNudgeDismissed: false,
   effectsLastPhase: "in",
@@ -315,10 +312,6 @@ function loadState(): PersistedEditorState {
             : DEFAULTS.scriptShotRailPct,
         previewTimelineSplit: clampSplit(parsed.previewTimelineSplit, DEFAULTS.previewTimelineSplit),
         effectsPanelHeight: clampEffectsHeight(parsed.effectsPanelHeight),
-        previewTimelineZoom:
-          typeof parsed.previewTimelineZoom === "number" && parsed.previewTimelineZoom > 0
-            ? parsed.previewTimelineZoom
-            : DEFAULTS.previewTimelineZoom,
         effectsPanelOpen:
           typeof parsed.effectsPanelOpen === "boolean"
             ? parsed.effectsPanelOpen
@@ -375,7 +368,6 @@ function loadState(): PersistedEditorState {
         scriptShotRailPct: DEFAULTS.scriptShotRailPct,
         previewTimelineSplit: DEFAULTS.previewTimelineSplit,
         effectsPanelHeight: DEFAULTS.effectsPanelHeight,
-        previewTimelineZoom: DEFAULTS.previewTimelineZoom,
         effectsPanelOpen: DEFAULTS.effectsPanelOpen,
         codexNudgeDismissed: DEFAULTS.codexNudgeDismissed,
         effectsLastPhase: DEFAULTS.effectsLastPhase,
@@ -584,9 +576,11 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const [effectsPanelHeight, setEffectsPanelHeightState] = useState(
     () => loadState().effectsPanelHeight,
   );
-  const [previewTimelineZoom, setPreviewTimelineZoomState] = useState<number | null>(
-    () => loadState().previewTimelineZoom,
-  );
+  // Zoom is a TRANSIENT working state, never persisted: it is an ABSOLUTE
+  // px-per-second, so a value stored under one panel width silently overflows a
+  // narrower one later (and across every other piece). Each mount starts at Fit
+  // and the timeline re-fits per piece.
+  const [previewTimelineZoom, setPreviewTimelineZoomState] = useState<number | null>(null);
   const [effectsPanelOpen, setEffectsPanelOpenState] = useState(
     () => loadState().effectsPanelOpen,
   );
@@ -728,8 +722,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   previewTimelineSplitRef.current = previewTimelineSplit;
   const effectsPanelHeightRef = useRef(effectsPanelHeight);
   effectsPanelHeightRef.current = effectsPanelHeight;
-  const previewTimelineZoomRef = useRef(previewTimelineZoom);
-  previewTimelineZoomRef.current = previewTimelineZoom;
   const effectsPanelOpenRef = useRef(effectsPanelOpen);
   effectsPanelOpenRef.current = effectsPanelOpen;
   const codexNudgeDismissedRef = useRef(codexNudgeDismissed);
@@ -776,7 +768,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       scriptShotRailPct: scriptShotRailPctRef.current,
       previewTimelineSplit: previewTimelineSplitRef.current,
       effectsPanelHeight: effectsPanelHeightRef.current,
-      previewTimelineZoom: previewTimelineZoomRef.current,
       effectsPanelOpen: effectsPanelOpenRef.current,
       codexNudgeDismissed: codexNudgeDismissedRef.current,
       effectsLastPhase: effectsLastPhaseRef.current,
@@ -945,9 +936,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
 
   const setPreviewTimelineZoom = useCallback((value: number | null) => {
     setPreviewTimelineZoomState(value);
-    previewTimelineZoomRef.current = value;
-    persist();
-  }, [persist]);
+  }, []);
 
   const setEffectsPanelOpen = useCallback((value: boolean) => {
     setEffectsPanelOpenState(value);

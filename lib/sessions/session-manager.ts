@@ -28,6 +28,7 @@ import {
   type ModelState,
   type SessionModelSnapshot,
 } from "@/lib/sessions/model-option";
+import { recordWindow } from "@/lib/sessions/model-window-cache";
 import { sessionMetaFor } from "@/lib/sessions/session-meta";
 import {
   promptErrorNote,
@@ -993,6 +994,22 @@ export class SessionManager {
         type: "agent-complete",
         stopReason: result.stopReason,
       });
+      // Remember the settled context window for (agent, model) so the next
+      // process seeds the right denominator immediately instead of showing
+      // the adapter's default seed for its first turn on this model. The
+      // RAW reported size, never the corrected one — recording a correction
+      // would make the cache self-confirming (see model-window-cache.ts).
+      const settledUsage = entry.latestUsage;
+      if (settledUsage) {
+        const settledModel = extractModelOption(entry.configOptions);
+        if (settledModel) {
+          recordWindow(
+            entry.agentId,
+            settledModel.currentModelId,
+            settledUsage.reportedSize,
+          );
+        }
+      }
     } catch (err) {
       entry.currentAgentMessage = null;
       this.emitForSession(sessionId, {

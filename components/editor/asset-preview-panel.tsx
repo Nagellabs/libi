@@ -7,6 +7,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useEditorState } from "@/lib/editor-state-context";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { AssetMediaView } from "./asset-media-view";
+import { AssetLocationRow } from "./asset-location-row";
 import { AnalysisSummaryPanel } from "./analysis-summary-panel";
 import { TranscriptView, FramesTabContent, StepStateGate, StepIcon } from "./analysis-viewer";
 import { ScriptTabContent } from "./script-tab-content";
@@ -329,7 +330,7 @@ function FullModeBody({
 
 // Bottom-panel content in default mode (and reused in full mode).
 // Renders Summary, Transcript, and Frames tabs.
-function AnalysisTabsBody({
+export function AnalysisTabsBody({
   asset,
   onSeek,
   currentTime,
@@ -344,6 +345,11 @@ function AnalysisTabsBody({
   return (
     <>
       <TabsContent value="summary" className="px-4 py-3 m-0">
+        {/* Above the gate on purpose: StepStateGate renders "No summary yet"
+            and nothing else for an un-analyzed asset, which is most of them.
+            Inside it, the location would be invisible exactly when it is
+            most useful. */}
+        <AssetLocationRow fileId={asset.id} />
         <StepStateGate step={byKind.summary} kind="summary">
           <AnalysisSummaryPanel summary={summary} onSeek={onSeek} />
         </StepStateGate>

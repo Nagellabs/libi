@@ -80,6 +80,11 @@ export const EVENT_NAMES = [
   "agent_message_sent",
   // asset / feature usage (UI-initiated; not covered by the tool_used wrap)
   "file_uploaded",
+  // Asset revealed in the OS file manager. Param `source` is
+  // "context_menu" | "summary_tab" | "asset_grid" — bounded by construction,
+  // one value per surface that offers the action. The path itself is NEVER
+  // sent: it is unbounded and personal.
+  "asset_revealed",
   "terminal_session_started",
   "mcp_server_added",
   "codex_connect_toggled",

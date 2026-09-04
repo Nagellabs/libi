@@ -10,9 +10,6 @@ import {
   Target,
   Layers,
   Plus,
-  ZoomIn,
-  ZoomOut,
-  Maximize2,
   Link2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -36,6 +33,7 @@ import {
 } from "@/lib/preview/track-stack-view-model";
 import { TimelineOverlayRow } from "@/components/preview/timeline-overlay-row";
 import { TimelinePlayheadStrip } from "@/components/preview/timeline-playhead-strip";
+import TimelineZoomControls from "@/components/preview/timeline-zoom-controls";
 import { usePlayheadScrub } from "@/hooks/preview/use-playhead-scrub";
 import { TrackRail, RAIL_WIDTH } from "@/components/preview/track-rail";
 import type { LaneView } from "@/lib/preview/lane-bar-geometry";
@@ -45,8 +43,15 @@ import {
   fitPxPerSec,
   applyWheelZoom,
   anchoredScrollLeft,
-  zoomFactorPercent,
+  maxPxPerSec,
 } from "@/lib/preview/timeline-zoom";
+import {
+  followScrollLeft,
+  edgeScrollDelta,
+  zoomAnchorX,
+  maxScrollLeft,
+  type FollowView,
+} from "@/lib/preview/playhead-follow";
 import { AddOverlayMenu } from "@/components/preview/add-overlay-menu";
 import { overlayKeyframeTimes } from "@/lib/overlays/keyframes";
 import type { NewOverlayPayload, NewOverlayCtx } from "@/lib/overlays/new-overlay-defaults";
@@ -259,6 +264,10 @@ function Timeline({
   }, []);
 
   const totalSeconds = totalFrames > 0 && fps > 0 ? totalFrames / fps : 0;
+  // The zoom ceiling is frame-derived (MAX_PX_PER_FRAME × fps), so it depends
+  // only on this composition's frame rate — memoize on fps alone rather than
+  // recomputing on every render.
+  const maxPx = useMemo(() => maxPxPerSec(fps), [fps]);
   // Clamp the stored zoom up to fit so a short comp never renders narrower than
   // its viewport. fitPxPerSec already floors to ZOOM_MIN on a degenerate view.
   const fitPx = fitPxPerSec(viewportWidth, totalSeconds);
@@ -280,10 +289,12 @@ function Timeline({
   // current before any wheel event can fire against the committed DOM.
   const pxPerSecRef = useRef(pxPerSec);
   const totalSecondsRef = useRef(totalSeconds);
+  const maxPxRef = useRef(maxPx);
   const setZoomRef = useRef(setPreviewTimelineZoom);
   useLayoutEffect(() => {
     pxPerSecRef.current = pxPerSec;
     totalSecondsRef.current = totalSeconds;
+    maxPxRef.current = maxPx;
     setZoomRef.current = setPreviewTimelineZoom;
   });
 
@@ -309,7 +320,11 @@ function Timeline({
       e.preventDefault();
       const oldPx = pxPerSecRef.current;
       if (oldPx <= 0 || totalSecondsRef.current <= 0) return;
-      const newPx = applyWheelZoom({ pxPerSec: oldPx, factor: e.deltaY < 0 ? 1.1 : 1 / 1.1 });
+      const newPx = applyWheelZoom({
+        pxPerSec: oldPx,
+        factor: e.deltaY < 0 ? 1.1 : 1 / 1.1,
+        maxPx: maxPxRef.current,
+      });
       if (newPx === oldPx) return;
       const rect = el.getBoundingClientRect();
       const pointerX = e.clientX - rect.left - RAIL_WIDTH;
@@ -325,10 +340,39 @@ function Timeline({
     return () => el.removeEventListener("wheel", handler);
   }, []);
 
-  const zoomFactor = zoomFactorPercent(pxPerSec, fitPx);
-  const handleZoomIn = () => setPreviewTimelineZoom(applyWheelZoom({ pxPerSec, factor: 1.2 }));
-  const handleZoomOut = () => setPreviewTimelineZoom(applyWheelZoom({ pxPerSec, factor: 1 / 1.2 }));
   const handleZoomFit = () => setPreviewTimelineZoom(null);
+
+  // Opening a different piece starts at Fit. Zoom is absolute px-per-second, so
+  // carrying one piece's zoom into another shows an arbitrary slice of a
+  // composition with an unrelated duration.
+  useEffect(() => {
+    setPreviewTimelineZoom(null);
+  }, [pieceId, setPreviewTimelineZoom]);
+
+  // Shift+Z re-fits the whole composition (CapCut's "adapt to timeline"). Bare
+  // Shift+Z is free: the two other `z` bindings in the editor — discard-draft in
+  // snapshot-draft-switcher.tsx and revert-reanchor in preview-player.tsx — both
+  // require Cmd/Ctrl and return early without it.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key !== "z" && e.key !== "Z") return;
+      const el = document.activeElement as HTMLElement | null;
+      if (
+        el &&
+        (el.tagName === "INPUT" ||
+          el.tagName === "TEXTAREA" ||
+          el.tagName === "SELECT" ||
+          el.isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      setPreviewTimelineZoom(null);
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [setPreviewTimelineZoom]);
 
   const playheadPercent = totalFrames > 0 ? (currentFrame / (totalFrames - 1)) * 100 : 0;
 
@@ -410,12 +454,190 @@ function Timeline({
   // select-none guard while any of them is active.
   const playheadLaneRef = useRef<HTMLDivElement>(null);
   const [playheadDragging, setPlayheadDragging] = useState(false);
-  const lineScrubHandlers = usePlayheadScrub({
+  // Latest pointer x while the playhead is being dragged — the edge auto-scroll
+  // re-scrubs from it after each scroll step.
+  const dragPointerXRef = useRef<number | null>(null);
+  // Shared by BOTH scrub surfaces (the spanning line below, and the strip's
+  // own usePlayheadScrub inside TimelinePlayheadStrip) — whichever the user
+  // actually drags must populate this ref, or the edge-scroll loop below
+  // reads a permanently-null clientX and never scrolls for that surface.
+  const handleDragPointerX = useCallback((x: number) => {
+    dragPointerXRef.current = x;
+  }, []);
+
+  // Shared dedupe-guard: passed to BOTH this line's `usePlayheadScrub` call
+  // and the strip's (via the `getLastFrame`/`setLastFrame` props below). The
+  // edge-scroll rAF loop further down always re-scrubs through the LINE's
+  // `scrubTo`, even when the drag actually started on the strip — sharing
+  // this state (instead of each instance keeping its own) is what makes that
+  // safe: either instance's `scrub` sees the other's last emitted frame, so a
+  // re-scrub through the "wrong" instance can't duplicate a seek the right
+  // one already made, and can't refuse a genuinely new one either.
+  //
+  // A get/set FUNCTION pair, not a shared ref object: the ref itself is owned
+  // and mutated only here, where it's created — handing it to ANOTHER hook
+  // call to mutate directly is what the React Compiler's ref-safety analysis
+  // rejects (writing `.current` on a value that arrived as a hook argument).
+  const playheadLastFrameRef = useRef<number | null>(null);
+  const getPlayheadLastFrame = useCallback(() => playheadLastFrameRef.current, []);
+  const setPlayheadLastFrame = useCallback((frame: number | null) => {
+    playheadLastFrameRef.current = frame;
+  }, []);
+
+  // `scrubTo` isn't a DOM prop — pulled out here so only the four pointer
+  // handlers get spread onto the playhead line element below.
+  const { scrubTo: lineScrubTo, ...lineScrubHandlers } = usePlayheadScrub({
     laneRef: playheadLaneRef,
     totalFrames,
     onScrub: onFrameChange,
     onDraggingChange: setPlayheadDragging,
+    onDragPointerX: handleDragPointerX,
+    getLastFrame: getPlayheadLastFrame,
+    setLastFrame: setPlayheadLastFrame,
   });
+
+  // The lane's live scroll geometry, in post-rail lane px. Read from the DOM at
+  // call time (never stored) so it is correct mid-scroll and mid-zoom.
+  const readFollowView = useCallback((): FollowView | null => {
+    const el = scrollRef.current;
+    if (!el || renderWidth <= 0 || viewportWidth <= 0) return null;
+    return {
+      playheadX: (playheadPercent / 100) * renderWidth,
+      scrollLeft: el.scrollLeft,
+      viewportWidth,
+      contentWidth: renderWidth,
+    };
+  }, [renderWidth, viewportWidth, playheadPercent]);
+
+  const handleZoomTo = useCallback(
+    (next: number) => {
+      // Same no-op guard as the wheel handler below: at either zoom extreme,
+      // a control that clamps to the current value (e.g. zoom-in already at
+      // the frame-derived ceiling `maxPx`) must not arm a pending anchor that
+      // no later `[cw]` width change will ever consume.
+      if (Math.max(next, fitPx) === pxPerSec) return;
+      const el = scrollRef.current;
+      const view = readFollowView();
+      if (el && view && pxPerSec > 0) {
+        pendingAnchorRef.current = anchoredScrollLeft({
+          pointerX: zoomAnchorX(view),
+          prevScrollLeft: el.scrollLeft,
+          oldPxPerSec: pxPerSec,
+          newPxPerSec: next,
+        });
+      }
+      setPreviewTimelineZoom(next);
+    },
+    [pxPerSec, fitPx, readFollowView, setPreviewTimelineZoom],
+  );
+
+  // Follow the playhead: whenever the frame changes and the playhead is off
+  // screen, scroll it back into view. Keyed on the FRAME, so a manual scroll
+  // while paused moves nothing and is never fought — but during playback the
+  // playhead can never be lost. Suppressed mid-drag, where the edge auto-scroll
+  // below owns the scroll instead.
+  //
+  // readFollowView also changes identity on a pure ZOOM (renderWidth moves),
+  // and this effect's deps must include it so a PANEL RESIZE (viewportWidth
+  // moves) still re-follows. But naively following on every readFollowView
+  // change re-fires this effect right after the `[cw]` layout effect above
+  // applies an anchored wheel-zoom scrollLeft — and if the playhead sits
+  // outside that anchored window, this effect discarded the anchor and
+  // snapped to the playhead instead (a zoom-into-a-far-region regression).
+  // These two refs remember the (frame, viewportWidth) this effect last
+  // actually considered, so the body below can tell "the zoom changed the
+  // content width" apart from "the frame advanced" or "the panel resized" —
+  // and only follow for the latter two.
+  const lastFollowFrameRef = useRef(currentFrame);
+  const lastFollowViewportWidthRef = useRef(viewportWidth);
+
+  // useEffect (not useLayoutEffect): unlike the zoom-anchor effect above, there
+  // is no width change to synchronise with here, and this runs on every played
+  // frame — keeping this hot path out of the layout phase is deliberate.
+  useEffect(() => {
+    if (playheadDragging) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    const frameChanged = currentFrame !== lastFollowFrameRef.current;
+    const viewportChanged = viewportWidth !== lastFollowViewportWidthRef.current;
+    lastFollowFrameRef.current = currentFrame;
+    lastFollowViewportWidthRef.current = viewportWidth;
+    if (!frameChanged && !viewportChanged) return; // zoom-only change — don't fight the anchor
+    const view = readFollowView();
+    if (!view) return;
+    const next = followScrollLeft(view);
+    if (next !== null) el.scrollLeft = next;
+  }, [currentFrame, playheadDragging, readFollowView, viewportWidth]);
+
+  // `lineScrubHandlers` (and lineScrubTo with it) is a fresh value every
+  // render, so the edge-scroll effect below must not depend on it — doing so
+  // would tear down and restart the rAF loop on every frame of the drag. Read
+  // the current scrubTo through a ref instead (same latest-ref pattern as the
+  // wheel handler above).
+  const scrubToRef = useRef(lineScrubTo);
+  useLayoutEffect(() => {
+    scrubToRef.current = lineScrubTo;
+  });
+
+  // A fresh drag must start with NO known pointer x — otherwise a stale
+  // clientX left over from wherever the LAST drag ended keeps driving the
+  // edge-scroll loop below (and its re-scrub) until the next pointermove
+  // overwrites it. Reproduced: end a drag inside the edge zone, release, then
+  // press elsewhere — the loop scrolled the lane and re-seeked to the old
+  // position on its own.
+  //
+  // This reset is its OWN effect, keyed on `playheadDragging` alone, rather
+  // than living inline at the top of the edge-scroll effect below (which also
+  // depends on viewportWidth/renderWidth). The edge-scroll effect re-arms —
+  // teardown then setup — on every width change too, e.g. an editor splitter
+  // drag or window resize WHILE a pin is held stationary at the edge; an
+  // inline reset there fired on that re-arm as well, wiping a live, still-
+  // valid pointer x for a pointer that never moved (so nothing ever
+  // repopulated it), silently killing edge auto-scroll for the rest of that
+  // drag. Keying this effect on `playheadDragging` only means it fires
+  // exclusively on the false→true transition — a genuine drag start.
+  useEffect(() => {
+    if (playheadDragging) dragPointerXRef.current = null;
+  }, [playheadDragging]);
+
+  // Edge auto-scroll: while the playhead drag is held near (or past) a lane
+  // edge, scroll that way each frame and re-scrub, so the user can drag beyond
+  // the visible range and still see where they are landing.
+  useEffect(() => {
+    if (!playheadDragging) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    let raf = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const clientX = dragPointerXRef.current;
+      if (clientX == null) return;
+      const rect = el.getBoundingClientRect();
+      const pointerX = clientX - rect.left - RAIL_WIDTH;
+      const delta = edgeScrollDelta({ pointerX, viewportWidth });
+      if (delta === 0) return;
+      // maxScrollLeft only reads contentWidth/viewportWidth, so build the view
+      // from this effect's own deps rather than readFollowView() — that also
+      // pulls in playheadPercent, which changes every re-scrub and would put
+      // readFollowView in this effect's deps, retriggering the teardown this
+      // rAF loop exists to avoid (see the scrubToRef comment above).
+      const before = el.scrollLeft;
+      const max = maxScrollLeft({ playheadX: 0, scrollLeft: 0, viewportWidth, contentWidth: renderWidth });
+      el.scrollLeft = Math.max(0, Math.min(max, before + delta));
+      // Only re-scrub if the lane actually moved — at either extreme the clamp
+      // pins scrollLeft and the frame under the pointer is unchanged.
+      if (el.scrollLeft !== before) scrubToRef.current(clientX);
+    };
+    raf = requestAnimationFrame(tick);
+    // No `dragPointerXRef.current = null` here: this cleanup also runs on a
+    // mid-drag re-arm (viewportWidth/renderWidth changing while dragging),
+    // and nulling unconditionally is exactly what caused the bug the effect
+    // above exists to fix. The dedicated drag-start effect above is the only
+    // place this ref gets cleared; while not dragging, nothing reads it, so
+    // a value left over from the last drag is inert until the next drag
+    // start clears it.
+    return () => cancelAnimationFrame(raf);
+  }, [playheadDragging, viewportWidth, renderWidth]);
 
   // Cross-row drag → deltaRows from the pointer's real Y against the rendered
   // overlay rows (variable height). Measures the live row rects so the count of
@@ -654,42 +876,13 @@ function Timeline({
               }
             />
           )}
-          {/* Zoom controls: out / readout / in / fit */}
-          <div className="flex items-center gap-0.5">
-            <button
-              type="button"
-              data-testid="zoom-out"
-              onClick={handleZoomOut}
-              title="Zoom out"
-              className="flex size-5 cursor-pointer items-center justify-center rounded border border-border bg-background text-muted-foreground hover:text-foreground"
-            >
-              <ZoomOut className="size-3" />
-            </button>
-            <span
-              data-testid="zoom-readout"
-              className="min-w-[3.25rem] text-center font-mono text-[10px] text-muted-foreground tabular-nums"
-            >
-              {zoomFactor}%
-            </span>
-            <button
-              type="button"
-              data-testid="zoom-in"
-              onClick={handleZoomIn}
-              title="Zoom in"
-              className="flex size-5 cursor-pointer items-center justify-center rounded border border-border bg-background text-muted-foreground hover:text-foreground"
-            >
-              <ZoomIn className="size-3" />
-            </button>
-            <button
-              type="button"
-              data-testid="zoom-fit"
-              onClick={handleZoomFit}
-              title="Fit to viewport"
-              className="flex size-5 cursor-pointer items-center justify-center rounded border border-border bg-background text-muted-foreground hover:text-foreground"
-            >
-              <Maximize2 className="size-3" />
-            </button>
-          </div>
+          <TimelineZoomControls
+            pxPerSec={pxPerSec}
+            fitPx={fitPx}
+            maxPx={maxPx}
+            onZoom={handleZoomTo}
+            onFit={handleZoomFit}
+          />
           <span className="font-mono text-xs text-muted-foreground">{formatTime(totalFrames, fps)}</span>
         </div>
       </div>
@@ -724,6 +917,9 @@ function Timeline({
             laneRef={playheadLaneRef}
             dragging={playheadDragging}
             onDraggingChange={setPlayheadDragging}
+            onDragPointerX={handleDragPointerX}
+            getLastFrame={getPlayheadLastFrame}
+            setLastFrame={setPlayheadLastFrame}
           />
 
           {/* Track stack + single spanning playhead. This is the measured

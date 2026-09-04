@@ -3,6 +3,7 @@ import {
   formatTokens,
   formatReset,
   usageSeverity,
+  usageFraction,
 } from "@/lib/chat/format-usage";
 
 describe("formatTokens", () => {
@@ -40,5 +41,17 @@ describe("usageSeverity", () => {
     expect(usageSeverity(0.94)).toBe("warn");
     expect(usageSeverity(0.95)).toBe("critical");
     expect(usageSeverity(1.2)).toBe("critical");
+  });
+});
+
+describe("usageFraction", () => {
+  it("divides and clamps to [0, 1]", () => {
+    expect(usageFraction(50_000, 200_000)).toBe(0.25);
+    expect(usageFraction(300_000, 200_000)).toBe(1);
+    expect(usageFraction(-5, 200_000)).toBe(0);
+  });
+
+  it("returns 0 for a non-positive size", () => {
+    expect(usageFraction(50_000, 0)).toBe(0);
   });
 });

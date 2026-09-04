@@ -6,7 +6,7 @@ import { trackEvent } from "@/lib/analytics/client";
 import { useSessionContext } from "@/lib/queries/session-context";
 import { usePlanUsage } from "@/lib/queries/plan-usage";
 import { useEditorState } from "@/lib/editor-state-context";
-import { formatTokens, formatReset, usageSeverity } from "@/lib/chat/format-usage";
+import { formatTokens, formatReset, usageSeverity, usageFraction } from "@/lib/chat/format-usage";
 import type { PlanUsageWindows, PlanWindow } from "@/lib/claude/plan-usage";
 
 const SEVERITY_TEXT: Record<ReturnType<typeof usageSeverity>, string> = {
@@ -104,7 +104,7 @@ export default function ContextUsageChip({ sessionId }: { sessionId: string | nu
   const [open, setOpen] = useState(false);
   if (!usage) return null;
 
-  const pct = usage.size > 0 ? usage.used / usage.size : 0;
+  const pct = usageFraction(usage.used, usage.size);
   const severity = usageSeverity(pct);
   // The plan endpoint is Claude-subscription-specific — other agents (codex)
   // get no budget section rather than a misleading "token" message.

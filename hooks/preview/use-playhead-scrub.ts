@@ -20,10 +20,43 @@ export function usePlayheadScrub(args: {
   totalFrames: number;
   onScrub: (frame: number) => void;
   onDraggingChange?: (dragging: boolean) => void;
+  /** Latest pointer x while a drag is held — drives the timeline's edge
+   *  auto-scroll, which needs a position to re-scrub from as the lane slides
+   *  under a stationary pointer. */
+  onDragPointerX?: (clientX: number) => void;
+  /** Optional dedupe-guard ACCESSORS shared with ANOTHER `usePlayheadScrub`
+   *  instance on the same lane (the strip's pin surface and the spanning
+   *  line both scrub the same `laneRef`). Pass the same pair to both so a
+   *  `scrubTo` call made through either instance sees the other's last
+   *  emitted frame — timeline.tsx's edge auto-scroll re-scrubs through
+   *  whichever instance is convenient, not necessarily the one the drag
+   *  actually started on. Without sharing this, each instance's own guard
+   *  drifts from the other's: a re-scrub through the "wrong" instance either
+   *  duplicates a seek the other instance already made (an extra decoder
+   *  flush), or later refuses a genuinely new seek because ITS guard never
+   *  saw the frame the other instance already emitted.
+   *
+   *  This is a get/set FUNCTION pair rather than a shared ref object: the
+   *  underlying ref must be written to from wherever it's created (its owning
+   *  component), never handed to another hook call to mutate directly — the
+   *  React Compiler's ref-safety analysis rejects writing `.current` on a
+   *  value that arrived as a hook argument. Both default to a private ref
+   *  when omitted, so a lone instance behaves exactly as before. */
+  getLastFrame?: () => number | null;
+  setLastFrame?: (frame: number | null) => void;
 }) {
-  const { laneRef, totalFrames, onScrub, onDraggingChange } = args;
+  const { laneRef, totalFrames, onScrub, onDraggingChange, onDragPointerX } = args;
   const draggingRef = useRef(false);
-  const lastFrameRef = useRef<number | null>(null);
+  const ownLastFrameRef = useRef<number | null>(null);
+  // Stable fallbacks (empty deps) so `readLastFrame`/`writeLastFrame` have a
+  // consistent identity across renders whether or not the caller shares its
+  // own accessors — same requirement as the shared ones the caller passes in.
+  const readOwnLastFrame = useCallback(() => ownLastFrameRef.current, []);
+  const writeOwnLastFrame = useCallback((frame: number | null) => {
+    ownLastFrameRef.current = frame;
+  }, []);
+  const readLastFrame = args.getLastFrame ?? readOwnLastFrame;
+  const writeLastFrame = args.setLastFrame ?? writeOwnLastFrame;
   const pendingXRef = useRef<number | null>(null);
   const rafRef = useRef(0);
 
@@ -40,11 +73,11 @@ export function usePlayheadScrub(args: {
       });
       // Same target frame ⇒ skip: the seek itself is idempotent but bumping
       // the seek signal re-flushes every video decoder.
-      if (frame === lastFrameRef.current) return;
-      lastFrameRef.current = frame;
+      if (frame === readLastFrame()) return;
+      writeLastFrame(frame);
       onScrub(frame);
     },
-    [laneRef, totalFrames, onScrub],
+    [laneRef, totalFrames, onScrub, readLastFrame, writeLastFrame],
   );
   // The rAF callback must see the LATEST scrub (totalFrames/onScrub can
   // change identity mid-drag) — same latest-ref pattern as timeline.tsx's
@@ -80,12 +113,12 @@ export function usePlayheadScrub(args: {
       e.stopPropagation();
       (e.currentTarget as Element).setPointerCapture?.(e.pointerId);
       draggingRef.current = true;
-      lastFrameRef.current = null; // a fresh press always seeks
+      writeLastFrame(null); // a fresh press always seeks
       pendingXRef.current = null;
       onDraggingChange?.(true);
       scrubRef.current(e.clientX); // immediate — a click-seek must not wait a frame
     },
-    [onDraggingChange],
+    [onDraggingChange, writeLastFrame],
   );
 
   const onPointerMove = useCallback(
@@ -103,6 +136,7 @@ export function usePlayheadScrub(args: {
         stopDragging();
         return;
       }
+      onDragPointerX?.(e.clientX);
       pendingXRef.current = e.clientX;
       if (rafRef.current) return; // one seek per animation frame
       rafRef.current = requestAnimationFrame(() => {
@@ -116,7 +150,7 @@ export function usePlayheadScrub(args: {
         if (x != null) scrubRef.current(x);
       });
     },
-    [stopDragging],
+    [stopDragging, onDragPointerX],
   );
 
   const endDrag = useCallback(
@@ -142,5 +176,8 @@ export function usePlayheadScrub(args: {
     onPointerMove,
     onPointerUp: endDrag,
     onPointerCancel: endDrag,
+    /** Seek to the frame under a client x — used by the edge auto-scroll to
+     *  re-scrub after it slides the lane beneath a held, stationary pointer. */
+    scrubTo: scrub,
   };
 }

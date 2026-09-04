@@ -13,6 +13,7 @@ describe("applyUsageUpdate", () => {
     expect(next).toEqual({
       used: 82_000,
       size: 200_000,
+      reportedSize: 200_000,
       cost: null,
       rateLimits: {},
       updatedAt: NOW,
@@ -21,7 +22,7 @@ describe("applyUsageUpdate", () => {
 
   it("returns prev unchanged on malformed input (experimental-field drift)", () => {
     const prev: SessionUsageState = {
-      used: 1, size: 2, cost: null, rateLimits: {}, updatedAt: 5,
+      used: 1, size: 2, reportedSize: 2, cost: null, rateLimits: {}, updatedAt: 5,
     };
     expect(applyUsageUpdate(prev, null, NOW)).toBe(prev);
     expect(applyUsageUpdate(prev, "nope", NOW)).toBe(prev);
@@ -98,6 +99,56 @@ describe("applyUsageUpdate", () => {
     expect(next?.rateLimits).toEqual(prev?.rateLimits);
     const garbageMeta = applyUsageUpdate(prev, { used: 12, size: 100, _meta: { "_claude/rateLimit": 42 } }, NOW + 2);
     expect(garbageMeta?.rateLimits).toEqual(prev?.rateLimits);
+  });
+
+  it("carries the previous size forward when an update reports used > size and prev can hold it (stale window after a model switch)", () => {
+    const prev = applyUsageUpdate(null, { used: 300_000, size: 1_000_000 }, 1000);
+    const next = applyUsageUpdate(prev, { used: 310_000, size: 200_000 }, 2000);
+    expect(next).toMatchObject({ used: 310_000, size: 1_000_000 });
+  });
+
+  it("raises size to used when an update reports used > size and no previous size can hold it", () => {
+    const next = applyUsageUpdate(null, { used: 250_000, size: 200_000 }, 1000);
+    expect(next).toMatchObject({ used: 250_000, size: 250_000 });
+  });
+
+  it("takes a smaller reported size at face value while used still fits (genuine window shrink)", () => {
+    const prev = applyUsageUpdate(null, { used: 150_000, size: 1_000_000 }, 1000);
+    const next = applyUsageUpdate(prev, { used: 150_000, size: 200_000 }, 2000);
+    expect(next).toMatchObject({ used: 150_000, size: 200_000 });
+  });
+
+  it("accepts the authoritative correction after a stale-size stretch", () => {
+    const a = applyUsageUpdate(null, { used: 300_000, size: 200_000 }, 1000); // capped to 300k
+    const b = applyUsageUpdate(a, { used: 305_000, size: 1_000_000 }, 2000); // adapter corrected
+    expect(b).toMatchObject({ used: 305_000, size: 1_000_000 });
+  });
+
+  it("prefers the learned window over a smaller reported size (fresh-process default seed)", () => {
+    const next = applyUsageUpdate(null, { used: 73_000, size: 200_000 }, 1000, 1_000_000);
+    expect(next).toMatchObject({ used: 73_000, size: 1_000_000 });
+  });
+
+  it("uses the learned window when used > size and there is no previous state", () => {
+    const next = applyUsageUpdate(null, { used: 250_000, size: 200_000 }, 1000, 1_000_000);
+    expect(next).toMatchObject({ used: 250_000, size: 1_000_000 });
+  });
+
+  it("ignores a learned window smaller than the reported size (bigger window wins)", () => {
+    const next = applyUsageUpdate(null, { used: 73_000, size: 1_000_000 }, 1000, 200_000);
+    expect(next).toMatchObject({ used: 73_000, size: 1_000_000 });
+  });
+
+  it("falls back to capping at used when even the learned window cannot hold it", () => {
+    const next = applyUsageUpdate(null, { used: 1_200_000, size: 200_000 }, 1000, 1_000_000);
+    expect(next).toMatchObject({ used: 1_200_000, size: 1_200_000 });
+  });
+
+  it("always preserves the adapter's raw size in reportedSize, corrections notwithstanding", () => {
+    const corrected = applyUsageUpdate(null, { used: 73_000, size: 200_000 }, 1000, 1_000_000);
+    expect(corrected).toMatchObject({ size: 1_000_000, reportedSize: 200_000 });
+    const faceValue = applyUsageUpdate(null, { used: 10, size: 100 }, 1000);
+    expect(faceValue).toMatchObject({ size: 100, reportedSize: 100 });
   });
 });
 

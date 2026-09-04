@@ -74,3 +74,53 @@ describe("/api/shell/reveal — non-oracle response (RC-A)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+describe("/api/shell/reveal — allowlist covers libi's own configurable roots", () => {
+  let externalRoot: string;
+  let fileUnderLibiHome: string;
+  const OLD_LIBI_HOME = process.env.LIBI_HOME;
+
+  beforeEach(() => {
+    vi.resetModules();
+    spawnMock.mockClear();
+    // MUST be outside BOTH $HOME and os.tmpdir(). An earlier version of this
+    // fixture used os.tmpdir(), which revealRoots() allowlists
+    // unconditionally — so the test passed with getLibiHome() deleted from
+    // the root list entirely, proving nothing about LIBI_HOME. /var/tmp is a
+    // distinct directory from os.tmpdir() on both macOS (/var/folders/...)
+    // and ubuntu CI (/tmp), and is writable on both.
+    externalRoot = fs.mkdtempSync(path.join("/var/tmp", "libi-external-root-"));
+    const storage = path.join(externalRoot, "storage", "p1");
+    fs.mkdirSync(storage, { recursive: true });
+    fileUnderLibiHome = path.join(storage, "clip.mp4");
+    fs.writeFileSync(fileUnderLibiHome, "x");
+    process.env.LIBI_HOME = externalRoot;
+  });
+
+  afterEach(() => {
+    if (OLD_LIBI_HOME === undefined) delete process.env.LIBI_HOME;
+    else process.env.LIBI_HOME = OLD_LIBI_HOME;
+    fs.rmSync(externalRoot, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("reveals a file under a relocated LIBI_HOME", async () => {
+    const { POST } = await import("@/app/api/shell/reveal/route");
+
+    const res = await POST(post({ path: fileUnderLibiHome }));
+    expect(res.status).toBe(200);
+    // The point of the change: before LIBI_HOME joined the allowlist this
+    // spawned nothing and the user got a button that did nothing at all.
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock.mock.calls[0]?.[1]).toContain(fileUnderLibiHome);
+  });
+
+  it("still refuses a path outside every allowed root", async () => {
+    const { POST } = await import("@/app/api/shell/reveal/route");
+
+    const res = await POST(post({ path: "/etc/shadow" }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+});

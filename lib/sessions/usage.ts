@@ -44,8 +44,13 @@ export interface RateLimitSnapshot {
 export interface SessionUsageState {
   /** Tokens currently in the agent's context. */
   used: number;
-  /** Total context window size in tokens. */
+  /** Total context window size in tokens, after correction (what the UI shows). */
   size: number;
+  /** The size exactly as the adapter last reported it, before any correction.
+   *  This — never `size` — is what the turn-end recorder persists to the
+   *  model-window cache: recording a corrected value would make the cache
+   *  self-confirming, and a genuine window downgrade could never displace it. */
+  reportedSize: number;
   /** Cumulative session cost when the adapter reports one (ACP Cost shape). */
   cost: { amount: number; currency: string } | null;
   rateLimits: Partial<Record<RateLimitWindowType, RateLimitSnapshot>>;
@@ -77,6 +82,7 @@ export function applyUsageUpdate(
   prev: SessionUsageState | null,
   update: unknown,
   now: number = Date.now(),
+  knownWindow: number | null = null,
 ): SessionUsageState | null {
   if (typeof update !== "object" || update === null) return prev;
   const u = update as {
@@ -89,6 +95,33 @@ export function applyUsageUpdate(
   const used = finiteNumber(u.used);
   const size = finiteNumber(u.size);
   if (used === null || used < 0 || size === null || size <= 0) return prev;
+
+  // used > size is arithmetically impossible against the model's true window
+  // (the API would have refused or auto-compacted first), so it marks the
+  // reported size as stale — the adapter seeds a 200k default on session/new
+  // and on model switches until the first result confirms the real window
+  // (claude-agent-acp inferContextWindowFromModel / DEFAULT_CONTEXT_WINDOW).
+  // Recover the best size we can prove: the previous window if it can hold
+  // `used` (a model switch left the old, correct window behind), then the
+  // learned window for this model (persisted at prior turn ends by the
+  // model-window cache), else `used` itself, which caps the display at
+  // exactly 100%. Separately, a size SMALLER than the learned window while
+  // `used` still fits it is the fresh-process default seed nine times out of
+  // ten — prefer the learned window; the tenth time (a genuine downgrade)
+  // re-records at the end of its first turn and wins from then on. The
+  // adapter's authoritative correction still replaces all of this within a
+  // turn — except a genuine downgrade to a window smaller than `used`, which
+  // is indistinguishable from a stale report and keeps the recovered size
+  // until compaction brings `used` back under the true window.
+  const effectiveSize = (() => {
+    if (used > size) {
+      if (prev && prev.size >= used) return prev.size;
+      if (knownWindow !== null && knownWindow >= used) return knownWindow;
+      return used;
+    }
+    if (knownWindow !== null && knownWindow > size) return knownWindow;
+    return size;
+  })();
 
   // Cost: replace when the update carries a valid Cost, else carry forward.
   let cost = prev?.cost ?? null;
@@ -130,7 +163,14 @@ export function applyUsageUpdate(
     }
   }
 
-  return { used, size, cost, rateLimits, updatedAt: now };
+  return {
+    used,
+    size: effectiveSize,
+    reportedSize: size,
+    cost,
+    rateLimits,
+    updatedAt: now,
+  };
 }
 
 /** Map a raw `available_commands_update` to typed command infos. */

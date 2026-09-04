@@ -1,8 +1,9 @@
 "use client";
 
 import { useRef, useEffect, useLayoutEffect, useState } from "react";
-import { Copy, Pencil, Trash2, FolderPlus, FolderInput, ChevronRight, Folder } from "lucide-react";
+import { Copy, Pencil, Trash2, FolderPlus, FolderInput, ChevronRight, Folder, FolderOpen } from "lucide-react";
 import type { FolderNode } from "@/lib/queries/folders";
+import { revealLabel, getShellPlatform } from "@/lib/shell/client";
 
 export interface ContextMenuState {
   x: number;
@@ -24,6 +25,10 @@ interface ResourceContextMenuProps {
   onMoveTo?: (destinationFolderId: string | null) => void;
   /** Folder + piece: duplicate the target into an independent copy. */
   onDuplicate?: () => void;
+  /** Asset-only: reveal the file in the OS file manager. Assets are the
+   *  only type with an on-disk location — a piece is a directory but is
+   *  out of scope, and an asset folder is a DB row with nothing on disk. */
+  onReveal?: () => void;
   /** All folders, for the "Move to…" submenu. Pass undefined to hide the submenu. */
   folders?: FolderNode[];
 }
@@ -144,6 +149,7 @@ export default function ResourceContextMenu({
   onNewSubfolder,
   onMoveTo,
   onDuplicate,
+  onReveal,
   folders,
 }: ResourceContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -160,6 +166,7 @@ export default function ResourceContextMenu({
 
   const isFolder = state.type === "folder";
   const isPiece = state.type === "piece";
+  const isAsset = state.type === "asset";
   const showMoveTo = (isFolder || isPiece) && !!onMoveTo && !!folders;
 
   return (
@@ -230,6 +237,16 @@ export default function ResourceContextMenu({
         >
           <Copy className="h-3.5 w-3.5" />
           Duplicate piece…
+        </button>
+      )}
+
+      {isAsset && onReveal && (
+        <button
+          onClick={onReveal}
+          className="cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
+        >
+          <FolderOpen className="h-3.5 w-3.5" />
+          {revealLabel(getShellPlatform())}
         </button>
       )}
 

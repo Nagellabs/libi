@@ -33,7 +33,11 @@ import {
 import { getNotificationsSetting } from "@/lib/db/settings";
 import { pushIfBackgrounded } from "@/mcp/notify";
 import { applyUsageUpdate, toAvailableCommands } from "@/lib/sessions/usage";
-import { deriveModelSnapshot } from "@/lib/sessions/model-option";
+import {
+  deriveModelSnapshot,
+  extractModelOption,
+} from "@/lib/sessions/model-option";
+import { getKnownWindow } from "@/lib/sessions/model-window-cache";
 
 // usage_update is @experimental — on drift we keep the previous state and
 // warn ONCE per session (spec: never spam the log at stream rate).
@@ -886,7 +890,19 @@ export class SessionEventHandler {
 
       case "usage_update": {
         if (session) {
-          const next = applyUsageUpdate(session.latestUsage, update);
+          // The learned window for the session's current model lets a fresh
+          // process seed the right denominator on the first update instead of
+          // showing the adapter's default seed for a whole turn.
+          const model = extractModelOption(session.configOptions);
+          const known = model
+            ? getKnownWindow(session.agentId, model.currentModelId)
+            : null;
+          const next = applyUsageUpdate(
+            session.latestUsage,
+            update,
+            Date.now(),
+            known,
+          );
           if (next !== session.latestUsage && next !== null) {
             session.latestUsage = next;
             this.emit(sessionId, { type: "agent-usage", usage: next });

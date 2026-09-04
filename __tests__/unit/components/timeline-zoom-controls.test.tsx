@@ -50,7 +50,8 @@ import type { Composition } from "@/lib/engine/types";
 import {
   applyWheelZoom,
   fitPxPerSec,
-  zoomFactorPercent,
+  zoomMultiplierLabel,
+  maxPxPerSec,
 } from "@/lib/preview/timeline-zoom";
 import { RAIL_WIDTH } from "@/components/preview/track-rail";
 
@@ -108,19 +109,25 @@ describe("Timeline zoom controls", () => {
 
   it("zoom-in calls setPreviewTimelineZoom with a larger px", () => {
     renderTimeline();
+    // Mounting fires the piece-change fit reset (Task 4); clear it so this test
+    // isolates the click handler's own call.
+    setPreviewTimelineZoom.mockClear();
     fireEvent.click(screen.getByTestId("zoom-in"));
     expect(setPreviewTimelineZoom).toHaveBeenCalledTimes(1);
     const arg = setPreviewTimelineZoom.mock.calls[0][0] as number;
     expect(arg).toBeGreaterThan(500);
-    expect(arg).toBeCloseTo(applyWheelZoom({ pxPerSec: 500, factor: 1.2 }));
+    expect(arg).toBeCloseTo(applyWheelZoom({ pxPerSec: 500, factor: 1.2, maxPx: maxPxPerSec(30) }));
   });
 
   it("zoom-out calls setPreviewTimelineZoom with a smaller px", () => {
     renderTimeline();
+    // Mounting fires the piece-change fit reset (Task 4); clear it so this test
+    // isolates the click handler's own call.
+    setPreviewTimelineZoom.mockClear();
     fireEvent.click(screen.getByTestId("zoom-out"));
     const arg = setPreviewTimelineZoom.mock.calls[0][0] as number;
     expect(arg).toBeLessThan(500);
-    expect(arg).toBeCloseTo(applyWheelZoom({ pxPerSec: 500, factor: 1 / 1.2 }));
+    expect(arg).toBeCloseTo(applyWheelZoom({ pxPerSec: 500, factor: 1 / 1.2, maxPx: maxPxPerSec(30) }));
   });
 
   it("zoom-fit calls setPreviewTimelineZoom(null)", () => {
@@ -129,11 +136,11 @@ describe("Timeline zoom controls", () => {
     expect(setPreviewTimelineZoom).toHaveBeenCalledWith(null);
   });
 
-  it("readout shows the zoom factor percent relative to fit", () => {
+  it("readout shows the zoom multiplier relative to fit", () => {
     renderTimeline();
     // viewport = VIEWPORT_WIDTH - RAIL_WIDTH; totalSeconds = 3.
     const fit = fitPxPerSec(VIEWPORT_WIDTH - RAIL_WIDTH, 3);
-    const pct = zoomFactorPercent(500, fit);
-    expect(screen.getByTestId("zoom-readout").textContent).toContain(String(pct));
+    const label = zoomMultiplierLabel(500, fit);
+    expect(screen.getByTestId("zoom-readout").textContent).toBe(label);
   });
 });

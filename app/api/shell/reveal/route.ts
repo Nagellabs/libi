@@ -1,17 +1,18 @@
 import { NextResponse } from "next/server";
 import { spawn } from "node:child_process";
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs";
 import { isMac, isWindows } from "@/lib/platform";
+import { revealRoots, isPathRevealable } from "@/lib/shell/reveal-roots";
 
 /**
  * Open the OS file manager at a given path. Used as a fallback when the
  * Electron preload bridge isn't available (BYO-CLI / web preview).
  *
- * Path-traversal guard: the resolved absolute path must live inside the
- * user's home directory (or the OS temp dir). Anything else is silently
- * ignored — no reveal is performed.
+ * Path-traversal guard: the resolved absolute path must live inside one of
+ * the roots libi legitimately writes to (see `lib/shell/reveal-roots.ts` —
+ * $HOME, the OS temp dir, LIBI_HOME, and the configured export folder).
+ * Anything else is silently ignored — no reveal is performed.
  *
  * Non-oracle response (RC-A defense-in-depth): once the request body is
  * well-formed, this route returns the SAME `{ ok: true }` / 200 response
@@ -39,11 +40,17 @@ export async function POST(req: Request): Promise<Response> {
   // paths — see the doc comment above.
   try {
     const abs = path.resolve(raw);
-    const home = os.homedir();
-    const tmp = os.tmpdir();
-    // Only reveal paths under $HOME OR the OS temp dir that actually exist.
-    // Any other path is quietly skipped (no reveal, no distinguishable error).
-    if ((abs.startsWith(home) || abs.startsWith(tmp)) && fs.existsSync(abs)) {
+    // Only reveal paths inside a root libi legitimately writes to, and that
+    // actually exist. Any other path is quietly skipped (no reveal, no
+    // distinguishable error).
+    //
+    // LIBI_HOME and the export folder are on the list because both are
+    // user-configurable and routinely sit outside $HOME (an external volume,
+    // a second drive). While the list was just $HOME + tmp, revealing an
+    // asset or an export that lived under a relocated LIBI_HOME or a custom
+    // export folder silently did nothing on this fallback path — Electron
+    // was unaffected, so it only ever broke for npx users.
+    if (isPathRevealable(abs, revealRoots()) && fs.existsSync(abs)) {
       // On macOS, `open -R <path>` reveals the file in Finder. Windows + Linux
       // don't have a native "reveal" — fall back to opening the containing folder.
       // isMac()/isWindows(), not a `const platform = process.platform` alias —

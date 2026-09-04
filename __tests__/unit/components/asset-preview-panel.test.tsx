@@ -24,6 +24,7 @@ vi.mock("@/lib/queries/analysis", () => ({
 }));
 vi.mock("@/lib/queries/files", () => ({
   useUpdateFileNotes: () => ({ mutate: vi.fn() }),
+  useFileLocation: () => ({ data: null, isLoading: false }),
 }));
 vi.mock("@/hooks/sessions/use-session-list", () => ({
   useSessionList: () => ({

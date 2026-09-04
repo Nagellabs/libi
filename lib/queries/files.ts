@@ -11,6 +11,7 @@ export const fileKeys = {
   forPiece: (pieceId: string) => ["files", pieceId] as const,
   global: () => ["files", "global"] as const,
   byId: (fileId: string) => ["files", "by-id", fileId] as const,
+  location: (fileId: string) => ["files", "location", fileId] as const,
 };
 
 /**
@@ -33,6 +34,34 @@ export function useFileById(fileId: string | null | undefined) {
       if (!res.ok) throw new Error("Failed to fetch file");
       const data = await res.json();
       return data.file;
+    },
+  });
+}
+
+export interface FileLocation {
+  path: string;
+  exists: boolean;
+}
+
+/**
+ * Absolute on-disk path for a file, plus whether it's still there.
+ * Returns `null` when the file row is gone (404).
+ *
+ * Keyed under the `["files", …]` prefix on purpose: the existing
+ * `useDeleteFileById` / `useRenameFile` / `useAssignFile` invalidations of
+ * `["files"]` already clear this entry, so no new invalidation wiring is
+ * needed. (`useDeleteFile` invalidates the narrower `["files", pieceId]`,
+ * which does not prefix-match this key, so it is NOT among these.)
+ */
+export function useFileLocation(fileId: string | null | undefined) {
+  return useQuery({
+    queryKey: fileKeys.location(fileId ?? ""),
+    enabled: !!fileId,
+    queryFn: async (): Promise<FileLocation | null> => {
+      const res = await fetch(`/api/files/by-id/${fileId}/location`);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error("Failed to fetch file location");
+      return (await res.json()) as FileLocation;
     },
   });
 }

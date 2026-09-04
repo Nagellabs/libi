@@ -33,6 +33,12 @@ export function usageSeverity(pct: number): "ok" | "warn" | "critical" {
   return "ok";
 }
 
+/** used/size as a display fraction, clamped to [0, 1]; 0 when size is unusable. */
+export function usageFraction(used: number, size: number): number {
+  if (size <= 0) return 0;
+  return Math.min(1, Math.max(0, used / size));
+}
+
 // Plan-window row labels moved into components/chat/context-usage-chip.tsx
 // (PLAN_ROWS) when the popover switched from event-based rate-limit
 // snapshots to the authoritative claude.ai plan-usage endpoint

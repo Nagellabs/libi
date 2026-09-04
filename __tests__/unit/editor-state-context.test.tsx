@@ -135,56 +135,11 @@ describe("effects panel height", () => {
   });
 });
 
-describe("timeline zoom state", () => {
-  it("defaults previewTimelineZoom to null", () => {
-    const get = captureCtx();
-    expect(get().previewTimelineZoom).toBeNull();
-  });
-
-  it("persists previewTimelineZoom changes (number)", () => {
-    const get = captureCtx();
-    act(() => get().setPreviewTimelineZoom(200));
-    expect(get().previewTimelineZoom).toBe(200);
-    const raw = JSON.parse(localStorage.getItem("libi:editor-state")!);
-    expect(raw.previewTimelineZoom).toBe(200);
-  });
-
-  it("loads a stored positive previewTimelineZoom", () => {
-    localStorage.setItem(
-      "libi:editor-state",
-      JSON.stringify({ previewTimelineZoom: 350 }),
-    );
-    const get = captureCtx();
-    expect(get().previewTimelineZoom).toBe(350);
-  });
-
-  it("falls back to null on a malformed previewTimelineZoom", () => {
-    localStorage.setItem(
-      "libi:editor-state",
-      JSON.stringify({ previewTimelineZoom: "nope" }),
-    );
-    const get = captureCtx();
-    expect(get().previewTimelineZoom).toBeNull();
-  });
-
-  it("falls back to null on a non-positive previewTimelineZoom", () => {
-    localStorage.setItem(
-      "libi:editor-state",
-      JSON.stringify({ previewTimelineZoom: 0 }),
-    );
-    const get = captureCtx();
-    expect(get().previewTimelineZoom).toBeNull();
-  });
-
-  it("setPreviewTimelineZoom(null) clears the stored value back to null", () => {
-    const get = captureCtx();
-    act(() => get().setPreviewTimelineZoom(200));
-    act(() => get().setPreviewTimelineZoom(null));
-    expect(get().previewTimelineZoom).toBeNull();
-    const raw = JSON.parse(localStorage.getItem("libi:editor-state")!);
-    expect(raw.previewTimelineZoom).toBeNull();
-  });
-});
+// previewTimelineZoom's lifecycle (transient, in-memory, never persisted —
+// see lib/editor-state-context.tsx) is covered by
+// __tests__/unit/preview/timeline-zoom-lifecycle.test.tsx. The describe block
+// that used to live here asserted the opposite (localStorage persistence),
+// which Task 4 deliberately removed as the fix for the reported bug.
 
 /**
  * The provider list handed to consumers must NOT be pre-filtered on

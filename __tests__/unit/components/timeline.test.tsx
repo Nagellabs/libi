@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 // The timeline reads viewMode for the snapshot-gated "+ Add" picker. Stub the
 // hook so it can render outside an EditorStateProvider.
 vi.mock("@/lib/editor-state-context", () => ({
-  useEditorState: () => ({ viewMode: "draft" }),
+  useEditorState: () => ({ viewMode: "draft", previewTimelineZoom: null, setPreviewTimelineZoom: vi.fn() }),
 }));
 
 // jsdom has no ResizeObserver — stub it so the timeline's useEffect doesn't throw.
