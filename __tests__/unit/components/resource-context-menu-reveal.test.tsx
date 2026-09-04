@@ -2,9 +2,16 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 
+const revealFileById = vi.fn(async () => {});
 vi.mock("@/lib/shell/client", () => ({
+  revealFileById: (id: string) => revealFileById(id),
+  revealFile: vi.fn(async () => {}),
   revealLabel: () => "Reveal in Finder",
   getShellPlatform: () => "darwin",
+}));
+const trackEvent = vi.fn();
+vi.mock("@/lib/analytics/client", () => ({
+  trackEvent: (n: string, p?: Record<string, unknown>) => trackEvent(n, p),
 }));
 
 import ResourceContextMenu, { type ContextMenuState } from "@/components/resources/context-menu";
@@ -30,24 +37,24 @@ describe("ResourceContextMenu reveal item", () => {
         state={state()}
         onRename={noop}
         onDelete={noop}
-        onReveal={noop}
+        onClose={noop}
       />,
     );
     expect(screen.getByText("Reveal in Finder")).toBeTruthy();
   });
 
-  it("calls onReveal when the item is clicked", () => {
-    const onReveal = vi.fn();
+  it("reveals by id and reports the context_menu source when clicked", () => {
     render(
       <ResourceContextMenu
         state={state()}
         onRename={noop}
         onDelete={noop}
-        onReveal={onReveal}
+        onClose={noop}
       />,
     );
     fireEvent.click(screen.getByText("Reveal in Finder"));
-    expect(onReveal).toHaveBeenCalledTimes(1);
+    expect(revealFileById).toHaveBeenCalledWith("f1");
+    expect(trackEvent).toHaveBeenCalledWith("asset_revealed", { source: "context_menu" });
   });
 
   it("does not show the reveal item for a piece", () => {
@@ -56,7 +63,7 @@ describe("ResourceContextMenu reveal item", () => {
         state={state({ type: "piece", fileId: undefined })}
         onRename={noop}
         onDelete={noop}
-        onReveal={noop}
+        onClose={noop}
       />,
     );
     expect(screen.queryByText("Reveal in Finder")).toBeNull();
@@ -68,14 +75,23 @@ describe("ResourceContextMenu reveal item", () => {
         state={state({ type: "folder", fileId: undefined, folderId: "d1" })}
         onRename={noop}
         onDelete={noop}
-        onReveal={noop}
+        onClose={noop}
       />,
     );
     expect(screen.queryByText("Reveal in Finder")).toBeNull();
   });
 
-  it("does not show the reveal item when no handler is supplied", () => {
-    render(<ResourceContextMenu state={state()} onRename={noop} onDelete={noop} />);
+  it("does not show the reveal item for an asset row with no fileId", () => {
+    // Defensive: the menu needs an id to reveal by. Without one the row is
+    // omitted rather than rendered inert.
+    render(
+      <ResourceContextMenu
+        state={state({ fileId: undefined })}
+        onRename={noop}
+        onDelete={noop}
+        onClose={noop}
+      />,
+    );
     expect(screen.queryByText("Reveal in Finder")).toBeNull();
   });
 
@@ -85,7 +101,7 @@ describe("ResourceContextMenu reveal item", () => {
         state={state()}
         onRename={noop}
         onDelete={noop}
-        onReveal={noop}
+        onClose={noop}
       />,
     );
     const labels = Array.from(document.querySelectorAll("button")).map((b) =>

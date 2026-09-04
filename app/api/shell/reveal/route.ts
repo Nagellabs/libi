@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 import { isMac, isWindows } from "@/lib/platform";
-import { revealRoots, isPathRevealable } from "@/lib/shell/reveal-roots";
+import { revealRoots, isPathRevealable, realpathOrSelf } from "@/lib/shell/reveal-roots";
 
 /**
  * Open the OS file manager at a given path. Used as a fallback when the
@@ -50,7 +50,14 @@ export async function POST(req: Request): Promise<Response> {
     // asset or an export that lived under a relocated LIBI_HOME or a custom
     // export folder silently did nothing on this fallback path — Electron
     // was unaffected, so it only ever broke for npx users.
-    if (isPathRevealable(abs, revealRoots()) && fs.existsSync(abs)) {
+    // Order matters: confirm existence FIRST, because realpathSync throws
+    // ENOENT, then resolve symlinks, and only then decide containment.
+    // Deciding lexically would let a symlink planted under an allowed root
+    // point anywhere — an agent has write access to piece directories, so it
+    // can plant one. revealRoots() resolves its own entries the same way, and
+    // both sides must be resolved or neither: os.tmpdir() is ITSELF a symlink
+    // on macOS (/var/folders/… → /private/var/folders/…).
+    if (fs.existsSync(abs) && isPathRevealable(realpathOrSelf(abs), revealRoots())) {
       // On macOS, `open -R <path>` reveals the file in Finder. Windows + Linux
       // don't have a native "reveal" — fall back to opening the containing folder.
       // isMac()/isWindows(), not a `const platform = process.platform` alias —

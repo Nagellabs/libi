@@ -1,9 +1,9 @@
 "use client";
 
 import { useRef, useEffect, useLayoutEffect, useState } from "react";
-import { Copy, Pencil, Trash2, FolderPlus, FolderInput, ChevronRight, Folder, FolderOpen } from "lucide-react";
+import { Copy, Pencil, Trash2, FolderPlus, FolderInput, ChevronRight, Folder } from "lucide-react";
 import type { FolderNode } from "@/lib/queries/folders";
-import { revealLabel, getShellPlatform } from "@/lib/shell/client";
+import { RevealMenuItem } from "@/components/shared/reveal-asset";
 
 export interface ContextMenuState {
   x: number;
@@ -25,10 +25,9 @@ interface ResourceContextMenuProps {
   onMoveTo?: (destinationFolderId: string | null) => void;
   /** Folder + piece: duplicate the target into an independent copy. */
   onDuplicate?: () => void;
-  /** Asset-only: reveal the file in the OS file manager. Assets are the
-   *  only type with an on-disk location — a piece is a directory but is
-   *  out of scope, and an asset folder is a DB row with nothing on disk. */
-  onReveal?: () => void;
+  /** Close the menu. The reveal row calls it before acting, so the menu
+   *  behaves like every other item. */
+  onClose?: () => void;
   /** All folders, for the "Move to…" submenu. Pass undefined to hide the submenu. */
   folders?: FolderNode[];
 }
@@ -149,7 +148,7 @@ export default function ResourceContextMenu({
   onNewSubfolder,
   onMoveTo,
   onDuplicate,
-  onReveal,
+  onClose,
   folders,
 }: ResourceContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
@@ -240,14 +239,15 @@ export default function ResourceContextMenu({
         </button>
       )}
 
-      {isAsset && onReveal && (
-        <button
-          onClick={onReveal}
-          className="cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent"
-        >
-          <FolderOpen className="h-3.5 w-3.5" />
-          {revealLabel(getShellPlatform())}
-        </button>
+      {/* Assets are the only type with an on-disk location — a piece is a
+          directory but is out of scope, and an asset folder is a DB row with
+          nothing on disk. */}
+      {isAsset && state.fileId && (
+        <RevealMenuItem
+          fileId={state.fileId}
+          source="context_menu"
+          onAfter={onClose}
+        />
       )}
 
       <button

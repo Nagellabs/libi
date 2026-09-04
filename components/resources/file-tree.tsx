@@ -16,8 +16,6 @@ import {
 } from "@/lib/queries/folders";
 import { getAncestorIds, getDescendantIds, wouldCreateCycle } from "@/lib/folders/tree";
 import { resolveCopyName } from "@/lib/duplication/copy-name";
-import { revealFileById } from "@/lib/shell/client";
-import { trackEvent } from "@/lib/analytics/client";
 import {
   useDuplicatePiece,
   useDuplicateFolder,
@@ -520,14 +518,6 @@ const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
     setContextMenu(null);
   };
 
-  const handleContextMenuReveal = useCallback(() => {
-    const fileId = contextMenu?.fileId;
-    setContextMenu(null);
-    if (!fileId) return;
-    trackEvent("asset_revealed", { source: "context_menu" });
-    void revealFileById(fileId);
-  }, [contextMenu]);
-
   // ── Recursive renderer: folders FIRST, then pieces, at every level ───
   // `seen` threads the chain of ancestor folder ids so a corrupt folder
   // cycle in the DB can never put renderLevel into an infinite loop.
@@ -840,7 +830,7 @@ const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
           onNewSubfolder={handleContextMenuNewSubfolder}
           onMoveTo={handleContextMenuMoveTo}
           onDuplicate={handleContextMenuDuplicate}
-          onReveal={handleContextMenuReveal}
+          onClose={() => setContextMenu(null)}
           folders={folders}
         />
       )}

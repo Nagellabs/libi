@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getLibiHome } from "@/lib/libi-home";
@@ -30,7 +31,26 @@ export function revealRoots(): string[] {
     // The export folder lives in the DB; a failed read must not take the
     // whole allowlist down with it. The other roots still apply.
   }
-  return normalizeRoots(roots);
+  return normalizeRoots(roots).map(realpathOrSelf);
+}
+
+/**
+ * Resolve a root through any symlinks, falling back to the lexical path when
+ * it does not exist yet.
+ *
+ * BOTH sides of the containment check have to be resolved or NEITHER. On macOS
+ * `os.tmpdir()` is itself a symlink — `/var/folders/…` realpaths to
+ * `/private/var/folders/…` — so resolving the requested path while leaving the
+ * roots lexical would reject every legitimate reveal under the temp dir. The
+ * fallback matters too: an export folder the user has configured but never
+ * exported to does not exist on disk yet, and must still count as a root.
+ */
+export function realpathOrSelf(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
 }
 
 /**
@@ -45,12 +65,15 @@ export function revealRoots(): string[] {
  * of, so it grants nothing new, but it is worth stating rather than implying
  * relative paths are rejected.
  */
-export function normalizeRoots(roots: (string | null | undefined)[]): string[] {
+export function normalizeRoots(
+  roots: (string | null | undefined)[],
+  pathMod: Pick<typeof path, "resolve" | "parse" | "sep"> = path,
+): string[] {
   const out: string[] = [];
   for (const raw of roots) {
     if (!raw) continue;
-    const abs = path.resolve(raw);
-    if (abs === path.parse(abs).root) continue;
+    const abs = pathMod.resolve(raw);
+    if (abs === pathMod.parse(abs).root && !isUncShareRoot(abs, pathMod)) continue;
     // Fold when comparing, keep the original casing in the output — the same
     // reasoning as isPathRevealable, so a case-varied duplicate root doesn't
     // survive into the list.
@@ -60,6 +83,21 @@ export function normalizeRoots(roots: (string | null | undefined)[]): string[] {
     if (!seen) out.push(abs);
   }
   return out;
+}
+
+/**
+ * True for a Windows UNC share root such as `\\nas\libi`.
+ *
+ * `path.win32` reports a share root as its own filesystem root, so the
+ * volume-root rule above would drop it — and `LIBI_HOME=\\nas\libi` would then
+ * contribute NO allowlist entry, making reveal silently do nothing. That is the
+ * same silent failure this allowlist exists to remove. A share is one specific
+ * network location, unlike `/` or `C:\` which are the whole machine, so it is
+ * kept.
+ */
+function isUncShareRoot(abs: string, pathMod: Pick<typeof path, "sep">): boolean {
+  const sep = pathMod.sep;
+  return sep === "\\" && abs.startsWith(sep + sep);
 }
 
 /**

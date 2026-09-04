@@ -122,13 +122,30 @@ describe("writeSkillsToWorkspace", () => {
 
 describe("skills mirror ownership manifest", () => {
   let wsManifest: string;
+  // The DEFAULT-agent-dir case below resolves getLibiAgentDir(), which derives
+  // from LIBI_HOME. The global setup points that at ONE temp dir shared by the
+  // whole run, and four test files write into `<LIBI_HOME>/agent/` — in
+  // parallel worker PROCESSES, against the same directory on disk. Since
+  // writeSkillsToWorkspace DELETES every non-enabled dir it finds there, that
+  // is shared mutable state two workers can interleave on. Give this file its
+  // own LIBI_HOME so the default dir is private to it. The global setup
+  // explicitly blesses this override.
+  let ownHome: string;
+  let prevHome: string | undefined;
 
   beforeEach(() => {
     wsManifest = fs.mkdtempSync(path.join(os.tmpdir(), "ws-manifest-"));
+    ownHome = fs.mkdtempSync(path.join(os.tmpdir(), "libi-home-writer-"));
+    fs.mkdirSync(path.join(ownHome, "agent"), { recursive: true });
+    prevHome = process.env.LIBI_HOME;
+    process.env.LIBI_HOME = ownHome;
   });
 
   afterEach(() => {
+    if (prevHome === undefined) delete process.env.LIBI_HOME;
+    else process.env.LIBI_HOME = prevHome;
     fs.rmSync(wsManifest, { recursive: true, force: true });
+    fs.rmSync(ownHome, { recursive: true, force: true });
   });
 
   it("never deletes a user-owned skill dir in a non-default workspace", async () => {
@@ -167,8 +184,8 @@ describe("skills mirror ownership manifest", () => {
     await writeSkillsToWorkspace(defaultDir, [makeSkill("libi-skill")]);
 
     expect(fs.existsSync(stray)).toBe(false);
-    // cleanup the libi-skill dir we wrote into the (isolated) default dir
-    fs.rmSync(path.join(defaultDir, ".claude", "skills", "libi-skill"), { recursive: true, force: true });
+    // No manual cleanup needed any more: the whole LIBI_HOME this test used is
+    // private to it and removed in afterEach.
   });
 });
 

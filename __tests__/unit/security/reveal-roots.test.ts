@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { isPathRevealable, normalizeRoots } from "@/lib/shell/reveal-roots";
+import { isPathRevealable, normalizeRoots, realpathOrSelf } from "@/lib/shell/reveal-roots";
 
 // Every path here is built from the real filesystem root, never a hardcoded
 // "/Users/...". CI is ubuntu-only while the product also ships Windows, and a
@@ -145,20 +145,34 @@ describe("normalizeRoots", () => {
     expect(normalizeRoots([fsRoot, p("Users", "nadav")])).toEqual([p("Users", "nadav")]);
   });
 
-  it("drops a bare Windows UNC share root, the same way it drops C:\\ or /", () => {
-    // path.win32 reports \\\\nas\\libi as its own filesystem root, so the volume-root
-    // rule catches it. Pinned deliberately: it means LIBI_HOME set to a BARE
-    // share root contributes no allowlist entry, and reveal for files under it
-    // falls back to whatever other roots apply. A normal LIBI_HOME one level
-    // in (\\\\nas\\share\\libi) is not a root and survives — that is the case
-    // people actually configure.
+  it("KEEPS a Windows UNC share root while still dropping C:\\ and /", () => {
+    // path.win32 reports \\\\nas\\libi as its own filesystem root, so the plain
+    // volume-root rule used to drop it — and LIBI_HOME=\\\\nas\\libi then
+    // contributed NO allowlist entry, so reveal silently did nothing. A share
+    // is one specific network location, unlike C:\\ or / which are the whole
+    // machine, so it is kept.
     const B = String.fromCharCode(92);
     const shareRoot = B + B + "nas" + B + "libi";
-    const oneLevelIn = shareRoot + B + "libi";
-    expect(path.win32.resolve(shareRoot)).toBe(path.win32.parse(path.win32.resolve(shareRoot)).root);
-    expect(path.win32.resolve(oneLevelIn)).not.toBe(
-      path.win32.parse(path.win32.resolve(oneLevelIn)).root,
-    );
+    expect(normalizeRoots([shareRoot], path.win32)).toEqual([
+      path.win32.resolve(shareRoot),
+    ]);
+    // …and the machine-wide roots are still dropped.
+    expect(normalizeRoots(["C:" + B], path.win32)).toEqual([]);
+    expect(normalizeRoots(["/"], path.posix)).toEqual([]);
+  });
+
+  it("a kept UNC share root actually contains its own files", () => {
+    // The drop and the containment check have to agree, or keeping the root
+    // buys nothing.
+    const B = String.fromCharCode(92);
+    const shareRoot = B + B + "nas" + B + "libi";
+    const [root] = normalizeRoots([shareRoot], path.win32);
+    expect(
+      isPathRevealable(shareRoot + B + "storage" + B + "clip.mp4", [root], path.win32, true),
+    ).toBe(true);
+    expect(
+      isPathRevealable(B + B + "nas" + B + "libi-other" + B + "x.mp4", [root], path.win32, true),
+    ).toBe(false);
   });
 
   it("de-duplicates and resolves to absolute paths", () => {
@@ -187,9 +201,13 @@ describe("revealRoots", () => {
     const { revealRoots } = await import("@/lib/shell/reveal-roots");
 
     const roots = revealRoots();
-    expect(roots).toContain(path.resolve(os.homedir()));
-    expect(roots).toContain(path.resolve(os.tmpdir()));
-    expect(roots).toContain(path.resolve(process.env.LIBI_HOME!));
+    // Roots come back REALPATH'd. That is load-bearing, not incidental:
+    // os.tmpdir() is itself a symlink on macOS (/var/folders/… →
+    // /private/var/folders/…), and since the route now realpaths the requested
+    // path too, a lexical root would reject every temp-dir reveal.
+    expect(roots).toContain(realpathOrSelf(path.resolve(os.homedir())));
+    expect(roots).toContain(realpathOrSelf(path.resolve(os.tmpdir())));
+    expect(roots).toContain(realpathOrSelf(path.resolve(process.env.LIBI_HOME!)));
   });
 
   it("includes the configured export folder even when it is outside $HOME", async () => {
@@ -197,6 +215,8 @@ describe("revealRoots", () => {
     vi.doMock("@/lib/db/settings", () => ({ resolveExportFolder: () => external }));
     const { revealRoots } = await import("@/lib/shell/reveal-roots");
 
+    // Not on disk, so realpathOrSelf falls back to the lexical path — a
+    // configured-but-never-used export folder must still count as a root.
     expect(revealRoots()).toContain(path.resolve(external));
   });
 
@@ -209,7 +229,7 @@ describe("revealRoots", () => {
     const { revealRoots } = await import("@/lib/shell/reveal-roots");
 
     const roots = revealRoots();
-    expect(roots).toContain(path.resolve(os.homedir()));
+    expect(roots).toContain(realpathOrSelf(path.resolve(os.homedir())));
     expect(roots.length).toBeGreaterThan(0);
   });
 });

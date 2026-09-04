@@ -10,6 +10,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 const revealFileById = vi.fn(async () => {});
 vi.mock("@/lib/shell/client", () => ({
   revealFileById: (id: string) => revealFileById(id),
+  revealFile: vi.fn(async () => {}),
   revealLabel: () => "Reveal in Finder",
   getShellPlatform: () => "darwin",
 }));

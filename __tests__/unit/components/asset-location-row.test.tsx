@@ -15,6 +15,7 @@ vi.mock("@/lib/queries/files", () => ({
 const revealFile = vi.fn(async () => {});
 vi.mock("@/lib/shell/client", () => ({
   revealFile: (p: string) => revealFile(p),
+  revealFileById: vi.fn(async () => {}),
   revealLabel: () => "Reveal in Finder",
   getShellPlatform: () => "darwin",
 }));

@@ -131,3 +131,69 @@ describe("/api/shell/reveal — allowlist covers libi's own configurable roots",
     expect(spawnMock).not.toHaveBeenCalled();
   });
 });
+
+describe("/api/shell/reveal — symlinks are resolved before containment", () => {
+  let root: string;
+  let outside: string;
+  const OLD_LIBI_HOME = process.env.LIBI_HOME;
+
+  beforeEach(() => {
+    vi.resetModules();
+    spawnMock.mockClear();
+    root = fs.mkdtempSync(path.join("/var/tmp", "libi-symlink-root-"));
+    outside = fs.mkdtempSync(path.join("/var/tmp", "libi-symlink-outside-"));
+    process.env.LIBI_HOME = root;
+  });
+
+  afterEach(() => {
+    if (OLD_LIBI_HOME === undefined) delete process.env.LIBI_HOME;
+    else process.env.LIBI_HOME = OLD_LIBI_HOME;
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+    vi.resetModules();
+  });
+
+  it("refuses a symlink that sits inside a root but points outside it", async () => {
+    const secret = path.join(outside, "secret.txt");
+    fs.writeFileSync(secret, "x");
+    const planted = path.join(root, "innocent.mp4");
+    fs.symlinkSync(secret, planted);
+
+    const { POST } = await import("@/app/api/shell/reveal/route");
+    const res = await POST(post({ path: planted }));
+
+    // Response shape is unchanged — the non-oracle property still holds.
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    // But nothing was revealed. An agent has write access to piece dirs and
+    // can plant exactly this, and a lexical check waves it through.
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("still reveals a real file under the OS temp dir", async () => {
+    // THE REGRESSION GUARD for resolving symlinks: os.tmpdir() is ITSELF a
+    // symlink on macOS (/var/folders/… → /private/var/folders/…). Resolving
+    // the requested path while leaving the roots lexical would reject every
+    // temp-dir reveal — which is a path the release QA actually exercises.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "libi-tmp-reveal-"));
+    const file = path.join(tmp, "clip.mp4");
+    fs.writeFileSync(file, "x");
+    try {
+      const { POST } = await import("@/app/api/shell/reveal/route");
+      await POST(post({ path: file }));
+      expect(spawnMock).toHaveBeenCalledTimes(1);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("still reveals an ordinary file inside the root", async () => {
+    const real = path.join(root, "real.mp4");
+    fs.writeFileSync(real, "x");
+
+    const { POST } = await import("@/app/api/shell/reveal/route");
+    await POST(post({ path: real }));
+
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+});

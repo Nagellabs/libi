@@ -3,8 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 import { FolderOpen, Copy, Check } from "lucide-react";
 import { useFileLocation } from "@/lib/queries/files";
-import { revealFile, revealLabel, getShellPlatform } from "@/lib/shell/client";
-import { trackEvent } from "@/lib/analytics/client";
+import { useRevealAsset } from "@/components/shared/reveal-asset";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -29,14 +28,14 @@ export function AssetLocationRow({ fileId }: { fileId: string }) {
 
   const path = data?.path;
 
+  // Shared with both context menus so the analytics event and the
+  // platform-native wording cannot drift between surfaces.
+  const { revealByPath, label } = useRevealAsset("summary_tab");
+
   const handleReveal = useCallback(() => {
     if (!path) return;
-    trackEvent("asset_revealed", { source: "summary_tab" });
-    // Reveal is fire-and-forget by design and this is a button click with
-    // nowhere to surface an error, so swallow a rejecting bridge call or
-    // rejecting fetch rather than let it escape as an unhandled rejection.
-    void revealFile(path).catch(() => {});
-  }, [path]);
+    revealByPath(path);
+  }, [path, revealByPath]);
 
   const handleCopy = useCallback(() => {
     if (!path) return;
@@ -65,8 +64,6 @@ export function AssetLocationRow({ fileId }: { fileId: string }) {
   // No row (404) or an error — render nothing rather than an error state.
   // A missing file row means the asset panel itself is about to close.
   if (!data || !path) return null;
-
-  const label = revealLabel(getShellPlatform());
 
   return (
     <section className="mb-4">
