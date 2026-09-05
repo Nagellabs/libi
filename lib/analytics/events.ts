@@ -85,6 +85,13 @@ export const EVENT_NAMES = [
   // one value per surface that offers the action. The path itself is NEVER
   // sent: it is unbounded and personal.
   "asset_revealed",
+  // Piece aspect ratio changed from the Preview-row picker. Params:
+  // `ratio` is a catalog id ("9:16" | "4:5" | "1:1" | "16:9" | "4:3" | "21:9")
+  // and `mode` is "direct" (empty piece, written immediately) | "dispatched"
+  // (piece had overlays, handed to the agent to reflow). Both are bounded by
+  // construction. Dimensions are NOT sent — an agent can set any, so they are
+  // unbounded.
+  "aspect_ratio_changed",
   "terminal_session_started",
   "mcp_server_added",
   "codex_connect_toggled",

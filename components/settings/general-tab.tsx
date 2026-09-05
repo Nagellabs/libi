@@ -3,8 +3,11 @@
 import { useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { UpdatesSection } from "@/components/settings/updates-section";
 import { useEditorState } from "@/lib/editor-state-context";
+import { ASPECT_RATIOS } from "@/lib/composition/aspect-ratio";
+import { usePieceDefaults, useUpdatePieceDefaults } from "@/lib/queries/piece-defaults";
 
 const LIBI_PREFIXES = ["libi:", "libi-"];
 const OTHER_KEYS = ["theme"];
@@ -35,6 +38,8 @@ function resetLocalPreferences(): number {
 export function GeneralTab() {
   const [confirming, setConfirming] = useState(false);
   const { previewQuality, setPreviewQuality } = useEditorState();
+  const { data: pieceDefaults } = usePieceDefaults();
+  const updatePieceDefaults = useUpdatePieceDefaults();
 
   const handleReset = () => {
     const count = resetLocalPreferences();
@@ -74,6 +79,46 @@ export function GeneralTab() {
             Smooth (720p)
           </Button>
         </div>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold text-foreground">Default aspect ratio</h3>
+        <p data-testid="default-ratio-help" className="mt-1 text-sm text-muted-foreground">
+          The frame shape <strong>new pieces</strong> are created with. Existing pieces
+          are never changed — to change one, use the aspect ratio control above the
+          preview.
+        </p>
+
+        {!pieceDefaults ? (
+          <div data-testid="default-ratio-skeleton" className="mt-3 flex gap-2">
+            {ASPECT_RATIOS.map((r) => (
+              <Skeleton key={r.id} className="h-9 w-16 rounded-md" />
+            ))}
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {ASPECT_RATIOS.map((r) => {
+              const active = pieceDefaults.aspectRatioId === r.id;
+              return (
+                <button
+                  key={r.id}
+                  type="button"
+                  aria-pressed={active}
+                  data-testid={`default-ratio-${r.id}`}
+                  disabled={updatePieceDefaults.isPending}
+                  onClick={() => updatePieceDefaults.mutate({ aspectRatioId: r.id })}
+                  className={`cursor-pointer rounded-md border px-3 py-2 text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    active
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:bg-accent hover:text-foreground"
+                  }`}
+                >
+                  {r.id}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div>

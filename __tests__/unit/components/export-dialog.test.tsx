@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 const exportDefaults: { data: unknown } = { data: undefined };
@@ -34,13 +34,19 @@ function idleFlow(): UseExportFlowResult {
   } as unknown as UseExportFlowResult;
 }
 
-function renderDialog(opts: { hasDraft: boolean; hasSnapshot: boolean; pieceName?: string }) {
+function renderDialog(opts: {
+  hasDraft: boolean;
+  hasSnapshot: boolean;
+  pieceName?: string;
+  compositionWidth?: number;
+  compositionHeight?: number;
+}) {
   return render(
     <ExportDialog
       pieceId="p1"
       pieceName={opts.pieceName ?? "My piece"}
-      compositionWidth={1920}
-      compositionHeight={1080}
+      compositionWidth={opts.compositionWidth ?? 1920}
+      compositionHeight={opts.compositionHeight ?? 1080}
       flow={idleFlow()}
       hasSnapshot={opts.hasSnapshot}
       hasDraft={opts.hasDraft}
@@ -78,5 +84,35 @@ describe("ExportDialog form seeding", () => {
     // The seeded format renders as the selected Segmented chip.
     expect(screen.getByRole("button", { name: "WebM" }).className).toContain("bg-primary");
     exportDefaults.data = undefined;
+  });
+});
+
+describe("ExportDialog quality hint — orientation-aware presets", () => {
+  // Regression for the bug where the dialog derived the "1080p" hint from a
+  // hardcoded landscape table (1920×1080) instead of the server's short-edge
+  // logic. For a portrait piece (the DEFAULT for new pieces, which are
+  // 9:16), that showed the wrong dimensions AND a false upscaling warning
+  // for an export that is pixel-identical to the source.
+  it("shows the portrait target dimensions, not the landscape table", () => {
+    renderDialog({
+      hasDraft: true,
+      hasSnapshot: true,
+      compositionWidth: 1080,
+      compositionHeight: 1920,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "1080p" }));
+    expect(screen.getByText("1080×1920")).toBeInTheDocument();
+  });
+
+  it("shows no upscaling warning for a 1080×1920 piece at 1080p", () => {
+    renderDialog({
+      hasDraft: true,
+      hasSnapshot: true,
+      compositionWidth: 1080,
+      compositionHeight: 1920,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "1080p" }));
+    expect(screen.queryByText(/will be larger without added detail/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/will be upscaled/)).not.toBeInTheDocument();
   });
 });

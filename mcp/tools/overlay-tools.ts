@@ -19,6 +19,7 @@ import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema";
 import { eq, and } from "drizzle-orm";
 import { validateDrawFunction, validateThreeFunction, warnThreeFunction } from "@/lib/ai/scene-validator";
+import { aspectMismatchWarning } from "@/lib/composition/aspect-mismatch";
 import { findEffect, listEffects } from "@/lib/effects/registry";
 import { overlayLogger } from "@/lib/logger";
 import { clampRectToFrame } from "@/lib/engine/overlays";
@@ -151,12 +152,37 @@ function captionStyleFields(p: {
 
 /** Clamp a 2D overlay rect to the piece's frame bounds (no-op on load failure). */
 async function clampRect(pieceId: string, rect: OverlayRect): Promise<OverlayRect> {
+  const frame = await loadFrame(pieceId);
+  return clampToFrame(frame, rect);
+}
+
+/**
+ * The composition's frame size, read ONCE per add.
+ *
+ * `addOverlay` needs the frame up to three times — to clamp the supplied rect,
+ * to default a video overlay to full-frame, and to compare the source's aspect
+ * against the canvas. Each used to load the manifest separately. They all
+ * describe the same frame within one request, so one read is both cheaper and
+ * more obviously consistent.
+ *
+ * Returns null when the manifest cannot be read; callers then leave the rect
+ * untouched rather than clamping against a guessed frame.
+ */
+async function loadFrame(pieceId: string): Promise<{ width: number; height: number } | null> {
   try {
     const { manifest } = await loadComposition(pieceId);
-    return clampRectToFrame(rect, manifest.width, manifest.height);
+    return { width: manifest.width, height: manifest.height };
   } catch {
-    return rect;
+    return null;
   }
+}
+
+/** Pure clamp against an already-loaded frame. */
+function clampToFrame(
+  frame: { width: number; height: number } | null,
+  rect: OverlayRect,
+): OverlayRect {
+  return frame ? clampRectToFrame(rect, frame.width, frame.height) : rect;
 }
 
 /** codeFilePath for the data payload, or undefined for non-code overlays. */
@@ -224,13 +250,17 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
     };
   }
 
+  // One read of the frame for this whole add — the clamp, the video full-frame
+  // default and the aspect-mismatch check all describe the same canvas.
+  const frame = await loadFrame(pieceId);
+
   if (kind === "text") {
     overlay = {
       id: newId("text"),
       kind,
       startTime: params.startTime,
       duration: params.duration,
-      rect: await clampRect(pieceId, params.rect!),
+      rect: clampToFrame(frame, params.rect!),
       z: params.z,
       opacity: params.opacity,
       content: params.content!,
@@ -249,7 +279,7 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
       kind,
       startTime: params.startTime,
       duration: params.duration,
-      rect: await clampRect(pieceId, params.rect!),
+      rect: clampToFrame(frame, params.rect!),
       z: params.z,
       opacity: params.opacity,
       fileId: params.fileId!,
@@ -262,10 +292,13 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
     // (default "cover").
     let rect: OverlayRect;
     if (params.rect === undefined) {
-      const { manifest } = await loadComposition(pieceId);
-      rect = { x: 0, y: 0, width: manifest.width, height: manifest.height };
+      // Throwing matches the old behaviour exactly: this branch used to call
+      // loadComposition directly and let a read failure propagate to the
+      // tool's error result. There is no safe frame to default to.
+      if (!frame) throw new Error(`Could not read the composition for piece ${pieceId}`);
+      rect = { x: 0, y: 0, width: frame.width, height: frame.height };
     } else {
-      rect = await clampRect(pieceId, params.rect);
+      rect = clampToFrame(frame, params.rect);
     }
     overlay = {
       id: newId("vid"),
@@ -295,7 +328,7 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
       kind,
       startTime: params.startTime,
       duration: params.duration,
-      rect: await clampRect(pieceId, params.rect!),
+      rect: clampToFrame(frame, params.rect!),
       z: params.z,
       opacity: params.opacity,
       drawFunction: body,
@@ -397,20 +430,42 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
   }
 
   const codeFilePath = codePathFor(overlay);
-  const warning =
+
+  const warnings: string[] = [];
+  const threeWarning =
     overlay.kind === "three" ? warnThreeFunction(overlay.sceneFunction) : null;
-  if (warning) {
+  if (threeWarning) {
+    warnings.push(threeWarning);
     overlayLogger.warn(
-      { pieceId, overlayId: overlay.id, warning },
+      { pieceId, overlayId: overlay.id, warning: threeWarning },
       "overlay.add three — resource-budget warning",
     );
   }
+
+  if (overlay.kind === "video" || overlay.kind === "image") {
+    const mediaFile = lookupPieceFile(pieceId, overlay.fileId);
+    const mismatch = aspectMismatchWarning({
+      compWidth: frame?.width ?? 0,
+      compHeight: frame?.height ?? 0,
+      mediaWidth: mediaFile?.mediaWidth ?? null,
+      mediaHeight: mediaFile?.mediaHeight ?? null,
+      rect: overlay.rect,
+    });
+    if (mismatch) {
+      warnings.push(mismatch);
+      overlayLogger.warn(
+        { pieceId, overlayId: overlay.id, kind: overlay.kind },
+        "overlay.add — full-frame source does not match the composition aspect",
+      );
+    }
+  }
+
   return {
     success: true,
     data: {
       overlayId: overlay.id,
       ...(codeFilePath ? { codeFilePath } : {}),
-      ...(warning ? { warning } : {}),
+      ...(warnings.length ? { warning: warnings.join(" ") } : {}),
     },
   };
 }

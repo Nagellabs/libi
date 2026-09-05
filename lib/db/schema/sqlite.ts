@@ -217,6 +217,9 @@ export const settings = sqliteTable("settings", {
   codex: text("codex"),
   /** JSON-serialized ExportDefaultsSetting (folder, format, quality). Null = use OS-aware defaults. */
   exportDefaults: text("export_defaults"),
+  /** JSON-serialized PieceDefaultsSetting ({aspectRatioId}, see lib/db/settings.ts).
+   *  Applied when a piece is CREATED; never retroactive. Null = use 9:16. */
+  pieceDefaults: text("piece_defaults"),
   /** JSON {version, digests: {skillName: sha256}} — per-app-version cache of
    *  bundled skill content digests. Recomputed once per version change. */
   skillDigestCache: text("skill_digest_cache"),

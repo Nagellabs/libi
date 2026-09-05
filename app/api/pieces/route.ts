@@ -3,6 +3,7 @@ import { pieces } from "@/lib/db/schema";
 import { desc } from "drizzle-orm";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { trackServerEvent } from "@/lib/analytics/server";
+import { initializePieceManifest } from "@/lib/composition/new-piece-manifest";
 
 function formatPieceName(): string {
   const now = new Date();
@@ -48,6 +49,19 @@ export async function POST() {
     .insert(pieces)
     .values({ name: formatPieceName() })
     .returning();
+
+  // Materialise the manifest at creation so the user's default aspect ratio
+  // applies. Without this the piece has no manifest at all and loadManifest
+  // hands back a clone of EMPTY_MANIFEST — which is 1920x1080, and which must
+  // NOT be repointed: it is the "no content" baseline the snapshot/draft diff
+  // system compares against.
+  //
+  // The piece row above is already committed, so a failure inside this call
+  // cannot un-create it — see initializePieceManifest's own comment for why
+  // it swallows storage errors instead of throwing. Shared with
+  // `libi.create_piece` (mcp/tools/piece-discovery-tools.ts) so the two
+  // creation paths can't diverge on this again.
+  await initializePieceManifest(piece.id);
 
   void trackServerEvent("piece_created", { source: "ui" });
 

@@ -121,6 +121,7 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       notifications TEXT,
       codex TEXT,
       export_defaults TEXT,
+      piece_defaults TEXT,
       skill_digest_cache TEXT,
       analytics TEXT,
       crash_reports TEXT,

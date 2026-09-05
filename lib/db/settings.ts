@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "./client";
 import { settings } from "./schema";
 import { serverLogger } from "@/lib/logger";
+import { DEFAULT_ASPECT_RATIO_ID, ratioById } from "@/lib/composition/aspect-ratio";
 import {
   type AnalyticsSettings,
   parseAnalyticsSettings,
@@ -294,6 +295,62 @@ export function setExportDefaults(s: ExportDefaultsSetting): void {
   const value = JSON.stringify(s);
   const set = { exportDefaults: value, updatedAt: new Date() };
 
+  db.insert(settings)
+    .values({ id: 1, ...set })
+    .onConflictDoUpdate({ target: settings.id, set })
+    .run();
+}
+
+// ---------------------------------------------------------------------------
+// Piece defaults setting (default aspect ratio applied to NEW pieces)
+// ---------------------------------------------------------------------------
+
+/** The user's defaults for NEWLY CREATED pieces. Never applied retroactively. */
+export type PieceDefaultsSetting = {
+  /** A catalog id from lib/composition/aspect-ratio.ts, e.g. "9:16". */
+  aspectRatioId: string;
+};
+
+const PIECE_DEFAULTS_FALLBACK: PieceDefaultsSetting = {
+  aspectRatioId: DEFAULT_ASPECT_RATIO_ID,
+};
+
+/**
+ * Read the piece defaults. Falls back to 9:16 portrait when the row is
+ * missing, the column is empty, the JSON is malformed, or the stored id is
+ * not in the catalog.
+ *
+ * The catalog check is not paranoia: an id retired in a later version would
+ * otherwise reach `dimensionsFor()`, return null, and create a piece with no
+ * usable dimensions.
+ */
+export function getPieceDefaults(): PieceDefaultsSetting {
+  const db = getDb();
+  const [row] = db
+    .select({ pieceDefaults: settings.pieceDefaults })
+    .from(settings)
+    .where(eq(settings.id, 1))
+    .limit(1)
+    .all();
+
+  const raw = row?.pieceDefaults;
+  if (!raw) return { ...PIECE_DEFAULTS_FALLBACK };
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<PieceDefaultsSetting> | null;
+    if (!parsed || typeof parsed !== "object") return { ...PIECE_DEFAULTS_FALLBACK };
+    const id = parsed.aspectRatioId;
+    if (typeof id !== "string" || !ratioById(id)) return { ...PIECE_DEFAULTS_FALLBACK };
+    return { aspectRatioId: id };
+  } catch {
+    return { ...PIECE_DEFAULTS_FALLBACK };
+  }
+}
+
+/** Persist the piece defaults as JSON in the settings table. */
+export function setPieceDefaults(s: PieceDefaultsSetting): void {
+  const db = getDb();
+  const set = { pieceDefaults: JSON.stringify(s), updatedAt: new Date() };
   db.insert(settings)
     .values({ id: 1, ...set })
     .onConflictDoUpdate({ target: settings.id, set })

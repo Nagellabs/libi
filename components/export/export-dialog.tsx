@@ -20,6 +20,7 @@ import {
   type UseExportFlowResult,
 } from "@/hooks/editor/use-export-flow";
 import { useExportDefaults } from "@/lib/queries/export-defaults";
+import { presetDimensions, isUpscaling as computeIsUpscaling } from "@/lib/export/quality";
 import { revealFile, pickDirectory, hasElectronBridge } from "@/lib/shell/client";
 
 interface ExportDialogProps {
@@ -41,12 +42,6 @@ interface ExportDialogProps {
   openOverride?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
-
-const PRESET_DIMS: Record<Exclude<ExportQuality, "source" | "custom">, [number, number]> = {
-  "1080p": [1920, 1080],
-  "1440p": [2560, 1440],
-  "4k": [3840, 2160],
-};
 
 /**
  * Modal export dialog. Hosts:
@@ -136,12 +131,13 @@ export function ExportDialog(props: ExportDialogProps) {
   const targetDims = useMemo(() => {
     if (quality === "source") return { width: compositionWidth, height: compositionHeight };
     if (quality === "custom") return { width: customW, height: customH };
-    const [w, h] = PRESET_DIMS[quality];
-    return { width: w, height: h };
+    // Derive from the SAME short-edge logic the server uses, rather than a
+    // second hardcoded table — a stale copy here is what showed "1920×1080"
+    // (and a false upscaling warning) for a portrait export.
+    return presetDimensions(quality, compositionWidth, compositionHeight);
   }, [quality, compositionWidth, compositionHeight, customW, customH]);
 
-  const isUpscaling =
-    targetDims.width > compositionWidth || targetDims.height > compositionHeight;
+  const isUpscaling = computeIsUpscaling(targetDims, compositionWidth, compositionHeight);
 
   const isRunning = flow.status === "starting" || flow.status === "running";
 

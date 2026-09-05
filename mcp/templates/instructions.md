@@ -391,6 +391,43 @@ need a vertical canvas; otherwise the source either crops, letterboxes, or stret
 - When the user adds an asset whose aspect differs noticeably from the current canvas.
 - When the user explicitly mentions "vertical", "9:16", "portrait", "square", "TikTok", etc.
 
+### Before generating AI video or images
+
+**Know the piece's aspect ratio first.** If it is not already in your context, call
+`libi.retrieve_assets_dimensions(pieceId)` — it returns the composition's `width`,
+`height`, `aspect` and `isVertical`.
+
+Then pass a matching `aspect_ratio` to the generation model. Generation MCPs such as
+`fal-ai` are separate servers: libi does **not** rewrite their parameters, so an unset
+`aspect_ratio` uses that model's own default (often 16:9) and you get a clip that has to
+be cropped or letterboxed into the frame. The one exception is a storyboard card, where
+libi already defaults `aspect_ratio` to the piece's aspect for you.
+
+If `libi.add_overlay` comes back with a warning that a full-frame source does not match
+the composition, that is this mistake — regenerate at the right ratio, or change the
+canvas deliberately.
+
+### New pieces
+
+A new piece is created with the user's default aspect ratio (Settings → General). When
+you create or start work on a piece, set the canvas to match where the video is going:
+
+- Social / TikTok / Reels / Shorts / Stories → **9:16** (1080x1920). This is the default
+  and the right answer when nothing else is stated.
+- Instagram feed POST (a photo/video post, not a Reel) → **4:5** (1080x1350). Square
+  feed post → **1:1** (1080x1080). A Reel is 9:16 above, not 4:5 — they are different
+  surfaces: 4:5 is sized to win feed scroll space, 9:16 to fill the screen.
+- YouTube / X (Twitter) / web / presentation → **16:9** (1920x1080). X's standard video
+  is 16:9; it also accepts 9:16, so prefer 9:16 when the user says the post is aimed at
+  mobile.
+
+Set it with `libi.update_composition_dimensions` BEFORE generating anything, so every
+generated clip is produced at the final shape instead of being cropped into it later.
+
+Once the user has stated a destination, that destination wins: if a later asset doesn't
+match it, adapt the asset into the frame (crop, scale, or place as an inset) rather than
+resizing the canvas to fit the asset.
+
 ### Workflow
 
 1. Call `libi.retrieve_assets_dimensions(pieceId)` to see all video and image overlays with

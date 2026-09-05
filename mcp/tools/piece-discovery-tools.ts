@@ -3,6 +3,7 @@ import { pieces } from "@/lib/db/schema/sqlite";
 import { and, desc, eq, like, or, ne } from "drizzle-orm";
 import { getOpenedPieceId, setOpenedPieceId } from "@/lib/editor-state";
 import { deletePieceCompletely } from "@/lib/pieces/delete-piece";
+import { initializePieceManifest } from "@/lib/composition/new-piece-manifest";
 import type { ToolResult } from "./types";
 
 /** Validator-safe blank canvas body — paints a full-frame dark background.
@@ -104,6 +105,13 @@ export async function createPiece(params: {
   // plus a non-blocking hint (see preview-player.tsx), so there's no longer a
   // "reads as broken" empty state to paper over with a seeded scene. The agent
   // adds real content (video scene, overlay, etc.) when the user asks.
+  //
+  // Materialise the manifest at the user's default aspect ratio, same as
+  // `POST /api/pieces` — without this an agent-created piece silently lands
+  // at EMPTY_MANIFEST's 1920x1080 landscape regardless of what the user set
+  // as their default.
+  await initializePieceManifest(piece.id);
+
   return { success: true, data: piece };
 }
 

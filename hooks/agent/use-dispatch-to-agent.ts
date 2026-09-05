@@ -31,7 +31,12 @@ export function useDispatchToAgent() {
   }, []);
 
   const { switchSession, refresh } = sessionList;
-  const send = useCallback(async () => {
+  // Returns whether the prompt was actually handed to the agent — false for
+  // both the BYO-CLI no-op and a request failure. Callers that need to know
+  // the dispatch actually happened (e.g. to fire analytics only on a real
+  // send, not on every open of this dialog) key off this instead of the
+  // toast side effects.
+  const send = useCallback(async (): Promise<boolean> => {
     setSending(true);
     try {
       const r = await sendPromptToAgent(prompt, {
@@ -48,25 +53,30 @@ export function useDispatchToAgent() {
           description:
             "You're in bring-your-own-CLI mode. Copy the prompt and paste it into your CLI.",
         });
-        return;
+        return false;
       }
       if (!r.ok) {
         toast.error("Couldn't send to the agent");
-        return;
+        return false;
       }
       toast.success("Sent to the libi agent");
       setOpen(false);
+      return true;
     } finally {
       setSending(false);
     }
   }, [prompt, switchSession, refresh, chatVisible, toggleChat]);
 
-  const copy = useCallback(async () => {
+  // Same signal as `send`, for the same reason: true only when the prompt
+  // actually made it to the clipboard.
+  const copy = useCallback(async (): Promise<boolean> => {
     try {
       await navigator.clipboard.writeText(prompt);
       toast.success("Prompt copied to clipboard");
+      return true;
     } catch {
       toast.error("Clipboard not available");
+      return false;
     }
   }, [prompt]);
 

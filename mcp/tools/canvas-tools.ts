@@ -1,8 +1,8 @@
 import { eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files, pieces } from "@/lib/db/schema/sqlite";
-import { loadComposition, loadManifest, saveManifest } from "@/lib/composition/persistence";
-import { navigationEmitter } from "@/lib/navigation-events";
+import { loadComposition } from "@/lib/composition/persistence";
+import { setCompositionDimensions } from "@/lib/composition/dimensions";
 import { mcpLogger as logger } from "@/lib/logger";
 import type { ToolResult } from "./types";
 import type {
@@ -119,46 +119,19 @@ export async function updateCompositionDimensions(
     return { success: false, error: `Piece not found: ${pieceId}` };
   }
 
-  const manifest = await loadManifest(pieceId);
-  const oldWidth = manifest.width;
-  const oldHeight = manifest.height;
-  manifest.width = width;
-  manifest.height = height;
-
-  const warnings: string[] = [];
-  for (const o of manifest.overlays ?? []) {
-    const rect = o.rect;
-    const rightEdge = rect.x + rect.width;
-    const bottomEdge = rect.y + rect.height;
-    if (rightEdge > width || bottomEdge > height || rect.x < 0 || rect.y < 0) {
-      warnings.push(
-        `Overlay ${o.id} (${o.kind}) rect ${JSON.stringify(rect)} extends beyond new ${width}×${height} bounds.`,
-      );
-    }
-  }
-
-  await saveManifest(pieceId, manifest);
-
-  navigationEmitter.emit("refresh_query", { queryKey: "composition", pieceId });
+  const result = await setCompositionDimensions(pieceId, width, height);
 
   logger.info(
     {
+      tag: "composition",
+      op: "update_dimensions",
       pieceId,
-      from: { w: oldWidth, h: oldHeight },
-      to: { w: width, h: height },
-      warnings: warnings.length,
+      from: { w: result.previousWidth, h: result.previousHeight },
+      to: { w: result.width, h: result.height },
+      warnings: result.warnings.length,
     },
     "update_composition_dimensions",
   );
 
-  return {
-    success: true,
-    data: {
-      width,
-      height,
-      previousWidth: oldWidth,
-      previousHeight: oldHeight,
-      warnings,
-    },
-  };
+  return { success: true, data: { ...result } };
 }

@@ -2339,7 +2339,7 @@ export function createLibiMcpServer(): McpServer {
     {
       title: "Retrieve assets dimensions",
       description:
-        "Return width/height/aspect of every video scene, video overlay, and image overlay in the composition, plus the current composition dimensions. Use BEFORE making canvas-aspect decisions or before calling libi.update_composition_dimensions.",
+        "Return width/height/aspect of every video overlay and image overlay in the composition, plus the current composition dimensions (width, height, aspect, isVertical). This is how you learn the piece's ASPECT RATIO. Call it BEFORE generating any AI video or image whose aspect must match the piece, before making canvas-aspect decisions, and before calling libi.update_composition_dimensions.",
       inputSchema: retrieveAssetsDimensionsSchema,
     },
     async (params) => {

@@ -74,6 +74,7 @@ import { usePlaybackFrame } from "@/hooks/preview/use-playback-frame";
 import type { SelectionStore } from "@/lib/preview/selection-store";
 import { useSelectedOverlay } from "@/hooks/preview/use-selected-overlay";
 import { EffectsPanel, type EffectsFamily } from "@/components/preview/effects-panel";
+import { AspectRatioControl } from "@/components/preview/aspect-ratio-control";
 import type { EffectHighlightStore } from "@/lib/preview/effect-highlight-store";
 import type { EffectPreviewStore } from "@/lib/preview/effect-preview-store";
 import type { KeyframeSelectionStore } from "@/lib/preview/keyframe-selection-store";
@@ -1429,7 +1430,16 @@ export default function PreviewPlayer({
     <div className="flex h-full flex-col bg-background">
       {/* Top bar with export */}
       <div className="flex items-center justify-between border-b border-border bg-surface px-4 py-2">
-        <span className="text-xs font-medium text-muted-foreground">Preview</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-medium text-muted-foreground">Preview</span>
+          <AspectRatioControl
+            pieceId={pieceId}
+            pieceName={pieceName ?? "this piece"}
+            width={composition.width}
+            height={composition.height}
+            overlayCount={(composition.overlays ?? []).length}
+          />
+        </div>
         <div className="flex items-center gap-2">
           {(composition.overlays ?? []).some((o) => o.kind === "tracked") && (
             <TooltipProvider>
