@@ -161,6 +161,12 @@ export const audioAddClipSchema = z.object({
     "For an inline clip bound to a video overlay (not a scene). At most one of linkedSceneId/linkedOverlayId.",
   ),
   label: z.string().optional().describe("Display label, e.g. 'background music'"),
+  lengthPolicy: z
+    .enum(["extend", "trim"])
+    .optional()
+    .describe(
+      "Required ONLY when the clip would end past the piece's current end and no explicit `duration` is given: 'extend' keeps the asset's full length (the piece grows), 'trim' cuts the clip at the piece's current end. Ask the user which they want before choosing.",
+    ),
 });
 
 export const audioUpdateClipSchema = z.object({
@@ -717,6 +723,15 @@ export const addOverlaySchema = z.object({
   body: z.string().max(20000).optional(),
   cameraPreset: cameraPresetEnum.optional(),
   transform3d: transform3dSchema.optional(),
+  // video only — `duration` is REQUIRED on this tool, so (unlike audioAddClip)
+  // an explicit duration can't mean "already decided". This is the only way
+  // through when the overlay would end past the piece's current end.
+  lengthPolicy: z
+    .enum(["extend", "trim"])
+    .optional()
+    .describe(
+      "VIDEO overlays only. Required ONLY when startTime + duration would run past the piece's current end: 'extend' keeps the requested duration (the piece grows), 'trim' cuts the overlay at the piece's current end. Ask the user which they want before choosing.",
+    ),
 });
 export type AddOverlayParams = z.infer<typeof addOverlaySchema>;
 

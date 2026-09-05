@@ -148,6 +148,25 @@ chosen provider. It handles the approval card and cost disclosure.
 On success, attach the wav to the piece via `libi.audio_add_clip` so
 the user hears it under their visuals.
 
+## When the track is longer than the piece
+
+A piece has no length of its own — it ends where its last clip ends. So
+attaching a 3:49 track to a 3-second piece stretches the piece to 3:49, and
+trimming the track to 3 seconds throws the rest away. Both are real choices
+and neither is yours to make silently.
+
+Before calling `libi.audio_add_clip` with a track that runs past the piece's
+current end, ASK:
+
+> "That track is 3:49 but the piece is currently 0:03. Want me to extend the
+> piece to the full track, trim the track to 0:03, or use a specific length?"
+
+Then call `libi.audio_add_clip` with `lengthPolicy: "extend"` or `"trim"`, or
+with an explicit `duration` for a length in between. The tool refuses the add
+until you have stated one — if you see `asset_longer_than_piece` in the
+response, you skipped the question. An asset that fits inside the piece (or
+an empty piece with nothing to exceed) needs no question.
+
 ## Stage 9 — Beat-synced visual? (optional)
 
 Once a track exists, ask:

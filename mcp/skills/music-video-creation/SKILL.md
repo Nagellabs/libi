@@ -281,6 +281,28 @@ After completing each major phase (e.g., music generated, scenes built, overlays
 
 When generating 2–3 candidate tracks for the user to choose from (e.g. the user says "give me a few options"), keep them together in a folder rather than scattering three unrelated files. Create one folder via `libi.create_asset_folder({ pieceId, name: "music candidates" })`, then import each track with that `folderId`. Use `libi.show_asset({ pieceId, fileId })` so the user can audition the candidates, and reference the chosen track's `fileId` directly when you attach it to the timeline. See the `using-asset-folders` skill for the full workflow.
 
+### Rule 10 — When the track is longer than the piece
+
+A piece has no length of its own — it ends where its last clip ends. So
+attaching a 3:49 track to a 3-second piece (Step 4, ATTACH, below) stretches
+the piece to 3:49, and trimming the track to 3 seconds throws the rest away.
+Both are real choices and neither is yours to make silently.
+
+Before calling `libi.audio_add_clip` with a track that runs past the piece's
+current end, ASK:
+
+> "That track is 3:49 but the piece is currently 0:03. Want me to extend the
+> piece to the full track, trim the track to 0:03, or use a specific length?"
+
+Then call `libi.audio_add_clip` with `lengthPolicy: "extend"` or `"trim"`, or
+with an explicit `duration` for a length in between. The tool refuses the add
+until you have stated one — if you see `asset_longer_than_piece` in the
+response, you skipped the question. An asset that fits inside the piece needs
+no question. The same rule applies to a `video` overlay added via
+`libi.add_overlay` (e.g. a storyboard clip that outlasts the piece) — there,
+`duration` is required and does not bypass the gate, so `lengthPolicy` is the
+only way through.
+
 ## The flow
 
 ```

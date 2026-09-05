@@ -30,6 +30,7 @@ import OverlayClipContextMenu from "@/components/preview/overlay-clip-context-me
 import KeyframeContextMenu from "@/components/preview/keyframe-context-menu";
 import { useClipOps } from "@/lib/queries/clips";
 import DuckConfigDialog from "@/components/preview/duck-config-dialog";
+import { AudioLengthDialog } from "@/components/preview/audio-length-dialog";
 import { useUpdateAudioClip, useAddAudioClip } from "@/lib/queries/audio-clips";
 import { overlayErrorEmitter } from "@/hooks/sessions/use-agent-chat";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
@@ -470,12 +471,24 @@ export default function PreviewSurface({
   // Dropped AUDIO → a standalone audio clip (not an overlay). In-app asset →
   // fileId; OS file → upload first (proxy auto via storeFile), then add.
   const addAudioClip = useAddAudioClip(pieceId);
+  // An asset that would run past the piece's current end silently stretches
+  // it otherwise — the user must choose (extend / trim / a specific length)
+  // before the clip is written. Held here rather than fired immediately;
+  // AudioLengthDialog below resolves it into the actual mutation.
+  const [pendingAudioDrop, setPendingAudioDrop] = useState<{
+    fileId: string;
+    startTime: number;
+    assetName: string;
+    assetDurationSec: number;
+  } | null>(null);
+  const filesById = useMemo(() => new Map(files.map((f) => [f.id, f] as const)), [files]);
   const onDropAudio = useCallback(
     async (arg: { fileId?: string; file?: File; startTime: number }) => {
       let fileId = arg.fileId;
+      let rec: FileRecord | undefined;
       if (!fileId && arg.file) {
         try {
-          const rec = await uploadFile(arg.file);
+          rec = await uploadFile(arg.file);
           fileId = rec.id;
         } catch (err) {
           toast.error(err instanceof Error ? err.message : "Upload failed");
@@ -483,9 +496,20 @@ export default function PreviewSurface({
         }
       }
       if (!fileId) return;
+      const meta = rec ?? filesById.get(fileId);
+      const assetDurationSec = meta?.mediaDuration ?? 0;
+      if (durationSec > 0 && arg.startTime + assetDurationSec > durationSec) {
+        setPendingAudioDrop({
+          fileId,
+          startTime: arg.startTime,
+          assetName: meta ? meta.name || meta.filename : "This clip",
+          assetDurationSec,
+        });
+        return;
+      }
       addAudioClip.mutate({ fileId, startTime: arg.startTime });
     },
-    [addAudioClip, uploadFile],
+    [addAudioClip, uploadFile, durationSec, filesById],
   );
 
   // Just-created overlay id → drives the timeline bar's one-shot enter animation.
@@ -1335,6 +1359,25 @@ export default function PreviewSurface({
         chatVisible={chatVisible}
         toggleChat={toggleChat}
       />
+
+      {pendingAudioDrop && (
+        <AudioLengthDialog
+          open
+          assetName={pendingAudioDrop.assetName}
+          assetDurationSec={pendingAudioDrop.assetDurationSec}
+          pieceDurationSec={durationSec}
+          startTimeSec={pendingAudioDrop.startTime}
+          onCancel={() => setPendingAudioDrop(null)}
+          onChoose={(duration) => {
+            addAudioClip.mutate({
+              fileId: pendingAudioDrop.fileId,
+              startTime: pendingAudioDrop.startTime,
+              duration,
+            });
+            setPendingAudioDrop(null);
+          }}
+        />
+      )}
     </div>
     </OverlayEditStoreProvider>
   );

@@ -30,7 +30,7 @@ import type { Storyboard, StoryboardCard as Card } from "@/lib/storyboard/types"
 // Custom node data type
 // ---------------------------------------------------------------------------
 
-type StoryboardNodeData = { card: Card; pieceId: string; schemas: SchemasMap; orderByCardId: Record<string, number> } & Record<string, unknown>;
+type StoryboardNodeData = { card: Card; pieceId: string; schemas: SchemasMap; sketchRevs: Record<string, Record<string, string>>; orderByCardId: Record<string, number> } & Record<string, unknown>;
 type StoryboardNodeType = Node<StoryboardNodeData, "storyboardCard">;
 
 // ---------------------------------------------------------------------------
@@ -38,11 +38,11 @@ type StoryboardNodeType = Node<StoryboardNodeData, "storyboardCard">;
 // ---------------------------------------------------------------------------
 
 function StoryboardNode({ data }: NodeProps<StoryboardNodeType>) {
-  const { card, pieceId, schemas, orderByCardId } = data;
+  const { card, pieceId, schemas, sketchRevs, orderByCardId } = data;
   return (
     <div className="w-[420px]">
       <Handle type="target" position={Position.Left} />
-      <StoryboardCard pieceId={pieceId} card={card} index={card.order} schemas={schemas} orderByCardId={orderByCardId} />
+      <StoryboardCard pieceId={pieceId} card={card} index={card.order} schemas={schemas} sketchRevs={sketchRevs[card.id]} orderByCardId={orderByCardId} />
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -58,9 +58,10 @@ interface BoardViewProps {
   pieceId: string;
   storyboard: Storyboard;
   schemas: SchemasMap;
+  sketchRevs?: Record<string, Record<string, string>>;
 }
 
-export function BoardView({ pieceId, storyboard, schemas }: BoardViewProps) {
+export function BoardView({ pieceId, storyboard, schemas, sketchRevs = {} }: BoardViewProps) {
   const updateLayout = useUpdateLayout(pieceId);
 
   const { nodes: initialNodes, edges: initialEdges } = useMemo(
@@ -78,11 +79,11 @@ export function BoardView({ pieceId, storyboard, schemas }: BoardViewProps) {
           id: n.id,
           position: n.position,
           type: "storyboardCard" as const,
-          data: { card, pieceId, schemas, orderByCardId },
+          data: { card, pieceId, schemas, sketchRevs, orderByCardId },
         };
       });
     },
-    [initialNodes, storyboard.cards, pieceId, schemas],
+    [initialNodes, storyboard.cards, pieceId, schemas, sketchRevs],
   );
 
   const rfEdges: Edge[] = useMemo(

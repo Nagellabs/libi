@@ -5,6 +5,7 @@ import {
   loadManifest,
   saveManifest,
 } from "@/lib/composition/persistence";
+import { pieceDurationSec } from "@/lib/composition/duration";
 import {
   addClip,
   updateClip as updateClipPure,
@@ -53,13 +54,47 @@ export async function audioAddClip(
   }
 
   const manifest = await loadManifest(ctx.pieceId);
+
+  // Length gate. A piece has no stored duration (see lib/composition/duration),
+  // so adding a clip that ends past the current end silently STRETCHES the
+  // piece, and trimming it silently shortens the asset. Both used to happen
+  // with no signal to the user — the drag path stretched, the agent trimmed on
+  // its own judgement. Refuse instead, and make the caller state an intent.
+  //
+  // An explicit `duration` always wins: a caller that already agreed a length
+  // with the user (including the drop dialog) is never blocked.
+  const pieceEnd = pieceDurationSec(manifest);
+  const assetDuration = params.duration ?? file.mediaDuration ?? 0;
+  const wouldExtend = params.startTime + assetDuration > pieceEnd;
+  let duration = assetDuration;
+  if (params.duration === undefined && pieceEnd > 0 && wouldExtend) {
+    if (!params.lengthPolicy) {
+      return {
+        success: false,
+        error: "asset_longer_than_piece",
+        data: {
+          assetDurationSec: assetDuration,
+          pieceDurationSec: pieceEnd,
+          message:
+            `This asset runs ${assetDuration}s but the piece is currently ${pieceEnd}s. ` +
+            "Ask the user which they want — extend the piece to fit the asset, trim the asset " +
+            "to the piece's length, or a specific length in between — then call again with " +
+            "lengthPolicy 'extend' | 'trim', or with an explicit `duration` for an in-between length.",
+        },
+      };
+    }
+    if (params.lengthPolicy === "trim") {
+      duration = Math.max(0, pieceEnd - params.startTime);
+    }
+  }
+
   const id = `clip_${randomId()}`;
   const next = addClip(manifest, {
     id,
     kind: params.kind,
     fileId: params.fileId,
     startTime: params.startTime,
-    duration: params.duration ?? file.mediaDuration ?? 0,
+    duration,
     trimStart: params.trimStart ?? 0,
     volume: params.volume ?? 1,
     enabled: params.enabled ?? true,

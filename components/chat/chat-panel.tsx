@@ -47,7 +47,6 @@ interface ChatPanelProps {
   sessionId: string | null;
   onToolResult?: (toolId: McpToolId | null, rawTitle: string, result: unknown) => void;
   onNavigate?: (event: { target: string; pieceId: string; fileId?: string }) => void;
-  onRefreshQuery?: (event: { queryKey: string; pieceId?: string }) => void;
   onSessionsChanged?: () => void;
   /** Open a chat-message file attachment in the assets panel. The parent
    *  (editor page) switches to the file's piece, flips the editor to the
@@ -145,9 +144,9 @@ function AgentThinkingTag() {
   );
 }
 
-function ChatPanel({ sessionId, onToolResult, onNavigate, onRefreshQuery, onSessionsChanged, onOpenAsset, onNewChat }: ChatPanelProps) {
+function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onOpenAsset, onNewChat }: ChatPanelProps) {
   useReactRenderTelemetry("ChatPanel");
-  const chat = useAgentChat(sessionId, { onToolResult, onNavigate, onRefreshQuery, onSessionsChanged });
+  const chat = useAgentChat(sessionId, { onToolResult, onNavigate, onSessionsChanged });
   // Measured once per messages array and shared: the pill compares it against
   // where the user left the bottom, and the scroll hook saves it next to the
   // offset so a return to this session can tell "nothing happened while I was

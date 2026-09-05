@@ -251,13 +251,18 @@ export function usePendingApprovalCount(sessionId: string | null): number {
 }
 
 // ── refresh_query global emitter ────────────────────────────────────
-// A second pub/sub channel layered on top of the single SSE EventSource.
-// `useAgentChat` instances forward their per-session callback (existing
-// `onRefreshQuery` option) AS WELL AS publishing every refresh_query
-// event here. Layout-level subscribers (see
-// `hooks/use-global-refresh-query-subscription.ts`) consume this so the
-// data-cache invalidation runs on every (app) route, not only on the
-// editor page where `onRefreshQuery` happens to be wired in.
+// A second pub/sub channel layered on top of the single SSE EventSource,
+// published at the SSE-singleton level (see `_ensureGlobalSSE` below) so
+// every refresh_query event reaches every subscriber regardless of which
+// `useAgentChat` instances happen to be mounted. Layout-level subscribers
+// (`hooks/use-global-refresh-query-subscription.ts`) consume this for
+// data-only cache invalidation, and `hooks/editor/
+// use-composition-refresh-subscription.ts` consumes it directly for the
+// composition case — there used to be a per-instance `onRefreshQuery`
+// option that the editor wired through `<ChatPanel>`, but that path was
+// never mounted on the terminal chat surface, so composition changes made
+// by a terminal-driven agent were silently dropped. Delivery now never
+// depends on a chat instance being mounted at all.
 
 type RefreshQueryListener = (event: {
   queryKey: string;
@@ -573,12 +578,11 @@ function _ensureGlobalSSE() {
 
     // Publish refresh_query events to the layout-level emitter at the
     // SINGLETON level so cache invalidation runs on every (app) route,
-    // even when no useAgentChat instance is mounted (e.g. /settings,
-    // /characters, /items — AppSidebar opens the SSE singleton via
-    // usePendingApprovalCount but registers no per-instance handler).
-    // The per-instance `optionsRef.current?.onRefreshQuery?.(...)`
-    // callback still fires inside the per-session handler below so the
-    // editor's composition handler keeps working.
+    // and every subscriber, regardless of whether any useAgentChat
+    // instance is mounted at all (e.g. /settings, /characters, /items —
+    // AppSidebar opens the SSE singleton via usePendingApprovalCount but
+    // registers no per-instance handler; the terminal chat surface never
+    // mounts a useAgentChat instance in the first place).
     if (data.type === "refresh_query") {
       refreshQueryEmitter.emit({
         queryKey: data.queryKey as string,
@@ -803,9 +807,6 @@ export interface UseAgentChatOptions {
    *  the original ACP title — most consumers only care about toolId. */
   onToolResult?: (toolId: McpToolId | null, rawTitle: string, result: unknown) => void;
   onNavigate?: (event: { target: string; pieceId: string; fileId?: string; id?: string }) => void;
-  /** Fired when a server-side tool asks the UI to invalidate a React Query
-   *  cache (e.g. composition after a scene mutation). */
-  onRefreshQuery?: (event: { queryKey: string; pieceId?: string; sceneId?: string; fileId?: string }) => void;
   /** Fired after the server has re-synced session metadata (e.g. the agent
    *  just auto-renamed this session). Consumers typically refresh their
    *  sidebar session list. */
@@ -960,20 +961,15 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         });
       }
 
-      if (type === "refresh_query") {
-        // Note: refreshQueryEmitter.emit happens at the SSE singleton
-        // (see _ensureGlobalSSE onmessage) so layout-level subscribers
-        // get every event regardless of whether any useAgentChat
-        // instance is mounted. The per-instance callback below is just
-        // for consumers that opt-in via `onRefreshQuery` (e.g. the
-        // editor page's composition handler).
-        optionsRef.current?.onRefreshQuery?.({
-          queryKey: data.queryKey as string,
-          pieceId: data.pieceId as string | undefined,
-          sceneId: data.sceneId as string | undefined,
-          fileId: data.fileId as string | undefined,
-        });
-      }
+      // Note: refresh_query has no per-instance callback here — the
+      // per-instance `onRefreshQuery` option this used to fire
+      // (`optionsRef.current?.onRefreshQuery?.(...)`) was dropped because
+      // it was only ever wired up on the editor page, and only when a
+      // <ChatPanel> was mounted — never on the terminal chat surface.
+      // refreshQueryEmitter.emit at the SSE singleton (see
+      // _ensureGlobalSSE onmessage above) is the sole delivery path now;
+      // see `hooks/editor/use-composition-refresh-subscription.ts` for
+      // the editor's subscriber.
 
       if (type === "sessions-changed") {
         optionsRef.current?.onSessionsChanged?.();

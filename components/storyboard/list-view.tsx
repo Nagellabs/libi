@@ -11,6 +11,7 @@ interface StoryboardListViewProps {
   /** Cards pre-sorted by `order`. */
   cards: Card[];
   schemas: SchemasMap;
+  sketchRevs?: Record<string, Record<string, string>>;
   orderByCardId: Record<string, number>;
 }
 
@@ -27,6 +28,7 @@ export function StoryboardListView({
   pieceId,
   cards,
   schemas,
+  sketchRevs = {},
   orderByCardId,
 }: StoryboardListViewProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -85,6 +87,7 @@ export function StoryboardListView({
             card={c}
             index={i}
             schemas={schemas}
+            sketchRevs={sketchRevs[c.id]}
             orderByCardId={orderByCardId}
           />
         </div>

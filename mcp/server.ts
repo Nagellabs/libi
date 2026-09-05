@@ -489,7 +489,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.audio_add_clip",
     {
       description:
-        "Add an audio clip to the composition. Use kind='standalone' for music/VO/sfx files; use kind='inline' with linkedSceneId to bind audio to a video scene (the clip moves with the scene until unlinked).",
+        "Add an audio clip to the composition. Use kind='standalone' for music/VO/sfx files; use kind='inline' with linkedSceneId to bind audio to a video scene (the clip moves with the scene until unlinked). If the clip would run past the piece's current end and you didn't pass an explicit `duration`, ask the user whether to extend the piece or trim the clip BEFORE calling this — the tool refuses with `asset_longer_than_piece` until you pass `lengthPolicy: \"extend\" | \"trim\"` (or a `duration` that fits).",
       inputSchema: audioAddClipSchema,
     },
     async (params) => {
@@ -689,7 +689,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.add_overlay",
     {
       description:
-        "Add an overlay on top of the base scene. `kind` selects the type: \"text\" (content/font/color/align), \"image\" (fileId), \"video\" (fileId + optional trim), \"code\" (a Canvas2D draw function), or \"three\" (a three.js/WebGL scene + optional cameraPreset). All kinds take timing (startTime + duration in seconds), rect (position/size in composition pixels), z, and opacity. For \"code\" and \"three\", pass an optional `body` to seed the JS draw/scene function (a starter is scaffolded when omitted); the response returns `codeFilePath` — the per-overlay file you then EDIT DIRECTLY with your file tools (there is no string-update tool). For ANIMATED TEXT load `animated-text-overlays` and for 3D load `three-overlays` FIRST and copy a vetted template body.",
+        "Add an overlay on top of the base scene. `kind` selects the type: \"text\" (content/font/color/align), \"image\" (fileId), \"video\" (fileId + optional trim), \"code\" (a Canvas2D draw function), or \"three\" (a three.js/WebGL scene + optional cameraPreset). All kinds take timing (startTime + duration in seconds), rect (position/size in composition pixels), z, and opacity. For \"code\" and \"three\", pass an optional `body` to seed the JS draw/scene function (a starter is scaffolded when omitted); the response returns `codeFilePath` — the per-overlay file you then EDIT DIRECTLY with your file tools (there is no string-update tool). For ANIMATED TEXT load `animated-text-overlays` and for 3D load `three-overlays` FIRST and copy a vetted template body. For \"video\": `duration` is required but does NOT bypass the length check — if `startTime + duration` runs past the piece's current end, ask the user to extend or trim BEFORE calling, then pass `lengthPolicy: \"extend\" | \"trim\"`, or the call is refused with `asset_longer_than_piece`.",
       inputSchema: addOverlaySchema,
     },
     async (params) => {

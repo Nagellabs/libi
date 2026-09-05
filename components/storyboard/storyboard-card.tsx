@@ -66,6 +66,10 @@ interface StoryboardCardProps {
   card: Card;
   index: number;
   schemas?: SchemasMap;
+  /** This card's slotId → sketch PNG content hash, threaded down to
+   *  SketchesRow so a regenerated drawing gets re-requested (see
+   *  sketches-row.tsx#sketchUrl). */
+  sketchRevs?: Record<string, string>;
   onPrefill?: (text: string) => void;
   orderByCardId?: Record<string, number>;
 }
@@ -75,6 +79,7 @@ export function StoryboardCard({
   card,
   index,
   schemas = {},
+  sketchRevs,
   onPrefill,
   orderByCardId = {},
 }: StoryboardCardProps) {
@@ -181,6 +186,7 @@ export function StoryboardCard({
           <SketchesRow
             pieceId={pieceId}
             card={card}
+            sketchRevs={sketchRevs}
             onEditParam={handleEditParam}
           />
 

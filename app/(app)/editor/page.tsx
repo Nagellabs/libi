@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorState } from "@/lib/editor-state-context";
 import { navigateEmitter } from "@/hooks/sessions/use-agent-chat";
+import { useCompositionRefreshSubscription } from "@/hooks/editor/use-composition-refresh-subscription";
 import type { FileRecord } from "@/lib/db/schema/types";
 import EditorLayout from "@/components/layout/editor-layout";
 import ChatPanel from "@/components/chat/chat-panel";
@@ -480,33 +481,22 @@ export default function EditorPage() {
     };
   }, [activePieceId]);
 
-  // Handle refresh_query SSE events — mutation tools on the server fire
-  // `notify.refreshQuery({ queryKey, pieceId, sceneId? })` after mutating.
+  // Handle refresh_query SSE events for composition — mutation tools on the
+  // server fire `notify.refreshQuery({ queryKey: "composition", pieceId,
+  // sceneId? })` after mutating. Data-only cache invalidations (pieces,
+  // files, piece, analysis, script) are owned by the layout-level
+  // subscriber `useGlobalRefreshQuerySubscription`; the editor retains
+  // ONLY the composition case because it combines invalidation (done
+  // inside the hook below) with navigation side effects: auto-show jumps
+  // the preview to the first changed scene + switches to the Preview tab.
   //
-  // We invalidate the matching React Query cache and, for composition
-  // changes, jump the preview to the first changed scene + switch to the
-  // Preview tab (auto-show — always on).
-  //
-  // Name-based dispatch on `queryKey` (not tool name) is deliberate: ACP
-  // mangles tool names (`mcp__libi__create_scene`) in transport, so keys are
-  // the stable contract.
-  const handleRefreshQuery = useCallback(
-    (event: { queryKey: string; pieceId?: string; sceneId?: string; fileId?: string }) => {
-      // Data-only cache invalidations (pieces, files, piece, analysis,
-      // script) are owned by the layout-level subscriber
-      // `useGlobalRefreshQuerySubscription`. The editor handler retains
-      // ONLY the composition case because it combines invalidation with
-      // navigation side effects (auto-show seek, tab switch).
-      if (event.queryKey !== "composition") return;
-      if (!event.pieceId) return;
-
-      queryClient.invalidateQueries({
-        queryKey: pieceKeys.composition(event.pieceId),
-      });
-      queryClient.invalidateQueries({
-        queryKey: ["composition-snapshot", event.pieceId],
-      });
-
+  // `useCompositionRefreshSubscription` subscribes directly to the global
+  // `refreshQueryEmitter` singleton so this ALWAYS fires — even on the
+  // terminal chat surface, which renders `<TerminalPanel>` instead of
+  // `<ChatPanel>` and so never registers a per-instance `onRefreshQuery`
+  // handler. Same fix, same reason, as the navigateEmitter effect below.
+  const handleCompositionRefresh = useCallback(
+    (event: { pieceId: string; sceneId?: string }) => {
       // Auto-show: bring the user to the edited scene. This may involve
       // switching pieces + switching tab. The actual playhead seek happens
       // in the effect below, once the target composition is loaded.
@@ -516,8 +506,9 @@ export default function EditorPage() {
         setPendingSeek({ pieceId: event.pieceId, sceneId: event.sceneId });
       }
     },
-    [queryClient],
+    [],
   );
+  useCompositionRefreshSubscription(handleCompositionRefresh);
 
   // Handle navigation events forwarded from the chat SSE
   const handleNavigate = useCallback((event: { target: string; pieceId: string; fileId?: string; id?: string }) => {
@@ -708,7 +699,6 @@ export default function EditorPage() {
           <ChatPanel
             sessionId={sessionList.activeSessionId}
             onNavigate={handleNavigate}
-            onRefreshQuery={handleRefreshQuery}
             onSessionsChanged={sessionList.refresh}
             onOpenAsset={handleOpenAssetFromChat}
             onNewChat={() => {

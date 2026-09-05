@@ -9,6 +9,10 @@ import { MediaViewer } from "@/components/storyboard/media-viewer";
 interface SketchesRowProps {
   pieceId: string;
   card: StoryboardCard;
+  /** slotId → a content hash of the sketch PNG's bytes, so a re-rendered
+   *  drawing gets a changed `src` and the browser actually re-requests it
+   *  (see sketchUrl below). */
+  sketchRevs?: Record<string, string>;
   onEditParam?: (key: string, value: GenParamValue | null) => void;
 }
 
@@ -16,11 +20,18 @@ interface SketchesRowProps {
  *  use this so the spacing reads evenly across the card. */
 export const ROW_GAP = "gap-3";
 
-function sketchUrl(pieceId: string, cardId: string, slotId: string) {
-  return `/api/pieces/${pieceId}/storyboard/cards/${cardId}/sketches/${slotId}`;
+/** The sketch PNG is regenerated IN PLACE at an otherwise-invariant URL, so a
+ *  mounted <img> never re-requests it on its own — the `rev` (a content hash
+ *  of the file's bytes) is appended as a query param specifically to change
+ *  the `src` when the drawing actually changes. Omitted when no revision is
+ *  known yet (falsy, e.g. ""), so the URL matches what the slot GET route
+ *  lazy-renders on first request. */
+export function sketchUrl(pieceId: string, cardId: string, slotId: string, rev?: string) {
+  const base = `/api/pieces/${pieceId}/storyboard/cards/${cardId}/sketches/${slotId}`;
+  return rev ? `${base}?v=${rev}` : base;
 }
 
-export function SketchesRow({ pieceId, card, onEditParam }: SketchesRowProps) {
+export function SketchesRow({ pieceId, card, sketchRevs, onEditParam }: SketchesRowProps) {
   const [viewer, setViewer] = useState<{ src: string; title: string } | null>(null);
   const views = sketchSlotViews(card);
   if (views.length === 0) return null;
@@ -35,7 +46,7 @@ export function SketchesRow({ pieceId, card, onEditParam }: SketchesRowProps) {
     // per-slot serve route renders the unit.
     const src = v.sketchImageFileId
       ? `/api/files/by-id/${v.sketchImageFileId}/content`
-      : sketchUrl(pieceId, card.id, v.slotId);
+      : sketchUrl(pieceId, card.id, v.slotId, sketchRevs?.[v.slotId]);
     return (
       <MediaTile
         kind="image"

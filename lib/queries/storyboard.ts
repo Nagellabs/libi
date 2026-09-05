@@ -12,8 +12,16 @@ export const storyboardKeys = {
 
 export type SchemaEntry = { apiUrl: string; model: string; lookup: CacheLookup };
 export type SchemasMap = Record<string, SchemaEntry>;
-export type StoryboardResponse = { storyboard: Storyboard | null; schemas?: SchemasMap };
-export type StoryboardData = { storyboard: Storyboard | null; schemas: SchemasMap };
+export type StoryboardResponse = {
+  storyboard: Storyboard | null;
+  schemas?: SchemasMap;
+  sketchRevs?: Record<string, Record<string, string>>;
+};
+export type StoryboardData = {
+  storyboard: Storyboard | null;
+  schemas: SchemasMap;
+  sketchRevs: Record<string, Record<string, string>>;
+};
 
 export function useStoryboard(pieceId: string | null) {
   return useQuery({
@@ -23,7 +31,7 @@ export function useStoryboard(pieceId: string | null) {
       const r = await fetch(`/api/pieces/${pieceId}/storyboard`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const body = (await r.json()) as StoryboardResponse;
-      return { storyboard: body.storyboard, schemas: body.schemas ?? {} };
+      return { storyboard: body.storyboard, schemas: body.schemas ?? {}, sketchRevs: body.sketchRevs ?? {} };
     },
   });
 }

@@ -13,7 +13,12 @@ import type { AudioClip } from "@/lib/engine/types";
 export function useAddAudioClip(pieceId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (vars: { fileId: string; startTime: number; label?: string }) => {
+    mutationFn: async (vars: {
+      fileId: string;
+      startTime: number;
+      label?: string;
+      duration?: number;
+    }) => {
       const res = await fetch(`/api/pieces/${pieceId}/audio-clips`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -22,6 +27,7 @@ export function useAddAudioClip(pieceId: string) {
           kind: "standalone",
           startTime: vars.startTime,
           label: vars.label,
+          duration: vars.duration,
         }),
       });
       if (!res.ok) throw new Error(`Add audio clip failed: ${res.status}`);

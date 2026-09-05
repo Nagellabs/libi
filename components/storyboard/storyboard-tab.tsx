@@ -20,6 +20,7 @@ export function StoryboardTab({ pieceId }: { pieceId: string }) {
   const { data, isLoading } = useStoryboard(pieceId);
   const sb = data?.storyboard ?? null;
   const schemas: SchemasMap = data?.schemas ?? {};
+  const sketchRevs: Record<string, Record<string, string>> = data?.sketchRevs ?? {};
   const [view, setView] = useState<View>("board");
 
   if (isLoading) {
@@ -79,7 +80,7 @@ export function StoryboardTab({ pieceId }: { pieceId: string }) {
       </div>
       {view === "board" ? (
         <div className="flex-1 min-h-0">
-          <BoardView pieceId={pieceId} storyboard={sb} schemas={schemas} />
+          <BoardView pieceId={pieceId} storyboard={sb} schemas={schemas} sketchRevs={sketchRevs} />
         </div>
       ) : (
         (() => {
@@ -89,6 +90,7 @@ export function StoryboardTab({ pieceId }: { pieceId: string }) {
               pieceId={pieceId}
               cards={cards}
               schemas={schemas}
+              sketchRevs={sketchRevs}
               orderByCardId={orderByCardId}
             />
           );

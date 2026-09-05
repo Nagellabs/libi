@@ -10,6 +10,7 @@ import {
   saveManifest,
   type PersistedOverlay,
 } from "@/lib/composition/persistence";
+import { pieceDurationSec } from "@/lib/composition/duration";
 import {
   addClip,
   findInlineClipForOverlay,
@@ -286,6 +287,35 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
       ...transformFields(params),
     };
   } else if (kind === "video") {
+    // Same rule as audioAddClip — see mcp/tools/audio-clip-tools.ts. Video only:
+    // a text/image/code/three overlay has no intrinsic asset length, so there is
+    // nothing to trade off. `duration` is required on this tool, so unlike the
+    // audio gate an explicit duration cannot mean "already decided" — the policy
+    // param is the only way through.
+    let videoDuration = params.duration;
+    const manifest = await loadManifest(pieceId);
+    const pieceEnd = pieceDurationSec(manifest);
+    const wouldExceed = pieceEnd > 0 && params.startTime + params.duration > pieceEnd;
+    if (wouldExceed) {
+      if (!params.lengthPolicy) {
+        return {
+          success: false,
+          error: "asset_longer_than_piece",
+          data: {
+            assetDurationSec: params.duration,
+            pieceDurationSec: pieceEnd,
+            message:
+              `This overlay would run to ${params.startTime + params.duration}s but the piece is ` +
+              `currently ${pieceEnd}s. Ask the user whether to extend the piece, trim the overlay ` +
+              "to the piece's length, or use a specific length, then call again with lengthPolicy.",
+          },
+        };
+      }
+      if (params.lengthPolicy === "trim") {
+        videoDuration = Math.max(0, pieceEnd - params.startTime);
+      }
+    }
+
     // A video overlay defaults to the FULL composition frame + fit:"cover" when
     // no rect is supplied — it reads like a base scene (fills the frame,
     // croppable). An explicit rect is clamped + uses the supplied fit
@@ -304,7 +334,7 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
       id: newId("vid"),
       kind,
       startTime: params.startTime,
-      duration: params.duration,
+      duration: videoDuration,
       rect,
       z: params.z,
       opacity: params.opacity,
