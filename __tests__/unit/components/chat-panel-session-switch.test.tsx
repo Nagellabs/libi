@@ -146,7 +146,7 @@ async function mount(sessionId: string) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const view = render(
     <QueryClientProvider client={qc}>
-      <ChatPanel sessionId={sessionId} pieceId="piece-1" />
+      <ChatPanel sessionId={sessionId} />
     </QueryClientProvider>,
   );
   const el = view.container.querySelector<HTMLDivElement>(".overflow-y-auto");
@@ -160,7 +160,7 @@ async function mount(sessionId: string) {
       act(() => {
         view.rerender(
           <QueryClientProvider client={qc}>
-            <ChatPanel sessionId={nextSessionId} pieceId="piece-1" />
+            <ChatPanel sessionId={nextSessionId} />
           </QueryClientProvider>,
         );
       });

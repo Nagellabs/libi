@@ -155,7 +155,7 @@ describe("ChatPanel — the chat that never starts", () => {
   it("shows a skeleton, not the sentence, before the grace period elapses", async () => {
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
     vi.useFakeTimers();
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     act(() => {
       vi.advanceTimersByTime(2000);
@@ -169,7 +169,7 @@ describe("ChatPanel — the chat that never starts", () => {
   it("stops claiming progress once the grace period has passed, and Retry re-runs selectAgent", async () => {
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
     vi.useFakeTimers();
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     await act(async () => {
       vi.advanceTimersByTime(10_001);
@@ -200,7 +200,7 @@ describe("ChatPanel — the chat that never starts", () => {
         : { state: "unknown" };
 
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    const { container } = wrap(<ChatPanel sessionId={null} pieceId="" />);
+    const { container } = wrap(<ChatPanel sessionId={null} />);
 
     expect(screen.getByRole("button", { name: /sign in to codex/i })).toBeTruthy();
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
@@ -232,7 +232,7 @@ describe("ChatPanel — the chat that never starts", () => {
         : { state: "unknown" };
 
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    const { container } = wrap(<ChatPanel sessionId={null} pieceId="" />);
+    const { container } = wrap(<ChatPanel sessionId={null} />);
 
     const card = container.querySelector('[data-slot="agent-setup-card"]') as HTMLElement;
     fireEvent.click(within(card).getByRole("button", { name: /sign in to codex/i }));
@@ -262,7 +262,7 @@ describe("ChatPanel — the chat that never starts", () => {
     Object.assign(navigator, { clipboard: { writeText } });
 
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     fireEvent.click(screen.getByRole("button", { name: /copy/i }));
     expect(writeText).toHaveBeenCalledWith(
@@ -278,7 +278,7 @@ describe("ChatPanel — the chat that never starts", () => {
         : { state: "unknown" };
 
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    const { container } = wrap(<ChatPanel sessionId={null} pieceId="" />);
+    const { container } = wrap(<ChatPanel sessionId={null} />);
 
     expect(screen.getByRole("button", { name: /install claude code/i })).toBeTruthy();
     const card = container.querySelector('[data-slot="agent-setup-card"]');
@@ -288,7 +288,7 @@ describe("ChatPanel — the chat that never starts", () => {
   it("keeps the plain 'select an agent' sentence when no agent is chosen at all", async () => {
     activeProviderId = null;
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     expect(screen.getByText(/select an agent to start chatting/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
@@ -298,7 +298,7 @@ describe("ChatPanel — the chat that never starts", () => {
     readinessFor = () => ({ state: "unknown" });
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
     vi.useFakeTimers();
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
     await act(async () => {
       vi.advanceTimersByTime(10_001);
     });
@@ -336,7 +336,7 @@ describe("ChatPanel — a completed install clears the card", () => {
 
   it("stops offering the install once the job completes, and re-selects the agent", async () => {
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     fireEvent.click(screen.getByRole("button", { name: /install claude code/i }));
     expect(startInstallMutate).toHaveBeenCalledWith("claude-code");
@@ -364,7 +364,7 @@ describe("ChatPanel — a completed install clears the card", () => {
     // "Install Claude Code" and stay enabled — an invitation to click again.
     startInstall = { mutate: startInstallMutate, isPending: true, error: null };
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     const button = screen.getByRole("button", { name: /starting/i });
     expect(button).toBeDisabled();
@@ -379,7 +379,7 @@ describe("ChatPanel — a completed install clears the card", () => {
       error: new Error("Install failed to start (500)"),
     };
     const { default: ChatPanel } = await import("@/components/chat/chat-panel");
-    wrap(<ChatPanel sessionId={null} pieceId="" />);
+    wrap(<ChatPanel sessionId={null} />);
 
     expect(screen.getByText(/install failed to start \(500\)/i)).toBeTruthy();
     expect(screen.getByRole("button", { name: /retry/i })).toBeTruthy();

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { useQueryClient } from "@tanstack/react-query";
 import { pieceKeys } from "@/lib/queries/pieces";
 import { Group, Panel, Separator, useGroupRef } from "react-resizable-panels";
@@ -456,8 +457,11 @@ export default function PreviewSurface({
             group,
           }),
         );
-      } catch {
-        /* useFileUpload/toast surfaces failure */
+      } catch (err) {
+        // Nothing else reports this. The comment here used to claim the upload
+        // hook surfaced a toast; it does not, so a rejected drop onto the
+        // timeline was entirely silent — no overlay, no message.
+        toast.error(err instanceof Error ? err.message : "Upload failed");
       }
     },
     [addOverlay, uploadFile, frameSize.width, frameSize.height, durationSec, track],
@@ -473,8 +477,9 @@ export default function PreviewSurface({
         try {
           const rec = await uploadFile(arg.file);
           fileId = rec.id;
-        } catch {
-          return; /* upload toast surfaces failure */
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Upload failed");
+          return;
         }
       }
       if (!fileId) return;

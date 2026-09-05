@@ -258,6 +258,18 @@ export const duplicateFileSchema = z.object({
   name: z.string().optional().describe("Optional new name for the duplicate (defaults to source name)"),
 });
 
+export const assignFileSchema = z.object({
+  fileId: z.string().describe("ID of the file to move"),
+  pieceId: z
+    .string()
+    .nullable()
+    .describe(
+      "Piece to move the file into, or null to make it unassigned (global). " +
+        "Moves the file — it does not copy. Use libi.duplicate_file when the " +
+        "original must stay where it is.",
+    ),
+});
+
 export const updateFileNotesSchema = z.object({
   fileId: z.string().describe("ID of the file whose notes should be updated"),
   notes: z.string().describe("Notes content. In append mode this is the single line to append (a timestamp prefix is added automatically); in replace mode this is the full new notes body."),
@@ -491,6 +503,7 @@ export const setComplexityModeSchema = z.object({
 
 export type ListFilesParams = z.infer<typeof listFilesSchema>;
 export type DuplicateFileParams = z.infer<typeof duplicateFileSchema>;
+export type AssignFileToolParams = z.infer<typeof assignFileSchema>;
 export type UploadFileParams = z.infer<typeof uploadFileSchema>;
 export type RegisterMcpServerParams = z.infer<typeof registerMcpServerSchema>;
 export type UpdateMcpServerParams = z.infer<typeof updateMcpServerSchema>;

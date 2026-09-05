@@ -178,7 +178,7 @@ async function mountPanel() {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
   const view = render(
     <QueryClientProvider client={qc}>
-      <ChatPanel sessionId="A" pieceId="piece-1" />
+      <ChatPanel sessionId="A" />
     </QueryClientProvider>,
   );
   const el = view.container.querySelector<HTMLDivElement>(".overflow-y-auto");

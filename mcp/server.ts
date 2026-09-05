@@ -40,6 +40,7 @@ import {
   deleteCaptionStyleSchema,
   listFilesSchema,
   duplicateFileSchema,
+  assignFileSchema,
   updateFileNotesSchema,
   uploadFileSchema,
   UploadFileToFalSchema,
@@ -1086,6 +1087,28 @@ export function createLibiMcpServer(): McpServer {
     async (params) => {
       try {
         const result = await tools.duplicateFile(params);
+        return makeContent(result);
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "libi.assign_file",
+    {
+      description:
+        "Move a file into a piece, or out of every piece by passing pieceId: null. " +
+        "This MOVES the file — the original does not stay behind; use libi.duplicate_file " +
+        "to copy instead. Files attached in chat or dropped on the terminal arrive " +
+        "unassigned, so this is how you take one into the piece you are working on. " +
+        "Overlays already accept unassigned files, so assigning is about where the asset " +
+        "belongs, not about making it usable.",
+      inputSchema: assignFileSchema,
+    },
+    async (params) => {
+      try {
+        const result = await tools.assignFile(params);
         return makeContent(result);
       } catch (err) {
         return makeError(err);

@@ -23,6 +23,7 @@
  * "use libi in your own tools" flow, which shells out to the USER's `codex`.
  */
 import { isWindows } from "@/lib/platform";
+import { quoteForShell } from "@/lib/terminal/shell-quote";
 import { resolveCodexNativeBinary } from "./codex-native-binary";
 
 export interface TerminalRemedy {
@@ -32,26 +33,6 @@ export interface TerminalRemedy {
   command: string;
   /** One line explaining what the command will do, shown next to the button. */
   detail: string;
-}
-
-/**
- * Quote a path for the shell libi's Terminal actually spawns —
- * `lib/terminal/pty.ts#resolveShell`, which is PowerShell on Windows and the
- * user's login `sh` everywhere else. The two disagree about quoting, so this
- * cannot be one expression pretending to serve both (which it was).
- */
-function shellQuote(p: string): string {
-  // PowerShell: inside single quotes everything is literal and an embedded
-  // quote is escaped by DOUBLING it — the POSIX `'\''` idiom would end the
-  // string and leave a stray backslash. Always quoting is also the only safe
-  // default: the old "does it look tame?" character test let
-  // `…\@nagellabslibi\…` through as untamed (it has an `@`) and a plain
-  // `C:\…\claude.cmd` through as tame, so the two agent remedies took
-  // different branches and only one of them was ever exercised.
-  if (isWindows()) return `'${p.replace(/'/g, "''")}'`;
-  // POSIX: a backslash is an ESCAPE outside quotes, so it must not appear in
-  // the "safe to leave bare" set. It was in the old one, for Windows' benefit.
-  return /^[A-Za-z0-9._\-/:]+$/.test(p) ? p : `'${p.replace(/'/g, `'\\''`)}'`;
 }
 
 /**
@@ -73,9 +54,18 @@ function shellQuote(p: string): string {
  *
  * Bare command NAMES (`claude`, `npm`) are not paths and never take this
  * treatment — they resolve through PATH in both shells as they are.
+ *
+ * The quoting itself comes from `lib/terminal/shell-quote.ts#quoteForShell` —
+ * the same pure function `hooks/terminal/use-terminal-file-drop.ts` uses for
+ * dropped paths, so there is exactly one PowerShell-vs-POSIX quoting policy
+ * for the one PTY both callers type into. See the `SAFE` comment there for
+ * why PowerShell always quotes rather than trying to detect a "safe" path:
+ * that heuristic is what let this exact bug ship in the first place (a plain
+ * `C:\…\claude.cmd` read as tame, `C:\…\@nagellabslibi\…` did not, so only one
+ * of the two remedies below ever ran the always-quote branch before this).
  */
 function runBinaryLine(bin: string, ...args: string[]): string {
-  const line = [shellQuote(bin), ...args].join(" ");
+  const line = [quoteForShell(bin, isWindows() ? "powershell" : "posix"), ...args].join(" ");
   return isWindows() ? `& ${line}` : line;
 }
 

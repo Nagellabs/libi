@@ -24,6 +24,8 @@ import { useAssetFolderList } from "@/lib/queries/asset-folders";
 import { getAncestorIds } from "@/lib/folders/tree";
 import { useFiles } from "@/lib/queries/files";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { fileKeys, uploadFileTo } from "@/lib/queries/files";
 import { pickVideoUrl } from "@/lib/proxy/url";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarInset } from "@/components/ui/sidebar";
@@ -421,20 +423,36 @@ export default function EditorPage() {
     renamePiece.mutate({ pieceId: targetPieceId, name });
   }, [renamePiece]);
 
+  /**
+   * Files dropped onto a piece in the resources tree — which is not necessarily
+   * the OPEN piece, so this uploads by explicit id rather than through
+   * `useFileUpload`.
+   *
+   * It used to hand-roll the request and never looked at `res.ok`: a rejected
+   * upload was completely silent AND still switched the user to the target
+   * piece, so the only evidence was an asset that never appeared. It also
+   * skipped the media probe, so images uploaded this way alone landed with null
+   * dimensions. Going through `uploadFileTo` fixes both by construction.
+   */
   const handleUploadFiles = useCallback(async (targetPieceId: string, files: File[]) => {
+    let uploaded = 0;
     for (const file of files) {
-      const formData = new FormData();
-      formData.append("file", file);
-      await fetch(`/api/pieces/${targetPieceId}/upload`, {
-        method: "POST",
-        body: formData,
-      });
+      try {
+        await uploadFileTo(targetPieceId, file);
+        uploaded++;
+      } catch (err) {
+        toast.error(
+          `${file.name}: ${err instanceof Error ? err.message : "upload failed"}`,
+        );
+      }
     }
+    if (uploaded === 0) return;
+    queryClient.invalidateQueries({ queryKey: fileKeys.forPiece(targetPieceId) });
     // Switch to the target piece to see uploads
     if (targetPieceId !== activePieceId) {
       setActivePieceId(targetPieceId);
     }
-  }, [activePieceId]);
+  }, [activePieceId, queryClient]);
 
   // Notify server which piece is currently open
   useEffect(() => {
@@ -689,10 +707,6 @@ export default function EditorPage() {
           ) : (
           <ChatPanel
             sessionId={sessionList.activeSessionId}
-            // Empty string = "no piece scope". The agent can still chat (and
-            // create a new piece via libi.create_piece); per-piece operations
-            // like file upload are gated by the upstream UI when needed.
-            pieceId={activePieceId ?? ""}
             onNavigate={handleNavigate}
             onRefreshQuery={handleRefreshQuery}
             onSessionsChanged={sessionList.refresh}

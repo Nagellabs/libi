@@ -96,13 +96,33 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
   const [isDark, setIsDark] = useState(true);
+  // Shared with the insert-text effect below. `wsRef` mirrors whichever
+  // socket the connect effect currently owns (null while connecting/between
+  // attempts). `insertReadyRef` is true only once THIS connection's snapshot
+  // has actually been applied — it flips back to false on every close, so a
+  // fresh reconnect can't inherit "ready" from the socket it replaced and
+  // race a paste against the `term.reset()` that's about to wipe it.
+  const wsRef = useRef<WebSocket | null>(null);
+  const insertReadyRef = useRef(false);
+  // Text queued by the insert-text effect while the socket wasn't OPEN yet,
+  // or was OPEN but hadn't replayed its snapshot. Flushed from the snapshot
+  // handler below, immediately after `term.reset()` + the snapshot write —
+  // never from `onopen`, which fires before the reset that would erase it.
+  //
+  // An ARRAY, not a single slot: this used to be a single `string | null`
+  // that a second queued insert simply overwrote, silently losing the first
+  // one — two file drops during a reconnect (or two demo-prompt injects)
+  // landed only the second. Every insert queued before the flush is kept and
+  // joined with a single space (the same separator `buildInsertText` uses
+  // between paths) so consecutive drops land as distinct tokens instead of
+  // abutting.
+  const pendingInsertRef = useRef<string[]>([]);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
     let disposed = false;
-    let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let attempts = 0;
 
@@ -149,8 +169,8 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
     term.focus();
 
     const sendResize = () => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(
           JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }),
         );
       }
@@ -162,8 +182,8 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
     resizeObserver.observe(container);
 
     term.onData((data) => {
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "input", data }));
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "input", data }));
       }
     });
 
@@ -185,7 +205,7 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
           `ws://127.0.0.1:${port}/?session=${encodeURIComponent(terminalId)}`,
         );
         socket.binaryType = "arraybuffer";
-        ws = socket;
+        wsRef.current = socket;
 
         socket.onopen = () => {
           attempts = 0;
@@ -207,6 +227,18 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
                 fit.fit();
                 sendResize();
               });
+              // Only NOW — after the reset + replay above — is it safe to
+              // land a queued insert. Doing it on `onopen` instead was tried
+              // and reverted: the reset a few lines up would wipe it moments
+              // later (see the module doc comment and
+              // hooks/agents/use-run-remedy-in-terminal.ts).
+              insertReadyRef.current = true;
+              if (pendingInsertRef.current.length > 0) {
+                const text = pendingInsertRef.current.join(" ");
+                pendingInsertRef.current = [];
+                term.paste(text);
+                term.focus();
+              }
             } else if (msg.type === "exit") {
               onExitedRef.current?.(msg.exitCode ?? 0);
             }
@@ -215,8 +247,12 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
           }
         };
         socket.onclose = (ev: CloseEvent) => {
-          if (disposed || ws !== socket) return;
-          ws = null;
+          if (disposed || wsRef.current !== socket) return;
+          wsRef.current = null;
+          // The next socket (if any) starts a new attach and needs its own
+          // snapshot before an insert is safe again — don't let "ready" from
+          // this connection leak into the next one's pre-snapshot window.
+          insertReadyRef.current = false;
           // 1000 = clean shutdown (shell exited), 4404 = session gone —
           // both are terminal states, no reconnect.
           if (ev.code === 1000 || ev.code === 4404) return;
@@ -232,23 +268,44 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
       disposed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       resizeObserver.disconnect();
-      ws?.close();
+      wsRef.current?.close();
+      wsRef.current = null;
       term.dispose();
       termRef.current = null;
     };
   }, [terminalId]);
 
-  // Let other UI (the onboarding demo chip) drop text into the live PTY. Uses
-  // xterm's paste() so it routes through onData → the WebSocket input path, just
-  // like a real paste. No trailing newline — the user reviews and presses Enter,
-  // so we never auto-run something into a CLI that isn't at its prompt yet.
+  // Let other UI (the onboarding demo chip, a file drop) drop text into the
+  // live PTY. Uses xterm's paste() so it routes through onData → the
+  // WebSocket input path, just like a real paste. No trailing newline — the
+  // user reviews and presses Enter, so we never auto-run something into a CLI
+  // that isn't at its prompt yet.
+  //
+  // The socket isn't necessarily OPEN with a settled snapshot when this
+  // fires: a sleep/resume can leave it CONNECTING for up to
+  // RECONNECT_MAX_MS, and even once OPEN there's a window before the
+  // attach snapshot has replayed. Pasting in either case used to be a
+  // silent no-op (dropped by the `ws?.readyState === OPEN` guard downstream
+  // in onData) or got wiped by the reset that snapshot replay does — see the
+  // connect effect above. So anything that arrives before this connection is
+  // both OPEN and past its snapshot gets queued in `pendingInsertRef` instead,
+  // and is flushed from the snapshot handler once it's actually safe. If the
+  // connection never establishes at all, the text just stays queued — better
+  // than landing in a terminal nobody is attached to.
   useEffect(() => {
     const onInsert = (e: Event) => {
       const text = (e as CustomEvent<{ text?: string }>).detail?.text;
       const term = termRef.current;
       if (!text || !term) return;
-      term.paste(text);
-      term.focus();
+      if (wsRef.current?.readyState === WebSocket.OPEN && insertReadyRef.current) {
+        term.paste(text);
+        term.focus();
+      } else {
+        // Accumulate — do not overwrite. A second insert queued before the
+        // first is flushed (two drops in the same reconnect window) must not
+        // silently discard the first one.
+        pendingInsertRef.current.push(text);
+      }
     };
     window.addEventListener(TERMINAL_INSERT_TEXT_EVENT, onInsert);
     return () => window.removeEventListener(TERMINAL_INSERT_TEXT_EVENT, onInsert);

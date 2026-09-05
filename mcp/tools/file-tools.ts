@@ -561,18 +561,32 @@ export async function assignFile(params: AssignFileParams): Promise<ToolResult> 
     };
   }
 
-  // Move the file on disk: read from old location, save to new
+  // Dedupe the filename within the DESTINATION scope before writing a single
+  // byte. `storage.save` ends in `fs.rename`, which replaces unconditionally
+  // — without this, assigning a file into a piece that already holds one
+  // with the same name overwrites its bytes on disk while its DB row keeps
+  // pointing at the (now shared) filename. Deleting either row then unlinks
+  // the shared bytes and orphans the survivor: the exact `storeFile` bug
+  // this mirrors (see the comment on `dedupeFilename`), reachable here too
+  // now that `assign_file` is registered and every chat/terminal attachment
+  // routes through it.
+  const targetFilename = dedupeFilename(db, targetPieceId, file.filename);
+
+  // Move the file on disk: read from old location, save to new (deduped) name.
   const newStoragePath = await storage.save(
     targetPieceId,
-    file.filename,
+    targetFilename,
     await storage.read(currentPieceId, file.filename),
   );
 
-  // Update DB record: new piece, new storage path. Asset folders are
-  // scope-specific, so the old folder belongs to the old scope — clear
-  // folderId so the file lands at the destination scope's root.
+  // Update DB record: new piece, new filename, new storage path. Asset
+  // folders are scope-specific, so the old folder belongs to the old scope —
+  // clear folderId so the file lands at the destination scope's root. The
+  // filename MUST be updated to the deduped name — a row still pointing at
+  // the name that was never actually written is the same data-loss bug in a
+  // different place.
   db.update(files)
-    .set({ pieceId: targetPieceId, storagePath: newStoragePath, folderId: null })
+    .set({ pieceId: targetPieceId, filename: targetFilename, storagePath: newStoragePath, folderId: null })
     .where(eq(files.id, fileId))
     .run();
 
@@ -597,7 +611,7 @@ export async function assignFile(params: AssignFileParams): Promise<ToolResult> 
     success: true,
     data: {
       fileId: file.id,
-      filename: file.filename,
+      filename: targetFilename,
       previousPieceId: currentPieceId,
       pieceId: targetPieceId,
     },

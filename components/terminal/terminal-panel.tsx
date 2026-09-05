@@ -6,6 +6,7 @@ import { Plus, TerminalSquare, X, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useEditorState } from "@/lib/editor-state-context";
+import { useTerminalFileDrop } from "@/hooks/terminal/use-terminal-file-drop";
 import {
   useCreateTerminal,
   useTerminalSessions,
@@ -53,6 +54,50 @@ export default function TerminalPanel() {
   const active = sessions?.find((s) => s.id === activeTerminalId) ?? null;
   const showExitedOverlay =
     activeTerminalId !== null && exited?.id === activeTerminalId;
+
+  const { handleDrop, isUploading } = useTerminalFileDrop({
+    // An exited terminal still mounts its view, but its PTY is gone — a paste
+    // would go nowhere.
+    hasLiveTerminal: active !== null && !showExitedOverlay,
+  });
+
+  /**
+   * Drop handlers for every one of this component's roots.
+   *
+   * `preventDefault` runs on BOTH events and BEFORE any other decision: the
+   * browser's default `dragover` action is to reject the drop target, and
+   * without preventing it the `drop` event never fires at all — our handler
+   * would simply never run. (It is NOT, as an earlier comment here claimed,
+   * a defense against Electron navigating the window to the dropped file —
+   * `electron/main.ts`'s `will-navigate` guard, backed by `nav-guard.ts`,
+   * already blocks any off-origin navigation including `file:`. The call is
+   * still required, just for the ordinary DOM reason above.) That is also
+   * why the no-terminal case is intercepted here rather than left to the
+   * browser — the hook then explains what to do instead of the drop
+   * silently doing nothing.
+   */
+  const dropProps = {
+    onDragOver: (e: React.DragEvent) => e.preventDefault(),
+    onDrop: (e: React.DragEvent) => {
+      e.preventDefault();
+      // Snapshot synchronously — `dataTransfer` is bound to the drop event
+      // and is not readable once the handler returns.
+      const files = Array.from(e.dataTransfer?.files ?? []);
+      if (files.length === 0 && (e.dataTransfer?.types.length ?? 0) > 0) {
+        // The panel advertises as a drop target for ANY drag (dragover
+        // always cancels), including the Resources panel's own in-app asset
+        // drags (`application/libi-file-id` / `x-libi-asset`), which carry
+        // no `dataTransfer.files`. Without this, dragging something onto the
+        // terminal that the user can plainly see produces total silence.
+        // The hook only ever sees real `File[]`, so its "no files → return"
+        // is untouched — this decision has to live here, where `types` is
+        // visible.
+        toast.info("Only files can be dropped on the terminal.");
+        return;
+      }
+      void handleDrop(files);
+    },
+  };
 
   // Selection maintenance. Two cases, carefully separated:
   //  1. Nothing selected → pick the most recent terminal (page load, return
@@ -173,7 +218,7 @@ export default function TerminalPanel() {
   // Empty state — no session selected and none to auto-select.
   if (!activeTerminalId || (!active && !showExitedOverlay)) {
     return (
-      <div className="flex h-full flex-col bg-surface">
+      <div className="flex h-full flex-col bg-surface" {...dropProps}>
         {demoChip}
         <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
           {isLoading ? (
@@ -211,13 +256,21 @@ export default function TerminalPanel() {
   const preset = active ? getPreset(active.cliId) : null;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden bg-background">
+    <div className="flex h-full flex-col overflow-hidden bg-background" {...dropProps}>
       <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border px-3">
         <TerminalSquare className="size-3.5 text-muted-foreground" />
         <span className="truncate text-xs font-medium text-foreground">{title}</span>
         {preset && preset.id !== "shell" ? (
           <span className="rounded-full border border-border bg-muted px-1.5 py-0.5 text-[9.5px] font-medium uppercase tracking-wide text-muted-foreground">
             {preset.label}
+          </span>
+        ) : null}
+        {isUploading ? (
+          <span
+            data-testid="terminal-drop-uploading"
+            className="ml-auto animate-pulse text-[11px] text-muted-foreground"
+          >
+            Uploading…
           </span>
         ) : null}
       </div>

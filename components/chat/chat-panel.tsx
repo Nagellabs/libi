@@ -7,6 +7,7 @@ import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import { useAgentChat, type AgentMessage } from "@/hooks/sessions/use-agent-chat";
 import { useEditorState } from "@/lib/editor-state-context";
 import { useScrollToBottom, type TranscriptSize } from "@/hooks/use-scroll-to-bottom";
+import { toast } from "sonner";
 import { useFileUpload } from "@/lib/queries/files";
 import ChatComposer from "./chat-composer";
 import ChatMessage from "./chat-message";
@@ -44,7 +45,6 @@ function remedyCommand(readiness: AgentReadiness): string | undefined {
 
 interface ChatPanelProps {
   sessionId: string | null;
-  pieceId: string;
   onToolResult?: (toolId: McpToolId | null, rawTitle: string, result: unknown) => void;
   onNavigate?: (event: { target: string; pieceId: string; fileId?: string }) => void;
   onRefreshQuery?: (event: { queryKey: string; pieceId?: string }) => void;
@@ -145,7 +145,7 @@ function AgentThinkingTag() {
   );
 }
 
-function ChatPanel({ sessionId, pieceId, onToolResult, onNavigate, onRefreshQuery, onSessionsChanged, onOpenAsset, onNewChat }: ChatPanelProps) {
+function ChatPanel({ sessionId, onToolResult, onNavigate, onRefreshQuery, onSessionsChanged, onOpenAsset, onNewChat }: ChatPanelProps) {
   useReactRenderTelemetry("ChatPanel");
   const chat = useAgentChat(sessionId, { onToolResult, onNavigate, onRefreshQuery, onSessionsChanged });
   // Measured once per messages array and shared: the pill compares it against
@@ -158,7 +158,12 @@ function ChatPanel({ sessionId, pieceId, onToolResult, onNavigate, onRefreshQuer
     sessionId ?? undefined,
     transcript,
   );
-  const { upload } = useFileUpload(pieceId);
+  // Attachments upload as UNASSIGNED, never straight into the open piece.
+  // Attaching a file shows the agent something; it does not decide that the
+  // file belongs to this piece. The agent moves it in with libi.assign_file
+  // if it decides it does — and overlays already accept unassigned files, so
+  // nothing is blocked in the meantime.
+  const { upload } = useFileUpload(null);
 
   // The composer draft survives a page reload: every change mirrors into the
   // per-session draft store, and a failed send backs its text up there too
@@ -450,6 +455,15 @@ function ChatPanel({ sessionId, pieceId, onToolResult, onNavigate, onRefreshQuer
         } else if (sessionId) {
           setPendingMessage(text);
         }
+      } catch (err) {
+        // The composer is cleared BEFORE the upload starts, so without this the
+        // user's text and their attachments were both destroyed by a failed
+        // upload and nothing was shown — the failure reached them only as an
+        // unhandled rejection in a console they never open. Put the message
+        // back exactly as it was so Send simply works on the retry.
+        setInputValue(text);
+        setPendingFiles(filesToUpload);
+        toast.error(err instanceof Error ? err.message : "Upload failed");
       } finally {
         setIsSubmitting(false);
       }

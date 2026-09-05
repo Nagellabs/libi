@@ -4,6 +4,7 @@ import { memo, useRef } from "react";
 import { X, Upload, FolderPlus } from "lucide-react";
 import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import type { FileRecord } from "@/lib/db/schema/types";
+import { toast } from "sonner";
 import { useGlobalUpload } from "@/lib/queries/files";
 import FileTree, { type FileTreeHandle } from "./file-tree";
 import { PieceMark } from "./piece-mark";
@@ -42,11 +43,25 @@ function ResourcesPanel({
   const handleFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFiles = e.target.files;
     if (!selectedFiles) return;
-    for (const file of Array.from(selectedFiles)) {
-      await upload(file);
+    // Snapshot before the first await: clearing the input below empties the live
+    // FileList, and an early throw used to skip the reset entirely — leaving the
+    // same file selected, so picking it again fired no change event and the
+    // retry looked like a dead button.
+    const files = Array.from(selectedFiles);
+    try {
+      for (const file of files) {
+        try {
+          await upload(file);
+        } catch (err) {
+          toast.error(
+            `${file.name}: ${err instanceof Error ? err.message : "upload failed"}`,
+          );
+        }
+      }
+    } finally {
+      // Reset input so the same file can be re-selected
+      if (fileInputRef.current) fileInputRef.current.value = "";
     }
-    // Reset input so the same file can be re-selected
-    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   return (

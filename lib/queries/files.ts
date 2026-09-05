@@ -155,7 +155,62 @@ export function useUpdateFileNotes() {
   });
 }
 
-export function useFileUpload(pieceId: string) {
+/**
+ * The server's own explanation of a failed upload, falling back to the status
+ * code. Both upload routes answer `{ error }`; a bare "Upload failed" gave the
+ * user — and the log — nothing to act on.
+ */
+async function uploadErrorMessage(res: Response): Promise<string> {
+  try {
+    const body = await res.json();
+    if (body && typeof body.error === "string" && body.error) return body.error;
+  } catch {
+    /* not JSON (a 405 from a route mismatch, an HTML error page) */
+  }
+  return `Upload failed (${res.status})`;
+}
+
+/**
+ * POST one file, to the piece when there is one and to the global store when
+ * there isn't.
+ *
+ * The endpoint choice lives here, in ONE place, because it did not used to:
+ * the piece-drop path in the editor hand-rolled its own `fetch` and drifted —
+ * it never checked `res.ok` and never sent the probed dimensions.
+ */
+export async function uploadFileTo(pieceId: string | null, file: File): Promise<FileRecord> {
+  const media = await probeMediaMetadata(file);
+
+  const formData = new FormData();
+  formData.append("file", file);
+  if (media.duration != null) formData.append("mediaDuration", String(media.duration));
+  if (media.width != null) formData.append("mediaWidth", String(media.width));
+  if (media.height != null) formData.append("mediaHeight", String(media.height));
+
+  const res = await fetch(pieceId ? `/api/pieces/${pieceId}/upload` : "/api/upload", {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) throw new Error(await uploadErrorMessage(res));
+
+  const data = await res.json();
+  return data.file;
+}
+
+/**
+ * Upload files against a piece — or globally when `pieceId` is null or empty.
+ *
+ * The empty string is treated as "no piece" deliberately, not defensively. The
+ * chat panel is handed `activePieceId ?? ""`, and an empty id built the URL
+ * `/api/pieces//upload`, which redirects to `/api/pieces/upload` and matches
+ * `[pieceId]/route.ts` with `pieceId="upload"` — a route with no POST. Every
+ * chat attachment sent with no piece open died on that 405.
+ *
+ * Uploading it as an unassigned asset is the right answer rather than blocking
+ * the attach button: "here is an image, build something from it" is the reason
+ * to attach before a piece exists.
+ */
+export function useFileUpload(pieceId: string | null) {
   const queryClient = useQueryClient();
   const [isUploading, setIsUploading] = useState(false);
 
@@ -163,23 +218,15 @@ export function useFileUpload(pieceId: string) {
     async (file: File): Promise<FileRecord> => {
       setIsUploading(true);
       try {
-        const media = await probeMediaMetadata(file);
-
-        const formData = new FormData();
-        formData.append("file", file);
-        if (media.duration != null) formData.append("mediaDuration", String(media.duration));
-        if (media.width != null) formData.append("mediaWidth", String(media.width));
-        if (media.height != null) formData.append("mediaHeight", String(media.height));
-
-        const res = await fetch(`/api/pieces/${pieceId}/upload`, {
-          method: "POST",
-          body: formData,
+        const record = await uploadFileTo(pieceId, file);
+        // Same falsiness rule as the endpoint choice, and for the same reason:
+        // an empty id here would invalidate ["files", ""], which matches no
+        // query, so the upload would not show up in Resources until something
+        // else forced a refetch.
+        queryClient.invalidateQueries({
+          queryKey: pieceId ? fileKeys.forPiece(pieceId) : fileKeys.global(),
         });
-        if (!res.ok) throw new Error("Upload failed");
-
-        const data = await res.json();
-        queryClient.invalidateQueries({ queryKey: fileKeys.forPiece(pieceId) });
-        return data.file;
+        return record;
       } finally {
         setIsUploading(false);
       }
@@ -202,39 +249,9 @@ export function useGlobalFiles() {
   });
 }
 
+/** Upload to the global (unassigned) store. */
 export function useGlobalUpload() {
-  const queryClient = useQueryClient();
-  const [isUploading, setIsUploading] = useState(false);
-
-  const upload = useCallback(
-    async (file: File): Promise<FileRecord> => {
-      setIsUploading(true);
-      try {
-        const media = await probeMediaMetadata(file);
-
-        const formData = new FormData();
-        formData.append("file", file);
-        if (media.duration != null) formData.append("mediaDuration", String(media.duration));
-        if (media.width != null) formData.append("mediaWidth", String(media.width));
-        if (media.height != null) formData.append("mediaHeight", String(media.height));
-
-        const res = await fetch("/api/upload", {
-          method: "POST",
-          body: formData,
-        });
-        if (!res.ok) throw new Error("Upload failed");
-
-        const data = await res.json();
-        queryClient.invalidateQueries({ queryKey: fileKeys.global() });
-        return data.file;
-      } finally {
-        setIsUploading(false);
-      }
-    },
-    [queryClient],
-  );
-
-  return { upload, isUploading };
+  return useFileUpload(null);
 }
 
 export function useAssignFile() {

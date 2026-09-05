@@ -71,7 +71,7 @@ describe("ChatPanel prefill", () => {
       <QueryClientProvider client={qc}>
         <EditorStateProvider>
           <Trigger />
-          <ChatPanel sessionId={null} pieceId="" />
+          <ChatPanel sessionId={null} />
         </EditorStateProvider>
       </QueryClientProvider>,
     );

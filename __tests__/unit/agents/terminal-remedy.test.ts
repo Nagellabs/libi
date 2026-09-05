@@ -33,6 +33,7 @@ import {
   claudeSignInRemedy,
   codexInstallRemedy,
 } from "@/lib/agents/terminal-remedy";
+import { quoteForShell } from "@/lib/terminal/shell-quote";
 
 /** The exact path from the machine that reported the bug. */
 const WIN_CODEX =
@@ -66,10 +67,19 @@ describe("codexSignInRemedy", () => {
     expect(command).toMatch(/^& /);
   });
 
-  it("on POSIX, quotes the path and adds no call operator", () => {
+  it("on POSIX, leaves the bundled path bare and adds no call operator", () => {
+    // Changed by the shared-quoter consolidation: POSIX_CODEX contains an `@`
+    // (`@openai/codex-darwin-arm64`) and nothing else outside the shared
+    // POSIX safe set (letters, digits, `/ . - @`, no spaces or shell
+    // metacharacters). A bare `@` has no special meaning to bash/zsh outside
+    // an extglob `@(...)` pattern, which this is not, so it is genuinely safe
+    // to leave unquoted — this is not a regression, it's the shared module's
+    // POSIX safe set (which already treats `@` as safe for terminal
+    // file-drops) now applying here too instead of this file's own stricter
+    // private regex.
     resolveCodexNativeBinary.mockReturnValue(POSIX_CODEX);
     const remedy = codexSignInRemedy("/root");
-    expect(remedy?.command).toBe(`'${POSIX_CODEX}' login`);
+    expect(remedy?.command).toBe(`${POSIX_CODEX} login`);
     expect(remedy?.command).not.toContain("&");
   });
 
@@ -102,6 +112,32 @@ describe("claudeSignInRemedy", () => {
 
   it("on POSIX, leaves an unremarkable path unquoted", () => {
     expect(claudeSignInRemedy("/opt/libi/bin/claude").command).toBe("/opt/libi/bin/claude");
+  });
+
+  it("matches the shared quoter's output exactly, so a reintroduced private copy only fails if it diverges", () => {
+    // Two quoters for one PTY is what this consolidation removes, but a
+    // behaviourally IDENTICAL private copy would still pass every other
+    // assertion here — this test only catches a copy that computes something
+    // DIFFERENT from `quoteForShell`. Under the shared POSIX safe set `@` is
+    // safe, so a scoped npm path is left BARE — the old private regex in
+    // this file did not treat `@` as safe and would have quoted it instead.
+    // Strict equality against the shared function's own output is what makes
+    // this fail if a divergent private copy ever comes back: a `toContain`
+    // check can't tell "bare" from "quoted", since a quoted path still
+    // contains the bare path as a substring.
+    const p = "/Users/nadav/.libi/agents/node_modules/@nagellabs/libi/bin/claude";
+    expect(claudeSignInRemedy(p).command).toBe(quoteForShell(p, "posix"));
+  });
+
+  it("still quotes a path that needs it, the case that caused the original outage", () => {
+    // The scoped-npm-path outage was specifically about a heuristic rejecting
+    // a path it should have accepted as tame. This checks the other side
+    // keeps working: a path with a space still comes out quoted, and the
+    // path itself survives inside the quotes untouched.
+    const p = "/Users/nadav/Library/Application Support/libi/claude";
+    const cmd = claudeSignInRemedy(p).command;
+    expect(cmd).toBe(`'${p}'`);
+    expect(cmd).toContain(p);
   });
 });
 

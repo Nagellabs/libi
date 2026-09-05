@@ -30,6 +30,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
 import ResourceContextMenu, { type ContextMenuState } from "./context-menu";
@@ -679,29 +680,39 @@ const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
               <ArrowUpDown className="h-3 w-3" />
             </DropdownMenuTrigger>
             <DropdownMenuContent side="bottom" align="end" sideOffset={4}>
-              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Root</DropdownMenuLabel>
-              {(Object.keys(SORT_LABELS) as SortOption[]).map((opt) => (
-                <DropdownMenuItem
-                  key={opt}
-                  className="cursor-pointer"
-                  onClick={() => handleRootSortChange(opt)}
-                >
-                  <Check className={`h-3.5 w-3.5 ${rootSort === opt ? "opacity-100" : "opacity-0"}`} />
-                  {SORT_LABELS[opt]}
-                </DropdownMenuItem>
-              ))}
+              {/* Each label MUST stay wrapped in its DropdownMenuGroup: base-ui's
+                  GroupLabel throws outright when it can't find a group above it,
+                  and the throw lands during render of the menu content — i.e. on
+                  the click that opens this menu. Grouping is also what ties the
+                  label to its four items for screen readers, since both sections
+                  otherwise offer the same four names. */}
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Root</DropdownMenuLabel>
+                {(Object.keys(SORT_LABELS) as SortOption[]).map((opt) => (
+                  <DropdownMenuItem
+                    key={opt}
+                    className="cursor-pointer"
+                    onClick={() => handleRootSortChange(opt)}
+                  >
+                    <Check className={`h-3.5 w-3.5 ${rootSort === opt ? "opacity-100" : "opacity-0"}`} />
+                    {SORT_LABELS[opt]}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
               <DropdownMenuSeparator />
-              <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Inside pieces</DropdownMenuLabel>
-              {(Object.keys(SORT_LABELS) as SortOption[]).map((opt) => (
-                <DropdownMenuItem
-                  key={opt}
-                  className="cursor-pointer"
-                  onClick={() => handleInnerSortChange(opt)}
-                >
-                  <Check className={`h-3.5 w-3.5 ${innerSort === opt ? "opacity-100" : "opacity-0"}`} />
-                  {SORT_LABELS[opt]}
-                </DropdownMenuItem>
-              ))}
+              <DropdownMenuGroup>
+                <DropdownMenuLabel className="text-[10px] uppercase tracking-wider text-muted-foreground">Inside pieces</DropdownMenuLabel>
+                {(Object.keys(SORT_LABELS) as SortOption[]).map((opt) => (
+                  <DropdownMenuItem
+                    key={opt}
+                    className="cursor-pointer"
+                    onClick={() => handleInnerSortChange(opt)}
+                  >
+                    <Check className={`h-3.5 w-3.5 ${innerSort === opt ? "opacity-100" : "opacity-0"}`} />
+                    {SORT_LABELS[opt]}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

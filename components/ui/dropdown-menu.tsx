@@ -53,6 +53,19 @@ function DropdownMenuGroup({ ...props }: MenuPrimitive.Group.Props) {
   return <MenuPrimitive.Group data-slot="dropdown-menu-group" {...props} />
 }
 
+/**
+ * A section label inside a menu.
+ *
+ * MUST be rendered inside a `DropdownMenuGroup`. This is where base-ui diverges
+ * from Radix, which most shadcn muscle memory is built on: Radix's
+ * `DropdownMenu.Label` stands alone, while base-ui's `Menu.GroupLabel` reads a
+ * group context and THROWS when there isn't one —
+ * "Base UI: MenuGroupRootContext is missing." The throw happens while rendering
+ * the menu's content, so it fires on the click that opens the menu and, with no
+ * error boundary between here and `app/global-error.tsx`, replaces the whole
+ * screen. The resources-panel sort menu shipped that way and was unusable from
+ * the repo's first commit until it was found.
+ */
 function DropdownMenuLabel({
   className,
   inset,
