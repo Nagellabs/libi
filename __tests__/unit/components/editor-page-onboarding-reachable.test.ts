@@ -3,58 +3,48 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
- * The onboarding must never be gated behind library state.
+ * A first launch lands on the Agents tab with the persona question over it.
  *
- * The editor page renders `<PersonaModal />` and (via EditorLayout's
- * `rightTakeover`) the connect-an-agent panel in its MAIN return. Every
- * `return` above that is an early exit — and an early exit that forgets the
- * modal hides the onboarding from whoever hits that branch.
+ * It used to land on the editor: the persona question was mounted there, and a
+ * pick pushed the user to `/agents` — so the editor painted and then switched
+ * away, which read as a glitch. Now the editor page's default export is a gate
+ * that paints nothing of the editor until the onboarding state is known, and
+ * sends a first launch to `/agents` before any editor screen renders; the
+ * question itself lives on the Agents route. The gate's behaviour is rendered in
+ * first-launch-gate.test.tsx; this file pins where things sit, which a render
+ * test cannot see without standing up the dozen providers this page needs.
  *
- * That is not hypothetical. A `piecesScreen === "welcome"` early return sat
- * above them, so the ONLY user who never saw the persona question, the
- * connect-an-agent screen, or the "I'll build you a short example video" chip
- * was the brand-new user all three exist for; onboarding appeared *after* you
- * created your first piece. This is a source scan rather than a render test
- * because the failure is structural — where a `return` sits, not what it
- * paints — and rendering this page means standing up a dozen providers.
- *
- * Early returns are indented 4 spaces (they live inside an `if`); the main
- * return is at 2. That indentation is the discriminator.
+ * The empty-library pin predates this: a `piecesScreen === "welcome"` early
+ * return once swallowed the first-run onboarding for exactly the brand-new user
+ * it was written for.
  */
 
 const PAGE = join(process.cwd(), "app/(app)/editor/page.tsx");
+const AGENTS_ROUTE = join(process.cwd(), "app/(app)/agents/page.tsx");
 
-/** Every early-return JSX block in the page component, as source text. */
-function earlyReturnBlocks(source: string): string[] {
-  const blocks: string[] = [];
-  const lines = source.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i] !== "    return (") continue;
-    const body: string[] = [];
-    for (let j = i + 1; j < lines.length; j++) {
-      if (lines[j] === "    );") break;
-      body.push(lines[j]);
-    }
-    blocks.push(body.join("\n"));
-  }
-  return blocks;
+/** The source of the page's default export, up to its closing brace. */
+function defaultExportBody(source: string): string {
+  const start = source.indexOf("export default function EditorPage()");
+  expect(start, "the page's default export moved or was renamed").toBeGreaterThanOrEqual(0);
+  const rest = source.slice(start);
+  return rest.slice(0, rest.indexOf("\n}\n"));
 }
 
-describe("editor page — onboarding is reachable from every screen", () => {
+describe("editor page — a first launch lands on the Agents tab", () => {
   const source = readFileSync(PAGE, "utf8");
+  const agentsRoute = readFileSync(AGENTS_ROUTE, "utf8");
 
-  it("finds the early returns it is meant to be checking", () => {
-    // Guards the guard: if the page is restructured so this scan matches
-    // nothing, the test must fail loudly rather than pass vacuously.
-    expect(earlyReturnBlocks(source).length).toBeGreaterThan(0);
+  it("the default export renders every editor screen behind the first-launch gate, with only the loading screen before it", () => {
+    const body = defaultExportBody(source);
+    expect(body).toContain("<FirstLaunchGate fallback={<EditorLoadingScreen />}>");
+    expect(body).toContain("<EditorWorkspace />");
+    // Nothing runs ahead of the gate: no hook, so no editor effect fires for a first launch.
+    expect(body).not.toMatch(/\buse[A-Z]\w*\(/);
   });
 
-  it("renders the persona modal in every early return", () => {
-    for (const block of earlyReturnBlocks(source)) {
-      const firstLine = block.trim().split("\n")[0];
-      expect(block, `early return starting "${firstLine}" is missing <PersonaModal />`)
-        .toContain("<PersonaModal />");
-    }
+  it("the persona question is asked on the Agents route, not by any editor screen", () => {
+    expect(source).not.toContain("PersonaModal");
+    expect(agentsRoute).toContain("<PersonaModal />");
   });
 
   it("has NO early return for the empty library — first run renders inside the layout", () => {
@@ -65,9 +55,7 @@ describe("editor page — onboarding is reachable from every screen", () => {
     expect(source).toContain('firstRun={piecesScreen === "welcome"}');
   });
 
-  it("still renders the persona modal and the connect-agent takeover in the main return", () => {
-    expect(source).toContain("<PersonaModal />");
-    expect(source).toContain("<OnboardingPanel />");
-    expect(source).toContain("rightTakeover={rightTakeover}");
+  it("renders no takeover", () => {
+    expect(source).not.toContain("rightTakeover");
   });
 });

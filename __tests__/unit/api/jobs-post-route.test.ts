@@ -253,7 +253,10 @@ describe("POST /api/jobs", () => {
       pendingResolvers.push(resolve);
     });
     registerRunner({
-      kind: "extra_analysis_model",
+      // A fabricated kind: every built-in runner is local compute and
+      // runner-paid-coverage.test.ts asserts none is flagged paid, so this
+      // stub must not borrow a real kind name.
+      kind: "test_paid_kind",
       maxConcurrent: 8,
       resumable: false,
       paid: true,
@@ -271,7 +274,7 @@ describe("POST /api/jobs", () => {
         new Request("http://x/api/jobs", {
           method: "POST",
           // Distinct params each call so dedupe never collapses them.
-          body: JSON.stringify({ kind: "extra_analysis_model", params: { v } }),
+          body: JSON.stringify({ kind: "test_paid_kind", params: { v } }),
           headers: { "Content-Type": "application/json" },
         }),
       );

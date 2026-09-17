@@ -12,6 +12,8 @@
  */
 import { z } from "zod/v3";
 
+import { normalizeProviderId } from "@/lib/providers/catalog";
+
 export const aiGenerationCostSchema = z.object({
   amount: z.number().nonnegative(),
   currency: z.string().min(1).default("USD"),
@@ -30,11 +32,32 @@ export const aiGenerationCostActualSchema = aiGenerationCostSchema.extend({
 
 export const aiGenerationMetaSchema = z.object({
   /**
-   * MCP server id (e.g. "fal-ai", "elevenlabs"). Matches the `id` column on
-   * the mcp_servers table. In test mode fake-fal masquerades as "fal-ai", so
-   * test-mode files also carry provider "fal-ai".
+   * Provider catalog id (e.g. "fal", "elevenlabs") — `ProviderId` in
+   * `lib/providers/catalog.ts`. Test-mode fake-fal stamps the catalog id "fal",
+   * same as production.
+   *
+   * NORMALISED, not enumerated. `normalizeProviderId` maps the old
+   * bundled-MCP spellings forward — `fal-ai` → `fal`, `local-tts` → `kokoro`,
+   * `local-music` → `ace-step` — on BOTH read and write, so the two spellings
+   * of the same provider (the `fal` / `fal-ai` disagreement that already bit
+   * once) can no longer coexist in the column or in what a tool passes.
+   *
+   * It is deliberately NOT `z.enum(PROVIDER_IDS)`:
+   *
+   *   - `parseAiGenerationMeta` returns null on a parse failure, so a closed
+   *     enum would blank the whole Generation tab — model, prompt, cost, the
+   *     lot — for any row whose provider it did not recognise. That is the
+   *     loudest possible failure for the least valuable field.
+   *   - libi does not own the list of providers a user can have any more. Their
+   *     own agent config does, and an agent that generates through a provider
+   *     this catalog has never heard of (and then calls `libi.upload_file` with
+   *     provenance) is doing the right thing — a closed enum would reject that
+   *     upload outright.
+   *
+   * So an unrecognised id is kept verbatim. `isProviderId` is what to ask when
+   * a caller actually needs a catalog entry.
    */
-  provider: z.string().min(1),
+  provider: z.preprocess(normalizeProviderId, z.string().min(1)),
   /**
    * Model identifier within the provider (e.g. "veo3.1-fast", "kokoro-82m").
    * In test mode fake-fal uses "test-mode" as the model id.

@@ -11,8 +11,7 @@ import { enqueueJobOnServer, logProxyGenEnqueueFailure } from "@/mcp/jobs-client
 import { eq, isNull, desc } from "drizzle-orm";
 import { navigationEmitter } from "@/lib/navigation-events";
 import type { ToolContext, ToolResult } from "./types";
-import type { ListFilesParams, DuplicateFileParams, UploadFileParams, UploadFileToFalParams, SaveAssetParams } from "./schemas";
-import { getCurrentPort } from "@/lib/libi-home";
+import type { ListFilesParams, DuplicateFileParams, UploadFileParams, SaveAssetParams } from "./schemas";
 import type { FileRecord } from "@/lib/db/schema/types";
 
 /**
@@ -711,41 +710,4 @@ export async function updateFileNotes(
     .limit(1)
     .all();
   return { success: true, data: updated as unknown as Record<string, unknown> };
-}
-
-/**
- * Upload a LOCAL libi file to fal.ai storage and return a fal CDN URL.
- *
- * Runs server-side via the Next.js route `/api/files/by-id/{fileId}/fal-upload`
- * — the MCP child has an empty env and cannot resolve the FAL key, so we MUST
- * go through the server (which already resolves it). Never import
- * `lib/fal/upload-file.ts` here.
- */
-export async function uploadFileToFal(
-  params: UploadFileToFalParams,
-): Promise<{ success: boolean; data?: { url: string; cached: boolean }; error?: string }> {
-  const { fileId } = params;
-
-  let port: number;
-  try {
-    port = getCurrentPort();
-  } catch {
-    return { success: false, error: "libi server is not running (no port file)" };
-  }
-
-  try {
-    const res = await fetch(
-      `http://127.0.0.1:${port}/api/files/by-id/${fileId}/fal-upload`,
-      { method: "POST", headers: { "Content-Type": "application/json" } },
-    );
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string };
-      return { success: false, error: body.error ?? `fal upload failed: HTTP ${res.status}` };
-    }
-    const { url, cached } = (await res.json()) as { url: string; cached: boolean };
-    return { success: true, data: { url, cached } };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return { success: false, error: `fal upload request failed: ${message}` };
-  }
 }

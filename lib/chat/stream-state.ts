@@ -257,6 +257,9 @@ export function applyAgentEvent(
     case "agent-tool-status":
       return { state: applyToolStatus(state, event) };
 
+    case "agent-tool-args":
+      return { state: applyToolArgs(state, event) };
+
     case "agent-subagent-refine":
       return { state: applySubagentRefine(state, event) };
 
@@ -586,6 +589,44 @@ function applyToolStatus(
         if (p.type !== "tool-call") return p;
         if (p.status === "running" || p.runningAt !== undefined) return p;
         return { ...p, status: "running", runningAt: event.runningAt };
+      },
+    ),
+  ).state;
+}
+
+/**
+ * The tool call's real arguments, arriving after the row was already rendered
+ * claude-agent-acp emits `tool_call` at content_block_start with an
+ * empty input, so without this every live tool row showed `{}` for the whole
+ * call and only a page refresh — which re-reads the message cache — ever
+ * displayed what the tool was actually asked to do.
+ *
+ * Same monotone rule as the cache (`fillToolCallArgsFromUpdate`): a fuller
+ * input replaces a partial one, and an update carrying less never removes
+ * anything. The server already applies it before emitting; it is repeated here
+ * because SSE delivery after a reconnect is not ordered.
+ */
+function applyToolArgs(
+  state: ChatStreamState,
+  event: Extract<AgentEvent, { type: "agent-tool-args" }>,
+): ChatStreamState {
+  if (!event.args || typeof event.args !== "object") return state;
+  const incoming = Object.keys(event.args as Record<string, unknown>).length;
+  if (incoming === 0) return state;
+  return patchMessagesEverywhere(state, (msg) =>
+    patchPartInMessage(
+      msg,
+      (p) => p.type === "tool-call" && p.toolCallId === event.toolCallId,
+      (p) => {
+        if (p.type !== "tool-call") return p;
+        const known =
+          p.args && typeof p.args === "object"
+            ? Object.keys(p.args as Record<string, unknown>).length
+            : p.args === undefined || p.args === null
+              ? 0
+              : Infinity; // a non-object args came from somewhere that knew better
+        if (incoming <= known) return p;
+        return { ...p, args: event.args };
       },
     ),
   ).state;

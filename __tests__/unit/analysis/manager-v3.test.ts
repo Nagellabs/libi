@@ -1,5 +1,5 @@
 import fs from "fs";
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { createTestDb, resetTestDb } from "../../helpers/test-db";
 import {
@@ -12,6 +12,17 @@ import {
 } from "@/lib/analysis/manager";
 import { getDb } from "@/lib/db/client";
 import { files, pieces, analysisAudioChunks, analysisSteps } from "@/lib/db/schema";
+
+/** Whether the local Whisper model is on disk. Every other test in this file
+ *  injects `sttFn`, which makes `transcribeAudio` skip the install gate
+ *  entirely — so the gate, the ONE transcription failure the server can still
+ *  produce on its own, had no coverage at all. Defaults to installed so
+ *  nothing else in the file changes. */
+const isWhisperModelInstalled = vi.fn<(model: string) => boolean>(() => true);
+vi.mock("@/lib/whisper/models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/whisper/models")>()),
+  isWhisperModelInstalled: (model: string) => isWhisperModelInstalled(model),
+}));
 
 describe("analysis manager (per-step)", () => {
   let fileId: string;
@@ -182,6 +193,63 @@ describe("audio chunk save + auto-aggregate", () => {
     expect(meta.words).toHaveLength(2);
   });
 
+  /**
+   * `aggregateTranscript` defaults `provider` to `"external"` — right
+   * for path B (the agent driving its own STT through
+   * `libi.analysis_save_audio_chunk`, which cannot name a vendor), wrong for
+   * the server-side Whisper path, which knows exactly what produced the words.
+   * `transcribeAudio` used to correct it with a re-stamp AFTER the loop, so
+   * the aggregate spent the gap claiming a local on-device transcription came
+   * from somewhere external — and a run that never reached the re-stamp left
+   * that claim on disk for good.
+   */
+  it("stamps the provider the caller names, from the first aggregate", async () => {
+    const { saveAudioChunk } = await import("@/lib/analysis/manager");
+    const db = getDb();
+    const [step] = await db.insert(analysisSteps).values({
+      fileId: fid, kind: "transcript", status: "not_started",
+    }).returning();
+    const [chunk] = await db.insert(analysisAudioChunks).values({
+      fileId: fid, stepId: step.id, chunkIndex: 0,
+      startSeconds: 0, endSeconds: 60, filePath: "audio-chunks/chunk-0001.wav",
+    }).returning();
+
+    await saveAudioChunk({
+      chunkId: chunk.id,
+      text: "hello world",
+      words: [{ text: "hello", start: 0, end: 0.5, type: "word" }],
+      provider: "whisper",
+      model: "base",
+    });
+
+    const bundle = await getAnalysis({ fileId: fid });
+    const meta = JSON.parse(bundle.steps.find((s) => s.kind === "transcript")!.metadata!);
+    expect(meta.provider).toBe("whisper");
+    expect(meta.model).toBe("base");
+  });
+
+  it("still says external when the caller cannot name one (path B)", async () => {
+    const { saveAudioChunk } = await import("@/lib/analysis/manager");
+    const db = getDb();
+    const [step] = await db.insert(analysisSteps).values({
+      fileId: fid, kind: "transcript", status: "not_started",
+    }).returning();
+    const [chunk] = await db.insert(analysisAudioChunks).values({
+      fileId: fid, stepId: step.id, chunkIndex: 0,
+      startSeconds: 0, endSeconds: 60, filePath: "audio-chunks/chunk-0001.wav",
+    }).returning();
+
+    await saveAudioChunk({
+      chunkId: chunk.id,
+      text: "hello world",
+      words: [{ text: "hello", start: 0, end: 0.5, type: "word" }],
+    });
+
+    const bundle = await getAnalysis({ fileId: fid });
+    const meta = JSON.parse(bundle.steps.find((s) => s.kind === "transcript")!.metadata!);
+    expect(meta.provider).toBe("external");
+  });
+
   it("aggregate stays not_started when chunks split between ready and not_started", async () => {
     const { saveAudioChunk } = await import("@/lib/analysis/manager");
     const db = getDb();
@@ -223,13 +291,17 @@ describe("audio chunk save + auto-aggregate", () => {
     ]).returning();
 
     await saveAudioChunk({ chunkId: c0.id, text: "ok", words: [{ text: "ok", start: 0, end: 1, type: "word" }] });
-    await markAudioChunkFailed({ chunkId: c1.id, errorMessage: "ElevenLabs HTTP 500" });
+    await markAudioChunkFailed({
+      chunkId: c1.id,
+      // The shape lib/whisper/transcribe.ts actually rejects with.
+      errorMessage: "whisper exited 1: RuntimeError: CUDA out of memory",
+    });
 
     const result = await getAnalysis({ fileId: fid });
     const t = result.steps.find((s) => s.kind === "transcript");
     expect(t?.status).toBe("failed");
     expect(t?.errorMessage).toContain("1 of 2");
-    expect(t?.errorMessage).toContain("HTTP 500");
+    expect(t?.errorMessage).toContain("whisper exited 1");
   });
 });
 
@@ -368,6 +440,12 @@ describe("transcribeAudio (with mock STT)", () => {
     const t = bundle.steps.find((s) => s.kind === "transcript");
     expect(t?.status).toBe("ready");
     expect(t?.content).toContain("hello world");
+    // …and the provenance is whisper's own, not the "external" default — now
+    // written by the chunk save itself rather than by the trailing re-stamp.
+    const meta = JSON.parse(t!.metadata!);
+    expect(meta.provider).toBe("whisper");
+    expect(typeof meta.model).toBe("string");
+    expect(meta.model.length).toBeGreaterThan(0);
   });
 
   it("returns partial when one chunk fails", async () => {
@@ -403,14 +481,16 @@ describe("transcribeAudio (with mock STT)", () => {
       fileId: fid,
       chunkSeconds: 60,
       sttFn: async () => {
-        throw new Error("ELEVENLABS_API_KEY missing");
+        // lib/whisper/transcribe.ts#runUv's non-zero-exit rejection, verbatim
+        // in shape — the only STT failure the server side can now produce.
+        throw new Error("whisper exited 1: Could not load model small");
       },
     });
     expect(result.status).toBe("failed");
     expect(result.readyChunks).toBe(0);
     expect(result.totalChunks).toBe(2);
     expect(result.failedChunks).toHaveLength(2);
-    expect(result.failedChunks[0].error).toMatch(/ELEVENLABS_API_KEY/);
+    expect(result.failedChunks[0].error).toMatch(/whisper exited 1/);
   });
 
   it("re-calling on all-failed chunks (no retry) reports failed, not ready", async () => {
@@ -448,7 +528,7 @@ describe("transcribeAudio (with mock STT)", () => {
 
   it("re-calling on already-ready chunks returns ready, not partial", async () => {
     // The inverse fairness check: a fully-succeeded transcript that gets
-    // re-queried (no provider switch, no retry) should stay "ready".
+    // re-queried (no retry) should stay "ready".
     const db = getDb();
     await db.update(files).set({ mediaDuration: 60 }).where(eq(files.id, fid));
     const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
@@ -503,59 +583,7 @@ describe("transcribeAudio (with mock STT)", () => {
     expect(result.status).toBe("ready");
   });
 
-  it("provider switch forces re-transcription of ready chunks (not silent relabel)", async () => {
-    // First pass: explicit provider="whisper". sttFn injects a fake whisper result.
-    const { transcribeAudio: t1, chunkAudio } = await import("@/lib/analysis/manager");
-    await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });
-    let whisperCalls = 0;
-    const whisperFn = async () => {
-      whisperCalls++;
-      return {
-        text: "whisper output",
-        words: [{ text: "whisper", start: 0, end: 1, type: "word" }],
-        language_code: "eng",
-      };
-    };
-    const r1 = await t1({ fileId: fid, provider: "whisper", sttFn: whisperFn });
-    expect(r1.status).toBe("ready");
-    expect(r1.provider).toBe("whisper");
-    expect(whisperCalls).toBe(1);
-
-    // Sanity: the step's metadata should carry provider="whisper" so the
-    // second call can see the mismatch and switch.
-    const after1 = await getAnalysis({ fileId: fid });
-    const step1 = after1.steps.find((s) => s.kind === "transcript");
-    expect(step1?.metadata).toBeTruthy();
-    const meta1 = JSON.parse(step1!.metadata as unknown as string);
-    expect(meta1.provider).toBe("whisper");
-
-    // Second pass: explicit provider="elevenlabs". The ready chunks were
-    // produced by whisper; the new call MUST re-run the sttFn (now mimicking
-    // elevenlabs), not silently relabel.
-    const { transcribeAudio: t2 } = await import("@/lib/analysis/manager");
-    let elevenCalls = 0;
-    const elevenFn = async () => {
-      elevenCalls++;
-      return {
-        text: "elevenlabs output",
-        words: [{ text: "elevenlabs", start: 0, end: 1, type: "word" }],
-        language_code: "eng",
-      };
-    };
-    const r2 = await t2({ fileId: fid, provider: "elevenlabs", sttFn: elevenFn });
-    expect(r2.status).toBe("ready");
-    expect(r2.provider).toBe("elevenlabs");
-    // Critical: the new provider's sttFn was actually invoked, NOT skipped.
-    expect(elevenCalls).toBe(1);
-
-    // The aggregated transcript now reflects elevenlabs's output, not whisper's.
-    const bundle = await getAnalysis({ fileId: fid });
-    const t = bundle.steps.find((s) => s.kind === "transcript");
-    expect(t?.content).toContain("elevenlabs output");
-    expect(t?.content).not.toContain("whisper output");
-  });
-
-  it("same provider on re-call does NOT redo work (no spurious re-runs)", async () => {
+  it("re-call on ready chunks does NOT redo work (no spurious re-runs)", async () => {
     const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
     await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });
     let calls = 0;
@@ -567,10 +595,10 @@ describe("transcribeAudio (with mock STT)", () => {
         language_code: "eng",
       };
     };
-    await transcribeAudio({ fileId: fid, provider: "whisper", sttFn });
+    await transcribeAudio({ fileId: fid, sttFn });
     expect(calls).toBe(1);
-    // Second call with same provider should be a no-op.
-    await transcribeAudio({ fileId: fid, provider: "whisper", sttFn });
+    // Second call should be a no-op — every chunk is already ready.
+    await transcribeAudio({ fileId: fid, sttFn });
     expect(calls).toBe(1);
   });
 });
@@ -622,5 +650,73 @@ describe("saveAudioChunkFromFile", () => {
     } finally {
       fs.unlinkSync(tmp);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The transcription failures this file pinned were an injected
+// `ELEVENLABS_API_KEY missing` — a string no code in the tree can produce
+// since the ElevenLabs STT client was deleted. The injected ones now carry
+// Whisper's real rejection shape, and the block below covers the only
+// transcription failure `transcribeAudio` raises by itself: the local model
+// is not installed.
+// ---------------------------------------------------------------------------
+describe("transcribeAudio — the local Whisper install gate", () => {
+  let fid: string;
+  beforeEach(async () => {
+    createTestDb();
+    const db = getDb();
+    const [piece] = await db.insert(pieces).values({ name: "p", description: "" }).returning();
+    const [file] = await db.insert(files).values({
+      pieceId: piece.id, filename: "v.mp4", name: "v", description: "",
+      type: "video", storagePath: "v.mp4", mediaDuration: 30,
+    }).returning();
+    fid = file.id;
+    isWhisperModelInstalled.mockClear();
+    isWhisperModelInstalled.mockReturnValue(true);
+  });
+  afterEach(() => {
+    isWhisperModelInstalled.mockReturnValue(true);
+    resetTestDb();
+  });
+
+  it("answers needs_install — not a throw, and never 'ready' — when the model is absent", async () => {
+    isWhisperModelInstalled.mockReturnValue(false);
+    const { transcribeAudio } = await import("@/lib/analysis/manager");
+
+    const result = await transcribeAudio({ fileId: fid });
+
+    expect(result.status).toBe("needs_install");
+    expect(result.provider).toBe("whisper");
+    // The hint is the agent's whole next move; a hint that names no tool
+    // leaves it guessing, which is how this path used to dead-end.
+    expect(result.hint).toContain('libi.get_install_plan({ mcpId: "whisper" })');
+    expect(result.hint).toContain("libi.whisper_download_model");
+    // Nothing was chunked or extracted — the gate returns before any work.
+    expect(result.totalChunks).toBe(0);
+    expect(result.readyChunks).toBe(0);
+    expect(result.failedChunks).toEqual([]);
+    const bundle = await getAnalysis({ fileId: fid });
+    expect(bundle.audioChunks).toEqual([]);
+  });
+
+  it("names the model it looked for, so a wrong `model` argument is diagnosable", async () => {
+    isWhisperModelInstalled.mockReturnValue(false);
+    const { transcribeAudio } = await import("@/lib/analysis/manager");
+    const result = await transcribeAudio({ fileId: fid, model: "large-v3" });
+    expect(isWhisperModelInstalled).toHaveBeenCalledWith("large-v3");
+    expect(result.hint).toContain('"large-v3"');
+  });
+
+  it("skips the gate entirely when an sttFn is injected (the seam every other test uses)", async () => {
+    isWhisperModelInstalled.mockReturnValue(false);
+    const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
+    await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });
+    const result = await transcribeAudio({
+      fileId: fid,
+      sttFn: async () => ({ text: "hi", words: [{ text: "hi", start: 0, end: 1, type: "word" }] }),
+    });
+    expect(result.status).toBe("ready");
+    expect(isWhisperModelInstalled).not.toHaveBeenCalled();
   });
 });

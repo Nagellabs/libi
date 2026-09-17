@@ -1,10 +1,13 @@
 /** MCP server wrapping the shared Libi tool layer */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { isInAppSurface } from "@/lib/mcp/agent-surface";
+import type { AgentSurface } from "@/lib/mcp/agent-surface";
 import * as tools from "@/mcp/tools";
 import type { ToolContext } from "@/mcp/tools/types";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
+import { mcpLogger as logger } from "@/lib/logger";
+import { renderAgentInstructions } from "@/mcp/workspace";
+import { resolveManualSection, PROSE_EXAMPLE_SECTION_KEYS } from "@/mcp/manual-sections";
 import { registerTrackingTools } from "@/mcp/tracking-mcp/register-tracking-tools";
 import { installArgCoercion } from "@/mcp/tools/coerce-args";
 import {
@@ -43,13 +46,9 @@ import {
   assignFileSchema,
   updateFileNotesSchema,
   uploadFileSchema,
-  UploadFileToFalSchema,
   UploadFontSchema,
   listFontsSchema,
-  registerMcpServerSchema,
   updateMcpServerSchema,
-  setMcpServerEnabledSchema,
-  removeMcpServerSchema,
   listPiecesSchema,
   createPieceSchema,
   showPieceSchema,
@@ -89,7 +88,6 @@ import {
   analysisUpdateSummaryCustomSchema,
   analysisSearchFramesSchema,
   analysisSearchTranscriptSchema,
-  extraAnalysisModelInputSchema,
   analysisTranscribeAudioSchema,
   analysisChunkAudioSchema,
   analysisSaveAudioChunkSchema,
@@ -105,7 +103,6 @@ import {
   type AnalysisUpdateSummaryCustomParams,
   type AnalysisSearchFramesParams,
   type AnalysisSearchTranscriptParams,
-  type ExtraAnalysisModelParams,
   type AnalysisTranscribeAudioParams,
   type AnalysisChunkAudioParams,
   type AnalysisSaveAudioChunkParams,
@@ -135,8 +132,9 @@ import {
   type MusicDetectBeatsParams,
   type MusicProfileParams,
   type MusicInstallAnalysisDepsParams,
-  listBundledMcpsSchema,
-  showMcpSettingsSchema,
+  showExtensionSchema,
+  suggestProviderSchema,
+  listProvidersSchema,
   retryMcpServerSchema,
   retrieveAssetsDimensionsSchema,
   updateCompositionDimensionsSchema,
@@ -152,7 +150,6 @@ import {
   setSkillsEnabledByTagSchema,
   forkSkillSchema,
   diffSkillOverrideSchema,
-  listMcpServersSchema,
   ListCharactersSchema,
   GetCharacterSchema,
   CreateCharacterSchema,
@@ -201,8 +198,8 @@ import {
   updateMemoriesSchema,
   overrideInstructionsSchema,
   importRemoteFilesSchema,
+  downloadVideoSchema,
   startOnboardingSchema,
-  showApiConfigSchema,
   buildOnboardingPieceSchema,
   storyboardGetSchema,
   addStoryboardCardSchema,
@@ -222,6 +219,8 @@ import {
   type UpdateMemoriesParams,
   type OverrideInstructionsParams,
   devSlowJobSchema,
+  readManualSchema,
+  type ReadManualParams,
 } from "@/mcp/tools/schemas";
 import {
   createFolderTool,
@@ -237,6 +236,8 @@ import {
   duplicateFolderTool,
 } from "@/mcp/tools/duplication-tools";
 import { exportVideo } from "@/mcp/tools/export-tools";
+import { CHROMIUM_DOWNLOAD_MB } from "@/lib/export/chromium-size";
+import { KOKORO_DOWNLOAD_MB } from "@/lib/tts/model-size";
 import {
   getPieceStateTool,
   commitDraftTool,
@@ -273,7 +274,6 @@ import {
   setSkillsEnabledByTag,
   forkSkill,
   diffSkillOverride,
-  listMcpServersTool,
 } from "@/mcp/tools/skill-tools";
 import {
   listCharacters,
@@ -306,7 +306,6 @@ import {
   analysisUpdateSummaryCustom,
   analysisSearchFrames,
   analysisSearchTranscript,
-  extraAnalysisModel,
   analysisTranscribeAudio,
   analysisChunkAudio,
   analysisSaveAudioChunk,
@@ -322,18 +321,16 @@ import {
   musicProfile,
   musicInstallAnalysisDeps,
 } from "@/mcp/tools/music-analysis-tools";
-import { listBundledMcps, showMcpSettings } from "@/mcp/tools/mcp-status-tools";
-import {
-  startOnboarding,
-  showApiConfig,
-  buildOnboardingPiece,
-} from "@/mcp/tools/onboarding-tools";
+import { showExtension } from "@/mcp/tools/extension-tools";
+import { suggestProvider, listProviders, PROVIDER_NAMES_FOR_DESCRIPTIONS } from "@/mcp/tools/provider-tools";
+import { startOnboarding, buildOnboardingPiece } from "@/mcp/tools/onboarding-tools";
 import { updateMemories, overrideInstructions } from "@/mcp/tools/instruction-tools";
 import { retryMcpServer } from "@/mcp/tools/mcp-retry-tools";
 import { retrieveAssetsDimensions, updateCompositionDimensions } from "@/mcp/tools/canvas-tools";
 import { regenerateProxy, dropProxies } from "@/mcp/tools/proxy-tools";
 import { getJobStatus, listJobs, cancelJob } from "@/mcp/tools/job-tools";
 import { importRemoteFiles } from "@/mcp/tools/remote-tools";
+import { downloadVideo, YT_DLP_INSTALL_MB } from "@/mcp/tools/video-download-tools";
 import { runJobViaServer, legacyTripleFromRunJobResult } from "@/mcp/jobs-client";
 import { isTestMode } from "@/lib/test-mode";
 import { storyboardGet, addStoryboardCard, approveStoryboardStage, attachStoryboardKeyframe, attachStoryboardClip, setStoryboardGeneration, selectStoryboardTake, hideStoryboardTake, setStoryboardReference, editStoryboardCard } from "@/mcp/tools/storyboard-tools";
@@ -363,7 +360,9 @@ function makeContext(pieceId: string, sessionId?: string): ToolContext {
   return { pieceId, sessionId };
 }
 
-export function createLibiMcpServer(): McpServer {
+export function createLibiMcpServer(
+  opts: { surface?: AgentSurface; dialect?: "claude" | "codex" } = {},
+): McpServer {
   const server = new McpServer({
     name: "libi-video-studio",
     version: LIBI_SKILL_VERSION,
@@ -1200,83 +1199,15 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
-    "libi.upload_file_to_fal",
-    {
-      description:
-        "Upload a LOCAL libi file to fal.ai storage and return a fal CDN URL, for use as an image_urls/audio_urls reference in fal generation. The FAL key is handled server-side — never extract or pass it yourself. Result is cached (falUploadedUrl) so repeat calls are free.",
-      inputSchema: UploadFileToFalSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.uploadFileToFal(params);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    "libi.register_mcp_server",
-    {
-      description:
-        "Register a new external MCP server so it becomes available in future agent sessions. Use this when the user asks you to add an MCP tool. Install any required npm packages first (e.g., via npx), then call this tool to wire up the server config. The server will be available after the next session starts. Ask the user whether the server should require approval before use.",
-      inputSchema: registerMcpServerSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.registerMcpServer(params);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
     "libi.update_mcp_server",
     {
       description:
-        "Edit an existing MCP server's configuration. Use when the user asks you to change credentials, command, args, env vars, or any other config field. PATCH semantics — only fields you pass are updated. Bundled MCPs accept ONLY envVars and requireApproval; every other field is read-only. The type (stdio/http) cannot be changed for any row. When updating envVars, ASK the user for the value — never invent secret values.",
+        "Turn the approval prompt on or off for one of libi's own extensions (tracking, whisper, local TTS, local music, video download). No other field is editable, and libi holds no provider credentials — providers live in your own agent config.",
       inputSchema: updateMcpServerSchema,
     },
     async (params) => {
       try {
         const result = await tools.updateMcpServer(params);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    "libi.set_mcp_server_enabled",
-    {
-      description:
-        "Enable or disable an MCP server. Works on bundled and custom servers. Disabled servers are not surfaced to agents but their definition is preserved.",
-      inputSchema: setMcpServerEnabledSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.setMcpServerEnabled(params);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    "libi.remove_mcp_server",
-    {
-      description:
-        "Permanently remove a custom MCP server. Bundled servers cannot be removed — use libi.set_mcp_server_enabled to disable them.",
-      inputSchema: removeMcpServerSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.removeMcpServer(params);
         return makeContent(result);
       } catch (err) {
         return makeError(err);
@@ -1405,11 +1336,11 @@ export function createLibiMcpServer(): McpServer {
   // Surface-gated: registered ONLY for the in-app ACP chat (where an inline
   // media card can render). Terminal / BYO-CLI agents never see this tool, so
   // they cannot call it — they use libi.show_asset + the printed URL instead.
-  // Gating is centralized in lib/mcp/agent-surface.ts (isInAppSurface reads the
-  // LIBI_AGENT_SURFACE flag injected onto the libi entry on the ACP channel
-  // only). To add another in-app-only tool, wrap its registerTool in the same
-  // `if (isInAppSurface())` guard.
-  if (isInAppSurface()) {
+  // Gating is centralized in lib/mcp/agent-surface.ts (the surface is read
+  // from the `x-libi-surface` HTTP header on the MCP request and passed in
+  // here as `opts.surface`). To add another in-app-only tool, wrap its
+  // registerTool in the same `if (opts.surface === "in-app")` guard.
+  if (opts.surface === "in-app") {
     server.registerTool(
       "libi.show_in_chat",
       {
@@ -1874,7 +1805,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.analysis_transcribe_audio",
     {
       title: "Analysis: transcribe audio",
-      description: "Run the full transcript pipeline server-side: extract audio, chunk if needed (10-min default), transcribe per chunk, save each chunk row, auto-aggregate. Provider defaults to local Whisper (free); pass provider:'elevenlabs' for diarization/audio-events or on explicit request, and model to pick a Whisper size. May return status:'needs_install' on first Whisper use — then run libi.get_install_plan({ mcpId:'whisper' }). Returns a small status payload — words array stays in DB. retry:true re-processes only failed chunks.",
+      description: "Run the full transcript pipeline server-side: extract audio, chunk if needed (10-min default), transcribe per chunk with local Whisper (free, on-device), save each chunk row, auto-aggregate. Pass model to pick a Whisper size. May return status:'needs_install' on first use — then run libi.get_install_plan({ mcpId:'whisper' }). Returns a small status payload — words array stays in DB. retry:true re-processes only failed chunks. For diarization or audio-event tags, drive your own STT provider through libi.analysis_chunk_audio → libi.analysis_save_audio_chunk (the audio-analysis skill's Path B).",
       inputSchema: analysisTranscribeAudioSchema.shape,
     },
     async (args: AnalysisTranscribeAudioParams) => {
@@ -1968,7 +1899,7 @@ export function createLibiMcpServer(): McpServer {
     {
       title: "Local TTS: download model",
       description:
-        "Download the Kokoro model (~110 MB) into ~/.libi/models/tts/ (background job, progress streamed). Idempotent. No API key, free, on-device. " +
+        `Download the Kokoro model (~${KOKORO_DOWNLOAD_MB} MB) into ~/.libi/models/tts/ (background job, progress streamed). Idempotent. No API key, free, on-device. ` +
         "Dedup signals — when the tool returns `attachedToRunning:true`, the server attached this call to a still-running download job with matching parameters and BLOCKED until it finished, so the model IS now on disk; inform the user we continued an existing download (mention elapsed time from `existingJob.startedAt`) and ASK if they prefer a separate fresh run (retry with `forceNew:true`). " +
         "This download runs on the SERVER. If this tool call is interrupted, declined, or cancelled, the download KEEPS GOING — you just stop hearing about it and never get its jobId. Never tell the user nothing was downloaded on the strength of a declined call: check `libi.list_jobs({ status: \"running\" })` first, and use it (not the terminal) to answer \"how far along is it?\". " +
         "When the tool returns `matchedExisting:true`, the model is already downloaded on disk — no action needed; you can proceed. Use `forceNew:true` only if you suspect the model is corrupted or needs re-downloading.",
@@ -1985,7 +1916,7 @@ export function createLibiMcpServer(): McpServer {
     {
       title: "Generate speech (local TTS)",
       description:
-        "Synthesize narration/voiceover locally with Kokoro and store it as an audio file on the piece. Free, no API key — the DEFAULT speech provider. Returns the stored file; pass withTimestamps:true for approximate per-word timings (caption/timeline alignment). On first use may return status:\"needs_install\" — then run libi.get_install_plan({ mcpId: \"local-tts\" }). Use ElevenLabs only on explicit request or for voice cloning.",
+        "Synthesize narration/voiceover locally with Kokoro and store it as an audio file on the piece. Free, no API key — the DEFAULT speech provider. Returns the stored file; pass withTimestamps:true for approximate per-word timings (caption/timeline alignment). On first use may return status:\"needs_install\" — then run libi.get_install_plan({ mcpId: \"local-tts\" }). libi cannot clone a voice: for a specific cloned voice use a voice provider the user has connected themselves (libi.list_providers), or libi.suggest_provider({ kind: \"voice\" }) when there is none.",
       inputSchema: generateSpeechSchema.shape,
     },
     async (args: GenerateSpeechParams, extra) => {
@@ -2062,7 +1993,8 @@ export function createLibiMcpServer(): McpServer {
       description:
         "Run local librosa to extract a music profile: tempo, key, energy, brightness, " +
         "percussiveness, descriptors, and a suggestedPrompt string ready to feed back into " +
-        "ANY music generator (libi.generate_music, elevenlabs.compose_music, fal-ai music). " +
+        "ANY music generator — libi.generate_music, or a music provider the user has " +
+        "connected themselves (libi.list_providers). " +
         "Use to 'make similar music' from a reference track.",
       inputSchema: musicProfileSchema.shape,
     },
@@ -2231,20 +2163,6 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
-    "libi.extra_analysis_model",
-    {
-      title: "Analysis: generate script",
-      description: "PAID. Runs a provider-driven (fal.ai → Gemini 2.5 Pro by default) full-video analysis and returns a structured production script (shots, music, sound design) — designed for feeding back into a text-to-video model to recreate the video. Default flow is the free agent-driven `analysis_*` tool family; use this when the user explicitly asks to recreate / remake / reproduce a video. Returns the script directly; the agent should read it back to the user.",
-      inputSchema: extraAnalysisModelInputSchema.shape,
-    },
-    async (args: ExtraAnalysisModelParams, extra) => {
-      const result = await extraAnalysisModel(args, extra);
-      if (result.success) notify.refreshQuery({ queryKey: "analysis", fileId: args.fileId });
-      return makeContent(result);
-    },
-  );
-
-  server.registerTool(
     "libi.update_memories",
     {
       description:
@@ -2257,6 +2175,43 @@ export function createLibiMcpServer(): McpServer {
       } catch (err) {
         return makeError(err);
       }
+    },
+  );
+
+  // Tiered instructions: Claude Code truncates a server's `instructions` at
+  // 2,048 characters, so the HTTP MCP server sends only the short core
+  // (`renderInstructionsCore`) and the agent pulls the detail through this
+  // tool. `mcp/workspace.ts` does not import this file, so no cycle.
+  //
+  // The manual is SECTIONED (`mcp/manual-sections.ts`): returned whole it is
+  // ~87 KB, which Claude Code spools to a file — the agent then reads a
+  // fraction of it and keeps working from the ~1.6 KB core. No argument gives
+  // the index plus the pre-first-edit essentials (< 15 KB).
+  const readManualExampleKeys = PROSE_EXAMPLE_SECTION_KEYS.map((k) => `"${k}"`).join(", ");
+  server.registerTool(
+    "libi.read_manual",
+    {
+      description:
+        `libi's agent manual, by section. Call with NO arguments at the start of a session, BEFORE creating or editing a piece: you get the section index plus the workflow and coordinate-system material you need immediately. Then pass \`section\` (a key from that index, e.g. ${readManualExampleKeys}) to pull one section. \`section: "all"\` returns the whole ~87 KB manual. The server instructions you received are only a summary.`,
+      inputSchema: readManualSchema.shape,
+    },
+    async ({ section }: ReadManualParams) => {
+      const manual = renderAgentInstructions(opts.dialect ?? "claude");
+      const result = resolveManualSection(manual, section);
+      if (!result.ok) {
+        logger.warn(
+          // `createLibiMcpServer` backs BOTH the stdio entry and the HTTP
+          // entry (`mcp/http/server.ts`) — "mcp-http" undersells this path.
+          // Kept anyway: neither "mcp-config" nor any other tag in
+          // AGENTS.md's "Tags in use" list fits "libi's own MCP server,
+          // either transport" better, and introducing a bare "mcp" tag is a
+          // bigger change than this fix warrants.
+          { tag: "mcp-http", op: "read_manual_unknown_section", section },
+          "libi.read_manual called with an unknown section",
+        );
+        return { isError: true, content: [{ type: "text" as const, text: result.message }] };
+      }
+      return { content: [{ type: "text" as const, text: result.text }] };
     },
   );
 
@@ -2277,15 +2232,36 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
-    "libi.list_bundled_mcps",
+    "libi.show_extension",
     {
       description:
-        "This is libi's view of what was registered, not your live tool surface. Your actually-available tools are authoritative — use this to diagnose mismatches or to ask the user to fix a missing MCP.\n\nReturns each bundled MCP server's installStatus (installed | needs_config | failed | not_required | checking | pending), required env-var names, and the names of env vars that ARE currently configured (never values). Use this to detect missing API keys before relying on a server's tools.",
-      inputSchema: listBundledMcpsSchema,
+        "Navigate the user to Agents → Libi MCP, focused on one extension card by id (e.g. 'libi-tracking'). Use this after telling the user an extension needs attention. Returns `navigated: false` when the studio is not reachable — then say where it is, do not claim the page opened.",
+      inputSchema: showExtensionSchema,
     },
     async (params) => {
       try {
-        return makeContent(await listBundledMcps(params));
+        return makeContent(await showExtension(params));
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  // Registered on BOTH surfaces (unlike `libi.show_in_chat`): a CLI agent
+  // needs the add commands as text; an in-app agent gets a card in the chat.
+  // The surface is read from `opts.surface` and defaults to `cli`.
+  server.registerTool(
+    "libi.suggest_provider",
+    {
+      description:
+        "You need a provider for a media kind you cannot produce. Call this the moment you would otherwise apologise for having no image / video / music / voice / sound-effect / transcription tool — and when the user asks about a provider that is not in your tool list (for a provider with two kinds, call once, with either). libi's provider catalog (not necessarily connected or installed): " +
+        PROVIDER_NAMES_FOR_DESCRIPTIONS +
+        ". In the app it puts a card in the chat with one button per suggestion (on-device installs first, then providers to connect); the buttons open libi's Agents page, where the user submits the config command themselves, so do not ask for a key and do not print commands. From a CLI outside libi it returns the add commands, each with a <your key> placeholder the user fills in, plus a URL into libi's Agents page — relay those verbatim. Then STOP and let the user connect one — neither agent picks up a new MCP mid-session. Never ask the user for an API key. It only ever offers what the user does NOT already have: when everything libi knows of for that kind is already connected or already installed on-device it returns status:'none' with `covered`, puts no card in the chat, and the honest answer is to use what is listed there or say plainly what libi cannot do.",
+      inputSchema: suggestProviderSchema,
+    },
+    async (params) => {
+      try {
+        return makeContent(await suggestProvider(params, { surface: opts.surface ?? "cli", dialect: opts.dialect }));
       } catch (err) {
         return makeError(err);
       }
@@ -2293,15 +2269,17 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
-    "libi.show_mcp_settings",
+    "libi.list_providers",
     {
       description:
-        "Navigate the user to the MCPs & Skills page (MCP Servers tab), optionally focusing a specific bundled server card by id (e.g. 'elevenlabs'). Use this after telling the user that an MCP needs configuration, so they can click and set the API key without hunting through menus.",
-      inputSchema: showMcpSettingsSchema,
+        "What the user has connected (from their own agent config), what libi recommends, and libi's own on-device extensions with whether each is installed. Your LIVE tool list is authoritative for what you can call; this tells you what libi can see, which may lag it in either direction — a provider connected here for your agent (its row's `agent`) with no tools under its `name` in your list (search your deferred tools first) was added after this chat started, so a new chat has it. Use it for a general \"what's connected?\"; for a provider the user asks about that is not in your tool list, call libi.suggest_provider instead, so the chat shows the buttons to connect it. Never returns a key value. libi's provider catalog (not necessarily connected or installed): " +
+        PROVIDER_NAMES_FOR_DESCRIPTIONS +
+        ".",
+      inputSchema: listProvidersSchema,
     },
-    async (params) => {
+    async () => {
       try {
-        return makeContent(await showMcpSettings(params));
+        return makeContent(await listProviders());
       } catch (err) {
         return makeError(err);
       }
@@ -2312,7 +2290,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.start_onboarding",
     {
       description:
-        "Re-open the onboarding panel (agent setup + the guided demo). Use only if the user asks to see onboarding again.",
+        "Send the user to libi's Agents page (Agents tab) to set up or re-check Claude Code / Codex. Returns `status: \"navigated\"` only when the studio accepted it; on `status: \"unavailable\"` say setup lives under Agents in the libi app. It does not start the demo film.",
       inputSchema: startOnboardingSchema,
     },
     async (params) => {
@@ -2325,27 +2303,11 @@ export function createLibiMcpServer(): McpServer {
   );
 
   server.registerTool(
-    "libi.show_api_config",
-    {
-      description:
-        "Open the inline API-key config panel for a bundled MCP (right of the chat). Call this the moment a tool fails with mcp_missing_key, or libi.list_bundled_mcps shows a needed MCP as needs_config, then tell the user which key to paste. Never read or echo the key value.",
-      inputSchema: showApiConfigSchema,
-    },
-    async (params) => {
-      try {
-        return makeContent(await showApiConfig(params));
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
     "libi.retry_mcp_server",
     {
       title: "Retry MCP server",
       description:
-        "Re-probe an external MCP server and refresh its serverStatus. Use when list_bundled_mcps reports serverStatus !== 'up'. Note: a successfully-recovered server only becomes available in NEW chat sessions.",
+        "Re-probe a libi extension's MCP server and refresh its serverStatus. Use when the user reports an extension as down on Agents → Libi MCP. Note: a successfully-recovered server only becomes available in NEW chat sessions.",
       inputSchema: retryMcpServerSchema,
     },
     async (params) => {
@@ -2591,22 +2553,6 @@ export function createLibiMcpServer(): McpServer {
     },
   );
 
-  server.registerTool(
-    "libi.list_mcp_servers",
-    {
-      description:
-        "This is libi's view of what was registered, not your live tool surface. Your actually-available tools are authoritative — use this to diagnose mismatches or to ask the user to fix a missing MCP.\n\nReturns enabled MCP servers — id, name, description, type, installStatus, bundled. Never includes secrets (env-var values, headers). Use this to discover capabilities (e.g. AI image/video/audio MCPs) before deciding how to fulfill a request.",
-      inputSchema: listMcpServersSchema.shape,
-    },
-    async (params) => {
-      try {
-        return await listMcpServersTool(makeContext(""), params);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
   // ─── Character catalog ────────────────────────────────────────────
   server.registerTool(
     "libi.list_characters",
@@ -2837,7 +2783,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.get_install_plan",
     {
       description:
-        "Get the markdown install plan for a bundled MCP. The plan tells you, step by step, what to download, install, and verify. Read the plan, then follow it using your Bash/Read/Write tools. After each step call libi.update_dep_status.",
+        "Get the markdown install plan for a libi extension. The plan tells you, step by step, what to download, install, and verify. Read the plan, then follow it using your Bash/Read/Write tools. After each step call libi.update_dep_status.",
       inputSchema: getInstallPlanSchema.shape,
     },
     async (args) => {
@@ -2857,7 +2803,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.update_dep_status",
     {
       description:
-        "Record install progress for a bundled MCP. Call after each install step (status='installing'), on success ('installed'), or on failure ('failed' with error message). Optional env={KEY:VALUE} merges secrets (API keys) into the MCP's spawn env.",
+        "Record install progress for a libi extension. Call after each install step (status='installing'), on success ('installed'), or on failure ('failed' with error message). Optional env={KEY:VALUE} merges secrets (API keys) into the MCP's spawn env.",
       inputSchema: updateDepStatusSchema.shape,
     },
     async (args) => {
@@ -2877,7 +2823,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.recheck_mcp",
     {
       description:
-        "Probe a bundled MCP server's startup handshake. Returns up/down + tools list. Call this after install steps complete to verify the server actually boots.",
+        "Probe a libi extension's MCP server startup handshake. Returns up/down + tools list. Call this after install steps complete to verify the server actually boots.",
       inputSchema: recheckMcpSchema.shape,
     },
     async (args) => {
@@ -2897,7 +2843,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.restart_acp_session",
     {
       description:
-        "Reload the entire ACP session — all bundled MCPs come down and back up. Use this only when you don't have a specific MCP to target; otherwise prefer `libi.restart_mcp_server` which has the same effect today but is named more clearly and future-proof if claude-agent-acp ever supports per-MCP restart. Call this after installing a bundled MCP and after `update_dep_status` with status='installed'. Then end your turn and tell the user: 'Installed — please open a new chat and re-send your request to use the new tools.' (claude-agent-acp loads MCP servers at session-creation time, so the current session can't see them until a new chat is started.)",
+        "Reload the entire ACP session — every libi extension comes down and back up. Use this only when you don't have a specific MCP to target; otherwise prefer `libi.restart_mcp_server` which has the same effect today but is named more clearly and future-proof if claude-agent-acp ever supports per-MCP restart. Call this after installing a libi extension and after `update_dep_status` with status='installed'. Then end your turn and tell the user: 'Installed — please open a new chat and re-send your request to use the new tools.' (claude-agent-acp loads MCP servers at session-creation time, so the current session can't see them until a new chat is started.) The user manages extensions on Agents → Libi MCP.",
       inputSchema: restartAcpSessionSchema.shape,
     },
     async (args, extra) => {
@@ -2927,7 +2873,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.diagnose_mcp",
     {
       description:
-        "Snapshot of a bundled MCP's state when something looks broken: install/server status, spawn config (env keys, no values), whether the MCP is in your current session, per-MCP auxiliary checks (binary present, API key set), and plain-English hints. Call this FIRST when an MCP appears not to work — it's much faster than guessing.",
+        "Snapshot of a libi extension's state when something looks broken: install/server status, spawn config (env keys, no values), whether the extension is in your current session, per-extension auxiliary checks (binary present, model on disk), and plain-English hints. Call this FIRST when an MCP appears not to work — it's much faster than guessing.",
       inputSchema: diagnoseMcpSchema.shape,
     },
     async (args) => {
@@ -2947,7 +2893,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.restart_mcp_server",
     {
       description:
-        "Restart a specific bundled MCP server. Use after fixing an issue diagnose_mcp surfaced (e.g. installed a missing binary, set an API key). Returns immediately; the restart happens server-side. Per current claude-agent-acp limitations, all bundled MCPs restart together — the tool tells you to ask the user to open a new chat (or re-send) so the new session picks up the rebuilt MCP list.",
+        "Restart a specific libi extension's MCP server. Use after fixing an issue diagnose_mcp surfaced (e.g. installed a missing binary or model). Returns immediately; the restart happens server-side. Per current claude-agent-acp limitations, every libi extension restarts together — the tool tells you to ask the user to open a new chat (or re-send) so the new session picks up the rebuilt MCP list. The user manages extensions on Agents → Libi MCP.",
       inputSchema: restartMcpServerSchema.shape,
     },
     async (args, extra) => {
@@ -3329,7 +3275,8 @@ export function createLibiMcpServer(): McpServer {
     "libi.export_video",
     {
       description:
-        "Export the piece's composition to a video file on disk. Output goes to the user's configured export folder (Settings → Export) unless `destFolder` is provided. Returns the absolute file path. Progress streams through `notifications/progress` so the chat UI shows a live tool call. ALWAYS confirm with the user before exporting — it produces a final file and runs for tens of seconds to minutes. Best quality at 'source' (preserves native dimensions); use '1080p'/'1440p'/'4k' only when the user requests a specific delivery spec. Upscaling from a lower-res source is allowed but produces a larger file without added detail.",
+        "Export the piece's composition to a video file on disk. Output goes to the user's configured export folder (Settings → Export) unless `destFolder` is provided. Returns the absolute file path. Progress streams through `notifications/progress` so the chat UI shows a live tool call. ALWAYS confirm with the user before exporting — it produces a final file and runs for tens of seconds to minutes. Best quality at 'source' (preserves native dimensions); use '1080p'/'1440p'/'4k' only when the user requests a specific delivery spec. Upscaling from a lower-res source is allowed but produces a larger file without added detail. Exports that cannot be composited by ffmpeg (code overlays, 3D text, tracked layers, keyframed motion) render in headless Chromium; the FIRST such export downloads Chromium (~" +
+        `${CHROMIUM_DOWNLOAD_MB} MB) as its first step — say so to the user when you confirm.`,
       inputSchema: exportVideoSchema,
     },
     async (params, extra) => {
@@ -3354,7 +3301,7 @@ export function createLibiMcpServer(): McpServer {
         const result = await sleep(params, {
           signal: extra?.signal,
           sendNotification: extra?.sendNotification,
-          progressToken: extra?._meta?.progressToken as string | number | undefined,
+          _meta: extra?._meta,
         });
         return makeContent(result);
       } catch (err) {
@@ -3373,6 +3320,23 @@ export function createLibiMcpServer(): McpServer {
     async (params, extra) => {
       try {
         return makeContent(await importRemoteFiles(params, extra));
+      } catch (err) {
+        return makeError(err);
+      }
+    },
+  );
+
+  server.registerTool(
+    "libi.download_video",
+    {
+      description:
+        "Download a video (or just its audio) from a public page URL with libi's own yt-dlp and import it into the piece as an asset. Free and on-device; downloads up to 500 MiB per video and reports byte progress through `notifications/progress`. YouTube playlist/radio parameters are stripped automatically. The FIRST download installs uv + yt-dlp (~" +
+        `${YT_DLP_INSTALL_MB} MB, public domain) onto the user's machine as its first step — say so to the user before that first call; the result then carries ytDlpInstalled: true. If the install itself fails the tool returns error 'needs_install' with the text to show the user; do not retry until they install the Video download extension from Settings. Prefer this over Bash + a system yt-dlp: only this path registers the file on the piece.`,
+      inputSchema: downloadVideoSchema,
+    },
+    async (params, extra) => {
+      try {
+        return makeContent(await downloadVideo(params, extra));
       } catch (err) {
         return makeError(err);
       }
@@ -3481,7 +3445,7 @@ export function createLibiMcpServer(): McpServer {
     "libi.attach_storyboard_keyframe",
     {
       description:
-        "Attach a generated Tier-2 keyframe image (by libi file id) to a storyboard card, recording its cost and advancing the card to the keyframe stage. The agent generates the image (gpt-image-2, conditioned on the card's schematic + character ref) and uploads it FIRST, then calls this.",
+        "Attach a generated Tier-2 keyframe image (by libi file id) to a storyboard card, recording its cost and advancing the card to the keyframe stage. The agent generates the image (the image model its provider reference names, conditioned on the card's schematic + character ref) and uploads it FIRST, then calls this.",
       inputSchema: attachStoryboardKeyframeSchema,
     },
     async (params) => {

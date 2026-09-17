@@ -54,9 +54,10 @@ beat** (sipping, inspecting, reacting) regardless of duration.
 
 > **Headline rule — default to ONE full-length multi-beat clip. Do NOT generate one short clip per beat.**
 > The single biggest cause of bad, fast-paced UGC is reading each script beat as its own 3–4s
-> generation. On a native multi-beat model (Seedance 2.0 — the default), the Hook / Show / Demo /
-> Verdict beats are JUMP CUTS the model renders INSIDE one prompt: a 15s ad is **one ~15s
-> generation**, not four 4s clips.
+> generation. On a **native multi-beat model** — the default class for UGC; which concrete model
+> that is comes from the parent skill's provider reference — the Hook / Show / Demo / Verdict
+> beats are JUMP CUTS the model renders INSIDE one prompt: a 15s ad is **one ~15s generation**,
+> not four 4s clips.
 >
 > **Rebut the drift myth.** "Short clips avoid identity/motion drift" is true ONLY of a single
 > *continuous* long take. It is NOT true of jump-cut beats inside one prompt — those are discrete
@@ -83,11 +84,12 @@ cost zero words; lean on them.
 duration through the model's native clip length or its extend chain — NOT by
 fragmenting the ad into many tiny separate generations:
 
-- **Native multi-beat models (e.g. Seedance 2.0):** put the jump-cut beats INSIDE
-  one prompt and generate ONE clip at/near the model's max (15s). The model
-  renders the cuts itself.
-- **Extend-capable models (e.g. Veo extend chain):** one continuous action per
-  generation, chained up to the target length → one unified clip.
+- **Native multi-beat models:** put the jump-cut beats INSIDE one prompt and
+  generate ONE clip at/near **the model's own per-clip max** — read it from the
+  model's guide in `ai-video-models` or its live schema, never from a number
+  remembered here. The model renders the cuts itself.
+- **Extend-capable models:** one continuous action per generation, chained up to
+  the target length → one unified clip.
 - **Split into multiple SEPARATE generations only when:** (a) the script exceeds
   the model's single-clip max, (b) 36+ spoken words, or (c) a physical-
   manipulation beat keeps failing and you fall back to the editorial 3–5-clip
@@ -98,8 +100,9 @@ generation. That produces fast, incoherent pacing. Beats are cuts within a clip.
 
 **When you DO split (target exceeds the model's single-clip max):** each split clip is
 STILL a multi-beat ≤max-length clip. Use the FEWEST clips — about `ceil(target ÷ model max)`
-— and pack consecutive beats into each as in-prompt jump cuts. A **30s Seedance ad = TWO
-~15s multi-beat clips, NOT eight 3–4s clips.** This applies to RECREATIONS / mimics too:
+— and pack consecutive beats into each as in-prompt jump cuts. On a model whose per-clip max
+is 15s, a **30s ad = TWO ~15s multi-beat clips, NOT eight 3–4s clips.** This applies to
+RECREATIONS / mimics too:
 group the source's shots into the fewest multi-beat clips — NEVER map one source shot to
 one clip. (A standalone clip per beat is justified only for case (c) above — a
 manipulation beat that keeps failing and falls back to the editorial split.)

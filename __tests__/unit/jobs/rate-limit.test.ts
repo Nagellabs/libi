@@ -10,13 +10,32 @@ import {
 import {
   __resetRunnerRegistryForTests,
   registerBuiltinRunners,
+  registerRunner,
 } from "@/lib/jobs/runners/registry";
+import { z } from "zod/v3";
 
 // isPaidJobKind sources truth from the runner registry's `paid` flag, so the
 // built-in runners must be registered before the classification assertions run.
+// No built-in runner is paid any more (the fal.ai SAM2 `tracking_provider`
+// was removed with libi's provider keys), so two stub paid kinds are
+// registered to exercise the classifier and the shared-budget rule.
+const STUB_PAID_KIND = "stub_paid_provider";
+const STUB_PAID_KIND_2 = "stub_paid_provider_2";
 beforeAll(() => {
   __resetRunnerRegistryForTests();
   registerBuiltinRunners();
+  for (const kind of [STUB_PAID_KIND, STUB_PAID_KIND_2]) {
+    registerRunner({
+      kind,
+      maxConcurrent: 1,
+      resumable: false,
+      paid: true,
+      paramsSchema: z.object({}),
+      async run() {
+        return {};
+      },
+    });
+  }
 });
 
 describe("SlidingWindowRateLimiter", () => {
@@ -63,9 +82,14 @@ describe("SlidingWindowRateLimiter", () => {
 });
 
 describe("paid job classification", () => {
-  it("classifies the two fal.ai-backed kinds as paid", () => {
-    expect(isPaidJobKind("tracking_provider")).toBe(true);
-    expect(isPaidJobKind("extra_analysis_model")).toBe(true);
+  it("classifies a runner carrying paid: true as paid", () => {
+    expect(isPaidJobKind(STUB_PAID_KIND)).toBe(true);
+    expect(isPaidJobKind(STUB_PAID_KIND_2)).toBe(true);
+  });
+
+  it("no longer knows the removed paid kinds", () => {
+    expect(isPaidJobKind("extra_analysis_model")).toBe(false);
+    expect(isPaidJobKind("tracking_provider")).toBe(false);
   });
 
   it("classifies local kinds as non-paid", () => {
@@ -100,32 +124,32 @@ describe("checkPaidJobRateLimit", () => {
 
   it("limits a paid kind past PAID_JOB_RATE_LIMIT within the window", () => {
     for (let i = 0; i < PAID_JOB_RATE_LIMIT; i++) {
-      expect(checkPaidJobRateLimit("extra_analysis_model", i).allowed).toBe(true);
+      expect(checkPaidJobRateLimit(STUB_PAID_KIND, i).allowed).toBe(true);
     }
-    const denied = checkPaidJobRateLimit("extra_analysis_model", PAID_JOB_RATE_LIMIT);
+    const denied = checkPaidJobRateLimit(STUB_PAID_KIND, PAID_JOB_RATE_LIMIT);
     expect(denied.allowed).toBe(false);
     expect(denied.retryAfterMs).toBeGreaterThan(0);
   });
 
   it("shares one budget across all paid kinds", () => {
     for (let i = 0; i < PAID_JOB_RATE_LIMIT; i++) {
-      expect(checkPaidJobRateLimit("tracking_provider", i).allowed).toBe(true);
+      expect(checkPaidJobRateLimit(STUB_PAID_KIND, i).allowed).toBe(true);
     }
     // A different paid kind draws from the same bucket → already exhausted.
     expect(
-      checkPaidJobRateLimit("extra_analysis_model", PAID_JOB_RATE_LIMIT).allowed,
+      checkPaidJobRateLimit(STUB_PAID_KIND_2, PAID_JOB_RATE_LIMIT).allowed,
     ).toBe(false);
   });
 
   it("recovers after the window elapses", () => {
     for (let i = 0; i < PAID_JOB_RATE_LIMIT; i++) {
-      checkPaidJobRateLimit("tracking_provider", i);
+      checkPaidJobRateLimit(STUB_PAID_KIND, i);
     }
-    expect(checkPaidJobRateLimit("tracking_provider", PAID_JOB_RATE_LIMIT).allowed).toBe(
+    expect(checkPaidJobRateLimit(STUB_PAID_KIND, PAID_JOB_RATE_LIMIT).allowed).toBe(
       false,
     );
     expect(
-      checkPaidJobRateLimit("tracking_provider", PAID_JOB_RATE_WINDOW_MS + 1).allowed,
+      checkPaidJobRateLimit(STUB_PAID_KIND, PAID_JOB_RATE_WINDOW_MS + 1).allowed,
     ).toBe(true);
   });
 });

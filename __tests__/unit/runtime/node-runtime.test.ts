@@ -21,6 +21,7 @@ import {
   ensureNodeRuntime,
   PINNED_NODE_VERSION,
   MIN_NODE_MAJOR,
+  KNOWN_BAD_NODE_VERSIONS,
   NODE_DOWNLOAD_MAX_BYTES,
 } from "@/lib/runtime/node-runtime";
 
@@ -136,6 +137,31 @@ describe("findSystemNode", () => {
     expect(findSystemNode([path.join(tmpHome, "nope")])).toBeNull();
   });
 
+  // `MIN_NODE_MAJOR` is a floor, and a floor cannot express "24 is fine
+  // but 24.16 is not". 24.16.0 hangs Playwright's extractor, so a machine whose
+  // system node is that release got it linked as `<LIBI_HOME>/bin/node` and the
+  // first Chromium install then hung with no error.
+  it("rejects a known-bad <major>.<minor> even though its major is acceptable", () => {
+    const binDir = path.join(tmpHome, "bad-minor", "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, nodeBinaryName()), "#!/bin/sh\necho v24.16.0\n", {
+      mode: 0o755,
+    });
+    expect(findSystemNode([binDir])).toBeNull();
+    // …and the predicate cannot re-admit it: the blocklist is a property of the
+    // release, not of the caller's sidecar question.
+    expect(findSystemNode([binDir], () => true)).toBeNull();
+  });
+
+  it("accepts a neighbouring minor of the same major", () => {
+    const binDir = path.join(tmpHome, "good-minor", "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, nodeBinaryName()), "#!/bin/sh\necho v24.17.0\n", {
+      mode: 0o755,
+    });
+    expect(findSystemNode([binDir])).not.toBeNull();
+  });
+
   it("honours an acceptMajor predicate", () => {
     const binDir = path.join(tmpHome, "n25", "bin");
     fs.mkdirSync(binDir, { recursive: true });
@@ -225,6 +251,48 @@ describe("ensureNodeRuntime — sidecar-covered majors", () => {
     fs.writeFileSync(managed, "#!/bin/sh\necho v25.0.0\n", { mode: 0o755 });
 
     const result = await ensureNodeRuntime([fakeNode("covered", 24)]);
+    expect(result).toMatchObject({ ok: true, source: "linked-system" });
+  });
+});
+
+/**
+ * The gate was major-only, so 24.16.0 — the release that hangs
+ * Playwright's zip extractor — was adopted like any other Node 24, and the
+ * first Chromium install then never finished and never errored.
+ */
+describe("ensureNodeRuntime — known-bad releases", () => {
+  function fakeNodeAt(name: string, version: string): string {
+    const binDir = path.join(tmpHome, name, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(path.join(binDir, nodeBinaryName()), `#!/bin/sh\necho v${version}\n`, {
+      mode: 0o755,
+    });
+    return binDir;
+  }
+
+  it("never lists the pinned build as known-bad (it is the fallback)", () => {
+    const m = /^v(\d+)\.(\d+)\./.exec(PINNED_NODE_VERSION);
+    expect(m).not.toBeNull();
+    expect(KNOWN_BAD_NODE_VERSIONS.has(`${m![1]}.${m![2]}`)).toBe(false);
+  });
+
+  it("falls through to the pinned download instead of linking a known-bad system node", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("offline"));
+    const result = await ensureNodeRuntime([fakeNodeAt("hangy", "24.16.0")]);
+    // Offline, so the download itself fails — the assertion that matters is
+    // that it was ATTEMPTED rather than the bad node being adopted.
+    expect(result.ok).toBe(false);
+    expect(fetchSpy).toHaveBeenCalled();
+    expect(fs.existsSync(managedNodePath())).toBe(false);
+    fetchSpy.mockRestore();
+  });
+
+  it("re-resolves an already-managed node that is a known-bad release", async () => {
+    const managed = managedNodePath();
+    fs.mkdirSync(path.dirname(managed), { recursive: true });
+    fs.writeFileSync(managed, "#!/bin/sh\necho v24.16.0\n", { mode: 0o755 });
+
+    const result = await ensureNodeRuntime([fakeNodeAt("good", "24.18.0")]);
     expect(result).toMatchObject({ ok: true, source: "linked-system" });
   });
 });

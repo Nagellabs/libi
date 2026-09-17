@@ -29,18 +29,23 @@ afterEach(() => {
 
 describe("UrlSource against an unreachable server", () => {
   it("rejects instead of retrying forever", async () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const url = await deadUrl();
     const input = new Input({
       source: new UrlSource(url, { getRetryDelay: mediaFetchRetryDelay }),
       formats: ALL_FORMATS,
     });
     try {
-      const started = Date.now();
       await expect(input.getPrimaryVideoTrack()).rejects.toThrow();
-      // The whole point: it settles, and it settles inside the policy's budget
-      // rather than after the default's unbounded 16s-capped backoff.
-      expect(Date.now() - started).toBeLessThan(15_000);
+      // The whole point: it settles, and it settles because the POLICY gave up
+      // — `mediaFetchRetryDelay` returned null and logged it — rather than
+      // after the default's unbounded 16s-capped backoff. Asserted on the
+      // policy's own give-up line rather than on a wall clock: elapsed
+      // time here is set by how busy the machine is, and a "< 15 s" that only
+      // ever fails under full-suite load teaches people to re-run until green.
+      expect(
+        warn.mock.calls.some(([m]) => String(m).includes("giving up on")),
+      ).toBe(true);
     } finally {
       input.dispose();
     }
@@ -83,9 +88,14 @@ describe("UrlSource against an unreachable server", () => {
       settled,
       new Promise<"spinning">((r) => setTimeout(() => r("spinning"), 8_000)),
     ]);
-    // dispose() is what stops it — the loop has no other exit.
-    input.dispose();
-    await settled;
+    // dispose() is what stops it — the loop has no other exit. Do NOT wait on
+    // `settled` unbounded: with mediabunny's default policy the pending
+    // attempt can be inside a backoff sleep of up to 16 s when dispose lands,
+    // and that wait — on top of this test's own 8 s observation window — is
+    // what put the test at ~15 s idle and past its 30 s budget under
+    // full-suite load. Both handlers are already attached to `settled`, so
+    // leaving it pending cannot surface as an unhandled rejection.
+    await Promise.race([settled, new Promise((r) => setTimeout(r, 2_000))]);
     expect(outcome).toBe("spinning");
   }, 30_000);
 });

@@ -2,13 +2,14 @@
 id: using-character-library-auto-catalog-from-analysis
 title: Video analysis proactively catalogs the recurring subject, skips background extras
 skills: [using-character-library, video-analysis]
-mcps: [YouTube Downloader, fal-ai]
+mcps: [youtube-download, fal-ai]
 agent: claude-code
 runs: 1
 timeoutSec: 900
 covers: [create_character, auto-catalog, rep-image, no-background-extras, no-overgeneration]
 # SOURCE-DEPENDENT, NOT a deterministic regression guard (like mimic-video): it downloads
-# a real short YouTube clip (yt-dlp is real in test mode; only fal/elevenlabs are faked) and
+# a real short YouTube clip (`libi.download_video` is real in test mode; only fal/elevenlabs
+# are faked) and
 # runs a real Claude Code vision analysis, so wall-clock is ~6-15 min and a TIMEOUT is a
 # hardware/network artifact, NOT a skill regression. On TIMEOUT, JUDGE FROM THE PARTIAL
 # transcript + kept LIBI_HOME (analysis record + the /pieces/<id>/characters API): the
@@ -37,7 +38,7 @@ assertions:
 ```
 
 ## Behavioral expectations
-- Downloaded the clip (YouTube Downloader / yt-dlp) and ran the full `video-analysis`
+- Downloaded the clip (`libi.download_video`) and ran the full `video-analysis`
   pipeline — extracting frames, describing each with `people[]`/`subjects[]` naming where
   identifiable, and saving a video-level summary.
 - **Proactively created a character** (`libi.create_character`) for the recurring host —

@@ -16,9 +16,9 @@ A "run" is one (surface, agent) combination over the scenario set:
 
 | Surface | How the agent connects | Agents |
 |---|---|---|
-| `terminal` | Embedded PTY terminal (Terminal surface in the sidebar); CLI discovers libi via `.claude/settings.local.json` in `~/.libi/agent/` | claude-code, codex, any preset CLI |
+| `terminal` | Embedded PTY terminal (Terminal surface in the sidebar); the CLI in `~/.libi/agent/` has no libi MCP registered by default — it only sees libi if the user has run `libi connect` for that folder (Claude Code) or connected Codex user-wide | claude-code, codex, any preset CLI |
 | `acp` | In-app chat via ACP (`claude-agent-acp` / `codex-acp`); MCP servers passed via `newSession({ mcpServers })` | claude-code, codex |
-| `connect-agent` | Stock CLI launched in a directory *outside* libi; libi booted `npx @nagellabs/libi --connect-agent <dir>`; CLI discovers libi via that dir's `.mcp.json` + `.claude/settings.local.json` + skills mirror | claude-code, codex, any stock CLI |
+| `connect` | Stock CLI in a directory *outside* libi; libi already running (any way — dev, npx, desktop app); `npx @nagellabs/libi connect [dir] [--global]` registers libi's MCP-over-HTTP endpoint with `claude mcp add` / `codex mcp add` and mirrors skills into that dir | claude-code, codex, any stock CLI |
 | (future) | New surfaces/agents get a column here; scenarios are surface-agnostic unless marked | |
 
 Each scenario's frontmatter lists which surfaces/agents it applies to. Most
@@ -29,8 +29,9 @@ surface.
 
 1. Boot libi from this repo: `npm run dev` (NOT `next dev` — Category A must
    run). For zero-cost generation flows you may boot with `LIBI_TEST_MODE=1`,
-   but the default for agent-eval is **production mode** — the generation
-   scenario stops at the approval ask and declines, so nothing is spent.
+   but the default for agent-eval is **production mode**: no scenario in the
+   set calls a paid provider tool, so nothing is spent either way. (Skill-eval,
+   not agent-eval, is where generation behaviour is tested — against the fakes.)
 2. Open the app, switch the sidebar agent selector to the surface under test
    (e.g. **Terminal**, preset = Claude Code), start a session.
 3. Walk the scenarios in `TEST-PLAN.md` order (early scenarios create state

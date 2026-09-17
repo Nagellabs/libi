@@ -124,15 +124,9 @@ describe("MCP client → libi server", () => {
     expect(cotProps).toHaveProperty("anchors");
     expect(cotProps).toHaveProperty("derivedFromSubjectName");
 
-    // Same root cause for the paid providers variant.
-    const cotp = result.tools.find(
-      (t) => t.name === "libi.compute_object_track_providers",
-    );
-    expect(cotp).toBeTruthy();
-    const cotpProps = (cotp!.inputSchema?.properties ?? {}) as Record<string, unknown>;
-    expect(Object.keys(cotpProps).length).toBeGreaterThan(0);
-    expect(cotpProps).toHaveProperty("fileId");
-    expect(cotpProps).toHaveProperty("provider");
+    // The fal SAM2 tools were removed outright — they must not be advertised.
+    expect(result.tools.some((t) => t.name === "libi.compute_object_track_providers")).toBe(false);
+    expect(result.tools.some((t) => t.name === "libi.refine_track_with_sam2")).toBe(false);
 
     // Log the full JSON for debugging if needed
     if (process.env.LIBI_DEBUG) {

@@ -1,6 +1,13 @@
 ---
 id: music-video-storyboard-spine
 title: Music-video AI visuals are built THROUGH the storyboard (card=clip), music deferred
+# `skills` is the ENABLED set, not a coverage claim (`app/api/skill-eval/configure`
+# enables exactly these and disables every other bundled skill). `music-video-creation`
+# stays enabled deliberately: the agent HAS it and the observed behaviour is that it
+# routes to `using-storyboard` instead, because the user explicitly defers the music.
+# `covers` used to claim `music-video`, which made the index read as agent-level
+# coverage for a skill this scenario has never once loaded. The scenario that actually
+# loads it is `02-local-extension-is-the-provider.md`.
 skills: [music-video-creation, using-storyboard, ai-asset-generation, ai-video-models, realistic-image-generation]
 mcps: [fal-ai]
 agent: claude-code
@@ -8,7 +15,7 @@ runs: 1
 # Visuals-only run: the user supplies the track + defers music, so the hermetic boot
 # never touches the local ACE-Step model. Exercises the AI-visuals-through-storyboard path.
 timeoutSec: 900
-covers: [storyboard-spine, card-equals-clip, no-opt-off, music-video, keyframe-first]
+covers: [storyboard-spine, card-equals-clip, no-opt-off, keyframe-first, music-deferred]
 ---
 
 ## Prompt

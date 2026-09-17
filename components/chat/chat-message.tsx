@@ -17,6 +17,12 @@ import {
   isShowInChatCall,
   type ChatMediaPayload,
 } from "@/lib/chat/chat-media";
+import { ProviderSuggestionCard } from "./provider-suggestion-card";
+import {
+  extractProviderSuggestion,
+  isSuggestProviderCall,
+  type ProviderSuggestionPayload,
+} from "@/lib/chat/provider-suggestion";
 
 interface ChatMessageProps {
   message: AgentMessage;
@@ -36,6 +42,7 @@ type GroupedPart =
   | { type: "text"; text: string; isThought: boolean }
   | { type: "tool-group"; entries: Array<{ call: ToolCallPart; result?: ToolResultPart }> }
   | { type: "chat-media"; payload: ChatMediaPayload }
+  | { type: "provider-suggestion"; payload: ProviderSuggestionPayload }
   | { type: "file-attachment"; fileId: string; filename: string; contentType: string | null; size: number }
   | { type: "subagent"; part: Extract<AgentMessagePart, { type: "subagent" }> }
   | { type: "permission-request"; part: Extract<AgentMessagePart, { type: "permission-request" }> };
@@ -94,6 +101,20 @@ function groupParts(parts: AgentMessagePart[]): GroupedPart[] {
       }
       groups.push({ type: "permission-request", part });
     } else if (part.type === "tool-call") {
+      // suggest_provider: the chip is always hidden and, once a "card" result
+      // is in, the provider card takes its place. Before the result, and for a
+      // "none" or errored result, the call renders nothing.
+      if (isSuggestProviderCall(part)) {
+        const payload = extractProviderSuggestion(part, resultMap.get(part.toolCallId));
+        if (payload) {
+          if (currentToolGroup) {
+            groups.push({ type: "tool-group", entries: currentToolGroup });
+            currentToolGroup = null;
+          }
+          groups.push({ type: "provider-suggestion", payload });
+        }
+        continue;
+      }
       // show_in_chat is a pure presentation tool — suppress its chip and, once
       // its result has arrived, render an inline media card in its place.
       if (isShowInChatCall(part)) {
@@ -315,6 +336,10 @@ export default memo(function ChatMessage({ message, animate, sessionId, onOpenAs
 
         if (group.type === "chat-media") {
           return <ChatMediaCard key={i} payload={group.payload} />;
+        }
+
+        if (group.type === "provider-suggestion") {
+          return <ProviderSuggestionCard key={i} payload={group.payload} sessionId={sessionId} />;
         }
 
         if (group.type === "file-attachment") {

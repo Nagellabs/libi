@@ -101,15 +101,35 @@ describe("context-appropriate wording", () => {
     );
   });
 
-  it("does not tell a codex user to install what libi already ships", () => {
-    // libi bundles the codex engine, so the remedy is sign-in, not install.
-    // `npm i -g @openai/codex` would be wrong twice: they have it, and
-    // installing signs nobody in.
-    for (const ctx of ["prompt", "session-start"] as const) {
-      const note = promptErrorNote(authErr, "codex", ctx) ?? "";
-      expect(note).not.toMatch(/npm i(nstall)? -g/);
-      expect(note).toContain("nothing to install");
+  it("tells BOTH agents to sign in, never to install — an auth error only ever comes from a running agent", async () => {
+    // The naive fix would have said "install Codex (`npm i -g
+    // @agentclientprotocol/codex-acp`) and run `codex login`" — but that
+    // package is the ADAPTER (no `codex` on PATH), libi installs it on
+    // selection anyway, and the agent that raised -32000 is by definition
+    // already installed and running. The note names the sign-in command
+    // from the registry and nothing about installing, for every agent.
+    const { getAgentSetup } = await import("@/lib/agents/setup/registry");
+    for (const agentId of ["claude-code", "codex"]) {
+      const setup = getAgentSetup(agentId)!;
+      for (const ctx of ["prompt", "session-start"] as const) {
+        const note = promptErrorNote(authErr, agentId, ctx) ?? "";
+        expect(note, `${agentId}/${ctx}`).toContain(setup.signIn.displayCommand);
+        expect(note, `${agentId}/${ctx}`).not.toContain("npm i -g");
+        expect(note, `${agentId}/${ctx}`).not.toMatch(/install/i);
+        expect(note, `${agentId}/${ctx}`).not.toContain("@openai/codex");
+      }
     }
+  });
+
+  it("points at the Agents tab first, then the terminal command", () => {
+    expect(promptErrorNote(authErr, "claude-code", "prompt")).toBe(
+      "Claude Code isn't signed in on this machine, so it couldn't run that message. " +
+        "Sign in from Agents → Claude Code, or run `claude` in any terminal, or set `ANTHROPIC_API_KEY` — then send it again.",
+    );
+    expect(promptErrorNote(authErr, "codex", "session-start")).toBe(
+      "Codex isn't signed in on this machine, so libi can't start a chat with it. " +
+        "Sign in from Agents → Codex, or run `codex login` in any terminal.",
+    );
   });
 
   it("uses a display name, not a raw id, for an unknown agent", () => {
@@ -168,7 +188,7 @@ describe("environment-variable advice comes from the registry, not the branch", 
     }
   });
 
-  it("never mentions an env var for an agent libi already ships", () => {
+  it("never mentions an env var for an agent that declares none (Codex)", () => {
     expect(promptErrorNote(authErr, "codex")).not.toContain("API_KEY");
   });
 });

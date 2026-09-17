@@ -223,7 +223,12 @@ describe("uploadFile", () => {
     expect(result.success).toBe(true);
     const persisted = JSON.parse((result.data as { aiGeneration: string }).aiGeneration);
     expect(persisted).toMatchObject({
-      provider: "fal-ai",
+      // NORMALISED on the way in. The call above passes the old
+      // bundled-MCP spelling `fal-ai` — which is what a stale skill or an older
+      // caller still sends, and what this test itself asserted verbatim until
+      // now — and the column only ever holds the catalog id. That the two
+      // spellings could both land here is the whole defect.
+      provider: "fal",
       model: "fal-ai/veo3.1/fast",
       providerJobId: "req_fal_abc123",
     });

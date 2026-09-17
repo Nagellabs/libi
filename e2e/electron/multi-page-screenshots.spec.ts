@@ -18,7 +18,7 @@ test("walks the main routes and captures screenshots", async () => {
       { path: "/editor", name: "editor" },
       { path: "/characters", name: "characters" },
       { path: "/items", name: "items" },
-      { path: "/mcps-skills", name: "mcps-skills" },
+      { path: "/agents", name: "agents" },
       { path: "/settings", name: "settings" },
     ];
 

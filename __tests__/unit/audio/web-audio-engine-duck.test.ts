@@ -272,3 +272,119 @@ describe("WebAudioEngine sidechain ducking", () => {
     expect(internal.clips.get("music")!.duckGain).toBeNull();
   });
 });
+
+describe("WebAudioEngine worklet-load failures", () => {
+  /** Stub AudioContext so the worklet module load stays pending until we settle it. */
+  function deferredWorkletContext(): {
+    settle: { resolve: () => void; reject: (e: unknown) => void };
+    closed: () => boolean;
+  } {
+    let resolve!: () => void;
+    let reject!: (e: unknown) => void;
+    const pending = new Promise<void>((res, rej) => { resolve = res as () => void; reject = rej; });
+    let closed = false;
+    vi.stubGlobal("AudioContext", class {
+      state = "running";
+      sampleRate = 48000;
+      currentTime = 0;
+      destination = new FakeNode("destination");
+      audioWorklet = { addModule: () => pending };
+      async resume() {}
+      async close() { closed = true; }
+      createGain() { return new FakeGain(); }
+      createBufferSource() { return new FakeNode("buffersource"); }
+    });
+    return { settle: { resolve, reject }, closed: () => closed };
+  }
+
+  /** `AbortError: Unable to load a worklet's module.` — what Chromium rejects an
+   *  in-flight addModule with when the AudioContext closes underneath it. */
+  function abortError(): Error {
+    return Object.assign(new Error("Unable to load a worklet's module."), { name: "AbortError" });
+  }
+
+  it("swallows the dispose race — a context closed mid-load must not reject unhandled", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => { unhandled.push(e); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const { settle } = deferredWorkletContext();
+      const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+      const eng = new WebAudioEngine((fid) => `/${fid}`);
+
+      eng.setClips([clip("music", { duck: DUCK }), clip("vo")]);
+      await tick();
+      // Unmount (HMR remount, route change, StrictMode double-effect) while the
+      // module is still loading — dispose() closes the context.
+      eng.dispose();
+      settle.reject(abortError());
+      await tick(); await tick();
+
+      expect(unhandled).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+      expect(workletCount).toBe(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      warn.mockRestore();
+    }
+  });
+
+  it("surfaces a genuine load failure — the module 404s while the engine is live", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const { settle } = deferredWorkletContext();
+      const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+      const eng = new WebAudioEngine((fid) => `/${fid}`);
+
+      eng.setClips([clip("music", { duck: DUCK }), clip("vo")]);
+      await tick();
+      settle.reject(new Error("404"));
+      await tick(); await tick();
+
+      expect(warn).toHaveBeenCalledWith("[WebAudioEngine] worklet load failed", "404");
+      expect(workletCount).toBe(0); // left un-ducked, not half-wired
+      const internal = eng as unknown as Internal;
+      expect(internal.clips.get("music")!.duckGain).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not poison the engine — a later reconcile retries the failed load", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      let attempt = 0;
+      vi.stubGlobal("AudioContext", class {
+        state = "running";
+        sampleRate = 48000;
+        currentTime = 0;
+        destination = new FakeNode("destination");
+        audioWorklet = {
+          addModule: () => (++attempt === 1 ? Promise.reject(new Error("boom")) : Promise.resolve()),
+        };
+        async resume() {}
+        async close() {}
+        createGain() { return new FakeGain(); }
+        createBufferSource() { return new FakeNode("buffersource"); }
+      });
+      const { WebAudioEngine } = await import("@/lib/audio/web-audio-engine");
+      const eng = new WebAudioEngine((fid) => `/${fid}`);
+
+      eng.setClips([clip("music", { duck: DUCK }), clip("vo")]);
+      await tick(); await tick();
+      expect(workletCount).toBe(0); // first load failed
+
+      // A later reconcile (clip set changed) must try again, not stay disabled.
+      eng.setClips([clip("music", { duck: DUCK }), clip("vo"), clip("sfx")]);
+      await tick(); await tick();
+
+      expect(attempt).toBe(2);
+      expect(workletCount).toBe(1);
+      const internal = eng as unknown as Internal;
+      expect(internal.clips.get("music")!.duckGain).toBeTruthy();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

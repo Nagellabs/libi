@@ -1,7 +1,7 @@
 // app/api/agents/[agentId]/install/route.ts
 //
 // Drives the `agent_install` JobManager job (lib/jobs/runners/agent-install.ts)
-// that installs Claude Code's ACP adapter — the browser-facing half of Stage 3.
+// that installs an agent's ACP adapter — the browser-facing half of Stage 3.
 //
 // POST — enqueue. Mirrors POST /api/jobs: this route is the ONLY thing that
 //        calls `runToCompletion`, so a job that reaches `new`/`attached_running`
@@ -13,8 +13,12 @@
 //        Install/Retry actually starts a fresh attempt instead of replaying
 //        a dead job's old status forever — same shape as
 //        `enqueueRuntimeInstall()` in app/api/runtime/update/route.ts. A
-//        `completed` match is left alone; re-running a finished ~345MB
-//        install because someone double-clicked would be the opposite bug.
+//        `completed` match is left alone while the adapter really is
+//        installed; re-running a finished ~345MB install because someone
+//        double-clicked would be the opposite bug. A `completed` match whose
+//        adapter is gone (its tree was removed after the install finished —
+//        job rows are never pruned) is re-enqueued too, or the setup wizard
+//        would replay that old success forever with nothing installed.
 // GET  — status. `agent_install` jobs have no dedicated `agentId` column, so
 //        "the job for this agent" means the newest `agent_install` row whose
 //        stored params match — same technique as `latestInstallJob()` in
@@ -29,6 +33,7 @@ import { getDb } from "@/lib/db/client";
 import { jobs } from "@/lib/db/schema/sqlite";
 import { getJobManager } from "@/lib/jobs/manager";
 import { getAgentSetup } from "@/lib/agents/setup/registry";
+import { getAgentConfig } from "@/lib/agents/acp/agent-registry";
 import { serverLogger as logger } from "@/lib/logger";
 import { JobNotFoundError, snapshotFromRow, type JobStatusSnapshot } from "@/lib/jobs/types";
 
@@ -79,11 +84,11 @@ export async function GET(_req: Request, { params }: RouteParams): Promise<Respo
 export async function POST(_req: Request, { params }: RouteParams): Promise<Response> {
   const { agentId } = await params;
 
-  // Codex (and any unknown id) has no install step — libi ships Codex's
-  // engine, so there is nothing for `agent_install` to do. This is a CLIENT
-  // mistake (the connect card should never have offered the button), not a
-  // server fault, so it is a 400 — never let it reach the runner, which
-  // throws on exactly this and would otherwise turn into a 500.
+  // An agent with no install step (terminal, and any unknown id) has nothing
+  // for `agent_install` to do. This is a CLIENT mistake (the connect card
+  // should never have offered the button), not a server fault, so it is a
+  // 400 — never let it reach the runner, which throws on exactly this and
+  // would otherwise turn into a 500.
   const setup = getAgentSetup(agentId);
   if (!setup || !setup.install) {
     logger.warn(
@@ -99,12 +104,15 @@ export async function POST(_req: Request, { params }: RouteParams): Promise<Resp
   // A failed or cancelled terminal row is the dead end this feature exists
   // to remove: without forcing a fresh row here, a second Install click just
   // replays the OLD row's failed/cancelled status and nothing runs. A
-  // `completed` match keeps returning as-is — see the header comment.
-  if (
-    result.status === "matching_completed" &&
-    (result.existingJob.status === "failed" || result.existingJob.status === "cancelled")
-  ) {
-    result = await mgr.enqueue(JOB_KIND, { agentId }, { forceNew: true });
+  // `completed` match keeps returning as-is only while the adapter it
+  // installed is still there — see the header comment.
+  if (result.status === "matching_completed") {
+    const ended = result.existingJob.status === "failed" || result.existingJob.status === "cancelled";
+    const completedButMissing =
+      result.existingJob.status === "completed" && getAgentConfig(agentId)?.installed !== true;
+    if (ended || completedButMissing) {
+      result = await mgr.enqueue(JOB_KIND, { agentId }, { forceNew: true });
+    }
   }
 
   const jobId = result.status === "matching_completed" ? result.existingJob.jobId : result.jobId;

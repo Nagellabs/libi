@@ -53,7 +53,7 @@ async function main(): Promise<void> {
       const reportDir = join(runsRoot, scenario.id, agent, "run-1");
       const result: RunResult = {
         scenarioId: scenario.id, agent, status: "unsupported_agent",
-        assertions: [], hardPass: false, reportDir,
+        assertions: [], hardPass: false, vacuous: false, cliVersion: "unresolved", reportDir,
         errorMessage: `Agent "${agent}" is not supported yet (claude-code only). Abstraction is in place; wire it later.`,
       };
       writeRunReport(reportDir, { result, trace: [], transcript: "" });
@@ -65,11 +65,19 @@ async function main(): Promise<void> {
     for (let rep = 1; rep <= scenario.runs; rep++) {
       const reportDir = join(runsRoot, scenario.id, agent, `run-${rep}`);
       const harness = await runScenarioOnce({ scenario, agent, keep });
-      const assertions = harness.status === "completed" ? evaluate(harness.trace, scenario.assertions) : [];
+      const assertions =
+        harness.status === "completed"
+          ? evaluate(harness.trace, scenario.assertions, harness.transcript)
+          : [];
       const hardPass = harness.status === "completed" && assertions.every((a) => a.pass);
+      // A scenario with no `## Hard invariants` needles can only ever produce
+      // `every([]) === true`. Flagged so the summary can say so instead of printing the
+      // same HARD-PASS a scenario with real needles earns — see RunResult.vacuous.
+      const vacuous = harness.status === "completed" && scenario.assertions.length === 0;
       const result: RunResult = {
         scenarioId: scenario.id, agent, status: harness.status,
-        assertions, hardPass, reportDir, errorMessage: harness.errorMessage,
+        assertions, hardPass, vacuous, cliVersion: harness.cliVersion, reportDir,
+        errorMessage: harness.errorMessage,
       };
       writeRunReport(reportDir, { result, trace: harness.trace, transcript: harness.transcript });
       console.log(formatStdoutSummary(result));
@@ -79,7 +87,7 @@ async function main(): Promise<void> {
 
   // Print a machine-readable summary block for the orchestrating coding agent.
   console.log("\n[skill-eval] JSON_SUMMARY " + JSON.stringify(results.map((r) => ({
-    scenarioId: r.scenarioId, agent: r.agent, status: r.status, hardPass: r.hardPass, reportDir: r.reportDir,
+    scenarioId: r.scenarioId, agent: r.agent, status: r.status, hardPass: r.hardPass, vacuous: r.vacuous, cliVersion: r.cliVersion, reportDir: r.reportDir,
   }))));
 
   const ok = results.every((r) => r.status === "completed" && r.hardPass);

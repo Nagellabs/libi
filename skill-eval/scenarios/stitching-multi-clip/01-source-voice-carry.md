@@ -5,7 +5,12 @@ skills: [stitching-multi-clip, ugc-product-video, voiceover-production, ai-asset
 mcps: [fal-ai, ElevenLabs]
 agent: claude-code
 runs: 1
-timeoutSec: 600
+# Raised from 600 after the 2026-09-10 QA timeout. 715 KB of transcript and a healthy trace
+# — 3 image generations, 3 video jobs with polling, the composition committed — with the
+# agent on its closing boundary-frame verification when the budget expired. A 3-clip
+# generate-poll-stitch flow does not fit in 600 s; 1200 s is roughly double the observed
+# work and still well under `removing-backgrounds/02`'s 1800 s.
+timeoutSec: 1200
 covers: [stitch, source-voice-carry, reference-to-video, audio-reference, extract-audio-mp3, no-elevenlabs-default, voice-conditioning]
 ---
 
@@ -52,9 +57,10 @@ assertions: []
   `image-to-video`), passing the voice sample as `audio_urls`/`@Audio1` **paired with the insert's
   start frame as `image_urls`/`@Image1`** (the pairing is mandatory — audio alone is rejected),
   with `generate_audio: true` and the beat's narration line in the prompt.
-- **Local references reached fal via `libi.upload_file_to_fal` (no credential handling, 2026-06-08).**
-  Turned the LOCAL voice-sample MP3 and the LOCAL `@Image1` start frame into fal CDN URLs with
-  `libi.upload_file_to_fal({ fileId })` before passing them as `audio_urls`/`image_urls`. Did NOT
+- **Local references reached fal through the fal MCP's own upload tool (no credential handling, 2026-06-08).**
+  Turned the LOCAL voice-sample MP3 and the LOCAL `@Image1` start frame into fal CDN URLs with the
+  fal MCP's upload tool before passing them as `audio_urls`/`image_urls` (the test-mode fake fal
+  exposes no upload tool — if none was available, said so plainly instead of hand-rolling one). Did NOT
   read `FAL_KEY` from the database/env/shell, did NOT request a fal signed upload URL, and did NOT
   `PUT`/`curl` bytes to fal storage — provider credentials stayed inside the server/MCP boundary.
 - Reused the SAME `@Audio1` sample on every insert so one voice runs through the piece; the AI

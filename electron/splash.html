@@ -134,6 +134,7 @@
     .item.running { color: var(--fg); }
     .item.done    { color: var(--fg); }
     .item.failed  { color: var(--danger); }
+    .item.warning { color: var(--fg); }
 
     /* Status indicator (16x16 grid cell) */
     .dot { width: 14px; height: 14px; display: grid; place-items: center; }
@@ -176,6 +177,13 @@
       background: var(--muted);
       border-radius: 1px;
     }
+    .item.warning .dot::before {
+      content: "!";
+      color: var(--warn);
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1;
+    }
 
     .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .meta {
@@ -186,6 +194,7 @@
     }
     .item.done .meta    { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
     .item.running .meta { color: var(--primary); }
+    .item.warning .meta { color: var(--warn); }
 
     /* ───────────── Error pane ───────────── */
     .error {
@@ -252,10 +261,6 @@
       <div class="items" id="installs"></div>
     </div>
     <div class="section">
-      <div class="section-title">Verify</div>
-      <div class="items" id="probes"></div>
-    </div>
-    <div class="section">
       <div class="section-title">Boot</div>
       <div class="items" id="boot"></div>
     </div>
@@ -268,14 +273,30 @@
 
   <script>
     // RC-G: the splash runs isolated/sandboxed with no direct electron access.
-    // `window.splashAPI` is bridged in by electron/splash-preload.ts.
-    const splashAPI = window.splashAPI;
+    // `window.splashAPI` is bridged in by electron/splash-preload.ts. It is
+    // always called through `window.` on purpose — never aliased with a
+    // top-level `const splashAPI`: contextBridge defines the global as
+    // NON-configurable, and a lexical declaration against such a property is
+    // a SyntaxError ("Identifier 'splashAPI' has already been declared") that
+    // kills this whole script before it subscribes to anything — the splash
+    // then sits motionless with no rows and no fatal pane.
 
     function fmtBytes(b) {
-      if (!b) return "";
+      // 0 renders as "0 B", not "": the FIRST progress tick of every
+      // download carries 0 bytes, and an empty string there produced a meta
+      // column reading " / 165.0 MB · 0%" — a leading space where the count
+      // should be. Non-numeric / missing stays "" so a caller with no byte
+      // fields at all still renders nothing.
+      if (typeof b !== "number" || !Number.isFinite(b)) return "";
+      if (b === 0) return "0 B";
       if (b > 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + " MB";
       if (b > 1024) return (b / 1024).toFixed(1) + " KB";
       return b + " B";
+    }
+
+    function pct(done, total) {
+      if (!total || total <= 0 || typeof done !== "number") return null;
+      return Math.max(0, Math.min(100, Math.round((done / total) * 100)));
     }
 
     function upsertItem(parentId, key, label, state, meta) {
@@ -298,7 +319,11 @@
       if (el && text) el.textContent = text;
     }
 
-    splashAPI.onLifecycle((e) => {
+    // Boot steps that reported a warning, and the latest warning's message.
+    const warnedSteps = new Set();
+    let bootWarning = null;
+
+    window.splashAPI.onLifecycle((e) => {
       if (e.kind === "category-a-install-start") {
         upsertItem("installs", "i:" + e.item.id, e.item.label, "running", "downloading…");
         setSubtitle("Installing " + e.item.label + "…");
@@ -309,32 +334,43 @@
         if (e.detail) {
           upsertItem("installs", "i:" + e.item.id, e.item.label, "running", e.detail);
           setSubtitle(e.item.label + " — " + e.detail);
-        } else {
+        } else if (e.bytesDownloaded > 0 || e.bytesTotal) {
+          // Bytes AND a percentage. The counts alone answer "is it moving";
+          // the percentage answers "how much is left", which is the question a
+          // user watching a 132 MB download on a hotel wifi is actually asking.
+          const p = pct(e.bytesDownloaded, e.bytesTotal);
           const total = e.bytesTotal ? " / " + fmtBytes(e.bytesTotal) : "";
+          const suffix = p === null ? "" : " · " + p + "%";
           upsertItem("installs", "i:" + e.item.id, e.item.label, "running",
-            fmtBytes(e.bytesDownloaded) + total);
+            fmtBytes(e.bytesDownloaded) + total + suffix);
         }
+        // A tick with no detail, no total and no bytes carries no news, and
+        // rendering it wrote "0 B". The download opens with one of those
+        // (a bare `downloading` before the response headers land) and CLOSES
+        // with one (`extracting` carries no byte fields), so a finished
+        // 27.1 MB row flashed back to "0 B" right before its green tick.
+        // Leave the row saying whatever it last said.
       } else if (e.kind === "category-a-install-done") {
         const state = e.result === "skipped" ? "skipped"
                     : e.result === "failed" ? "failed"
                     : "done";
         upsertItem("installs", "i:" + e.item.id, e.item.label, state,
-          e.result === "skipped" ? (e.reason || "already installed")
+          e.result === "skipped" ? "ready"
           : e.result === "failed" ? (e.reason || "install failed")
           : "ready");
-      } else if (e.kind === "category-a-probe-start") {
-        upsertItem("probes", "p:" + e.mcpId, e.label, "running", "probing…");
-        setSubtitle("Verifying " + e.label + "…");
-      } else if (e.kind === "category-a-probe-done") {
-        const state = e.status === "down" ? "failed"
-                    : e.status === "skipped" ? "skipped"
-                    : "done";
-        upsertItem("probes", "p:" + e.mcpId, e.label, state,
-          e.status === "skipped" ? (e.reason || "skipped")
-          : e.durationMs != null ? e.durationMs + "ms" : "");
+      } else if (e.kind === "warning") {
+        // A step that finished without doing its job while boot carries on.
+        // Not the fatal pane, since nothing stopped, but the row must not end
+        // on a success tick, and the message stays in the subtitle, where the
+        // user is looking, for as long as the splash is up.
+        warnedSteps.add(e.step);
+        bootWarning = e.message;
+        upsertItem("boot", "b:" + e.step, e.step, "warning", "unavailable");
+        setSubtitle(e.message);
       } else if (e.kind === "category-b-step") {
-        upsertItem("boot", "b:" + e.step, e.step, e.status, "");
-        if (e.status === "running") setSubtitle("Starting libi…");
+        // A step that warned keeps its warning row when it then reports done.
+        if (!warnedSteps.has(e.step)) upsertItem("boot", "b:" + e.step, e.step, e.status, "");
+        if (e.status === "running" && bootWarning === null) setSubtitle("Starting libi…");
       } else if (e.kind === "fatal") {
         document.body.classList.add("is-failed");
         document.getElementById("title").textContent = "Something went wrong";
@@ -347,7 +383,7 @@
     });
 
     document.getElementById("quit").addEventListener("click", () => {
-      splashAPI.quit();
+      window.splashAPI.quit();
     });
   </script>
 </body>

@@ -62,11 +62,7 @@ describe("provider metadata on the aggregate", () => {
       language_probability: 0.99,
     });
 
-    const res = await transcribeAudio({
-      fileId,
-      provider: "whisper",
-      sttFn: fakeStt,
-    });
+    const res = await transcribeAudio({ fileId, sttFn: fakeStt });
     expect(res.status).toBe("ready");
 
     const [step] = db

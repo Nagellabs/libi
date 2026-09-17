@@ -5,6 +5,7 @@ import {
   files,
   settings,
   mcpServers,
+  legacyProviderKeys,
   skills,
   analysisSteps,
   analysisKeyframes,
@@ -20,12 +21,12 @@ import {
   modelSchemas,
   seenAnnouncements,
   analyticsQueue,
+  skillInstalls,
 } from "@/lib/db/schema/sqlite";
 
-const schema = { pieces, files, settings, mcpServers, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue };
+const schema = { pieces, files, settings, mcpServers, legacyProviderKeys, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue, skillInstalls };
 
 declare global {
-  // eslint-disable-next-line no-var
   var __libi_test_db: BetterSQLite3Database<typeof schema> | undefined;
 }
 
@@ -102,7 +103,6 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       filmstrip_generated_at INTEGER,
       filmstrip_frames INTEGER,
       filmstrip_height INTEGER,
-      fal_uploaded_url TEXT,
       notes TEXT,
       ai_generation TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -130,6 +130,11 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       agent_ever_connected INTEGER NOT NULL DEFAULT 0,
       onboarding_demo_offered_at INTEGER,
       onboarding_demo_dismissed_at INTEGER,
+      claude_sign_in_confirmed_at INTEGER,
+      codex_sign_in_confirmed_at INTEGER,
+      agent_wizard_chosen_at INTEGER,
+      agent_wizard_agent TEXT,
+      agent_wizard_finished_at INTEGER,
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE TABLE mcp_servers (
@@ -143,7 +148,6 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       url TEXT,
       headers TEXT,
       env_vars TEXT,
-      enabled INTEGER NOT NULL DEFAULT 1,
       require_approval INTEGER NOT NULL DEFAULT 1,
       bundled INTEGER NOT NULL DEFAULT 0,
       install_status TEXT NOT NULL DEFAULT 'pending',
@@ -154,6 +158,12 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       server_last_checked INTEGER,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE TABLE legacy_provider_keys (
+      provider_id TEXT PRIMARY KEY,
+      env_vars TEXT NOT NULL,
+      shown_at INTEGER,
+      rescued_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE TABLE skills (
       id TEXT PRIMARY KEY,
@@ -311,6 +321,19 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       next_attempt_at INTEGER NOT NULL
     );
     CREATE INDEX analytics_queue_due_idx ON analytics_queue(next_attempt_at);
+    CREATE TABLE skill_installs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      folder_path TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_synced_at INTEGER,
+      last_error TEXT,
+      skipped_names TEXT NOT NULL DEFAULT '[]',
+      last_root TEXT
+    );
+    CREATE UNIQUE INDEX skill_installs_level_unique ON skill_installs(agent_id, scope, folder_path);
   `);
 
   const db = drizzle(sqlite, { schema });

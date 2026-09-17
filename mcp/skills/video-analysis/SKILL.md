@@ -1,10 +1,39 @@
 ---
 name: video-analysis
-description: Analyze a video's visual content. Default to the free agent-driven flow (extract keyframes, describe each, produce VideoSummary) — this covers most tasks. Only mention the paid Gemini-via-fal.ai script flow when the task genuinely needs audio/music understanding or the user explicitly asks for it.
+description: Analyze a video's visual content. Default to the free agent-driven flow (extract keyframes, describe each, produce VideoSummary) — this covers most tasks. Only mention the paid script flow on your own video provider (fal's `fal-ai/video-understanding`) when the task genuinely needs audio/music understanding or the user explicitly asks for it.
 when_to_use: User asks to summarize, analyze, or search visual content of a video. For audio-only files, use audio-analysis instead.
 ---
 
 # Video Analysis (Frames + Summary)
+
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
 
 Use this skill when the user wants visual analysis of a video — keyframe extraction, per-frame description, and/or a structured summary. For the transcript step, see the `audio-analysis` skill — it handles long files via chunking automatically.
 
@@ -14,9 +43,31 @@ Two flows produce analysis for a video. Default to (A); only branch to (B) when 
 
 **(A) Agent-driven flow (default, FREE).** You — the agent — extract keyframes, run your own vision on each, and write structured `FrameDescription` / `VideoSummary` via `libi.analysis_save_*`. Strengths: free, gives per-frame bboxes (needed for tracking and character catalog), gives you control over what to look for. Weaknesses: per-frame independent (weak cross-shot continuity), can't hear audio (no structured music/SFX), slow on long videos.
 
-**(B) Model-driven script flow (PAID, opt-in).** Run `libi.extra_analysis_model`. A single fal.ai → Gemini 2.5 Pro call returns a structured `Script` (shot list with camera/lighting/mood/dialogue per shot, structured music & sound-design, overall style, pacing). Strengths: hears audio, sees the whole video at once (real shot boundaries, real music cues), one fast call. Weaknesses: paid (fal credits), no per-frame bboxes, no word-level transcript timing.
+**(B) Model-driven script flow (PAID, opt-in, runs on YOUR video provider).** libi does not
+run this for you — you run it on your own provider and write the result back into libi's
+analysis store. On fal the model is **`fal-ai/video-understanding`** (Gemini 2.5 Pro behind
+it, ~$0.002 per second of video): put the video on the provider's CDN with the provider's own
+upload tool, call it with a prompt asking for a structured production script (shot list with
+camera / lighting / mood / dialogue per shot, structured music and sound design, overall
+style, pacing), then save what comes back:
 
-> **`focus` parameter on (B).** `libi.extra_analysis_model` accepts `focus: "script" | "captions"` (default `"script"`). `focus: "captions"` runs a caption-focused prompt instead — it returns a per-caption recreation spec (each caption's words, anchor world-vs-screen, motion keyframes with center + height-fraction, reveal schedule, orientation, color/glow) as text in `data.captions`, stored under a separate `caption_spec:*` step (NOT a `Script`, never shown in the Script tab). This is the analysis the **`mimic-video-captions`** skill drives when reproducing on-screen captions — it watches the whole video, so it describes how captions *animate*, which the free per-frame pass (A) cannot. Same cost basis (~$0.002/s). Don't surface `focus: "captions"` for ordinary analysis — it's for the caption-mimic flow.
+- **Production script** → `libi.analysis_save_summary({ fileId, summary })`. Compose a
+  `video_v1` `VideoSummary` from the model's answer and put the per-shot script text under
+  `summary.custom.script`. No `analysis_start` call is needed — `analysis_save_summary` is
+  keyed by `fileId`.
+- **Caption recreation spec** (the `mimic-video-captions` flow) → ask the model for the
+  per-caption spec instead — each caption's words, anchor world-vs-screen, motion keyframes
+  with center + height-fraction, reveal schedule, orientation, colour/glow — and save it with
+  `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <the spec> })`.
+  That tool writes INTO the file's `summary` step, so one must exist first — run flow (A),
+  or save a minimal `video_v1` summary with `libi.analysis_save_summary` before the spec.
+  Minimal means exactly the required keys of `videoSummarySchema`:
+  `{ schema_version: "video_v1", overview: "<one sentence>", duration: <seconds>, subjects: [], sections: [], recurring_objects: [] }`.
+
+Strengths: hears audio, sees the whole video at once (real shot boundaries, real music cues),
+one call. Weaknesses: paid (the user's provider credits), no per-frame bboxes, no word-level
+transcript timing. **Disclose the cost and get approval before the call** — it is the user's
+money on their provider account.
 
 ### When to suggest (B)
 
@@ -37,34 +88,35 @@ If neither applies — run (A) silently. **Recreation ≠ "needs (B)"** for the 
 to the `mimic-video` dispatcher (which calls this skill for the analysis step, then routes the
 recreation to the right creation skill). Do NOT generate clips directly from this analysis.
 
-### Before offering (B), check the key
+### Before offering (B), check the provider
 
-If you ARE going to surface (B), first verify the user can actually use it:
-
-1. Call `libi.list_bundled_mcps` and find the `fal-ai` entry.
-2. If `installStatus !== "ready"` OR the fal-ai row shows the FAL_KEY env var is unset/empty, the paid path is NOT available.
+If you ARE going to surface (B), first verify the user can actually run it: (B) needs a
+`video` provider that hosts a video-understanding model. Check your tool list.
 
 When (B) is unavailable:
 
-- **If the user explicitly asked for it:** tell them the key is missing and navigate them to the fal-ai MCP settings (`libi.show_mcp_settings`). Ask whether they want to set the key now (then re-run), or whether the free flow is acceptable.
-- **If (B) would have been useful but the user didn't ask:** stay silent about it and just run (A). Don't make the user feel like they're missing something they didn't ask for.
+- **If the user explicitly asked for it:** say you have no video-understanding provider
+  connected, call `libi.suggest_provider({ kind: "video", reason: "paid full-video analysis" })`,
+  and ask whether they want to connect one (then re-run) or whether the free flow is fine.
+- **If (B) would have been useful but the user didn't ask:** stay silent about it and just
+  run (A). Don't make the user feel like they're missing something they didn't ask for.
 
 When (B) is available AND warranted, surface it with a short message and let them choose:
 
 > "I can analyze this video two ways:
 > - **Free** — I'll watch each keyframe and write up what I see. No audio detection, no music description. Good for editing tasks.
-> - **Paid (~fal credits)** — Gemini-via-fal.ai returns a full production script with shots, music, dialogue, and mood — designed to feed back into a text-to-video model. Best when audio/music drives the structure.
+> - **Paid (your provider's credits)** — the paid script flow on your own video provider (fal's `fal-ai/video-understanding`) returns a full production script with shots, music, dialogue, and mood — designed to feed back into a text-to-video model. Best when audio/music drives the structure.
 > Which do you want?"
 
 ### After running (B), decide if (A) is also needed
 
-The `Script` from (B) doesn't include per-frame bboxes or word-timed transcript. If the user's downstream task needs those, run (A) on top — they're additive (script rows and frames/transcript rows coexist on the same `analysis_steps` table). Heuristic:
+The saved script from (B) doesn't include per-frame bboxes or word-timed transcript. If the user's downstream task needs those, run (A) on top — they're additive (script rows and frames/transcript rows coexist on the same `analysis_steps` table). Heuristic:
 
 | Downstream task | Need (A) on top of (B)? |
 |---|---|
 | Feed shots to a text-to-video model | No — `Script` is sufficient |
 | Build tracked overlays (blur a face, pin a label) | Yes — need `bbox` on `people[]` / `objects[]` |
-| Build word-level caption overlays | Yes — need `audio-analysis` skill (ElevenLabs transcript) |
+| Build word-level caption overlays | Yes — need the `audio-analysis` skill (word-level transcript) |
 | Add subjects to the character/item catalog | Yes — need `people[].name` + `bbox` on frames |
 | User just wants to read what's in the video | No — show them the script |
 

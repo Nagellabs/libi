@@ -38,7 +38,9 @@ export function buildModifyPrompt(
 
 /** Seed prompt for transcribing a selected audio clip's source file. The user
  *  sends or copies it from the ask-agent composer; the agent runs the actual
- *  transcription (ElevenLabs / analysis tools) and reports the transcript back. */
+ *  transcription (libi.analysis_transcribe_audio — local Whisper, on-device)
+ *  and reports the transcript back. libi holds no provider keys and ships no
+ *  ElevenLabs STT client; Whisper is the only transcript service it has. */
 export function buildTranscribePrompt(audio: {
   fileId: string;
   fileName: string;

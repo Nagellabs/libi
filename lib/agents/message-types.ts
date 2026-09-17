@@ -79,7 +79,7 @@ export type AgentMessagePart =
       toolCall: import("@agentclientprotocol/sdk").ToolCallUpdate;
       options: import("@agentclientprotocol/sdk").PermissionOption[];
       /** Why we surfaced the prompt — drives copy / styling. */
-      reason: "acp" | "generation";
+      reason: "acp" | "extension";
       /** "pending" until the agent emits `agent-permission-resolved`. */
       status: "pending" | "resolved";
       outcome?:

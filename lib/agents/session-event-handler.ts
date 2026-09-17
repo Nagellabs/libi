@@ -18,14 +18,21 @@ import {
 } from "@/lib/agents/subagent-detector";
 import { applyAttachmentParsing } from "@/lib/agents/parse-attachments";
 import { getApprovalMode } from "@/lib/approval/settings";
-import { isGenerationTool } from "@/lib/approval/generation";
+import { isApprovalRequiredExtensionTool } from "@/lib/approval/extensions";
 import { serverLogger as logger } from "@/lib/logger";
 import {
   jobProgressEmitter,
   type JobProgressPayload,
 } from "@/lib/jobs/progress-emitter";
 import { getJobManager } from "@/lib/jobs/manager";
-import { fromAnyToolName, type McpToolId } from "@/lib/agents/mcp-tool-id";
+import {
+  fromAnyToolName,
+  fromCodexToolCall,
+  makeMcpToolId,
+  toolIdForCall,
+  type McpToolId,
+} from "@/lib/agents/mcp-tool-id";
+import { LIBI_MCP_ENTRY_NAME } from "@/lib/mcp/agent-surface";
 import {
   getJobKindToToolIdsMap,
   getRunner,
@@ -38,6 +45,16 @@ import {
   extractModelOption,
 } from "@/lib/sessions/model-option";
 import { getKnownWindow } from "@/lib/sessions/model-window-cache";
+
+/**
+ * How Claude Code has reported an expired OAuth session: as reply TEXT inside a
+ * turn that otherwise succeeds ("Failed to authenticate: OAuth session expired and
+ * could not be refreshed" — seen on a Windows QA VM with claude 2.1.267). The
+ * evidence is narrative-only (that output was not saved), so it is to be
+ * re-verified on a real expired sign-in. Matched ONLY at the start of the first
+ * part of a live claude-code turn — never as a substring anywhere in a reply.
+ */
+export const CLAUDE_AUTH_FAILURE_TEXT_PREFIX = "Failed to authenticate";
 
 // usage_update is @experimental — on drift we keep the previous state and
 // warn ONCE per session (spec: never spam the log at stream rate).
@@ -54,76 +71,100 @@ const usageParseWarnedSessions = new Set<string>();
 
 export type PermissionAction =
   | { kind: "auto-allow"; optionId: string }
-  | { kind: "prompt"; reason: "acp" | "generation" };
+  | { kind: "prompt"; reason: "acp" | "extension" };
 
 /**
- * Decide what to do with an ACP permission request based on the agent's
- * saved approval mode and whether the tool is a paid generation MCP.
+ * Identify the tool behind an ACP permission request.
  *
  * Tool name extraction: claude-agent-acp's `toolInfoFromToolUse` falls
  * through to a default branch for any tool it doesn't have a custom case
  * for (including all `mcp__server__tool` names), and that branch sets
  * `toolCall.title = toolUse.name`. So for MCP tools, `title` IS the
- * canonical `mcp__server__tool` identifier — exactly what
- * `isGenerationTool` matches against. For built-in tools (Read, Edit,
- * Bash, …), `title` is a human-readable label that doesn't start with
- * `mcp__`, so `isGenerationTool` correctly returns false.
+ * canonical `mcp__server__tool` identifier, which `fromAnyToolName`
+ * canonicalizes. For built-in tools (Read, Edit, Bash, …), `title` is a
+ * human-readable label that doesn't start with `mcp__`, so `toolId` is null.
  *
  * We also fall back to `rawInput?.name` if for any reason `title` is
  * absent — newer claude-agent-acp builds may shift the field, and other
  * ACP agents (codex) may not run through `toolInfoFromToolUse`
  * at all.
+ *
+ * Exported for the extension approval gate: the gate keys on the
+ * canonical tool id to find the owning extension via `extensionForToolName`.
  */
-type ToolMeta = {
+export type ToolMeta = {
   toolId: McpToolId | null;
   rawName: string;
 };
 
-function extractToolMeta(req: RequestPermissionRequest): ToolMeta {
+export function extractToolMeta(req: RequestPermissionRequest): ToolMeta {
   const tc = req.toolCall as Partial<{
     title: string | null;
     rawInput: Record<string, unknown> | null;
   }>;
-  // Tool name extraction: claude-agent-acp's `toolInfoFromToolUse` falls
-  // through to a default branch for any tool it doesn't have a custom case
-  // for (including all `mcp__server__tool` names), and that branch sets
-  // `toolCall.title = toolUse.name`. So for MCP tools, `title` IS the
-  // canonical `mcp__server__tool` identifier — exactly what
-  // `isGenerationTool` matches against. For built-in tools (Read, Edit,
-  // Bash, …), `title` is a human-readable label that doesn't start with
-  // `mcp__`, so `isGenerationTool` correctly returns false.
-  //
-  // We also fall back to `rawInput?.name` if for any reason `title` is
-  // absent — newer claude-agent-acp builds may shift the field, and other
-  // ACP agents (codex) may not run through `toolInfoFromToolUse`
-  // at all.
   const rawName =
     typeof tc.title === "string" && tc.title.length > 0
       ? tc.title
       : typeof tc.rawInput?.name === "string"
         ? (tc.rawInput.name as string)
         : "";
-  const toolId = fromAnyToolName(rawName);
+  // Structured first — the ACP permission request for a codex MCP call is
+  // NAMELESS (no title, no rawInput), but a Claude one carries both, and a
+  // future codex build attaching the envelope here would be picked up for
+  // free. `null` from either path just means "not an MCP tool".
+  const toolId =
+    fromCodexToolCall(tc.rawInput, (req.toolCall as { _meta?: unknown })._meta) ??
+    fromAnyToolName(rawName);
   return { toolId, rawName };
 }
 
+/**
+ * The `_meta` bag off a `session/update`, untyped.
+ *
+ * The ACP SDK's update types don't declare `_meta`, but codex-acp sets
+ * `is_mcp_tool_call: true` there for an MCP tool call (and
+ * `is_mcp_tool_approval: true` on the matching permission request). It is a
+ * corroborating marker for `fromCodexToolCall`, never the sole signal — an
+ * adapter that stops sending it still canonicalizes off the payload shape.
+ */
+function updateMeta(update: unknown): unknown {
+  return update && typeof update === "object"
+    ? (update as { _meta?: unknown })._meta
+    : undefined;
+}
+
+/**
+ * Decide what to do with an ACP permission request from the agent's saved
+ * approval mode. `ask` prompts for everything; the two auto modes select the
+ * agent's own allow option when it offers one and otherwise fall back to a
+ * prompt (the classifier-flagged case, where the agent offers only reject
+ * options).
+ *
+ * The one thing `auto` holds back is a tool of a libi extension the user
+ * marked "requires approval" (`isApprovalRequiredExtensionTool`); it prompts
+ * with reason `extension` so the card can say why. `auto-with-generations`
+ * runs that too.
+ */
 export async function decidePermissionAction(
   agentId: string,
   request: RequestPermissionRequest,
 ): Promise<PermissionAction> {
   const mode = getApprovalMode(agentId);
   const meta = extractToolMeta(request);
-  const isGen = isGenerationTool(meta.toolId);
+  const isExtension = isApprovalRequiredExtensionTool(meta.toolId);
   const allowOpt = request.options.find(
     (o) => o.kind === "allow_once" || o.kind === "allow_always",
   );
 
   if (mode === "ask") {
-    return { kind: "prompt", reason: isGen ? "generation" : "acp" };
+    return { kind: "prompt", reason: isExtension ? "extension" : "acp" };
   }
 
-  if (isGen && mode !== "auto-with-generations") {
-    return { kind: "prompt", reason: "generation" };
+  // `auto` runs everything except an extension the user marked "requires
+  // approval"; `auto-with-generations` runs that too. Same three modes as
+  // before — only what the middle one holds back has changed.
+  if (isExtension && mode !== "auto-with-generations") {
+    return { kind: "prompt", reason: "extension" };
   }
 
   if (allowOpt) return { kind: "auto-allow", optionId: allowOpt.optionId };
@@ -171,7 +212,73 @@ export class SessionEventHandler {
       sessionId: string,
       configOptions: SessionConfigOption[],
     ) => void,
+    /** Claude reported a failed sign-in as reply TEXT (CLAUDE_AUTH_FAILURE_TEXT_PREFIX).
+     *  The SessionManager records it as an observed auth rejection. */
+    private readonly onAuthRejectedText?: (sessionId: string) => void,
   ) {}
+
+  /** Agent messages already judged by `judgeTurnOpening` — one verdict per turn. */
+  private readonly authTextJudged = new WeakSet<AgentMessage>();
+
+  /** Tool calls that have shown real progress TEXT (ACP content, a codex MCP delta, or a
+   *  job_progress tick). Their elapsed-time line is suppressed. Dropped on completion. */
+  private readonly textProgressCalls = new Set<string>();
+
+  /** Emit `agent-tool-progress` and patch the cached part, so a fresh /api/agent/messages
+   *  fetch (e.g. after a refresh) returns the latest line with the call. The part may be a
+   *  `tool-call` or a `subagent`. `jobId` (a JobManager tick only) rides on the event and
+   *  on a `tool-call` part, which is what the row's Stop button targets. */
+  private applyProgressText(
+    sessionId: string,
+    session: SessionEntry | undefined,
+    toolCallId: string,
+    toolId: McpToolId | null,
+    rawTitle: string,
+    text: string,
+    jobId?: string,
+  ): void {
+    this.emit(sessionId, {
+      type: "agent-tool-progress",
+      toolCallId,
+      toolId,
+      rawTitle,
+      text,
+      ...(jobId ? { jobId } : {}),
+    });
+    if (!session) return;
+    const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
+    if (!agentMsg) return;
+    const idx = agentMsg.parts.findIndex(
+      (p) => (p.type === "tool-call" || p.type === "subagent") && p.toolCallId === toolCallId,
+    );
+    if (idx === -1) return;
+    const old = agentMsg.parts[idx];
+    if (old.type === "tool-call") {
+      agentMsg.parts[idx] = { ...old, progress: text, ...(jobId ? { jobId } : {}) };
+    } else if (old.type === "subagent") {
+      agentMsg.parts[idx] = { ...old, progress: text };
+    }
+  }
+
+  /**
+   * NARROW on purpose: only a live claude-code turn whose FIRST part is text
+   * starting with CLAUDE_AUTH_FAILURE_TEXT_PREFIX counts. Judged once per message,
+   * as soon as the first part is long enough to decide (the prefix may span
+   * chunks); a first part that is still a prefix of the prefix waits.
+   */
+  private judgeTurnOpening(sessionId: string, session: SessionEntry, agentMsg: AgentMessage): void {
+    if (!this.onAuthRejectedText || session.agentId !== "claude-code" || session.isReplaying === true) return;
+    if (this.authTextJudged.has(agentMsg)) return;
+    const first = agentMsg.parts[0];
+    if (!first || first.type !== "text") {
+      this.authTextJudged.add(agentMsg);
+      return;
+    }
+    const prefix = CLAUDE_AUTH_FAILURE_TEXT_PREFIX;
+    if (first.text.length < prefix.length && prefix.startsWith(first.text)) return; // undecided
+    this.authTextJudged.add(agentMsg);
+    if (first.text.startsWith(prefix)) this.onAuthRejectedText(sessionId);
+  }
 
   /**
    * Subscribe to `jobProgressEmitter` and synthesize an `agent-tool-progress`
@@ -226,60 +333,47 @@ export class SessionEventHandler {
         // Candidate tool ids: prefer the exact hint toolName; fall back to
         // the runner-registry kind map.
         const hintId = payload.toolName ? fromAnyToolName(payload.toolName) : null;
-        const ids = hintId ? [hintId] : (kindMap.get(payload.kind) ?? []);
+        let ids = hintId ? [hintId] : (kindMap.get(payload.kind) ?? []);
+        // The hint carries the name the tool was REGISTERED under (`libi.sleep`), which
+        // `fromAnyToolName` does not accept. A job resolves through its kind above; a
+        // non-job tool's tick (jobId "", kind "") has no kind, so name libi's own server
+        // directly. NEVER for a job: a kind with no chat surface (proxy_gen, export_render…)
+        // is absent from the kind map on purpose, yet its ticks carry the hint of whichever
+        // libi tool enqueued it — matching on that bound the job to the wrong row.
+        if (ids.length === 0 && !payload.jobId && payload.toolName?.startsWith("libi.")) {
+          ids = [makeMcpToolId(LIBI_MCP_ENTRY_NAME, payload.toolName)];
+        }
         const match = ids.length > 0 ? findInProgressToolCall(ids, payload.toolArgs) : undefined;
         if (match) {
           session = match.session;
           toolCallId = match.toolCallId;
-          try {
-            getJobManager().attachToolCallId(payload.jobId, toolCallId);
-          } catch (err) {
-            logger.warn(
-              {
-                tag: "session-event-handler",
-                op: "attach_tool_call_id_failed",
-                jobId: payload.jobId,
-                err: err instanceof Error ? err.message : String(err),
-              },
-              "Failed to attach toolCallId to JobManager",
-            );
+          // A non-job tool's tick (jobId "") has no job to attach.
+          if (payload.jobId) {
+            try {
+              getJobManager().attachToolCallId(payload.jobId, toolCallId);
+            } catch (err) {
+              logger.warn(
+                {
+                  tag: "session-event-handler",
+                  op: "attach_tool_call_id_failed",
+                  jobId: payload.jobId,
+                  err: err instanceof Error ? err.message : String(err),
+                },
+                "Failed to attach toolCallId to JobManager",
+              );
+            }
           }
         }
       }
       if (!session || !toolCallId) return;
+      // A non-job tick that lands after its call returned (the tool's last tick races its
+      // result) must not re-track the call or write progress onto a finished row.
+      if (!payload.jobId && this.hasToolResult(session, toolCallId)) return;
       const text = formatJobProgressText(payload);
-      // Patch the message cache so a fresh /api/agent/messages fetch
-      // (e.g. after page refresh) returns the latest progress + jobId.
-      const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
-      if (agentMsg) {
-        const idx = agentMsg.parts.findIndex(
-          (p) =>
-            (p.type === "tool-call" || p.type === "subagent") &&
-            p.toolCallId === toolCallId,
-        );
-        if (idx !== -1) {
-          const old = agentMsg.parts[idx];
-          if (old.type === "tool-call") {
-            agentMsg.parts[idx] = {
-              ...old,
-              progress: text,
-              jobId: payload.jobId,
-            };
-          } else if (old.type === "subagent") {
-            agentMsg.parts[idx] = { ...old, progress: text };
-          }
-        }
-      }
       // A job progress tick IS an execution signal for this tool call.
+      this.textProgressCalls.add(toolCallId);
       this.markToolCallRunning(session.sessionId, session, toolCallId, Date.now());
-      this.emit(session.sessionId, {
-        type: "agent-tool-progress",
-        toolCallId,
-        toolId: null,
-        rawTitle: "",
-        text,
-        jobId: payload.jobId,
-      });
+      this.applyProgressText(session.sessionId, session, toolCallId, null, "", text, payload.jobId || undefined);
     };
     jobProgressEmitter.on("job_progress", handler);
 
@@ -536,6 +630,7 @@ export class SessionEventHandler {
             } else {
               parts.push({ type: "text", text });
             }
+            this.judgeTurnOpening(sessionId, session, agentMsg);
           }
         }
         break;
@@ -567,7 +662,9 @@ export class SessionEventHandler {
 
       case "tool_call": {
         const rawTitle = update.title;
-        const toolId = fromAnyToolName(rawTitle);
+        // Structured first: codex-acp names the server and tool in `rawInput`
+        // and only DECORATES the title. See `toolIdForCall`.
+        const toolId = toolIdForCall(rawTitle, update.rawInput, updateMeta(update));
         const toolCallId = update.toolCallId;
 
         // Subagent dispatch — Task / Agent. On LIVE invocation rawInput
@@ -700,28 +797,35 @@ export class SessionEventHandler {
           // Without this refinement the part stays as "Task running …"
           // forever, both in the live UI and in the cached message log
           // served on page refresh.
-          const carriesContent =
-            extractProgressText(update.content ?? null) !== null;
-          if (session && (update.status === "in_progress" || carriesContent)) {
-            // Direct execution signal FOR THIS toolCallId: an SDK heartbeat
-            // (status in_progress, possibly with elapsedTimeSeconds) or a
-            // content-bearing progress update.
-            const meta = (update as {
-              _meta?: { claudeCode?: { toolResponse?: { elapsedTimeSeconds?: number } } };
-            })._meta;
-            const elapsedS = meta?.claudeCode?.toolResponse?.elapsedTimeSeconds;
+          // Progress text for THIS call: ACP content blocks, or — codex-acp — an MCP
+          // `notifications/progress` message forwarded as a `_meta`-only update.
+          const progressText =
+            extractProgressText(update.content ?? null) ?? extractMcpOutputDelta(update);
+          const meta = (update as {
+            _meta?: { claudeCode?: { toolResponse?: { elapsedTimeSeconds?: number } } };
+          })._meta;
+          const elapsedS = meta?.claudeCode?.toolResponse?.elapsedTimeSeconds;
+          if (session && (update.status === "in_progress" || progressText !== null)) {
+            // Direct execution signal FOR THIS toolCallId: an SDK heartbeat (status
+            // in_progress, possibly with elapsedTimeSeconds) or a text-bearing update.
             const runningAt =
-              typeof elapsedS === "number"
-                ? Date.now() - Math.round(elapsedS * 1000)
-                : Date.now();
+              typeof elapsedS === "number" ? Date.now() - Math.round(elapsedS * 1000) : Date.now();
             this.markToolCallRunning(sessionId, session, update.toolCallId, runningAt);
-          } else if (session) {
-            // Refinement update (no status, no content): the assistant
-            // message finished streaming — execution begins now. Flip the
-            // OLDEST pending call in the holding message.
+          } else if (session && (update.rawInput !== undefined || update.title != null)) {
+            // Refinement update (no status, no text, carries rawInput/title): the
+            // assistant message finished streaming — execution begins now. Flip the
+            // OLDEST pending call in the holding message. A `_meta`-only update (codex
+            // terminal / MCP output, claude's PostToolUse meta) is NOT one: it names a
+            // specific call, and inferring "the oldest" from it flipped the wrong row.
             const holder = this.findAgentMessageWithToolCall(session, update.toolCallId);
             if (holder) this.markOldestPendingRunning(sessionId, session, holder);
           }
+
+          // An ordinary tool call's `rawInput` is empty at content_block_start
+          // and arrives here; the subagent branch below is the same
+          // refinement for a dispatch. Caches it AND emits it, so the live row
+          // stops showing `{}`.
+          this.adoptToolCallArgs(sessionId, session, update.toolCallId, update.rawInput);
 
           const refined = this.refineSubagentFromUpdate(
             session,
@@ -738,46 +842,35 @@ export class SessionEventHandler {
             });
           }
 
-          const progressText = extractProgressText(update.content ?? null);
+          const progressToolId = toolIdForCall(update.title, update.rawInput, updateMeta(update));
           if (progressText !== null) {
-            this.emit(sessionId, {
-              type: "agent-tool-progress",
-              toolCallId: update.toolCallId,
-              toolId: fromAnyToolName(update.title ?? ""),
-              rawTitle: update.title ?? "",
-              text: progressText,
-            });
-            // Patch the message cache so a fresh /api/agent/messages
-            // fetch (e.g. after page refresh) returns the latest
-            // progress with the call. The matching part might be a
-            // `tool-call` (regular tool) OR a `subagent` (Task/Agent
-            // dispatch) — both carry an optional `progress` field.
-            if (session) {
-              const agentMsg = this.findAgentMessageWithToolCall(
-                session,
-                update.toolCallId,
-              );
-              if (agentMsg) {
-                const idx = agentMsg.parts.findIndex(
-                  (p) =>
-                    (p.type === "tool-call" || p.type === "subagent") &&
-                    p.toolCallId === update.toolCallId,
-                );
-                if (idx !== -1) {
-                  const old = agentMsg.parts[idx];
-                  if (old.type === "tool-call" || old.type === "subagent") {
-                    agentMsg.parts[idx] = { ...old, progress: progressText };
-                  }
-                }
-              }
-            }
+            this.textProgressCalls.add(update.toolCallId);
+            this.applyProgressText(sessionId, session, update.toolCallId, progressToolId, update.title ?? "", progressText);
+          } else if (
+            typeof elapsedS === "number" &&
+            session !== undefined &&
+            session.isReplaying !== true &&
+            !this.textProgressCalls.has(update.toolCallId) &&
+            this.findAgentMessageWithToolCall(session, update.toolCallId)?.parts.some(
+              (p) => p.type === "tool-call" && p.toolCallId === update.toolCallId,
+            ) === true
+          ) {
+            // Claude's heartbeat carries no text at all, so a tool with no progress of its
+            // own shows how long it has run — until real text arrives. Tool rows only: a
+            // subagent card has its own progress.
+            this.applyProgressText(sessionId, session, update.toolCallId, progressToolId, update.title ?? "", formatElapsedProgress(elapsedS));
           }
           break;
         }
 
         // status === "completed" || status === "failed" — emit final result.
+        // Some agents send the tool's input only with the completion; that is
+        // still the first and only chance to record what the call was made
+        // with, and the live row's last chance to stop showing `{}`.
+        this.textProgressCalls.delete(update.toolCallId);
+        this.adoptToolCallArgs(sessionId, session, update.toolCallId, update.rawInput);
         const rawTitle = update.title ?? "";
-        const toolId = fromAnyToolName(rawTitle);
+        const toolId = toolIdForCall(rawTitle, update.rawInput, updateMeta(update));
         const result = update.rawOutput;
 
         // Detect subagent completions by either name OR by checking
@@ -1129,6 +1222,70 @@ export class SessionEventHandler {
    * Without this, subagent cards stay stuck on description="Task" with
    * empty prompt for the entire run and on every replay afterward.
    */
+  /**
+   * Adopt a `tool_call_update`'s `rawInput` as an ordinary tool call's `args`
+   * when the call was created without any.
+   *
+   * claude-agent-acp emits `tool_call` at content_block_start, BEFORE the
+   * tool's input has finished streaming, so `rawInput` is empty there and the
+   * real arguments only ever arrive on an update. Nothing consumed them for a
+   * non-subagent call, so the cached part — which is what
+   * `GET /api/agent/messages` serves, and therefore what a page refresh and
+   * the skill-eval transcript render — kept an empty `{}` forever.
+   *
+   * Monotone rather than fill-once: an in-flight update can carry a PARTIAL
+   * input (the JSON is still streaming), so a later, fuller one must be able
+   * to replace it — but an update carrying less than what is cached, or
+   * nothing at all, never removes anything.
+   */
+  private fillToolCallArgsFromUpdate(
+    session: SessionEntry | undefined,
+    toolCallId: string,
+    rawInput: unknown,
+  ): boolean {
+    if (!session) return false;
+    if (!rawInput || typeof rawInput !== "object") return false;
+    if (Object.keys(rawInput as Record<string, unknown>).length === 0) return false;
+    const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
+    if (!agentMsg) return false;
+    const idx = agentMsg.parts.findIndex(
+      (p) => p.type === "tool-call" && p.toolCallId === toolCallId,
+    );
+    if (idx === -1) return false;
+    const old = agentMsg.parts[idx] as Extract<AgentMessagePart, { type: "tool-call" }>;
+    const known =
+      old.args && typeof old.args === "object"
+        ? Object.keys(old.args as Record<string, unknown>).length
+        : old.args === undefined || old.args === null
+          ? 0
+          : Infinity; // a non-object args came from somewhere that knew better
+    if (Object.keys(rawInput as Record<string, unknown>).length <= known) return false;
+    agentMsg.parts[idx] = { ...old, args: rawInput };
+    return true;
+  }
+
+  /**
+   * Cache the late-arriving input AND put it on the wire.
+   *
+   * The earlier fix addressed the transcript side only: the cached part got the real
+   * arguments, so a page refresh showed them, but a user WATCHING the session
+   * live saw every tool call with `{}` for its whole duration — there was no
+   * event carrying the update and no reducer case for one.
+   *
+   * The emit is gated on the cache having actually taken the value, so the
+   * live stream and `GET /api/agent/messages` can never disagree about what a
+   * call was made with: one monotone rule, applied once.
+   */
+  private adoptToolCallArgs(
+    sessionId: string,
+    session: SessionEntry | undefined,
+    toolCallId: string,
+    rawInput: unknown,
+  ): void {
+    if (!this.fillToolCallArgsFromUpdate(session, toolCallId, rawInput)) return;
+    this.emit(sessionId, { type: "agent-tool-args", toolCallId, args: rawInput });
+  }
+
   private refineSubagentFromUpdate(
     session: SessionEntry | undefined,
     toolCallId: string,
@@ -1223,6 +1380,16 @@ export class SessionEventHandler {
       if (hit) return msg;
     }
     return null;
+  }
+
+  /** True once the call's holder carries its `tool-result` — the terminal state both
+   *  completion paths (the ACP update and a job-terminal finalize) write. */
+  private hasToolResult(session: SessionEntry, toolCallId: string): boolean {
+    return (
+      this.findAgentMessageWithToolCall(session, toolCallId)?.parts.some(
+        (p) => p.type === "tool-result" && p.toolCallId === toolCallId,
+      ) === true
+    );
   }
 
   /** Flip a cached tool-call part to "running" (idempotent) and emit
@@ -1342,6 +1509,8 @@ function clearTransientStatus(
  *  reads as what it is. The old line just kept the last countdown it ever
  *  computed, which is how "ETA 1m 12s" survived fifteen minutes on screen. */
 export function formatJobProgressText(payload: JobProgressPayload): string {
+  // A non-job tool's own line (mcp/tools/tool-progress.ts): shown verbatim.
+  if (typeof payload.message === "string" && payload.message.trim() !== "") return payload.message.trim();
   const pct =
     payload.total > 0 ? Math.floor((payload.done / payload.total) * 100) : 0;
   const eta = payload.etaMs != null ? formatEta(payload.etaMs) : null;
@@ -1368,7 +1537,6 @@ function prettyTitleForKind(
   const titles: Record<string, string> = {
     music_generate: "Music generated",
     tracking: "Tracking finished",
-    tracking_provider: "Tracking finished",
     whisper_model_download: "Whisper model ready",
     music_model_download: "Music model ready",
     tts_model_download: "TTS model ready",
@@ -1396,4 +1564,23 @@ function extractProgressText(
   }
   const joined = texts.join("\n").trim();
   return joined.length > 0 ? joined : null;
+}
+
+/**
+ * codex-acp forwards an MCP `notifications/progress` message as
+ * `tool_call_update { toolCallId, _meta: { mcp_output_delta: { data } } }` with no status
+ * and no content (codex-acp 1.10.0 `createMcpToolProgressEvent`, `dist/index.js:24859-24869`).
+ * Returns the trimmed text, or null when absent or blank.
+ */
+export function extractMcpOutputDelta(update: unknown): string | null {
+  const data = (update as { _meta?: { mcp_output_delta?: { data?: unknown } } } | null)?._meta
+    ?.mcp_output_delta?.data;
+  if (typeof data !== "string") return null;
+  const text = data.trim();
+  return text.length > 0 ? text : null;
+}
+
+/** The progress line for a call whose only signal is Claude's heartbeat. */
+export function formatElapsedProgress(seconds: number): string {
+  return `running for ${formatEta(seconds * 1000)}`;
 }

@@ -28,4 +28,12 @@ describe("formatJobProgressText", () => {
       }),
     ).toBe("segment 2/7 — tracking 5/41 frames (12%)");
   });
+  it("a non-job tool's message is shown verbatim; a blank one falls back to the job line", () => {
+    expect(
+      formatJobProgressText({ jobId: "", kind: "", done: 5000, total: 20000, unit: "", etaMs: null, message: "sleeping — 5/20s" }),
+    ).toBe("sleeping — 5/20s");
+    expect(
+      formatJobProgressText({ jobId: "j", kind: "tracking", done: 1, total: 2, unit: "frames", etaMs: null, message: "   " }),
+    ).toBe("tracking 1/2 frames (50%)");
+  });
 });

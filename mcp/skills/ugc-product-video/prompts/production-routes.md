@@ -24,11 +24,11 @@ The A–E letters are **internal taxonomy only — never expose them to the user
 | User wants a head-to-head comparison | **"run all 5"** | Spawn 5 sibling pieces. Cost adds up (~$5–15 for five 30 s pieces). |
 
 **Path identity reminder (INTERNAL — never expose these letters to the user):**
-- A — character-swap on source via `fal-ai/wan/v2.2-14b/animate/replace`
-- B — restyle on source via `decart/lucy-restyle` (or `fal-ai/wan/v2.2-a14b/video-to-video` if strength control needed)
+- A — character-swap on source
+- B — restyle on source
 - C — variation stitch: regenerate the character-driven surrounding with AI + reuse the source's identity-neutral product-demo (GATED: surface the warning verbatim before starting)
-- D — generate from scratch with extend chain (`fal-ai/veo3.1/fast/extend-video` default; if the picked model lacks extend, switch to E)
-- E — generate from scratch with multi-clip stitch (any i2v model that lacks extend; expects visible seams)
+- D — generate from scratch with an extend chain (if the picked model lacks extend, switch to E)
+- E — generate from scratch with multi-clip stitch (any i2v model the user picked that lacks extend; expects visible seams)
 
 **User-facing language rule.** "Path A/B/C/D/E" is internal taxonomy — the user has no idea what it means. NEVER ask "Path D confirmed?" or name a path letter to the user. Translate to one plain sentence each:
 - A → "swap the person in your video for a new character, keeping your original footage"
@@ -44,11 +44,15 @@ If the user already told you what they want (e.g. "generate it fresh, don't reus
 ### Per-path default video models
 
 `videoModel` defaults are set by path. The user can override.
-- Path A: `fal-ai/wan/v2.2-14b/animate/replace` (no other strong option)
-- Path B: `decart/lucy-restyle` (cheap) or `fal-ai/wan/v2.2-a14b/video-to-video` (strength controllable)
-- Path C: `fal-ai/veo3.1/fast/image-to-video` (best for AI infills that need to mimic the source; identity-filter avoided via image-to-video + action-only prompts)
-- Path D: `fal-ai/veo3.1/fast/extend-video` (the only proven extend-capable model on fal today; if user picks another, agent must verify extend support at Step 4 dispatch)
-- Path E: any i2v model the user picked that lacks extend (kling, hunyuan, etc.)
+- Path A — the character-swap endpoint (no other strong option)
+- Path B — a cheap restyle default, or a strength-controllable video-to-video alternative
+- Path C — an image-to-video endpoint (best for AI infills that need to mimic the source; identity-filter avoided via image-to-video + action-only prompts)
+- Path D — the proven extend-capable endpoint (if the user picks another model, verify extend support at Step 4 dispatch)
+- Path E — any i2v model the user picked that lacks extend
+
+**Which endpoint each route uses on your provider is in
+`../references/providers/<id>.md`.** The route is the editorial decision — where the footage
+comes from; the endpoint is the provider detail. Pick the route first.
 
 ---
 
@@ -57,19 +61,19 @@ If the user already told you what they want (e.g. "generate it fresh, don't reus
 Build the beat plan from the Stage 0.5 (and optionally 0.6) analysis. Per-path rules:
 
 - **Path A (character-swap on source):**
-  - Every segment where the presenter is visible → `replace` operation. Saved as a video clip via `libi.upload_file` after `fal-ai/wan/v2.2-14b/animate/replace` returns.
+  - Every segment where the presenter is visible → `replace` operation. Saved as a video clip via `libi.upload_file` after the route-A endpoint returns.
   - Every segment where the presenter is NOT visible (b-roll, hands-only, product close-up, endcard) → REUSE verbatim via `libi.trim_video` on the source.
   - Audio policy: keep source on every scene (inline AudioClips auto-create; agent does nothing).
 
 - **Path B (restyle on source):**
-  - Every segment → `restyle` operation via `decart/lucy-restyle` (or `wan v2v` with strength).
+  - Every segment → `restyle` operation via the route-B endpoint (the cheap default, or the video-to-video alternative with strength).
   - No REUSE / REGEN split — the whole timeline is the restyled source.
   - Audio policy: if Lucy is used (drops audio), add a standalone AudioClip from the source file synced to the timeline (or accept silent). If Wan v2v is used, audio passes through.
 
 - **Path C (stitch source + AI infill — GATED):**
   - **Partition + voice owned by `stitching-multi-clip` — load it.** It decides REPLACE (new AI surrounding) vs REUSE (identity-neutral product demo), runs the no-reusable-section STOP gate, and the always-ask stitch voice policy. Mark each beat REPLACE (AI) or REUSE (trim source) per that skill — don't re-derive the rule here.
   - REGEN/AI prompts MUST include the Stage 0.6 per-shot style descriptors verbatim.
-  - Audio routing is the `stitching-multi-clip` always-ask voice gate (reuse the source voice vs a fresh one; `@Audio1` sync by default, ElevenLabs only on an explicit voice-change) — see Stage 6.
+  - Audio routing is the `stitching-multi-clip` always-ask voice gate (reuse the source voice vs a fresh one; the `@Audio1` carry by default, a separate TTS voice only on an explicit voice-change) — see Stage 6.
 
 - **Path D (extend chain):**
   - Not applicable — there's no per-beat reuse plan. The script is inspiration only.
@@ -104,7 +108,7 @@ Record the plan as the piece's `description` snapshot summary so a later agent r
 
 If the beat plan has a `textOverlay` field (the planned on-screen text), that text is the agent's TODO for Stage 7 — not the model's job.
 
-**Physical-manipulation beats (`physicalActionVerification: true`) — FLF-first + model ladder.** For any beat where a person manipulates a product (applying, peeling, pressing, pouring, gripping-and-releasing), you MUST follow `physical-action-video`: generate clean start + end keyframes and use a **first-last-frame** endpoint (default `fal-ai/veo3.1/fast/first-last-frame-to-video`), one dominant action, an object-permanence anchor ("the strip stays on the nail throughout"), tight shot, surgical negatives, ~4s. **Do NOT render a manipulation beat as a plain text/i2v shot inside a continuous extend chain** — that is exactly what produced the wiggling-then-disappearing nail strip in QA. Isolate the manipulation as its own FLF clip (Path E-style), and if it still fails Stage 4.5 after escalating Tier 0 → Kling 3.0 → Seedance 2.0, fall back to the **editorial before/after cut** (before-state clip → hard cut → after-state clip) or a real-product-photo overlay at the reveal. Background + citations: [docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md](../../../../docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md).
+**Physical-manipulation beats (`physicalActionVerification: true`) — FLF-first + model ladder.** For any beat where a person manipulates a product (applying, peeling, pressing, pouring, gripping-and-releasing), you MUST follow `physical-action-video`: generate clean start + end keyframes and use a **first-last-frame** endpoint (your provider's default is named in `physical-action-video`'s provider reference), one dominant action, an object-permanence anchor ("the strip stays on the nail throughout"), tight shot, surgical negatives, ~4s. **Do NOT render a manipulation beat as a plain text/i2v shot inside a continuous extend chain** — that is exactly what produced the wiggling-then-disappearing nail strip in QA. Isolate the manipulation as its own FLF clip (Path E-style), and if it still fails Stage 4.5 after escalating `physical-action-video`'s ladder (Tier 0 → Tier 1 → Tier 2), fall back to the **editorial before/after cut** (before-state clip → hard cut → after-state clip) or a real-product-photo overlay at the reveal. Background + citations: [docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md](../../../../docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md).
 
 Each path is a self-contained sub-flow. Track progress with TodoWrite items per beat.
 
@@ -113,30 +117,30 @@ Each path is a self-contained sub-flow. Track progress with TodoWrite items per 
 For each `replace` beat from Stage 0.75:
 
 1. `libi.trim_video` the source to the beat's `[startSeconds, endSeconds]` range → temp file.
-2. Upload the trimmed segment to fal CDN via `fal-ai.upload_file` → segment URL.
-3. Call `fal-ai/wan/v2.2-14b/animate/replace` with:
+2. Put the trimmed segment on the provider's CDN with the provider's own upload tool → segment URL.
+3. Call the route-A endpoint from `../references/providers/<id>.md` with:
    - `video_url`: the segment URL
    - `reference_image_url`: the character ref portrait from Stage 1
    - any per-shot prompt details from Stage 0.5 (lighting, framing, mood notes)
-4. Wait via `check_job`, fetch result URL, download to a temp path. Between `check_job` polls, use the `libi.sleep` tool to wait ~20s — see `ai-asset-generation` Step 8 for the full polling cadence rationale.
-5. `libi.upload_file` with the new clip. **Pass `aiGeneration` with every field**: `provider: "fal-ai"`, `model: "fal-ai/wan/v2.2-14b/animate/replace"`, the full prompt, `costEstimate` (from `get_pricing`), `startedAt`/`completedAt` ISO timestamps, `durationMs`, `providerJobId`, `attemptNumber`.
+4. Wait for the job (poll with your provider's status tool), fetch the result URL, download to a temp path. Between polls, use the `libi.sleep` tool to wait ~20s — the full polling cadence is in `ai-asset-generation`'s provider reference (`references/providers/<id>.md` under that skill).
+5. `libi.upload_file` with the new clip. **Pass `aiGeneration` with every field**: `provider: <your provider's catalog id>`, `model: <the exact endpoint id you submitted>`, the full prompt, `costEstimate` (from your provider's pricing tool), `startedAt`/`completedAt` ISO timestamps, `durationMs`, `providerJobId`, `attemptNumber`.
 6. Append the notes lineage line via `libi.update_file_notes`.
 
-For each REUSE beat: just `libi.trim_video` the source. No fal calls.
+For each REUSE beat: just `libi.trim_video` the source. No provider calls.
 
 ### Path B — Restyle on source
 
 For each beat:
 1. `libi.trim_video` the source segment → temp file.
-2. Upload to fal CDN.
-3. Call `decart/lucy-restyle` (default, $0.01/sec) OR `fal-ai/wan/v2.2-a14b/video-to-video` (if user wants strength control). Pass the style prompt the user provided in Stage 0.
+2. Put it on the provider's CDN with the provider's own upload tool.
+3. Call the route-B endpoint from `../references/providers/<id>.md` — it lists a cheap default and a strength-controllable alternative. Pass the style prompt the user provided in Stage 0.
 4. Save the result via `libi.upload_file` with `aiGeneration` populated. Append notes line.
 
-**Audio caveat:** if using `decart/lucy-restyle`, the output is silent — Lucy drops the audio track. After the timeline is built, add a standalone AudioClip pointing at the source file with the matching scene's time range. If using Wan v2v, audio passes through and no extra step is needed.
+**Audio caveat:** if using the cheap restyle default (Lucy), the output is silent — it drops the audio track. After the timeline is built, add a standalone AudioClip pointing at the source file with the matching scene's time range. If using Wan v2v, audio passes through and no extra step is needed.
 
 ### Path C — Stitch source + AI infill (surface the warning FIRST)
 
-**Before any fal call, surface this warning verbatim:**
+**Before any generation call, surface this warning verbatim:**
 
 > Stitching path: some scenes will be your original footage, others AI-generated. The seams may look obvious if the AI generations don't match your source's lighting, color grade, framing, and camera shake. To minimize this, I'll run a paid script analysis on your source (~$0.15) and pass that style summary into every AI generation prompt. Still want to proceed with C, or would you prefer D (fully AI, no stitching seams) or A (presenter-swap on your real footage, no seams)?
 
@@ -155,13 +159,14 @@ Then:
 2. For each REUSE beat: `libi.trim_video` the source.
 3. For each REPLACE (AI) beat:
    - **Talking-head beat (the variation default — a new on-camera character):** generate on
-     `bytedance/seedance-2.0/reference-to-video` (native audio + voice carry). Pass the new
-     character's start frame as `@Image1` and the main character's voice sample as `@Audio1`
-     (both LOCAL files → `libi.upload_file_to_fal` first — NEVER read `FAL_KEY` or `curl` fal
-     storage yourself), `generate_audio: true`, and the spoken line in the prompt. See
+     the reference-to-video endpoint (native audio + voice carry) (see
+     `../references/providers/<id>.md`). Pass the new character's start frame as `@Image1` and
+     the main character's voice sample as `@Audio1` (both LOCAL files → your provider MCP's own
+     upload tool first — never read a provider key or push bytes to its storage yourself),
+     `generate_audio: true`, and the spoken line in the prompt. See
      `stitching-multi-clip` step 3 + `voiceover-production` for the one-voice rule.
-   - **Faceless product / b-roll beat (no character):** call `fal-ai/veo3.1/fast/image-to-video`
-     (or Seedance i2v) with the product/scene ref + an action-only prompt, augmented with the
+   - **Faceless product / b-roll beat (no character):** call the image-to-video endpoint your provider
+     reference names (`../references/providers/<id>.md`) with the product/scene ref + an action-only prompt, augmented with the
      matching shot's Stage 0.6 descriptor: `<engineered prompt> | Source-style guidance: <shot
      taxonomy>, <lens>, <lighting>, <color>, <motion>`. No identity descriptors in the prompt
      (those go in the image input) — this also sidesteps Veo's identity filter (the Phase 4 fix).
@@ -173,39 +178,39 @@ Then:
 
 **Pre-flight: verify extend-capability of the picked model.**
 
-If `videoModel` is NOT `fal-ai/veo3.1/fast/extend-video`:
-1. Call `fal-ai.get_model_schema` on the picked model.
+If `videoModel` is NOT the extend endpoint named in `../references/providers/<id>.md`:
+1. Call your provider's schema tool on the picked model.
 2. Look for an `extend` action OR an input that accepts the prior generation as `source_video_url` / equivalent.
 3. If absent, surface this warning verbatim:
 
 > The model you picked (`<model id>`) doesn't expose an extend/continuation API. To hit your target length of `<N>s` I have two options:
 >
-> (a) **Switch to an extend-capable model** (recommended) — `veo3.1/fast/extend-video` is the proven path. I'll regenerate from the bootstrap with that.
+> (a) **Switch to an extend-capable model** (recommended) — the extend endpoint in `../references/providers/<id>.md` is the proven path. I'll regenerate from the bootstrap with that.
 >
 > (b) **Multiple-clip stitch with the same character ref (path E)** — I'll generate N separate clips from the same character image, each with a carefully-engineered prompt that tries to match the visual continuity (same lighting, framing, wardrobe, background). The seams may be visible because each clip is independently generated — the model has no memory of the last frame of the previous clip. I'll run Stage 4.5 validation on each clip to catch obvious mismatches, but expect 30–50 % to need regeneration to converge on consistent look.
 >
 > Which do you want?
 
-If user picks (a): switch `videoModel` to `fal-ai/veo3.1/fast/extend-video`, continue with the flow below.
+If user picks (a): switch `videoModel` to the extend endpoint from the reference, continue with the flow below.
 If user picks (b): switch `pathChoice` to `E` and jump to Path E flow.
 
 **D flow (the extend chain returns the FULL clip on each call — do NOT trim):**
 
-Important: Veo 3.1's `extend-video` endpoint returns the full chain on every call, not just the new tail. So if your bootstrap was 8 s and you extend by 7 s, the return is a single 15-second file containing the full bootstrap+extension. Treat each extend return as the new "current full clip" — do not slice it.
+Important: the extend endpoint returns the full chain on every call, not just the new tail (Veo 3.1's does — `../references/providers/<id>.md` says so for yours). So if your bootstrap was 8 s and you extend by 7 s, the return is a single 15-second file containing the full bootstrap+extension. Treat each extend return as the new "current full clip" — do not slice it.
 
 1. Stage 0.6 paid script analysis if `mimicSource` is set and user opted in (covered in Stage 0.6).
 2. Stage 1 character image via the `realistic-image-generation` realism picker.
 3. **Folder for the chain:** create one folder for the extend chain via `libi.create_asset_folder` (name it after the piece). Keep the resulting `folderId` in your TodoWrite — every clip in the chain goes into it.
 3b. **Bootstrap clip:**
-   - Call `fal-ai/veo3.1/fast/image-to-video` with the character ref + Beat 1's engineered prompt (action-only).
-   - **veo3.1/fast prompt format (Fast ≠ full Veo 3.1):** feed ONE continuous action description. Do NOT use timestamp-bracketed multi-beat decomposition (`[00:00-00:02] …`) — the Fast endpoint misparses the brackets as missing-attachment refs and returns `no_media_generated` / Unprocessable Entity (a failed, unbilled round-trip). Timestamp decomposition is a full-Veo-3.1 feature only. Describe the single motion you want over the clip; if the action is too long for one clip, that's what the extend loop (step 4) is for.
-   - Save the result via `libi.upload_file` as `<piece-name>-v1.mp4` with `folderId: <chain folderId>` + `aiGeneration` (model: `fal-ai/veo3.1/fast/image-to-video`, attemptNumber: 0, etc.) + notes lineage line.
+   - Call the image-to-video endpoint with the character ref + Beat 1's engineered prompt (action-only).
+   - **Prompt format:** check `../references/providers/<id>.md` for the tier-specific prompt format warnings before composing. Describe the single motion you want over the clip; if the action is too long for one clip, that's what the extend loop (step 4) is for.
+   - Save the result via `libi.upload_file` as `<piece-name>-v1.mp4` with `folderId: <chain folderId>` + `aiGeneration` (model: the image-to-video endpoint id you submitted, attemptNumber: 0, etc.) + notes lineage line.
    - Keep the resulting `fileId` in your TodoWrite — it's the current full clip.
 4. **Extend loop — each iteration produces a NEW full-length file, NOT a tail:**
-   - For each subsequent beat: call `fal-ai/veo3.1/fast/extend-video` with `source_video_url` = the previous extend's output (or the bootstrap clip on the first iteration) + the beat's engineered prompt.
-   - Between `check_job` polls inside the `wait via check_job` step, use the `libi.sleep` tool to wait ~20s — see `ai-asset-generation` Step 8 for the cadence rationale.
+   - For each subsequent beat: call the extend endpoint with `source_video_url` = the previous extend's output (or the bootstrap clip on the first iteration) + the beat's engineered prompt.
+   - Between polls while waiting for the job, use the `libi.sleep` tool to wait ~20s — the cadence rationale is in `ai-asset-generation`'s provider reference.
    - Save the returned full-length file via `libi.upload_file` using `folderId: <chain folderId>` — each extend take is its own asset, grouped in the chain folder alongside the prior takes.
-   - aiGeneration: `model: "fal-ai/veo3.1/fast/extend-video"`, `attemptNumber: N` where N is the iteration index, `providerJobId`, full prompt, cost.
+   - aiGeneration: `model: <the extend endpoint id you submitted>`, `attemptNumber: N` where N is the iteration index, `providerJobId`, full prompt, cost.
    - Notes line includes `parent=<previous file id>` so the chain is reconstructible.
 5. Continue until cumulative duration ≥ target.
 6. **Track the latest extend as the current full clip** in your TodoWrite once you're happy with the final length. The prior takes stay in the folder for rollback.
@@ -261,7 +266,7 @@ while currentDuration < beat.targetDuration:
 join the takes into one file (libi.concat_videos)  # stream-copy when same codec; expected for same-model outputs
 ```
 
-**Detecting native extension support:** at start of Stage 4, call `libi.list_mcp_servers` to find the fal-ai tool surface (or just inspect your deferred tool list). If you see a tool name matching `*extend*`, `*continue*`, or `*video-to-video*` from fal-ai, prefer it — one fewer artifact and no codec mismatch. Otherwise use the image-to-video fallback.
+**Detecting native extension support:** at start of Stage 4, check what your video provider offers — `libi.list_providers()` (the gate in `SKILL.md`) tells you which provider is connected, and `../references/providers/<id>.md` says whether it has a native extend / continue / video-to-video capability and how to confirm it against the schema. Prefer native extension when it exists — one fewer artifact and no codec mismatch. Otherwise use the image-to-video fallback.
 
 Stitched chunks should be the same codec/resolution/fps as the base (same model = usually true). `libi.concat_videos` will choose stream-copy automatically when codecs match.
 
@@ -271,9 +276,9 @@ Stitched chunks should be the same codec/resolution/fps as the base (same model 
 
 **Audio policy is owned by the `voiceover-production` skill — load it.** This stage
 only notes the per-path *routing* specifics. The universal rules (native audio
-always; multi-clip voice via `reference-to-video` `@Audio1`; mute only for real
-source footage; a separate voiceover is explicit opt-in, ElevenLabs not Kokoro for
-UGC) are NOT restated here — `voiceover-production` is the single source of truth.
+always; multi-clip voice carried via a reference-conditioned generation, `@Audio1`;
+mute only for real source footage; a separate voiceover is never a default) are NOT
+restated here — `voiceover-production` is the single source of truth.
 
 The audio policy depends entirely on `pathChoice`. Get this wrong and the output sounds incoherent — voice tones changing between scenes, dialog overlapping, sections going silent (Phase 4 round 1 had all three).
 
@@ -281,7 +286,7 @@ The audio policy depends entirely on `pathChoice`. Get this wrong and the output
 |---|---|---|
 | **A** | Keep source audio on every layer (inline AudioClips auto-create). | None — `libi.add_overlay({ kind: "video" })` auto-binds the inline clip. Do NOT call `audio_remove_clip`. |
 | **B** | If using Wan v2v: same as A (model preserves audio). If using Lucy: model drops audio → call `libi.audio_add_clip` with `kind: "standalone"` and `fileId: <sourceFileId>` to add the source's audio over the restyled visual. | Conditional on which B variant. |
-| **C** (variation stitch) | Owned by `stitching-multi-clip`'s **always-ask** voice gate: reuse the source voice (KEEP the reused beat's VO + sample it for `@Audio1`) or a fresh AI voice — `@Audio1` sync by default, ElevenLabs only on an explicit voice-change. | Follow `stitching-multi-clip` step 3 + `voiceover-production` Rule 5. Whether a reused scene's inline source audio is **kept** (voice-reuse) or **removed** (fresh-voice) is decided there — do NOT blanket-mute. The only hard invariant: never TWO different voices on one scene (the doubled-audio bug). |
+| **C** (variation stitch) | Owned by `stitching-multi-clip`'s **always-ask** voice gate: reuse the source voice (KEEP the reused beat's VO + sample it for `@Audio1`) or a fresh AI voice — the `@Audio1` carry by default, a separate TTS voice only on an explicit voice-change (which is `voice-replacement`, after the video exists). | Follow `stitching-multi-clip` step 3 + `voiceover-production` Rule 4. Whether a reused scene's inline source audio is **kept** (voice-reuse) or **removed** (fresh-voice) is decided there — do NOT blanket-mute. The only hard invariant: never TWO different voices on one scene (the doubled-audio bug). |
 | **D** (fully-AI extend chain) | **Keep native model audio** (`generate_audio = true`). | None — inline clips inherit the native audio. See `ai-asset-generation` Step 6.6. |
 | **E** (fully-AI multi-clip) | **Keep native model audio** (`generate_audio = true`) on every generated clip — do NOT mute, do NOT lay a separate VO by default. | None by default. Each AI clip is generated voiced. For cross-clip voice consistency on a >15s ad, carry clip-1's voice via the `reference-to-video` endpoint (`@Audio1`) — see `ai-asset-generation` Step 6.6 "multi-clip voice carry". |
 
@@ -298,12 +303,13 @@ The audio policy depends entirely on `pathChoice`. Get this wrong and the output
 > - **Fresh voice:** the reused scene's inline source audio MUST be removed (`libi.audio_remove_clip` at scene-creation) so the source voice doesn't play under the new AI voice.
 > Either way, PROVE it at Stage 8: read the composition back and confirm **no scene carries two voices**. (Paths D/E keep their native AI audio.)
 
-**Voice file generation** (Path C source stitch, OR any path where the user explicitly
-opted out of native audio): the provider choice, the consistent-voice-ID rule, the
-`needs_config` STOP-and-ASK flow, and the never-fall-back-to-Kokoro-for-UGC rule are all
-owned by **`voiceover-production`** — load it and follow it. This stage does not restate
-them.
+**Voice** (Path C source stitch, OR any path where the user explicitly opted out of
+native audio): the always-ask gate, which voice becomes the spine, and how it is carried
+across the new AI beats are owned by **`voiceover-production`** — load it and follow it.
+Deliberately giving the piece a voice that is neither the source's nor the generated one
+is **`voice-replacement`**, a separate user-triggered flow that runs after the video
+exists. This stage does not restate either.
 
-**No music in v2 default flow.** If the user explicitly asks for music: `local-music` (free, ACE-Step) or `elevenlabs.compose_music` (paid). Add via `libi.audio_add_clip` with `kind: "standalone"`. Optionally enable sidechain ducking via `libi.audio_duck_enable` so music dips under the VO.
+**No music in v2 default flow.** If the user explicitly asks for music: `local-music` (free, ACE-Step, on-device) or a paid `music` provider — see `../references/providers/<id>.md`. Add via `libi.audio_add_clip` with `kind: "standalone"`. Optionally enable sidechain ducking via `libi.audio_duck_enable` so music dips under the VO.
 
 **User override:** if user says "I don't like the audio in path A/B/D, give me a clean VO instead" — switch that path to the C/E audio rule (mute + standalone VO).

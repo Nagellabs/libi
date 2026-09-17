@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { Film, Folder, MessageSquare, Plus, PanelRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { HeaderToggleButton } from "./header-toggle-button";
@@ -19,6 +20,9 @@ interface NoPieceEmptyStateProps {
   onOpenPiece?: (pieceId: string) => void;
   /** True on a brand-new install: the library loaded and is genuinely empty. */
   firstRun?: boolean;
+  /** Set when the active agent can't chat yet: the server's one-line reason and
+   *  where its setup lives on the Agents page. */
+  setupAgent?: { message: string; href: string };
 }
 
 /**
@@ -41,11 +45,15 @@ interface NoPieceEmptyStateProps {
  * `firstRun` is the brand-new-install mood: the welcome headline instead of
  * "No piece open", and none of the library affordances, because there is no
  * library yet. It renders HERE rather than as its own full-page screen for one
- * load-bearing reason — the whole onboarding (persona modal, connect-an-agent
- * takeover, and the "I'll build you a short example video" demo chip, which
- * lives in the chat panel) is part of this layout. A separate first-run page
+ * load-bearing reason — the whole onboarding (the persona modal, and the "I'll
+ * build you a short example video" demo chip, which lives in the chat panel)
+ * is part of this layout. A separate first-run page
  * replaced the layout, so the only user who never saw the onboarding was the
  * brand-new one it exists for.
+ *
+ * `setupAgent` is the "what do I do now" answer when the agent can't chat yet:
+ * one line saying why and a Set up an agent link — setup itself lives on the
+ * Agents page.
  */
 export function NoPieceEmptyState({
   onCreatePiece,
@@ -57,6 +65,7 @@ export function NoPieceEmptyState({
   pieces,
   onOpenPiece,
   firstRun,
+  setupAgent,
 }: NoPieceEmptyStateProps) {
   const recents = onOpenPiece ? recentPieces(pieces ?? [], RECENT_PIECES_LIMIT) : [];
   // Nothing to browse on a brand-new install, so the labelled Resources button
@@ -104,6 +113,20 @@ export function NoPieceEmptyState({
                 ? "Pick up where you left off, start something new, or ask the agent in chat."
                 : "Create your first piece, or ask the agent in chat to make one for you."}
           </p>
+          {setupAgent && (
+            <div
+              data-testid="setup-agent-notice"
+              className="flex flex-col items-center gap-2"
+            >
+              <p className="max-w-md text-sm text-muted-foreground">{setupAgent.message}</p>
+              <Link
+                href={setupAgent.href}
+                className="cursor-pointer inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Set up an agent
+              </Link>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center justify-center gap-2">

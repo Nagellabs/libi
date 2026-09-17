@@ -113,103 +113,34 @@ export const videoSummarySchema = z.object({
 export type VideoSummary = z.infer<typeof videoSummarySchema>;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Script (provider-driven full-video script)
-// ──────────────────────────────────────────────────────────────────────────────
-
-export const shotSchema = z.object({
-  index: z.number().int().nonnegative(),
-  start: z.number().nonnegative(),
-  end: z.number().nonnegative(),
-  description: z.string().min(1),
-  action: z.string().optional(),
-  camera: z
-    .object({
-      shot: z
-        .enum(["close-up", "medium", "wide", "extreme-wide"])
-        .optional(),
-      angle: z.enum(["eye-level", "high", "low", "dutch"]).optional(),
-      motion: z
-        .enum(["static", "pan", "zoom", "dolly", "tracking", "handheld", "shake"])
-        .optional(),
-      lens: z.string().optional(),
-    })
-    .optional(),
-  lighting: z.string().optional(),
-  mood: z.string().optional(),
-  dialogue: z.string().optional(),
-  text_on_screen: z.array(z.string()).optional(),
-  transition_out: z
-    .enum(["cut", "fade", "dissolve", "wipe", "match"])
-    .optional(),
-});
-
-const scriptMusicSchema = z.object({
-  present: z.boolean(),
-  genre: z.string().optional(),
-  mood: z.string().optional(),
-  tempo: z.string().optional(),
-  instruments: z.array(z.string()).optional(),
-  cues: z
-    .array(
-      z.object({
-        timestamp: z.number().nonnegative(),
-        description: z.string().min(1),
-      }),
-    )
-    .optional(),
-});
-
-const scriptSoundDesignEntrySchema = z.object({
-  timestamp: z.number().nonnegative(),
-  description: z.string().min(1),
-});
-
-const scriptProviderMetaSchema = z.object({
-  name: z.string().min(1),
-  model: z.string().optional(),
-  generatedAt: z.string().min(1),
-  /** Dollar cost of this generation. Real-billing or estimated; see costEstimated. */
-  costUsd: z.number().nullable().optional(),
-  /** True when costUsd is a heuristic estimate (duration × per-second rate),
-   *  false when it came from the provider's billing API. Absent on older rows. */
-  costEstimated: z.boolean().optional(),
-  /** External provider's request/job id (e.g. fal's `request_id`). Persisted
-   *  so the user-initiated "refresh cost" flow can look up the real charge
-   *  later — fal billing data can take hours-to-days to appear. */
-  requestId: z.string().optional(),
-  /** ISO timestamp of the last cost-refresh attempt (success OR still-pending).
-   *  Drives the "Last checked X ago" tooltip surface. Absent before any check. */
-  costLastCheckedAt: z.string().optional(),
-});
-
-export const scriptSchema = z.object({
-  schema_version: z.literal("script_v1"),
-  duration: z.number().nonnegative(),
-  overall_style: z.string().min(1),
-  pacing: z.string().optional(),
-  shots: z.array(shotSchema).min(1),
-  music: scriptMusicSchema,
-  sound_design: z.array(scriptSoundDesignEntrySchema).optional(),
-  dialogue_summary: z.string().optional(),
-  provider: scriptProviderMetaSchema,
-  custom: z.record(z.unknown()).optional(),
-});
-
-export type Shot = z.infer<typeof shotSchema>;
-export type Script = z.infer<typeof scriptSchema>;
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Transcript (word-level timing)
+//
+// The shape is a generic word-level STT token: text, a start/end pair, an
+// optional token class and an optional speaker. It is deliberately WIDER than
+// what any one transcriber emits, because two kinds of producer write it:
+//
+//   - libi's own path, local Whisper (`lib/whisper/transcribe.ts`), which
+//     emits real word tokens only — no spacing, no audio events, no speakers;
+//   - a diarizing transcription MCP the user connected themselves, whose
+//     results the agent saves through `libi.analysis_save_audio_chunk`
+//     (Path B) — libi never calls that provider and cannot constrain it.
+//
+// So the optional fields are tolerance for the second kind, not a description
+// of the first. (Provenance: the enum and the nullable speaker were originally
+// taken from ElevenLabs' scribe_v1 response, the transcriber libi itself used
+// before local Whisper replaced it — that client is gone, the tolerance is
+// not, because Path B still delivers exactly this shape.)
 // ──────────────────────────────────────────────────────────────────────────────
 
 export const transcriptWordSchema = z.object({
   text: z.string(),
   start: z.number().nonnegative(),
   end: z.number().nonnegative(),
-  // ElevenLabs uses these three; allow `audio_event` to pass through (laughter,
-  // music, etc.) and we drop it during sentence aggregation.
+  // `audio_event` (laughter, music, …) passes validation and is dropped during
+  // sentence aggregation; `spacing` tokens carry timing but no speaker.
   type: z.enum(["word", "spacing", "audio_event"]).optional(),
-  // ElevenLabs sometimes returns null for a single-speaker clip — accept null too.
+  // Null, not absent, is what a diarizing producer sends for a single-speaker
+  // clip — accept both.
   speaker_id: z.string().nullable().optional(),
 });
 
@@ -245,7 +176,7 @@ const SENTENCE_PAUSE_THRESHOLD_SECONDS = 1.5;
 const TERMINAL_PUNCTUATION_RE = /[.!?]/;
 
 /**
- * Aggregate ElevenLabs-shaped word objects into sentences.
+ * Aggregate word-level STT tokens into sentences.
  *
  * Rules (in order):
  *   1. End the current sentence when the most recent token's text contains
@@ -278,8 +209,8 @@ export function wordsToSentences(words: TranscriptWord[]): TranscriptSentence[] 
   // The last non-audio_event word we appended — used for gap calculation.
   let prevWordIdx: number | null = null;
   // The last non-audio_event, non-spacing word we appended — used for speaker
-  // comparison ONLY.  ElevenLabs sets speaker_id only on type "word" tokens;
-  // spacing tokens carry no speaker_id.  Comparing against a spacing token's
+  // comparison ONLY.  speaker_id is set only on type "word" tokens; spacing
+  // tokens carry none.  Comparing against a spacing token's
   // null speaker_id would produce false positives on every spacing token in a
   // real multi-speaker transcript.
   let prevRealWordIdx: number | null = null;
@@ -323,8 +254,8 @@ export function wordsToSentences(words: TranscriptWord[]): TranscriptSentence[] 
         flush();
       }
       // Rule 3: speaker change — compare against the most recent REAL word
-      // token (not spacing).  Spacing tokens have no speaker_id on real
-      // ElevenLabs data; using them for comparison would trigger false flushes
+      // token (not spacing).  Spacing tokens carry no speaker_id in real
+      // diarized data; using them for comparison would trigger false flushes
       // on every "speaker_0 → null(spacing) → speaker_0" transition.
       else if (
         prevRealWordIdx !== null &&

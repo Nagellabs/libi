@@ -2,14 +2,15 @@
 id: mimic-video-instagram-reel-reuse-music
 title: Mimic an Instagram reel — download, analyze, plan, storyboard, reuse original music, generate
 skills: [mimic-video, video-planning, video-analysis, audio-analysis, using-storyboard, generic-video, ugc-product-video, music-video-creation, music-creation, ugc-craft, ai-asset-generation, ai-video-models, realistic-image-generation, physical-action-video, voiceover-production, stitching-multi-clip, speech-captions, animated-text-overlays, using-asset-folders, using-snapshot-draft, using-character-library]
-mcps: [YouTube Downloader, Whisper (local STT), fal-ai, ElevenLabs, Local TTS (Kokoro), Local Music (ACE-Step)]
+mcps: [youtube-download, whisper, fal-ai, ElevenLabs, local-tts, local-music]
 agent: claude-code
 runs: 1
 # HEAVY FULL-BUILD over a LIVE network source. The agent must: download a real Instagram
-# reel (yt-dlp), analyze it (frames + transcript + identify the music), plan it as building
-# blocks (video-planning), build it through the Storyboard with sketched keyframes, REUSE the
-# original music track (extract + attach — the music-creation Stage 0.5 reuse path), and
-# generate the clips via fake-fal. Expected wall-clock 25-45 min; whisper bootstraps its model
+# reel (`libi.download_video`, the youtube-download extension), analyze it (frames +
+# transcript + identify the music), plan it as building blocks (video-planning), build it
+# through the Storyboard with sketched keyframes, REUSE the original music track (extract +
+# attach — the music-creation Stage 0.5 reuse path), and generate the clips via fake-fal.
+# Expected wall-clock 25-45 min; whisper bootstraps its model
 # in the hermetic temp home (network) and each fake-fal video placeholder is a real ~1-2 min
 # ffmpeg encode, so a TIMEOUT here is a hardware/network artifact, NOT a skill regression.
 # On TIMEOUT, JUDGE FROM THE PARTIAL transcript + the kept LIBI_HOME artifacts (storyboard
@@ -40,8 +41,8 @@ assertions:
 ```
 
 ## Behavioral expectations
-1. **Downloaded the source** — used the YouTube Downloader (yt-dlp) to fetch the reel and imported
-   it into the piece via `libi.upload_file`. No fabricated content; the build is grounded in the
+1. **Downloaded the source** — used `libi.download_video` (the youtube-download extension) to
+   fetch the reel into the piece. No fabricated content; the build is grounded in the
    actual downloaded file.
 2. **Analyzed before building** — ran `video-analysis` (frames + summary) and `audio-analysis`
    (transcript) on the source, and **identified the music** (it reasoned about the track / its

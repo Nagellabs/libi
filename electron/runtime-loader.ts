@@ -55,9 +55,14 @@
 //      binding inside a try/catch. Node throws a clean, catchable Error on an
 //      ABI mismatch, so this is a true test rather than a promise — the stamp
 //      in gate 2 is only the cheap pre-filter for it.
-//   8. load `shell-api.js` and check its `SHELL_API_VERSION` matches the stamp
+//   8. the runtime is not OLDER than the database on disk — see
+//      `lib/runtime/db-schema-version.ts`. Downgrade is a designed path here
+//      (runtime-prune keeps the previous version precisely so gate 2 can fall
+//      back to it), and since migration 0051 an older runtime meeting a newer
+//      database is a fatal boot failure, not a degradation
+//   9. load `shell-api.js` and check its `SHELL_API_VERSION` matches the stamp
 //
-// Only after all eight does the shell hand control to the runtime.
+// Only after all nine does the shell hand control to the runtime.
 //
 // ## Dev
 //
@@ -86,6 +91,17 @@ import { SUPPORT_LINE } from "../lib/runtime/network-errors";
 // nothing but `node:fs` / `node:path`, so esbuild inlines it without pulling
 // any runtime dependency into the shell.
 import { sidecarMajorsInPrefix } from "../lib/runtime/node-abi-sidecars";
+// VALUE import, same contract again: `db-schema-version.ts` imports only
+// `node:fs` / `node:path`. It reads SQLite's `user_version` header field with
+// plain `fs`, which is the whole reason gate 8 can exist — the shell has no
+// better-sqlite3 binding until it has picked a runtime, and picking one is the
+// question.
+import {
+  isDbSchemaTooNew,
+  migrationsFolderIn,
+  readDbSchemaVersion,
+  readRuntimeSchemaVersion,
+} from "../lib/runtime/db-schema-version";
 
 /** The published package the shell knows how to run. */
 export const RUNTIME_PACKAGE = "@nagellabs/libi";
@@ -109,6 +125,15 @@ export const SHELL_API_ENTRY = "dist-cli/lib/runtime/shell-api.js";
 export const USER_RUNTIME_DIRNAME = "runtime";
 /** Directory name of the bundled snapshot under `resourcesPath`. */
 export const BUNDLED_RUNTIME_DIRNAME = "libi-bundle";
+/**
+ * The database file under LIBI_HOME, for gate 8.
+ *
+ * Duplicates `getLibiDbPath()` (lib/libi-home.ts) by necessity: the gate runs
+ * before a runtime has been chosen, so the module that owns this name cannot
+ * be loaded yet. `__tests__/unit/electron/runtime-loader.test.ts` pins the two
+ * together.
+ */
+export const LIBI_DB_FILENAME = "libi.sqlite";
 
 /** What the installer recorded about a runtime prefix. */
 export interface RuntimeStamp {
@@ -141,6 +166,7 @@ export type RuntimeRejectReason =
   | "next-build-missing"
   | "node-sidecars-missing"
   | "native-probe-failed"
+  | "db-schema-too-new"
   | "shell-api-load-failed"
   | "shell-api-version-disagrees";
 
@@ -165,6 +191,12 @@ export interface InspectOptions {
    * that build synthetic prefixes turn it off; production never should.
    */
   probeNative?: boolean;
+  /**
+   * The database gate 8 compares against, normally `<LIBI_HOME>/libi.sqlite`.
+   * Omitted (or pointing at no file yet) skips the gate — a first run has no
+   * database and therefore no opinion about which runtime may read it.
+   */
+  dbPath?: string;
 }
 
 export type ShellApi = typeof ShellApiModule;
@@ -387,6 +419,42 @@ export function inspectRuntimePrefix(
     }
   }
 
+  // ── 8. this runtime is not OLDER than the database on disk ──────────────
+  // The one gate about the USER'S DATA rather than the artifact, and the only
+  // one that can reject a runtime which is in every other way perfect.
+  //
+  // Every other gate is about a runtime being broken. This one fires when a
+  // runtime is merely old — which is a *designed* state here: `runtime-prune`
+  // keeps the previous version precisely so gate 2 can fall back to it, and a
+  // shell update that bumps Electron's ABI rejects every staged runtime at
+  // once, demoting the user to the snapshot inside the .app. Before migration
+  // 0051 that demotion was harmless. Now the older runtime's `seedDatabase`
+  // writes a column 0051 dropped, SQLite throws in the first fixed boot step,
+  // and the user meets a fatal banner. So the rollback path must know about
+  // the database, and it has to know here — the shell is the newer of the two
+  // components in this scenario, so a check living only in the runtime cannot
+  // protect against runtimes that predate the check.
+  //
+  // Fails OPEN on anything unknown (no database yet, an unstamped database
+  // from before this existed, a prefix with no `drizzle/`): a safety net that
+  // can itself refuse to boot on a missing file is a worse bug than the one it
+  // prevents.
+  if (opts.dbPath) {
+    const dbSchema = readDbSchemaVersion(opts.dbPath);
+    const runtimeSchema = readRuntimeSchemaVersion(migrationsFolderIn(root));
+    if (isDbSchemaTooNew(dbSchema, runtimeSchema)) {
+      return {
+        ...base,
+        version: stamp.version,
+        shellApiVersion: api,
+        reason: "db-schema-too-new",
+        detail:
+          `libi ${stamp.version} understands database schema ${runtimeSchema}, ` +
+          `but ${opts.dbPath} was written at schema ${dbSchema} by a newer libi`,
+      };
+    }
+  }
+
   return {
     prefix,
     root,
@@ -474,6 +542,12 @@ export interface ResolveRuntimeOptions {
   minApiVersion?: number;
   maxApiVersion?: number;
   probeNative?: boolean;
+  /**
+   * Database gate 8 compares candidates against. Defaults to
+   * `<libiHome>/libi.sqlite` — the same path `getLibiDbPath()` derives inside
+   * the runtime, restated here because the runtime is not loaded yet.
+   */
+  dbPath?: string;
 }
 
 export interface ResolveRuntimeResult {
@@ -518,6 +592,7 @@ export function resolveRuntime(opts: ResolveRuntimeOptions): ResolveRuntimeResul
     minApiVersion: opts.minApiVersion,
     maxApiVersion: opts.maxApiVersion,
     probeNative: opts.probeNative,
+    dbPath: opts.dbPath ?? path.join(opts.libiHome, LIBI_DB_FILENAME),
   };
 
   const candidates: Array<{ prefix: string; source: "bundled" | "user" }> = [
@@ -653,6 +728,30 @@ export function describeNoRuntimeFailure(rejections: RuntimeInspection[]): {
         "Update Libi to the latest desktop release, then reopen it.",
         "",
         `Detail: ${tooNew.detail ?? ""}`,
+        SUPPORT_LINE,
+      ].join("\n"),
+    };
+  }
+  // Every candidate was refused for being older than the user's data. This is
+  // NOT a damaged install and must not be described as one: the app is fine,
+  // the database is fine, and the two are one version apart. Above all it must
+  // not send the user anywhere near their database — the whole point of gate 8
+  // is that libi stopped instead of writing to it.
+  const tooOld = rejections.filter((r) => r.reason === "db-schema-too-new");
+  if (tooOld.length > 0 && tooOld.length === rejections.length) {
+    return {
+      error: "This version of Libi is older than your libi data.",
+      hint: [
+        "Your pieces, chats and settings were last opened by a newer version of Libi,",
+        "and this one stopped rather than write to them. Nothing has been changed, and",
+        "there is nothing to delete or repair.",
+        "",
+        "Install the latest Libi release and open it again.",
+        "",
+        // Every candidate was rejected against the SAME database, so their
+        // details differ only by prefix path — printing one per candidate just
+        // repeats the same sentence at the user.
+        ...[...new Set(tooOld.map((r) => r.detail ?? ""))].map((d) => `Detail: ${d}`),
         SUPPORT_LINE,
       ].join("\n"),
     };

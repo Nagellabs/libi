@@ -1,22 +1,17 @@
-import fs from "fs";
-import path from "path";
-
-import { claudeNativeBinaryPresent } from "@/lib/agents/claude-native-binary";
-import {
-  codexNativeBinaryMissingError,
-  codexNativeBinaryPresent,
-} from "@/lib/agents/codex-native-binary";
 import { serverLogger as logger } from "@/lib/logger";
-import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import {
-  claudeAdapterUnavailableReason,
+  adapterUnavailableReason,
   getAgentInstallRoot,
   resolveClaudeAdapterBin,
-  resolveBinIn,
   resolveInstalledAdapterBin,
   resolveRepoLocalAdapterBin,
 } from "@/lib/agents/runtime-install";
+import { CLAUDE_ADAPTER_PACKAGE, CODEX_ADAPTER_PACKAGE } from "@/lib/agents/runtime-packages";
 import type { AgentUnavailableReason } from "@/lib/agents/types";
+import { spawnViaNodeIfScript, type ResolvedBin } from "@/lib/agents/cli/spawn-shape";
+
+// Moved to `lib/agents/cli/spawn-shape.ts`; re-exported so existing importers keep working.
+export { spawnViaNodeIfScript, resolveCmdShimTarget } from "@/lib/agents/cli/spawn-shape";
 
 export interface CliAgentConfig {
   id: string;
@@ -26,13 +21,8 @@ export interface CliAgentConfig {
   /** Args for the ACP spawn command */
   args: string[];
   /**
-   * The CLI a user would associate with this agent. INFORMATIONAL ONLY —
-   * availability is never decided by a PATH probe for either agent (see
-   * `detectClaudeCode` / `detectCodex` below: both adapters resolve their
-   * engine by package, never through PATH). Kept on the config because
-   * `/api/agent/detect` reports it. The one place a real `which codex`
-   * matters — the `codex mcp add` install surface — does its own probe
-   * (`lib/codex-config/codex-cli.ts#codexCliOnPath`).
+   * The CLI name `resolveAgentCli` (`lib/agents/cli/resolve.ts`) looks for.
+   * Detection here never probes it; `GET /api/agents/status` reports it.
    */
   detectCommand: string;
   envHints: string[];
@@ -41,90 +31,52 @@ export interface CliAgentConfig {
   unavailableReason?: AgentUnavailableReason;
 }
 
-type ResolvedBin = { command: string; args: string[] };
-
 /** A resolved Claude adapter bin plus the npm tree root it belongs to. */
 type ClaudeBinResolution = { bin: ResolvedBin; root: string };
 
 /**
- * A resolved codex-acp bin plus the npm tree root it belongs to — null root
- * means the bundled adapter was NOT found locally and the command is the npx
- * fallback (dev convenience only; never counted as installed).
+ * A resolved codex-acp bin plus the npm tree root it belongs to — both null
+ * when the adapter is not on disk anywhere yet (see `resolveCodexBin`).
  */
-type CodexBinResolution = { bin: ResolvedBin; root: string | null };
+type CodexBinResolution = { bin: ResolvedBin | null; root: string | null };
 
 /**
- * npm-tree roots that could hold libi's dependencies, nearest first.
+ * Resolve the Codex ACP adapter bin: repo-local checkout first, then the
+ * runtime-installed copy under `~/.libi/agents` — the SAME order and the same
+ * two candidates `resolveClaudeBin` uses.
  *
- * `startDir` (= cwd, libi's package root in every server run mode) first — the
- * dev checkout, where `node_modules/` is a CHILD of the root. But npm HOISTS:
- * an installed copy at `<x>/node_modules/@nagellabs/libi` — the packaged
- * Electron runtime (`Resources/libi-bundle/node_modules/@nagellabs/libi`,
- * which `electron/main.ts` chdirs to) and an `npx @nagellabs/libi` install
- * alike — has its dependencies in `<x>/node_modules`, an ANCESTOR of the
- * package root rather than a child of it, and NO nested `node_modules` of its
- * own. So every `node_modules` ancestor also yields a candidate tree root
- * (its parent). Same bug class `workerReadScopes`
- * (`lib/storyboard/render/index.ts`) and `packageRoot()` already document;
- * checking only `<cwd>/node_modules` made a fully-present packaged codex-acp
- * report "missing — reinstall libi".
- *
- * Pure so the layouts are testable without a real tree.
- */
-export function codexCandidateTreeRoots(startDir: string): string[] {
-  const roots = [startDir];
-  const segments = startDir.split(path.sep);
-  for (let i = segments.length - 1; i > 0; i--) {
-    if (segments[i] !== "node_modules") continue;
-    const root = segments.slice(0, i).join(path.sep);
-    roots.push(root === "" ? path.sep : root);
-  }
-  return roots;
-}
-
-/**
- * Resolve the bundled codex-acp adapter bin. `@agentclientprotocol/codex-acp`
- * (Apache-2.0) is a production dependency of libi, so in any real install
- * `node_modules/.bin/codex-acp` exists in the npm tree libi resolves from —
- * `<cwd>/node_modules/.bin` in a dev checkout, or the HOISTED
- * `<cwd>/../../.bin` when libi itself is installed under `node_modules` (the
- * packaged runtime, `npx @nagellabs/libi`) — see `codexCandidateTreeRoots`.
- * The returned `root` is the tree root the bin came from, so
- * `codexNativeBinaryPresent(root)` probes the SAME tree for the engine.
- *
- * The npx fallback is a harmless dev convenience for a tree that was never
- * npm-installed — freely redistributable, so unlike claude-agent-acp an npx
- * fetch is licence-safe — but it is an unpinned network fetch, so
- * `detectCodex` never reports it as installed. It fetches the SCOPED package:
- * an unscoped `codex-acp` does not exist on the registry (`npm view codex-acp`
- * → 404), so the old `npx codex-acp` fallback could never have worked at all.
+ * The old `npx -y @agentclientprotocol/codex-acp` fallback is gone with the
+ * production dependency it backed. It was already never reported as installed
+ * (`detectCodex` returns `not_installed` for a null root), and in a packaged
+ * app it would be an unpinned network fetch of an arbitrary version — the exact
+ * thing `resolveClaudeBin` refuses. Now that the adapter is downloaded on
+ * selection, "not on disk" means "not installed yet", which is a state the UI
+ * can act on, not a broken install.
  *
  * The `.bin/codex-acp` shim is a `#!/usr/bin/env node` script, so it goes
  * through `spawnViaNodeIfScript` for the same reason the Claude adapter does:
  * a Finder-launched packaged app has no `node` on its launchd PATH.
  */
 function resolveCodexBin(): CodexBinResolution {
-  for (const root of codexCandidateTreeRoots(process.cwd())) {
-    // Was `execSync('test -x "<path>"')`. `test` is not a cmd.exe builtin and
-    // there is no `test.exe` on a stock Windows, so that command failed on
-    // EVERY Windows machine and codex was reported not-installed regardless of
-    // what was on disk. `resolveBinIn` is the check that already knows the
-    // platform's bin file names (`.cmd` / `.exe`) and uses F_OK rather than
-    // X_OK on win32, where the execute bit is not a thing.
-    const localBin = resolveBinIn(
-      path.join(root, "node_modules", ".bin"),
-      "codex-acp",
-    );
-    if (localBin) return { bin: spawnViaNodeIfScript(localBin), root };
+  const repoRoot = process.cwd();
+  const repoLocal = resolveRepoLocalAdapterBin(repoRoot, CODEX_ADAPTER_PACKAGE);
+  const binPath = repoLocal ?? resolveInstalledAdapterBin(CODEX_ADAPTER_PACKAGE);
+  if (!binPath) {
+    // Same copy and rule as `resolveClaudeBin` below.
+    const reason = adapterUnavailableReason(null, CODEX_ADAPTER_PACKAGE);
+    logger.warn({ tag: "agent-registry", op: "codex_adapter_unresolved", code: reason.code }, reason.message);
+    return { bin: null, root: null };
   }
-  return { bin: { command: "npx", args: ["-y", "@agentclientprotocol/codex-acp"] }, root: null };
+  // The tree the bin came from: the checkout in dev, ~/.libi/agents otherwise.
+  const root = binPath === repoLocal ? repoRoot : getAgentInstallRoot();
+  return { bin: spawnViaNodeIfScript(binPath), root };
 }
 
 /**
  * Resolve the Claude ACP adapter bin: repo-local checkout first, then the
  * runtime-installed copy under `~/.libi/agents` (see
- * `lib/agents/runtime-install.ts#resolveClaudeAdapterBin`). Unlike
- * `resolveBin` above, this NEVER falls back to npx — the adapter transitively
+ * `lib/agents/runtime-install.ts#resolveClaudeAdapterBin`). Like
+ * `resolveCodexBin` above, this NEVER falls back to npx — the adapter transitively
  * pulls `@anthropic-ai/claude-agent-sdk` (+ its ~306MB platform binary),
  * which libi holds no licence to redistribute and is therefore installed at
  * runtime from npm, not bundled. An unpinned `npx claude-agent-acp` in a
@@ -141,87 +93,18 @@ function resolveClaudeBin(): ClaudeBinResolution | null {
     installed: resolveInstalledAdapterBin(),
   });
   if (!binPath) {
-    logger.warn(
-      { tag: "agent-registry", op: "claude_adapter_unresolved" },
-      "Claude Code support is still installing — Codex and Terminal are available",
-    );
+    // The reason the disabled Agents row shows, so the log never claims an
+    // install nobody started: "installing" only while an install holds the
+    // agent-root lock, otherwise not set up (or failed), pointing at Agents.
+    // This used to say "still installing" unconditionally, including on a
+    // fresh home before any install job existed.
+    const reason = adapterUnavailableReason(null, CLAUDE_ADAPTER_PACKAGE);
+    logger.warn({ tag: "agent-registry", op: "claude_adapter_unresolved", code: reason.code }, reason.message);
     return null;
   }
-  // Which npm tree this bin came from decides where its native binary must
-  // live: the adapter resolves @anthropic-ai/claude-agent-sdk relative to its
-  // OWN location, so a repo-local bin execs the checkout's binary and an
-  // agent-root bin execs ~/.libi/agents'. Checking the wrong root would either
-  // bless a broken tree or condemn a healthy one.
+  // The tree the bin came from: the checkout in dev, ~/.libi/agents otherwise.
   const root = binPath === repoLocal ? repoRoot : getAgentInstallRoot();
   return { bin: spawnViaNodeIfScript(binPath), root };
-}
-
-/**
- * `node_modules/.bin/claude-agent-acp` is a symlink to a `#!/usr/bin/env node`
- * script, so spawning it directly requires `node` on the PATH of the SPAWNING
- * process — which, in a Finder-launched packaged app whose login-shell PATH
- * probe timed out, it is not (see `lib/runtime/node-runtime.ts`). Resolve the
- * link and run it through `resolveNodeCommand()` instead, so the adapter
- * launches off an absolute interpreter path rather than a shebang lookup.
- *
- * A Windows `.cmd` shim gets the SAME treatment, via its own JS target: since
- * the CVE-2024-27980 fix (Node ≥18.20.2 / ≥20.12.0) `child_process.spawn()`
- * REFUSES a `.cmd`/`.bat` file with `EINVAL` unless `shell: true`. Handing one
- * back unchanged here therefore produced an adapter that could never launch on
- * Windows while detection cheerfully reported it installed.
- *
- * `shell: true` is deliberately NOT the fix: it is the very thing the CVE was
- * about, and it re-introduces quoting hazards on any path containing a space —
- * `C:\Users\First Last\…` is the common case, not an edge one. Reading the
- * shim's own target and running it through `resolveNodeCommand()` keeps one
- * mechanism for all three platforms.
- *
- * Anything that resolves to neither (a genuine native launcher) is spawned
- * unchanged — those need no interpreter, and handing them to node would break
- * them.
- */
-export function spawnViaNodeIfScript(
-  binPath: string,
-  realpath: (p: string) => string = fs.realpathSync,
-  readFile: (p: string) => string = (p) => fs.readFileSync(p, "utf-8"),
-): ResolvedBin {
-  let target = binPath;
-  try {
-    target = realpath(binPath);
-  } catch {
-    /* not a link / unreadable — fall through with the original path */
-  }
-  if (/\.(c|m)?js$/.test(target)) {
-    return { command: resolveNodeCommand(), args: [target] };
-  }
-  if (/\.cmd$/i.test(target)) {
-    const js = resolveCmdShimTarget(target, readFile);
-    if (js) return { command: resolveNodeCommand(), args: [js] };
-  }
-  return { command: binPath, args: [] };
-}
-
-/**
- * The JS file an npm-generated `.cmd` shim actually runs, or null.
- *
- * npm's cmd-shim writes the target as `"%dp0%\..\<pkg>\<entry>.js"`, where
- * `%dp0%` is the shim's own directory. Anything that does not match that shape
- * (a hand-written batch file, a shim format npm may change) returns null and
- * the caller falls back to spawning the shim as-is — no worse than before.
- */
-export function resolveCmdShimTarget(
-  cmdPath: string,
-  readFile: (p: string) => string,
-): string | null {
-  let text: string;
-  try {
-    text = readFile(cmdPath);
-  } catch {
-    return null;
-  }
-  const m = /%dp0%\\(.+?\.(?:c|m)?js)"/i.exec(text);
-  if (!m) return null;
-  return path.resolve(path.dirname(cmdPath), m[1].replace(/\\/g, path.sep));
 }
 
 type Bins = { "claude-agent-acp": ClaudeBinResolution | null; "codex-acp": CodexBinResolution };
@@ -275,8 +158,10 @@ function getKnownAgents(): KnownAgent[] {
     {
       id: "codex",
       name: "Codex",
-      command: bins["codex-acp"].bin.command,
-      args: bins["codex-acp"].bin.args,
+      // Empty when the adapter isn't on disk anywhere yet — detectCodex below
+      // treats that as authoritative, exactly like claude-code above.
+      command: bins["codex-acp"].bin?.command ?? "",
+      args: bins["codex-acp"].bin?.args ?? [],
       detectCommand: "codex",
       envHints: ["OPENAI_API_KEY"],
       detect: detectCodex,
@@ -288,11 +173,10 @@ function getKnownAgents(): KnownAgent[] {
 /**
  * The ids this detection table dispatches on.
  *
- * Exists so a test can assert the three agent registries agree without
- * merging them: `lib/agents/setup/registry.ts` (pure, browser-safe — what to
- * SAY), this table (what to DETECT), and `sign-in-remedy.ts`'s resolvers
- * (which binary, WHERE). The split is deliberate and stays; what was missing
- * was anything asserting an id declared in one exists in the others. A setup
+ * Exists so a test can assert the two agent registries agree without merging
+ * them: `lib/agents/setup/registry.ts` (pure, browser-safe — what to SAY) and
+ * this table (what to DETECT). The split is deliberate and stays; what was
+ * missing was anything asserting an id declared in one exists in the other. A setup
  * entry with no detection entry is an agent the app offers to install and can
  * never see.
  */
@@ -303,196 +187,45 @@ export function knownAgentIds(): string[] {
 let cachedAgents: CliAgentConfig[] | null = null;
 
 /**
- * Claude Code availability = the two halves libi actually installs, and
- * NOTHING on PATH.
- *
- * The adapter's `claudeCliPath()`
- * (`node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js`)
- * resolves the CLI as `CLAUDE_CODE_EXECUTABLE`, else the
- * `@anthropic-ai/claude-agent-sdk-<platform>-<arch>` package via a require
- * bound to the SDK. It never reads PATH, and libi puts no `claude` on PATH —
- * `~/.libi/bin` holds ffmpeg, ffprobe, node, uv and yt-dlp. So a `which
- * claude` gate made a COMPLETE, successful runtime install report "not
- * installed": libi downloads the 306MB CLI and then refuses to admit it has
- * it, unless the user separately installed Claude Code — which every
- * developer machine has, which is why this hid for so long.
- *
- * WAS THE PATH PROBE A PROXY FOR "SIGNED IN"? It reads like one (running
- * `claude` once is how you get credentials), and the concern behind it is
- * real: with no credentials the adapter answers `initialize` and
- * `session/new` happily and then fails `session/prompt` with ACP
- * `-32000 Authentication required` (observed on adapter 0.44.0 with an
- * isolated empty HOME. On 0.70.0 only the static half is established:
- * `dist/acp-agent.js` still turns the CLI's "Please run /login" into
- * `RequestError.authRequired()`, and the SDK still maps that to -32000. The
- * SEQUENCE is not re-verified there — 0.70.0 added an `authRequired` throw
- * inside session creation, gated on `shouldHideClaudeAuth()` plus a
- * subscription account, so the failure may now land at `session/new`).
- * But PATH is unsound as a proxy in BOTH directions:
- *   - `npm i -g @anthropic-ai/claude-code` and never logging in passes it,
- *     so it never actually prevented that failure; and
- *   - a signed-in user fails it in the very place this matters. A
- *     Finder-launched packaged app inherits launchd's minimal PATH, and
- *     `electron/path-bootstrap.ts`'s synchronous fallback lists only
- *     Homebrew + /usr/local + system dirs — not `~/.local/bin` (where
- *     Claude Code's official installer lands) nor an fnm/nvm/volta npm-global
- *     dir. The login-shell probe that would find those is deliberately
- *     async, best-effort and 2s-bounded. This is the same PATH hole
- *     `lib/runtime/node-runtime.ts` exists to work around for `node`.
- * Credentials are also not the only auth path (ANTHROPIC_API_KEY, Bedrock /
- * Vertex env), so gating availability on a credential probe instead would
- * just move the false negative. libi already models auth separately and
- * deliberately doesn't gate on it (`envHints`, and `provider-registry.ts`'s
- * `requiresApiKey: false`), and `lib/claude/plan-usage.ts` treats absent
- * credentials as an expected state (`no_token`), not a broken install.
- *
- * So availability answers "can libi run this agent", and an unauthenticated
- * user gets an honest `Authentication required` at their first message
- * instead of being told to install a CLI they do not need.
+ * Claude Code "installed" = its ACP adapter is on disk (the checkout in dev,
+ * ~/.libi/agents otherwise). The CLI the adapter drives is the user's own
+ * `claude`, resolved separately by `resolveAgentCli` and combined with this in
+ * `provider-registry.ts` and the process manager. Nothing here reads PATH.
  */
 function detectClaudeCode(
   agent: Omit<CliAgentConfig, "installed">,
   claudeRoot: string | null,
 ): CliAgentConfig {
-  // The adapter couldn't be resolved anywhere (no repo-local checkout, no
-  // runtime install yet). This must never spawn `npx claude-agent-acp` in a
-  // packaged app, so it can't be reported installed on any other evidence.
+  // No adapter bin anywhere: there is nothing to spawn (and a packaged app must
+  // never fall back to `npx`), so it can't be reported installed on any other evidence.
   if (!agent.command || !claudeRoot) {
-    return { ...agent, installed: false, unavailableReason: claudeAdapterUnavailableReason(null) };
+    return {
+      ...agent,
+      installed: false,
+      unavailableReason: adapterUnavailableReason(null, CLAUDE_ADAPTER_PACKAGE),
+    };
   }
-  // A resolved adapter bin is only HALF the install. The adapter is ~40KB of
-  // JS that must exec @anthropic-ai/claude-agent-sdk's ~306MB native binary,
-  // which arrives as an optionalDependency — and npm exits 0 when an
-  // optional dependency fails. Reporting "installed" off the adapter alone
-  // therefore advertises an agent that throws `Claude native binary not
-  // found` at the first session/new. The install path already gates on this
-  // (`pendingInstallReason`); this is the reporting half.
-  //
-  // Unlike the install path, this does NOT exempt a dev checkout: a checkout
-  // installed with --omit=optional genuinely cannot run Claude Code, and the
-  // reason to skip it there (avoiding a redundant 306MB download libi cannot
-  // put in the repo anyway) is an install concern, not a reporting one.
-  // CLAUDE_CODE_EXECUTABLE still counts as present — see
-  // `resolveClaudeNativeBinary`.
-  if (!claudeNativeBinaryPresent(claudeRoot)) {
-    const unavailableReason = claudeAdapterUnavailableReason(claudeRoot);
-    logger.warn(
-      {
-        tag: "agent-registry",
-        op: "claude_native_binary_missing",
-        root: claudeRoot,
-        reason: unavailableReason.code,
-      },
-      "Claude adapter is present but its native binary is missing — reporting Claude Code as not installed",
-    );
-    return { ...agent, installed: false, unavailableReason };
-  }
-  // Both halves verified on disk — that IS the install. No PATH probe.
   return { ...agent, installed: true };
 }
 
 /**
- * Codex availability = the two halves libi actually SHIPS, and NOTHING on
- * PATH.
- *
- * The old gate here was `which codex` — the exact false negative
- * `detectClaudeCode` above removed for Claude, and it was wrong for the same
- * structural reason: `@agentclientprotocol/codex-acp` EMBEDS its engine. On
- * the ACP path it reads `process.env["CODEX_PATH"]` — undefined unless the
- * user sets it — and otherwise resolves the BUNDLED
- * `@openai/codex/bin/codex.js` launcher, which in turn resolves the platform
- * optionalDependency `@openai/codex-<platform>-<arch>` (a ~271MB Rust binary
- * at `vendor/<target-triple>/bin/codex`). It never falls back to a `codex` on
- * PATH. (Its separate `codex-acp login` subcommand DOES default to `"codex"`
- * on PATH — libi never invokes that, and it is not what availability means.)
- * Verified empirically (codex-acp 1.1.8, darwin-arm64, 2026-08-02): driven
- * from libi's OWN ACP SDK client — 0.25 at that verification, 1.4 since the
- * 2026-08-26 bump — against an empty isolated CODEX_HOME, it completes the
- * `initialize` handshake with full capabilities (both sides negotiated
- * PROTOCOL_VERSION 1 across the 0.25<->1.3 SDK gap of the day, so a version
- * gap is not a wire break); the only missing thing is auth — `session/new`
- * fails with ACP `-32000 Authentication required` (note: at session/new,
- * earlier than Claude's session/prompt). NOT re-verified since the
- * 2026-08-26 bump to codex-acp 1.6.2, which declares
- * `@agentclientprotocol/sdk ^1.3.0` and resolves hoisted to 1.4.0. Auth is
- * credentials (`~/.codex/auth.json` ChatGPT login,
- * CODEX_API_KEY, OPENAI_API_KEY), which — exactly as for Claude — no cheap
- * boot-time probe can answer honestly, so availability deliberately does NOT
- * mean "signed in".
- *
- * `which codex` was wrong in both directions: a user without the codex CLI
- * was told Codex is unavailable when the bundled adapter runs fine, and in a
- * Finder-launched packaged app even a user WITH codex installed can fail the
- * probe (launchd's minimal PATH + path-bootstrap's Homebrew-only fallback —
- * the same hole `detectClaudeCode` documents). What DOES determine
- * runnability is what this checks: the bundled adapter bin resolved locally,
- * plus its platform engine binary — an optionalDependency npm silently skips
- * on failure, the same partial-install trap as Claude's native binary.
- *
- * The ONE surface where `which codex` is the genuinely honest question — the
- * `codex mcp add` install flow, which shells out to the user's own codex CLI
- * — now does its own probe (`lib/codex-config/codex-cli.ts#codexCliOnPath`)
- * instead of borrowing this flag.
+ * Codex "installed" = its ACP adapter is on disk (the checkout in dev,
+ * ~/.libi/agents otherwise). The CLI the adapter drives is the user's own
+ * `codex`, resolved separately by `resolveAgentCli` and combined with this in
+ * `provider-registry.ts` and the process manager. Nothing here reads PATH.
  */
 function detectCodex(
   agent: Omit<CliAgentConfig, "installed">,
   codexRoot: string | null,
 ): CliAgentConfig {
-  // No local codex-acp bin — the command fell back to `npx codex-acp`, an
-  // unpinned network fetch. Fine as a dev convenience, but never report it as
-  // an install: codex-acp is a production dependency, so a missing local bin
-  // means this libi install is broken, not that the user must add anything.
-  if (!codexRoot) {
+  // No adapter bin anywhere: "not installed yet", a state the Agents tab can act on.
+  if (!agent.command || !codexRoot) {
     return {
       ...agent,
       installed: false,
-      unavailableReason: {
-        code: "not_installed" as const,
-        message:
-          "libi's bundled Codex adapter is missing from this install — reinstall libi to restore it.",
-      },
+      unavailableReason: adapterUnavailableReason(null, CODEX_ADAPTER_PACKAGE),
     };
   }
-  // `CODEX_PATH` names an engine explicitly, and the adapter reads it FIRST —
-  // before it ever looks for the bundled `@openai/codex` launcher (the module
-  // comment on `lib/agents/codex-native-binary.ts` says so, and libi forwards
-  // the whole env to the child via `buildSpawnEnv`). So a user who points it
-  // at their own build has a working setup that the engine-binary check below
-  // would hard-block for a file the adapter is never going to consult. This
-  // mirrors the `CLAUDE_CODE_EXECUTABLE` override on the Claude side.
-  const codexPathOverride = process.env.CODEX_PATH;
-  if (codexPathOverride && codexPathOverride.trim().length > 0) {
-    logger.info(
-      { tag: "agent-registry", op: "codex_path_override", path: codexPathOverride },
-      "CODEX_PATH is set — trusting it instead of probing the bundled engine binary",
-    );
-    return { ...agent, installed: true };
-  }
-
-  // The adapter bin is only the launcher. Its ~188MB engine binary arrives as
-  // a platform optionalDependency, and npm exits 0 when an optional
-  // dependency fails — reporting installed off the bin alone advertises an
-  // agent whose first spawn exits 1 with "Failed to locate … binary".
-  if (!codexNativeBinaryPresent(codexRoot)) {
-    logger.warn(
-      {
-        tag: "agent-registry",
-        op: "codex_native_binary_missing",
-        root: codexRoot,
-      },
-      "codex-acp adapter is present but its engine binary is missing — reporting Codex as not installed",
-    );
-    return {
-      ...agent,
-      installed: false,
-      unavailableReason: {
-        code: "install_failed" as const,
-        message: "Codex support is incomplete — reinstall libi to finish installing it.",
-        detail: codexNativeBinaryMissingError(codexRoot),
-      },
-    };
-  }
-  // Both halves verified on disk — that IS the install. No PATH probe.
   return { ...agent, installed: true };
 }
 
@@ -519,12 +252,14 @@ export function getAgentConfig(
 }
 
 /**
- * Re-detect agents (called by user via "Refresh agents" in UI).
+ * Re-detect agents — called whenever the Agents page reads agent status, and
+ * after an agent install finishes.
  *
- * Also clears the resolved-bin cache: the Claude adapter can finish its
- * background runtime install (`ensureClaudeAdapterInstalled`) after boot, at
- * which point a stale cached `null` bin would leave Claude Code permanently
- * unavailable until an app restart even though the adapter is now on disk.
+ * Also clears the resolved-bin cache: either adapter can finish its runtime
+ * install (the `agent_install` job, `lib/jobs/runners/agent-install.ts`)
+ * while the app runs, at which point a stale cached `null` bin would leave
+ * that agent permanently unavailable until an app restart even though the
+ * adapter is now on disk.
  */
 export function refreshAgentCache(): CliAgentConfig[] {
   resolvedBins = null;

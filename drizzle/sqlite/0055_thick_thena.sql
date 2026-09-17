@@ -1,0 +1,1 @@
+ALTER TABLE `skill_installs` ADD `last_root` text;

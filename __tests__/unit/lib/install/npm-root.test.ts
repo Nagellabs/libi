@@ -197,6 +197,14 @@ describe("npmInstallArgs", () => {
   });
 });
 
+describe("npmInstallArgs — optional dependencies", () => {
+  it("keeps optional deps by default and drops them on request (the adapters' engines)", () => {
+    expect(npmInstallArgs("/r")).not.toContain("--omit=optional");
+    expect(npmInstallArgs("/r", { omitOptional: true })).toContain("--omit=optional");
+    expect(npmInstallArgs("/r", { omitOptional: true })).toContain("--ignore-scripts");
+  });
+});
+
 /**
  * End-to-end proof that the plain-Node runner still genuinely executes the
  * vendored npm CLI — the path `npx libi` uses, which this change must not
@@ -249,8 +257,9 @@ describe("runNpmInstall on the plain-Node (execFile) runner", () => {
       }),
     );
 
-    // Callers (`lib/mcp/bundled-install.ts`, `lib/agents/runtime-install.ts`)
-    // only stringify `err.message`, so the `Command failed:` prefix is the
+    // Callers (`lib/agents/runtime-install.ts`; formerly also
+    // `lib/mcp/bundled-install.ts`, deleted 2026-09-08) only stringify
+    // `err.message`, so the `Command failed:` prefix is the
     // contract the utilityProcess runner's `npmFailure` deliberately mirrors.
     await expect(
       runNpmInstall(dir, { timeoutMs: 120_000, logTag: "test-install" }),

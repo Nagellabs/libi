@@ -1,12 +1,17 @@
+---
+prompt_kind: model-guide
+model: Veo 3.1 fast
+---
+
 # Model — Veo 3.1 fast
 
 Alternative model — used when the user overrides the Seedance 2.0 default. See
 SKILL.md model-selection policy.
 
-Veo 3.1 fast (`fal-ai/veo3.1/fast/*`) is a strong i2v/text-to-video option with
-synchronized audio generation. Verify capabilities + pricing at runtime via fal
-`recommend_model` / `get_model_schema` / `get_pricing` — never trust a hardcoded
-model id; better models ship every few weeks.
+Veo 3.1 fast is a strong i2v/text-to-video option with synchronized audio generation.
+Endpoint ids and the tools to confirm them are in
+[references/providers/fal.md](../references/providers/fal.md) — verify capabilities and
+pricing at runtime; never trust a hardcoded model id, better models ship every few weeks.
 
 Banned tokens (script + visual layers): see the `forbidden-words.md` prompt in the
 `ugc-product-video` skill. Paraphrase any banned token in the brief before composing.
@@ -56,9 +61,10 @@ transition sentence (and prefer FLF for manipulation beats — below).
 
 For a physical manipulation (applying, pouring, gripping-and-releasing), pin the
 END state with first-last-frame so the model is forced to *arrive* at the final
-state instead of improvising the object away mid-motion. Endpoint:
-`fal-ai/veo3.1/fast/first-last-frame-to-video` (same tier as i2v — confirm via
-`get_pricing`). Generate clean start + end keyframes, Vision-Read both before
+state instead of improvising the object away mid-motion. On fal this is the dedicated
+`first-last-frame-to-video` endpoint (see
+[references/providers/fal.md](../references/providers/fal.md); same tier as i2v — confirm
+the price before spending). Generate clean start + end keyframes, Vision-Read both before
 spending video credits, then describe only the transition. Prefer a 4s clip over
 8s for the manipulation beat.
 

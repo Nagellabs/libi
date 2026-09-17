@@ -47,38 +47,52 @@ describe("agent install flow — tier-1/tier-2 integration", () => {
   });
 
   it("seeded DB starts tier-2 MCPs as pending (npx will run them on first use)", () => {
-    const yt = db.select().from(mcpServers).where(eq(mcpServers.id, "youtube-downloader")).all()[0];
-    expect(yt.installStatus).toBe("pending");
-    // ElevenLabs and fal-ai start at needs_config because they need API keys
-    const eleven = db.select().from(mcpServers).where(eq(mcpServers.id, "elevenlabs")).all()[0];
-    expect(eleven.installStatus).toBe("needs_config");
-    const fal = db.select().from(mcpServers).where(eq(mcpServers.id, "fal-ai")).all()[0];
-    expect(fal.installStatus).toBe("needs_config");
+    const tracking = db.select().from(mcpServers).where(eq(mcpServers.id, "libi-tracking")).all()[0];
+    expect(tracking.installStatus).toBe("pending");
+    // No row is ever seeded needs_config — libi holds no provider key.
+    const rows = db.select().from(mcpServers).all();
+    expect(rows.map((r) => r.installStatus)).not.toContain("needs_config");
   });
 
-  it("buildMcpServers includes youtube-downloader (pending) but excludes elevenlabs (needs_config)", async () => {
+  it("getMcpServersForAcp hands out libi's HTTP entry alone, whatever rows the DB holds", async () => {
+    // libi manages no third-party MCP: a pending stdio row is data
+    // for the Settings tab, never a spawn, and never an entry an agent sees.
+    // (This used to assert the same thing through getMcpServersForSettings,
+    // which was deleted as dead code.)
+    db.insert(mcpServers)
+      .values({
+        id: "fixture-pending",
+        name: "Fixture Pending",
+        description: "pending stdio fixture",
+        type: "stdio",
+        command: "npx",
+        args: JSON.stringify(["-y", "fixture-mcp"]),
+        envVars: "{}",
+        bundled: false,
+        installStatus: "pending",
+        dependencyStatus: "[]",
+      })
+      .run();
     const real = await vi.importActual<typeof import("@/lib/mcp-config")>("@/lib/mcp-config");
     real.invalidateMcpConfig();
-    const servers = real.getMcpServersForSettings();
-    expect(servers["YouTube Downloader"]).toBeDefined();
-    expect(servers["ElevenLabs"]).toBeUndefined();
+    const servers = real.getMcpServersForAcp("claude-code");
+    expect(servers.map((s) => s.name)).toEqual(["libi"]);
   });
 
-  it("get_install_plan returns the yt-dlp plan content read from disk", async () => {
-    const result = await getInstallPlan({ mcpId: "youtube-downloader" });
+  it("get_install_plan returns the tracking plan content read from disk", async () => {
+    const result = await getInstallPlan({ mcpId: "libi-tracking" });
     if (!result.success) {
       throw new Error(`expected success, got: ${result.error}`);
     }
-    expect(result.plan).toContain("YouTube Downloader");
-    expect(result.plan).toContain("yt-dlp");
-    expect(result.planPath).toBe("mcp/bundled-mcps/plans/yt-dlp.md");
+    expect(result.plan).toContain("libi-tracking");
+    expect(result.planPath).toBe("mcp/bundled-mcps/plans/libi-tracking.md");
   });
 
   it("update_dep_status records 'installed' and triggers MCP-config invalidation", async () => {
     const result = await updateDepStatus({
-      mcpId: "youtube-downloader",
+      mcpId: "libi-tracking",
       status: "installed",
-      version: "0.8.4",
+      version: "1.0.0",
     });
     expect(result.success).toBe(true);
     if (!result.success) throw new Error("expected success");
@@ -87,7 +101,7 @@ describe("agent install flow — tier-1/tier-2 integration", () => {
     const row = db
       .select()
       .from(mcpServers)
-      .where(eq(mcpServers.id, "youtube-downloader"))
+      .where(eq(mcpServers.id, "libi-tracking"))
       .all()[0];
     expect(row.installStatus).toBe("installed");
     expect(row.installError).toBeNull();
@@ -102,35 +116,35 @@ describe("agent install flow — tier-1/tier-2 integration", () => {
     const initial = db
       .select()
       .from(mcpServers)
-      .where(eq(mcpServers.id, "youtube-downloader"))
+      .where(eq(mcpServers.id, "libi-tracking"))
       .all()[0];
     expect(initial.installStatus).toBe("pending");
 
     // 2. Agent reads the install plan.
-    const plan = await getInstallPlan({ mcpId: "youtube-downloader" });
+    const plan = await getInstallPlan({ mcpId: "libi-tracking" });
     if (!plan.success) throw new Error(`plan failed: ${plan.error}`);
     expect(plan.plan.length).toBeGreaterThan(100);
 
     // 3. Agent records progress as it works through the plan.
-    await updateDepStatus({ mcpId: "youtube-downloader", status: "installing" });
+    await updateDepStatus({ mcpId: "libi-tracking", status: "installing" });
     expect(
       db
         .select()
         .from(mcpServers)
-        .where(eq(mcpServers.id, "youtube-downloader"))
+        .where(eq(mcpServers.id, "libi-tracking"))
         .all()[0].installStatus,
     ).toBe("installing");
 
     // 4. Agent marks the MCP installed.
     await updateDepStatus({
-      mcpId: "youtube-downloader",
+      mcpId: "libi-tracking",
       status: "installed",
-      version: "0.8.4",
+      version: "1.0.0",
     });
     const final = db
       .select()
       .from(mcpServers)
-      .where(eq(mcpServers.id, "youtube-downloader"))
+      .where(eq(mcpServers.id, "libi-tracking"))
       .all()[0];
     expect(final.installStatus).toBe("installed");
 

@@ -10,10 +10,11 @@ Important - we call each video a "piece" internally but the user might reference
 
 ## Security — never handle raw provider credentials
 
-> **NEVER read, extract, copy, or pass a raw API key / credential** (`FAL_KEY`, the ElevenLabs key, any provider secret) out of the database (`libi.sqlite` / `mcp_servers`), environment, settings, or shell. Provider auth lives **inside the server/MCP boundary** — call the provider's MCP tools (or a `libi.*` server tool) and let them authenticate. Routing a key through `Terminal`/`curl`/`Bash` exposes it in tool outputs, transcripts, and shell history — that is a **security breach, even with good intent**, and you must refuse to do it.
+> **NEVER read, extract, copy, or pass a raw API key / credential** (`FAL_KEY`, an ElevenLabs key, any provider secret) out of the environment, a config file, or the shell. **libi holds no provider credentials at all** — a provider is an MCP server the *user* added to their own agent (Claude Code / Codex), and it authenticates itself. Call the provider's own MCP tools and let them do it. Routing a key through `Terminal`/`curl`/`Bash` exposes it in tool outputs, transcripts, and shell history — that is a **security breach, even with good intent**, and you must refuse to do it.
 >
-> - To upload a LOCAL libi file to fal for an `image_urls` / `audio_urls` reference, call **`libi.upload_file_to_fal({ fileId })`** (the key is handled server-side) — do NOT request a fal signed upload URL or `PUT`/`curl` bytes to fal storage yourself.
-> - To check whether a provider key is configured, use `libi.list_bundled_mcps` — it returns env-var **names only**, never values. Never read the value.
+> - **Never ask the user to paste a key to you, and never echo one back.** When you need a capability you have no tool for, call **`libi.suggest_provider({ kind })`**. In the app it puts a card in the chat whose buttons open libi's Agents page, where the user submits the config command themselves — do not ask for a key and do not print commands. From a CLI outside libi it returns the exact `claude mcp add` / `codex mcp add` commands, each carrying a literal `<your key>` placeholder the user fills in, plus an Agents-page URL — relay those verbatim.
+> - **To put a LOCAL libi file on a provider's CDN, use that provider's OWN upload tool** — never request a signed upload URL and `PUT`/`curl` the bytes yourself. A purely remote provider MCP may not be able to read a local path at all; if that happens, say so and ask the user how they want to proceed rather than improvising.
+> - There is no "does libi have a key for X" to check — it never does. `libi.list_providers()` reports what the user has connected, by **name** only.
 
 ## Planning workflow — Storyboard-first for video
 
@@ -41,12 +42,15 @@ The piece's durable plan and review surface is the **Storyboard** (the Storyboar
 > just generate"), in which case go straight to generation. The gate fires for **every** AI
 > video, including a single-clip request (a one-shot clip is just a one-card board).
 
+> If that skill is not available in this session, tell the user in one line to install libi's skills — Agents → Global setup in libi, or `npx @nagellabs/libi connect` in the folder — then continue with these instructions.
+
 <!-- libi-agent:codex -->
-> **Codex self-check — are libi's tools installed?** If the `libi.*` MCP tools are NOT
-> available in this session, tell the user: libi's tools need to be installed into codex —
-> open libi → MCPs & Skills → "Use libi in your own tools" → click **Install** on the Codex
-> row, make sure the libi app is running, then restart codex. `codex mcp list` should then
-> show `libi`.
+> **Codex self-check — is libi registered?** If the `libi.*` MCP tools are NOT available in
+> this session, tell the user: using libi from Codex has two parts. Part one is libi's tools —
+> one local MCP endpoint, registered for the whole account (with libi running, `npx @nagellabs/libi connect`,
+> or Connect on libi's Global setup tab under **Agents → Global setup**). Part two is libi's skills, installed for
+> every folder or for specific folders from the same Global setup tab (the `connect` command installs them for
+> the folder it runs in). Then restart Codex; `codex mcp list` should show `libi`.
 <!-- /libi-agent:codex -->
 
 - **Images / single assets → generate directly (no gate).** A standalone image / audio / music request does NOT trip this gate and does NOT go through the storyboard — generate it directly (via `ai-asset-generation`). The storyboard is for video.
@@ -76,14 +80,15 @@ See the `using-storyboard` skill for the full workflow, the file-vs-tool boundar
 
 All tools use the `libi.` namespace prefix.
 
-> **Argument format (applies to EVERY tool, including external MCPs like `fal-ai`).**
+> **Argument format (applies to EVERY tool, including a provider MCP such as `fal-ai`).**
 > Pass each argument as its native JSON type — an object as an object, an array
 > as an array, a number as a number. NEVER wrap a structured value in a string
 > (e.g. `input: "{\"prompt\":\"…\"}"` or `frames: "[…]"`). Stringified arguments
 > are rejected with `Expected object/array/number, received string`. libi's own
-> tools now coerce such strings defensively, but external servers (fal-ai, etc.)
-> do not — so a stringified arg there fails and wastes a paid call. If you ever
-> see that error, re-send the SAME call with the argument as a real JSON value.
+> tools now coerce such strings defensively, but a provider's own server (the
+> user's `fal-ai`, ElevenLabs, …) does not — so a stringified arg there fails
+> and burns the user's credits. If you ever see that error, re-send the SAME
+> call with the argument as a real JSON value.
 
 ### Background jobs — a tool call ending is NOT the work ending
 
@@ -156,9 +161,6 @@ in the middle of one big file and is not by itself evidence of a hang. Use
   - `targetPieceId` (string) -- ID of the piece to copy the file into
   - `name` (string, optional) -- Display name for the copy (defaults to original name)
 
-- **`libi.upload_file_to_fal`** -- Upload a LOCAL libi file to fal.ai storage and return a fal CDN `https` URL, for use as an `image_urls` / `audio_urls` reference in fal generation (e.g. `reference-to-video` `@Image1` / `@Audio1`). The FAL key is resolved and used **server-side** — you never see or pass it. The result is cached on the file (`falUploadedUrl`), so repeat calls are free. This is the ONLY sanctioned way to put a local file on the fal CDN — never extract `FAL_KEY` or `curl` fal storage yourself (see the Security section above).
-  - `fileId` (string) -- ID of the libi file to upload
-
 ### Video Tools
 
 > **A user's video is a VIDEO OVERLAY.** `libi.add_overlay({ pieceId, kind: "video", fileId })`.
@@ -176,9 +178,10 @@ These tools operate on files that already exist on a piece. They're fast for com
 
 - **`libi.trim_video`** — Trim a video to a time range `[startSeconds, endSeconds)`. Produces a new MP4 on the piece and returns its `fileId`. Use when the user asks to shorten, cut, or extract a portion of a clip.
 - **`libi.extract_audio`** — Extract the audio track from a video into an M4A file on the piece. Use when the user wants to isolate or reuse a video's audio, or convert a video clip to an audio-only soundtrack.
-- **`libi.generate_speech`** — Synthesize narration/voiceover locally with Kokoro (free, no API key — the DEFAULT speech provider). Stores a WAV on the piece and returns the file. Pass `withTimestamps: true` for approximate per-word timings (caption/timeline alignment). May return `status: "needs_install"` on first use — then run the local-tts install plan. Use ElevenLabs only on explicit request or for voice cloning.
+- **`libi.download_video`** — Download a video from a public page URL (YouTube included) with libi's own yt-dlp and import it into the piece. `url` (the URL as the user gave it — playlist/radio params are stripped for you), `pieceId` (or `null` for the unassigned library), optional `audioOnly`. Free and on-device, up to 500 MiB per video, with byte progress. The FIRST download installs uv + yt-dlp — disclose that before calling it. **Prefer this over `Bash` + a system `yt-dlp`:** only this path registers the result as a file on the piece.
+- **`libi.generate_speech`** — Synthesize narration/voiceover locally with Kokoro (free, no API key — the DEFAULT speech provider). Stores a WAV on the piece and returns the file. Pass `withTimestamps: true` for approximate per-word timings (caption/timeline alignment). May return `status: "needs_install"` on first use — then run the local-tts install plan. libi cannot clone a voice: for a cloned or branded voice, use a voice provider the **user** has connected in their own agent (ElevenLabs, say) — check your tool list, or call `libi.suggest_provider({ kind: "voice" })` when you have none.
 - **`libi.tts_list_voices`** — List local Kokoro voices (id + language + gender) and the default. Read-only. Use to pick/suggest a voice.
-- **`libi.tts_download_model`** — Download the Kokoro model (~110 MB, background job). Idempotent. Free, on-device.
+- **`libi.tts_download_model`** — Download the Kokoro model (~121 MB, background job). Idempotent. Free, on-device.
 - **`libi.generate_music`** — Generate music locally with ACE-Step (free, no API key — the DEFAULT music provider). Stores a WAV on the piece. Pass `lyrics` for vocals, `instrumental:true` for a bed. May return `status:"needs_install"` (tell the user the ~8.3 GB size, then run the local-music install plan), `status:"confirm_duration"` (tell the user the ETA, re-call with `confirm:true`), `status:"insufficient_memory"` (the 3.5B pipeline needs ~14 GB free RAM; the hint includes free/total — tell the user, suggest they close apps, then retry on their go-ahead), or `status:"model_load_failed"` (`music_download_model({force:true})` then retry). **Before EACH generation, tell the user the ~12 GB RAM peak + the ETA — generation is not just slow, it's memory-heavy.** Use paid/licensed music only on explicit request.
 - **`libi.music_list_styles`** — List local ACE-Step style hints, model-installed flag, download size, duration policy. Read-only.
 - **`libi.music_download_model`** — Download the ACE-Step model (~8.3 GB, background job). Idempotent; `force:true` discards what's on disk and re-fetches (corrupt/partial recovery, version bump) — ask the user first, it's another 8.3 GB. If a download is already running, `force` **attaches to it** and returns `attachedToRunning:true` rather than restarting: report its progress to the user, and only `libi.cancel_job` + re-force if they genuinely want to start over. The job completing now means the weights really are on disk — it fails loudly, naming the missing files, rather than reporting success over an empty directory. Free, on-device.
@@ -191,27 +194,30 @@ When any of these tools succeed, the resulting file is immediately available in 
 
 **Laggy / stuttering preview playback?** The editor preview decodes video on the user's own machine, so choppy *playback* (not export — exports are always full quality) is usually a performance limit on weaker hardware. Suggest the user lower the preview quality in **Settings → General → Preview quality** to **"Smooth (720p)"** — it decodes at a lower resolution for smoother playback and has no effect on exported videos. (This is a per-device setting the user toggles themselves; there is no tool for it.)
 
-### Audio Track Tools
+### Audio Clip Tools
 
-Audio tracks are layered on top of the composition. They play at a specified time with a given volume, independent of scenes.
+A composition's audio is a list of **clips**, each with a composition-global `startTime`, a `duration`, a `trimStart` into the source file and a `volume`. A clip is either `standalone` (music, voiceover, sfx — moves independently) or `inline` (bound to a video overlay/scene, so it moves and trims with it).
 
-- **`libi.add_audio_track`** -- Add an audio track to the composition.
+- **`libi.audio_add_clip`** -- Add an audio clip to the composition.
   - `pieceId` (string) -- ID of the piece
-  - `fileId` (string) -- ID of the uploaded audio file (from `libi.list_files` or `libi.upload_file`)
-  - `startTime` (number) -- Global composition time to start playing (seconds)
-  - `duration` (number, optional) -- Duration in seconds (defaults to full audio length)
-  - `volume` (number, optional, default 1) -- Volume level, 0 to 1
+  - `fileId` (string) -- Source file (audio, or a video whose audio stream plays)
+  - `kind` (`"standalone" | "inline"`, default `"standalone"`) -- `inline` also takes `linkedSceneId` / `linkedOverlayId`
+  - `startTime` (number) -- Composition-global start time in seconds
+  - `duration` (number, optional) -- Defaults to the source's media duration
+  - `trimStart` (number, optional, default 0) -- Offset into the source file
+  - `volume` (number, optional, default 1) -- 0 to 1
+  - `enabled` (boolean, optional, default true) -- the timeline speaker toggle
+  - If the clip would run past the piece's end and you passed no explicit `duration`, the tool refuses with `asset_longer_than_piece` — **ask the user first**, then re-call with `lengthPolicy: "extend" | "trim"` (or a `duration` that fits).
 
-- **`libi.update_audio_track`** -- Update an audio track's settings.
-  - `pieceId` (string) -- ID of the piece
-  - `trackId` (string) -- The ID of the audio track to update
-  - `startTime` (number, optional) -- New start time in seconds
-  - `duration` (number, optional) -- New duration in seconds
-  - `volume` (number, optional) -- New volume level, 0 to 1
+- **`libi.audio_update_clip`** -- Patch a clip: `clipId` plus any of `startTime`, `duration`, `trimStart`, `volume`, `enabled`, `label`, `timelineOrder`.
 
-- **`libi.remove_audio_track`** -- Remove an audio track from the composition.
-  - `pieceId` (string) -- ID of the piece
-  - `trackId` (string) -- The ID of the audio track to remove
+- **`libi.audio_remove_clip`** -- Remove a clip from the TIMELINE (`pieceId`, `clipId`). The source file stays in resources; an inline clip's video overlay keeps playing silently. To delete the file itself, use the resources panel.
+
+- **`libi.audio_split`** -- Split one clip in two at a composition time (`pieceId`, `clipId`, `time`). The new clip's id comes back as `data.tailId`.
+
+- **`libi.audio_unlink`** -- Turn an inline clip into a standalone one so it moves independently of its scene. **`libi.audio_relink_overlay`** re-binds a standalone clip to a video overlay as its inline audio.
+
+- **`libi.audio_duck_enable`** / **`libi.audio_duck_update`** / **`libi.audio_duck_disable`** -- Sidechain ducking, typically music dipping under voiceover. Pass EVERY voice clip in `sidechainClipIds` — their levels are summed. Defaults: -30 dBFS threshold, 4:1 ratio, 50 ms attack, 250 ms release, -12 dB max reduction.
 
 ### Overlays
 
@@ -397,10 +403,10 @@ need a vertical canvas; otherwise the source either crops, letterboxes, or stret
 `libi.retrieve_assets_dimensions(pieceId)` — it returns the composition's `width`,
 `height`, `aspect` and `isVertical`.
 
-Then pass a matching `aspect_ratio` to the generation model. Generation MCPs such as
-`fal-ai` are separate servers: libi does **not** rewrite their parameters, so an unset
-`aspect_ratio` uses that model's own default (often 16:9) and you get a clip that has to
-be cropped or letterboxed into the frame. The one exception is a storyboard card, where
+Then pass a matching `aspect_ratio` to the generation model. A provider's MCP (`fal-ai`,
+say) is the **user's own** server, not libi's: libi does **not** rewrite its parameters, so
+an unset `aspect_ratio` uses that model's own default (often 16:9) and you get a clip that
+has to be cropped or letterboxed into the frame. The one exception is a storyboard card, where
 libi already defaults `aspect_ratio` to the piece's aspect for you.
 
 If `libi.add_overlay` comes back with a warning that a full-frame source does not match
@@ -447,7 +453,7 @@ resizing the canvas to fit the asset.
      horizontal (YouTube)?"
 3. Call `libi.update_composition_dimensions(pieceId, width, height)` with the chosen dims.
 4. Read the response's `warnings` array. If any overlay rects are now out of bounds,
-   adjust them via `libi.update_*_overlay` tools or remove and recreate.
+   adjust them via `libi.update_overlay` (or `libi.update_tracked_overlay`) or remove and recreate.
 
 ### Examples
 
@@ -474,7 +480,7 @@ Libi maintains per-video analysis steps (transcript, keyframes with structured d
 - **`libi.analysis_get`** — Fetch all analysis steps, keyframes, and audio chunks for a file. Returns `{ steps: AnalysisStep[], keyframes: AnalysisKeyframe[], audioChunks: AudioChunk[], staleKeyframeIds: string[] }`. An empty `steps` array means nothing has been analyzed yet.
 - **`libi.analysis_extract_audio`** — Extract a 16 kHz mono WAV from the video into the analysis dir and return its path. **Does not write to the DB.** Used by chunking and BYO STT flows.
 - **`libi.analysis_extract_frames`** — Extract N evenly-spaced keyframes (or explicit timestamps) as PNGs and return their paths. **Does not write to the DB.** Use this to feed each frame to your vision capability before calling `analysis_save_frames`.
-- **`libi.analysis_transcribe_audio`** — Transcribe server-side, chunked for long files. **Default provider: local Whisper (free).** Pass `provider: "elevenlabs"` for diarization/audio-events or on explicit request; `model` to pick a Whisper size. Returns small status payload (may be `status: "needs_install"` on first Whisper use — then run the whisper install plan). `retry: true` re-processes failed chunks.
+- **`libi.analysis_transcribe_audio`** — Transcribe server-side, chunked for long files. **Local Whisper, free and on-device — the only transcription libi runs.** `model` picks a Whisper size (`tiny|base|small|medium|large-v3`). Returns a small status payload (may be `status: "needs_install"` on first use — then run the whisper install plan). `retry: true` re-processes failed chunks. **There is no `provider` parameter.** For diarization or audio-event tags, drive a transcription provider the *user* has connected through `libi.analysis_chunk_audio` → `libi.analysis_save_audio_chunk` (the `audio-analysis` skill's BYO-STT path).
 - **`libi.analysis_chunk_audio`** — BYO STT path: plan + extract per-chunk audio WAVs (no transcription). Returns chunk metadata for the agent to feed into a custom STT.
 - **`libi.analysis_save_audio_chunk`** — Save one chunk's transcript inline (text + words array). Auto-aggregates the transcript step when all chunks land.
 - **`libi.analysis_save_audio_chunk_from_file`** — Save one chunk's transcript by path (server reads JSON). Use when the chunk payload is large.
@@ -546,7 +552,8 @@ All analysis tools take `fileId` directly. When you have the `fileId` (e.g. from
 
 > **HARD GATE — non-negotiable.** Before the FIRST analysis tool call
 > (`libi.analysis_extract_frames`, `libi.analysis_extract_audio`,
-> `libi.analysis_describe_frame`, …) you MUST load and follow the relevant skill:
+> `libi.analysis_transcribe_audio`, `libi.analysis_save_frames`, …) you MUST load and
+> follow the relevant skill:
 > **`video-analysis`** for keyframes/summary,
 > **`audio-analysis`** for transcripts.
 <!-- libi-agent:claude -->
@@ -562,15 +569,17 @@ All analysis tools take `fileId` directly. When you have the `fileId` (e.g. from
 > (count ≈ ceil(durationSec/3) for clips < 5 min, else /10 — never a flat 8)
 > and the save/retry flow you must follow exactly.
 
-- **`audio-analysis` skill** — transcripts. Default local Whisper (free); ElevenLabs opt-in for diarization or on request. Handles chunking for long files, the one-time Whisper model install, larger-model escalation, BYO STT, retry on partial failure.
+> If that skill is not available in this session, tell the user in one line to install libi's skills — Agents → Global setup in libi, or `npx @nagellabs/libi connect` in the folder — then continue with these instructions.
+
+- **`audio-analysis` skill** — transcripts. Local Whisper, free and on-device; libi runs no hosted STT of its own. Handles chunking for long files, the one-time Whisper model install, larger-model escalation, the BYO-STT path (drive a transcription provider the user has connected, e.g. for diarization), retry on partial failure.
 - **`video-analysis` skill** — keyframes and summary. Handles extract → describe → batched save_frames (upsert), and save_summary.
-- **`ai-asset-generation` skill** — generation, incl. speech + music. Speech defaults to local Kokoro TTS and music to local ACE-Step (free); paid providers opt-in.
+- **`ai-asset-generation` skill** — generation, incl. speech + music. Speech defaults to local Kokoro TTS and music to local ACE-Step (free, on-device); anything paid runs on a provider the **user** has connected — see the `providers` section.
 
 Both skills are independent. For a full video analysis, use both. For an audio-only file, only `audio-analysis` applies.
 
 - **`using-character-library` skill** — the cross-piece objects catalog (people + items). Be proactive: auto-catalog central recurring subjects surfaced by analysis and report inline, and surface existing catalog matches for reuse before generating something fresh.
 
-The tool reference table above stays for autocomplete and direct lookups, but the per-step workflow guidance lives in the skills.
+The tool reference table in the `mcp-tools` section (`libi.read_manual({ section: "mcp-tools" })`) stays for autocomplete and direct lookups, but the per-step workflow guidance lives in the skills.
 
 #### Memories & self-improvement
 
@@ -581,73 +590,69 @@ The tool reference table above stays for autocomplete and direct lookups, but th
 
 **After a successful creation flow** — when a piece exported successfully or a generation workflow clearly satisfied the user — briefly reflect before moving on:
 
-1. **Skill check** — did this flow follow an existing enabled skill? If instead it was a meaningfully NEW, repeatable workflow (a sequence of models/tools/steps the user is likely to want again), offer once: "Want me to save this workflow as a skill so future sessions can repeat it?" If yes, create it with `libi.add_skill`, capturing the concrete steps, models, and settings that actually worked — not generic advice. **If the captured workflow generates or assembles AI video, make the Storyboard its skeleton** (card=clip, generation spec via the model-schema cache, place via `select_storyboard_take`, delegate the build to `using-storyboard`) — see "Authoring a NEW skill for AI video" in the Planning workflow section above.
+1. **Skill check** — did this flow follow an existing enabled skill? If instead it was a meaningfully NEW, repeatable workflow (a sequence of models/tools/steps the user is likely to want again), offer once: "Want me to save this workflow as a skill so future sessions can repeat it?" If yes, create it with `libi.add_skill`, capturing the concrete steps, models, and settings that actually worked — not generic advice. **If the captured workflow generates or assembles AI video, make the Storyboard its skeleton** (card=clip, generation spec via the model-schema cache, place via `select_storyboard_take`, delegate the build to `using-storyboard`) — see "Authoring a NEW skill for AI video" in the Planning workflow section (`libi.read_manual({ section: "planning-workflow-storyboard-first-for-video" })`).
 2. **Memory check** — did the user give lasting general guidance during the session (style, model choices, pacing, voice preferences)? If yes, offer once: "Want me to remember this for all future sessions?" If yes, save it with `libi.update_memories` (append).
 
 Guardrails: at most ONE such offer per session; only after success (never after a failed or abandoned flow); skip the skill offer when the flow is already covered by an enabled skill; never save anything without explicit consent.
 
-### MCP Status & Settings Navigation
+## Providers and skills — what you can rely on
 
-- **`libi.list_bundled_mcps`** — Returns status for every bundled MCP server: `{ id, name, description, installStatus, enabled, requiredEnvVars, configuredEnvVars, installError }`. `installStatus` is one of `installed | needs_config | failed | not_required | checking | pending`. `requiredEnvVars` lists the env var **names** the server needs; `configuredEnvVars` lists the names actually set on the row. NEVER includes env var values. Call this any time you're about to use a bundled MCP and want to verify it's ready.
+Everything a provider can do, it does through the **user's own** agent config. libi's part is
+to tell you what is there, suggest what is missing, and own its local extensions and skills.
 
-- **`libi.show_mcp_settings`** — Navigate the user to the MCPs & Skills page (MCP Servers tab), optionally focusing a card.
-  - `mcpId` (string, optional) — e.g. `"elevenlabs"`. Scrolls the card into view and applies a brief highlight.
-  Use this after telling the user a server needs configuration, so they can fix it with one click instead of hunting menus.
+### Provider status & settings navigation
 
-- **`libi.show_api_config`** — Open the inline API-key panel for a bundled MCP, right of the chat. **Strong rule:** the moment a tool fails with `mcp_missing_key`, OR `libi.list_bundled_mcps` shows a server you need as `needs_config`, call `libi.show_api_config({ mcpId })` and tell the user exactly which key to paste. Prefer this over `show_mcp_settings` mid-task — it keeps the user in the chat flow. Never read or echo the key value.
+- **`libi.list_providers`** — What the user has connected in their own agent config, libi's suggestion catalog, and libi's own extensions with each one's install status. Names only — never a key, never a key value. Returns `{ connected, catalog, extensions }`.
 
-## MCPs & Skills — what you can rely on
+- **`libi.suggest_provider`** — The exit when you have no tool for a kind of work. Call it the moment you would otherwise apologise for having no image / video / music / voice / sound-effect / transcription tool — and when the user asks about a provider (fal.ai, Higgsfield, ElevenLabs, …) that is not in your tool list — relay what it showed, and stop. For a general "what's connected?", use `libi.list_providers`.
+  - `kind` (string) — one of `image`, `video`, `music`, `voice`, `sfx`, `transcription`.
+  - `reason` (string, optional) — one line on why you need it, shown to the user.
+  - In the app it puts a **card in the chat** with one button per suggestion and returns `{ status: "card", kind, connected, covered, suggested }`. The buttons open libi's Agents page, where the config command is typed into a terminal for the user to submit — tell the user in one line what the card offers and stop; do not ask for a key and do not print commands. From a CLI (outside libi) it returns `status: "cli"` with the same picture **plus the exact add commands** and an `agentsPageUrl` per option — relay those verbatim. Each command carries a literal `<your key>` placeholder the user fills in themselves; never ask them for the key.
 
-1. **Source of truth.** Your live tool list — the tools you observe in this session — is authoritative for what you can actually call. The `libi.list_mcp_servers` and `libi.list_bundled_mcps` tools describe libi's registered intent; they can diverge from your live surface in either direction.
+- **`libi.show_extension`** — Navigate the user to **Agents → Libi MCP**.
+  - `extensionId` (string, optional) — a libi **extension** id, e.g. `"libi-tracking"`, `"whisper"`, `"local-tts"`, `"local-music"`, `"youtube-download"`, `"libi-export"`. Scrolls that card into view and applies a brief highlight.
+  Use it after telling the user an extension needs attention, so they land on the right card instead of hunting menus. It returns `navigated: false` when the studio is not reachable — then say where the card is instead of claiming the page opened.
 
-2. **User installed outside libi.** Users may register MCP servers through Claude Code's own config or `~/.codex/config.toml` directly. You will still see those tools in your live tool list even if libi's `list_*` doesn't return them. Use them normally; do not warn the user about the discrepancy unless they ask.
+### The five rules
 
-3. **Missing tool.** If `list_mcp_servers` says a server is enabled but you cannot actually call its tools, tell the user briefly and call `libi.show_mcp_settings` (optionally with `mcpId`) so they can fix it in the UI.
+1. **Source of truth.** Your live tool list — the tools you observe in this session — is authoritative for what you can actually call. `libi.list_providers` describes what libi can SEE: what the user has connected in their own agent config, plus libi's own extensions and whether each is installed. It can diverge from your live surface in either direction; when they disagree, believe your tool list.
 
-4. **Post-install registration contract.** After you install an MCP server on the user's machine (`npm install`, `pip install`, `git clone`, etc.), you MUST call `libi.register_mcp_server` to record it in libi. After you install a skill, call `libi.add_skill`. Without this registration the install vanishes next session.
+2. **libi manages no MCP servers.** The user's agent — Claude Code or Codex — owns its MCP configuration outright. libi cannot add, remove, enable or key a provider; it can only *show* the user the command to run. So there is nothing to "register with libi" after an install, and nothing libi can repair on a provider's behalf.
 
-5. **Editing contract.** When the user asks you to change an MCP's config or toggle, use `libi.update_mcp_server` / `libi.set_mcp_server_enabled` (or for skills, `libi.update_skill` / `libi.set_skill_enabled`). Never hand-edit `~/.claude/settings.local.json` or `~/.codex/config.toml` — they are derived from libi's DB and your edits will be overwritten.
+3. **User installed outside libi.** Users may register MCP servers through Claude Code's own config or `~/.codex/config.toml` directly. Those tools appear in your live tool list even when `libi.list_providers` has not detected them. Use them normally; do not warn the user about the discrepancy unless they ask.
 
-### MCP Server Management
+4. **Missing tool.** If `libi.list_providers` reports something connected (or an extension installed) but you cannot actually call its tools, say so briefly. For a libi extension, `libi.show_extension({ extensionId })` puts the user on its card. For the user's own provider, remember that **neither adapter loads an MCP mid-session** — one added during this conversation only appears in a NEW one.
 
-- **`libi.register_mcp_server`** -- Register a new external MCP server. Use this when the user asks you to add an MCP tool or integration.
-  - `name` (string) -- Human-readable name (e.g., "YouTube Downloader")
-  - `type` (string) -- Transport type: `"stdio"` or `"http"`
-  - `command` (string, optional) -- For stdio: the executable (e.g., "npx")
-  - `args` (string[], optional) -- For stdio: command arguments (e.g., ["@kevinwatt/yt-dlp-mcp"])
-  - `url` (string, optional) -- For http: the MCP server endpoint URL
-  - `headers` (object, optional) -- For http: headers as key-value pairs
-  - `envVars` (object, optional) -- Environment variables the server needs
-  - `description` (string, optional) -- Brief description of the server
-  - `requireApproval` (boolean, default true) -- Whether you must ask the user before calling the server's tools
+5. **Editing contract.** A provider MCP is edited where it lives: in the user's own agent config. In the app, send them to **Agents → Providers** in libi — the row's actions type the remove/replace command into a terminal for them to submit. From a CLI outside libi, tell them to use their own agent's `mcp remove` / `mcp add` (for a provider they don't have yet, `libi.suggest_provider` returns the add command). Never hand-edit `~/.claude.json` or `~/.codex/config.toml`. The one thing you *can* change is a libi **extension's** approval prompt, via `libi.update_mcp_server`; no other field on an extension is editable. Skills are libi's own: `libi.update_skill` / `libi.set_skill_enabled` / `libi.add_skill`.
 
-**Important notes on registering MCP servers:**
+## Using libi from your own Claude Code or Codex
 
-- Install any required npm packages first (e.g., run `npx <package>` to ensure it's available), then call this tool to wire it up.
-- Always ask the user whether the new server should require approval before use.
-- The registered server becomes available in the **next** agent session, not the current one.
-- This tool does not require a `pieceId` -- MCP servers are global, not per-piece.
+libi's own chats and terminal always have libi's tools and skills — nothing to set up there. Outside libi, using it from the user's own Claude Code or Codex app or terminal has two parts, and both are done in libi, not by you:
 
-## MCP Server Self-Healing
+1. **libi's tools** — libi's one local MCP endpoint, registered for the whole account (Claude Code's user scope; Codex registrations are always user-wide).
+2. **libi's skills** — an agent's skills are either installed for every folder (Claude Code: `~/.claude/skills`, or `$CLAUDE_CONFIG_DIR/skills`; Codex: `~/.agents/skills`) or in specific folders (`<folder>/.claude/skills`, `<folder>/.agents/skills`), never both: installing for every folder removes that agent's folder installs.
 
-Before relying on any external MCP server (e.g. `youtube-downloader`, `elevenlabs`), call
-`libi.list_bundled_mcps` and inspect each row's `serverStatus`:
+Where: the setup wizard's last step (**Agents → Agents**, step 4 "Open chat"), or **Agents → Global setup** (pick Claude Code or Codex at the top), with Install / Add folder / Remove. In a terminal, `npx @nagellabs/libi connect [folder] [--global]` does the same: tools for the account, skills for that folder (`--global`: for every folder).
 
-- `up` — the server passed handshake; you can use its tools.
-- `unknown` / `starting` — the probe hasn't completed yet; treat as available but be
-  ready for tool calls to fail.
-- `down` — the server failed to spawn. Read `serverError`, then call
-  `libi.retry_mcp_server({ mcpId })`. The response tells you the new status.
+libi records every install and keeps them up to date after every skill change and at every libi start — there is nothing to re-run. Remove deletes only libi's files; skills the user added themselves stay. A skill whose name the user already uses in that place is skipped and listed on the card ("Skipped N skills whose names you already use"). Tools and skills added this way appear in a new Claude Code or Codex session (restart Codex).
 
-If a retry succeeds, tell the user the server is fixed but only available in a NEW chat
-(`recoveredInThisSession: false` in the retry response). Suggest they start a fresh chat,
-or proceed with a fallback (e.g. shell out to the underlying binary if it's on PATH).
+Never run these commands yourself and never write into those folders: tell the user where to go, in one line, and carry on.
 
-If a retry fails, do NOT keep retrying in a loop. Report the error verbatim to the user
-and propose alternatives:
-- Run the underlying binary via `Bash` if it's installed (`which <binary>`).
-- Ask the user to fix the install (e.g., `npm i -g <pkg>` for npm-backed servers).
-- Use a different MCP that provides similar capability.
+## Extension self-healing
+
+This section is about libi's **own** extensions — `libi-tracking`, `whisper`, `local-tts`, `local-music`, `youtube-download`, `libi-export`. A provider the user connected is not libi's to diagnose or restart: if one of those misbehaves, say so and point the user at their own agent's MCP config.
+
+An extension's tools are always in your tool list. Before it is installed they answer with a status (`needs_install`, `tracking_engine_not_installed`, …) rather than disappearing — that is the normal first-run path, not a fault. Disclose the download (see "Rule: disclose every install/download before running it" in the `providers` section), then follow the install plan.
+
+When an extension is genuinely broken:
+
+1. **`libi.diagnose_mcp({ mcpId })`** — call this FIRST; it is much faster than guessing. It returns `installStatus`, `serverStatus`, `lastServerError`, `inCurrentSession` plus `whyExcluded`, the spawn config with env-var **names** only, per-extension auxiliary checks (is the binary there?), and plain-English `hints`.
+2. **`libi.get_install_plan({ mcpId })`** — the recovery guide when a hint is not enough. The plans are symptom-keyed: find the section matching what diagnose showed, follow its steps, and report each one back with `libi.update_dep_status`.
+3. **`libi.restart_mcp_server({ mcpId })`** once the cause is fixed, or **`libi.retry_mcp_server({ mcpId })`** to just re-probe and refresh `serverStatus`.
+
+A recovered extension only becomes available in a **NEW** chat — the adapter loads its MCP list at session creation, so tell the user to start a fresh chat rather than retrying in a loop. If a retry fails, report the error verbatim and propose an alternative (a different libi tool for the same job, or fixing the install) instead of looping.
+
+## Piece and navigation tools
 
 ### Piece Discovery Tools
 
@@ -738,7 +743,7 @@ also remove 2 overlays and 1 audio clip — proceed?") before calling
 7. Sequence the piece by giving each overlay its own `startTime` and `duration`; lay full-frame backdrops end to end the way a shot list runs.
 8. Use `z` (or `libi.reorder_overlays`) to control what stacks over what.
 9. To import user files (videos, images, audio), use `libi.upload_file` with the local file path, then check the result for the `fileId`. **For videos: immediately set composition dimensions to the video's `mediaWidth`×`mediaHeight` and add it via `libi.add_overlay({ kind: "video", fileId })` (full-frame editable overlay) so it lands on the timeline (see "Working with Pieces").**
-10. To add background music or audio, upload the file first, then use `libi.add_audio_track` with the `fileId`.
+10. To add background music or audio, upload the file first, then use `libi.audio_add_clip` with the `fileId`.
 
 ## Working with Pieces
 
@@ -1248,7 +1253,7 @@ When a user starts a new conversation and you understand what they're building, 
 
 ## File Management
 
-Use `libi.upload_file` to import files from the local filesystem (videos, images, audio). Use `libi.list_files` to see what files are available — pass `scope: "piece"` for a specific piece, `scope: "global"` for unassigned files, or `scope: "all"` to search across everything. File IDs from these tools are used as parameters for `libi.add_overlay` and `libi.add_audio_track`.
+Use `libi.upload_file` to import files from the local filesystem (videos, images, audio). Use `libi.list_files` to see what files are available — pass `scope: "piece"` for a specific piece, `scope: "global"` for unassigned files, or `scope: "all"` to search across everything. File IDs from these tools are used as parameters for `libi.add_overlay` and `libi.audio_add_clip`.
 
 To **move** a file to a different piece (or mark it as global/unassigned), use `libi.assign_file`. To **copy** a file to another piece while keeping the original intact, use `libi.duplicate_file` — the copy has an independent lifecycle.
 
@@ -1256,20 +1261,17 @@ When saving assets via `libi.save_asset`, provide a descriptive `name` and `desc
 
 ## Version Check
 
-This documentation is version **1.11.0**. If you encounter errors with MCP tools
-(unknown tool names, missing parameters, unexpected results), the skill files may
-be outdated. Use the `libi.get_version` tool to check the MCP server version.
+This manual (version **1.17.0**) was served by the running libi over MCP, so it is
+always current for that install — there is no separate on-disk copy to go stale. If a
+tool you expect is missing or behaves unexpectedly, the user's libi is probably older
+than this version marker. Ask them to upgrade (`npx @nagellabs/libi@latest`, or the
+desktop app's update); libi keeps the skills it installed up to date.
 
-If versions don't match, ask the user to run:
-
-```
-npx @nagellabs/libi update
-```
-
-### Skills + MCP discovery
+### Skills and provider discovery
 
 - `libi.list_skills` — see installed skills (bundled + user).
-- `libi.list_mcp_servers` — see configured MCPs (no secrets).
+- `libi.list_providers` — what the user has connected, what libi recommends, and libi's own extensions with their install status (never a key).
+- `libi.suggest_provider({ kind, reason? })` — when you have no tool for a kind of work, this is how the user gets one. See the `providers` section.
 - `libi.add_skill({ name, description, body })` — install a user skill (kebab-case name; `body` must include `---` YAML frontmatter with matching `name`).
 - `libi.set_skill_enabled({ id, enabled })` / `libi.remove_skill({ id })`.
 
@@ -1297,16 +1299,18 @@ feeding `video-analysis` output straight into a generic text-to-video generation
 > Invoke the skill via the Skill tool.
 > Reading the SKILL.md with Read / grep / ToolSearch is **NOT** a substitute —
 > only invoking the Skill tool counts. Do not improvise a tracking sequence from
-> the tool table below; the table is for autocomplete only and omits the
-> mandatory verification + repair steps.
+> the numbered steps under "Default flow (local, free)" below in this same section;
+> that list is for autocomplete only and omits the mandatory verification + repair steps.
 <!-- /libi-agent:claude -->
 <!-- libi-agent:codex -->
 > The skill is available to you as `$using-object-tracking`; read its SKILL.md from
 > `.agents/skills/using-object-tracking/` and follow it before the first tracking call.
 > Do not improvise a tracking sequence from
-> the tool table below; the table is for autocomplete only and omits the
-> mandatory verification + repair steps.
+> the numbered steps under "Default flow (local, free)" below in this same section;
+> that list is for autocomplete only and omits the mandatory verification + repair steps.
 <!-- /libi-agent:codex -->
+
+> If that skill is not available in this session, tell the user in one line to install libi's skills — Agents → Global setup in libi, or `npx @nagellabs/libi connect` in the folder — then continue with these instructions.
 
 ### Default flow (local, free)
 
@@ -1315,103 +1319,135 @@ feeding `video-analysis` output straight into a generic text-to-video generation
 3. **`libi.compute_track_segment`** — Recompute a specific time window if a segment is poor.
 4. **`libi.add_tracked_overlay`** — Pin an overlay (emoji, text, image, effect) to the tracked subject.
 
-### SAM2 mask refinement (opt-in, PAID)
+The local engine is the **only** tracker. There is no paid or hosted tracking path and no mask-refinement step: a track is boxes, computed on the user's machine, at no cost.
 
-**Do NOT use SAM2 as a tracker.** The local engine (`compute_object_track`) is the default tracker — it is free, runs locally, and is sufficient for most tasks.
+### When you need a pixel-precise mask
 
-SAM2 via fal.ai is **opt-in, paid mask-refinement** — use it only when:
-- A pixel-precise mask is required (e.g. object replacement, background matting).
-- The user has explicitly approved the fal.ai cost.
-- A box track already exists (SAM2 refines an existing track, it does not create one from scratch).
+Tracking gives you boxes, not mattes. When the job genuinely needs a cutout — object replacement, background matting, compositing a subject onto a new plate — use **`libi.remove_background`**, which runs the local MatAnyone matte on-device (free, part of the `libi-tracking` extension). Do not reach for a provider for this; libi already does it.
 
-Workflow when precise masks are needed:
-1. Run `libi.compute_object_track` first (always).
-2. Ask the user: "This will use fal.ai SAM2 which incurs a usage cost. Approve?"
-3. After approval: call `libi.refine_track_with_sam2({ trackId, range? })`.
+## Providers
 
-Never call `libi.compute_object_track_providers` or `libi.refine_track_with_sam2` without explicit user approval.
+**libi generates no media itself.** Images, video, music, voices and sound effects come from
+**providers the user connects in their own agent** (Claude Code / Codex) — their tools appear
+in your tool list, next to libi's. libi does not run, manage, key or pay for any of them, and
+never sees, stores or handles a provider key.
 
-## Bundled MCPs (live by default)
+**Before generating anything, look at your tool list.** In order:
 
-Libi ships with optional MCP servers that handle specific user
-intents. They're live in your session by default — you don't install
-them upfront.
+1. **You already have a provider for that kind of work** → use it. If the skill you are
+   following ships a `references/providers/<id>.md` for it, read that file and follow it;
+   otherwise use the provider's own schema tools (`get_model_schema` / `list_models` /
+   equivalent) and keep to the skill's capability rules.
+2. **libi has an on-device tool for it** (the table below) → prefer that. Free, local, no key,
+   no account. **A libi extension counts as a provider for its kind** — never send a user
+   shopping for a paid provider when one of these already covers the job.
+3. **Neither** → call **`libi.suggest_provider({ kind, reason? })`**, tell the user what it
+   showed, and **stop**. Do not improvise a provider, do not ask for an API key, and do not
+   fall back to a tool that cannot do the job.
 
-| If the user wants to … | Use bundled MCP | Tools |
+The same goes for a question about a provider. When the user asks about a named provider that is
+not in your tool list ("is fal.ai connected?"), don't answer in prose: call `libi.suggest_provider`
+once, for one of its kinds (fal and Higgsfield offer `image` and `video`; either shows the same
+choices), so the chat shows the buttons to connect it — even when a libi on-device tool already
+covers that kind. For a general "what's connected?" or "which providers do I have?", use
+`libi.list_providers()` instead: it puts no card in the chat. A provider libi's catalog doesn't
+have (not an image, video, music, voice, sound-effect or transcription provider listed above — "is
+the GitHub MCP connected?") has no kind: say libi doesn't know it instead of calling
+`suggest_provider`.
+
+`suggest_provider`'s `connected` and `covered` list only what is registered for YOUR agent. Whatever
+the answer's status, a provider in `covered` with `via: "connected"` has its tools listed under its
+`connected` row's `name` (the config entry, `fal-ai`, not the catalog id `fal`) — search your deferred
+tools for that name first. If there are none, it was added after this chat started: tell the user to
+open a new chat to use it — unless that row's `signIn` is `"unknown"`, which may mean it was never
+signed in, so send them to sign in first.
+
+`kind` is one of `image`, `video`, `music`, `voice`, `sfx`, `transcription`. libi's suggestion
+catalog holds `fal` (image, video), `higgsfield` (image, video — no key: the user signs in with
+their Higgsfield account, and generations use their Higgsfield credits), `elevenlabs` (voice, music,
+sfx), plus the on-device `whisper` (transcription), `kokoro` (voice) and `ace-step` (music).
+`libi.list_providers()` gives you the same picture without putting a card in the chat.
+
+**Never ask for, echo, or store an API key.** In the app, `suggest_provider` puts a card in the
+chat whose buttons open libi's Agents page, where the user submits the config command
+themselves — do not ask for a key and do not print commands. From a CLI (outside libi) it
+returns the exact `claude mcp add` / `codex mcp add` command, plus an Agents-page URL; relay
+them verbatim. A keyed provider's command carries a literal `<your key>` placeholder that the
+user fills in before running it in their own terminal. An `auth: "oauth"` provider (Higgsfield)
+has no key: the user signs in with their own account in the browser — Codex's add starts that
+itself, and `signInCommands` holds each agent's sign-in command. libi cannot add a provider or
+sign in for them.
+
+**A newly added MCP is not picked up mid-session** — neither agent adapter implements
+`list_changed`. Once the user has run the command, the flow continues in a NEW session. Say so
+when you point them at the card or relay the command, so they are not left waiting for tools
+that cannot arrive.
+
+**Your live tool list is the only source of truth** for what you can actually call.
+`libi.list_providers` reports what libi can SEE in the agent's config, which may lag your real
+tool list in either direction — trust the tools you have.
+
+### What libi does on-device
+
+These need no provider and no key. They are libi's own extensions, downloaded on demand
+(disclose the size and get a go-ahead first — see the rule below):
+
+| Capability | Tool | Extension |
 |---|---|---|
-| Download from YouTube (video, audio, captions, comments, metadata) | `youtube-downloader` | `mcp__YouTube_Downloader__ytdlp_*` |
-| Transcribe audio (speech-to-text) | `whisper` (local, default) | libi.analysis_transcribe_audio |
-| Generate audio / diarized STT (TTS, sound effects, music, speaker labels) | `elevenlabs` | `mcp__ElevenLabs__*` |
-| Generate images, videos, or audio via fal.ai's models | `fal-ai` | (HTTP — see notes) |
+| Transcription | `libi.analysis_transcribe_audio` (faster-whisper) | `whisper` |
+| Speech / voiceover | `libi.generate_speech` (Kokoro) | `local-tts` |
+| Music | `libi.generate_music` (ACE-Step) | `local-music` |
+| Object tracking | `libi.compute_object_track`, `libi.compute_track_segment` | `libi-tracking` |
+| Background removal / matting | `libi.remove_background` (MatAnyone) | `libi-tracking` |
+| Video download from a public URL | `libi.download_video` (yt-dlp) | `youtube-download` |
+| Canvas export that ffmpeg cannot composite | `libi.export_video` (headless Chromium) | `libi-export` |
 
-### Happy path
-
-Just call the tool. e.g. user asks "download this video" →
-`mcp__YouTube_Downloader__ytdlp_download_video({ url })`.
-
-### When a tool looks broken or missing
-
-Call `libi.diagnose_mcp({ mcpId: "<id>" })` FIRST. It returns:
-
-- `inCurrentSession`: is the MCP in your session at all? If false,
-  `whyExcluded` tells you what to fix (usually a missing API key —
-  ask the user, save via `libi.update_dep_status` with `env`).
-- `auxiliary`: per-MCP checks (binary present, API key set). If any
-  fail, the recovery guide explains the fix.
-- `hints`: plain-English next steps in priority order.
-
-After fixing whatever diagnose surfaced, call
-`libi.restart_mcp_server({ mcpId: "<id>" })` to give it a fresh start.
-
-### Recovery guides
-
-If diagnose surfaces a problem you don't immediately know how to fix,
-call `libi.get_install_plan({ mcpId: "<id>" })` (kept under this name
-for historical reasons — it's really a recovery guide now). The plans
-are symptom-keyed: find the section that matches the failure mode
-diagnose showed you, follow the steps.
+A tool whose extension is not installed yet answers with a status — `needs_install`,
+`tracking_engine_not_installed` — rather than failing. Follow its install plan. If an
+extension is genuinely broken (not merely uninstalled), see the `extension-self-healing`
+section.
 
 ### Rule: disclose every install/download before running it
 
-**Before** calling any tool that installs a package, downloads a model,
-or fetches binary dependencies (e.g. `libi.whisper_download_model`,
-`libi.tts_download_model`, `libi.music_download_model`, any tier-2 MCP
-install plan step) — tell the user, in one short paragraph:
+**Before** calling any tool that installs a package, downloads a model, or fetches binary
+dependencies (`libi.whisper_download_model`, `libi.tts_download_model`,
+`libi.music_download_model`, `libi.install_tracking_engine`, the first `libi.download_video`,
+any extension install step) — tell the user, in one short paragraph:
 
 1. **What** is being installed/downloaded (package name, model name).
-2. **Where from** (PyPI, HuggingFace, GitHub at a pinned commit,
-   bundled MCP registry, etc.). Use the source URL/repo, not just
-   "the internet."
-3. **Approximate size on disk** (the install plan / model catalog
-   knows this — `libi.list_bundled_mcps` or
-   `libi.whisper_list_models` / `libi.music_list_styles` surfaces it).
+2. **Where from** (PyPI, HuggingFace, GitHub at a pinned commit). Use the source URL/repo, not
+   just "the internet."
+3. **Approximate size on disk** (`libi.whisper_list_models`, `libi.music_list_styles` and
+   `libi.get_install_plan` carry this).
 4. **Whether it costs money or stays free + on-device.**
 
-Then wait for the user to say go. Skip the preamble only when
-re-running a previously approved download to recover from a failure
-(`force: true` / model corruption) — and even then, name the artifact
-you're re-fetching.
+Then wait for the user to say go. Skip the preamble only when re-running a previously approved
+download to recover from a failure (`force: true` / model corruption) — and even then, name
+the artifact you are re-fetching.
 
-This applies to **every** tier-2 / on-demand install, not just music.
-Speech model downloads, transcript model downloads, and any future
-on-demand fetch should follow the same rule. The user paid the cost
-of asking for libi; respect it by never spending their disk or money
+The user paid the cost of asking for libi; respect it by never spending their disk or money
 silently.
+
+### Cost, on a provider
+
+A provider generation spends the **user's own** credits, on their own account. Say what you
+are about to generate and roughly what it costs, and get a yes, before every paid call. libi
+holds no key and can spend nothing on your behalf — which is also why nothing stops a call you
+make carelessly from costing them money.
+
+### Don't shortcut past libi's own tools
+
+When libi has a tool for the job, use it rather than shelling out. `libi.download_video` beats
+`Bash` + a system `yt-dlp`: only libi's path registers the result as a file on the piece, with
+progress, dedupe and cancellation. A shortcut works once and leaves the next session with
+nothing to find.
 
 ### When NOT to touch any of this
 
-If the user is asking a question, not requesting an action (e.g.
-"what tools do you have?"), describe the bundled MCPs without
-diagnose / restart / install. Only act when there's a concrete user
-request to fulfill.
-
-### Important: don't bypass the MCP
-
-If `youtube-downloader` is live and you're asked to download a YouTube
-video, USE the bundled MCP tools. Don't shortcut via Bash + system
-`yt-dlp` even if it's on PATH. The MCP gives the user durable, libi-
-tracked tool history and integrates with libi's piece/file model.
-Shortcuts work once and leave the next session in the same state.
+If the user is asking a question rather than requesting an action (e.g. "what can you
+generate?"), just describe what is connected and what libi does on-device. Do not call
+`suggest_provider`, do not install anything. Only act when there is a concrete request to
+fulfil.
 
 <!-- libi-memories-start -->
 <!-- libi-memories-end -->

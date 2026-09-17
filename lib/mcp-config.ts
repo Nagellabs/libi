@@ -1,117 +1,70 @@
 /**
  * Centralized MCP server configuration manager.
  *
- * All MCP server list construction, caching, and delivery flows through
- * this single module. Two delivery mechanisms exist:
+ * libi manages ONE MCP server: its own. It never proxies, spawns or passes a
+ * third-party MCP — the user's agents own their own lists
+ * (`~/.claude.json`, `$CODEX_HOME/config.toml`), which libi reads but never
+ * writes and never carries a key for. Two delivery shapes exist:
  *
- * 1. **ACP protocol** (in-app agent) — servers passed explicitly via
- *    `newSession({ mcpServers })`. NOTE: the `claude-agent-acp` adapter sets
- *    `settingSources: ["user","project","local"]` and merges
- *    `mcpServers: { ...explicit }`, so the in-app SDK ALSO reads the workspace
- *    `.mcp.json` we write for BYO CLIs. libi (same server name) dedupes across
- *    the two — verified: the ACP standby connects libi exactly once, and libi
- *    tools are callable via `.mcp.json` alone. We still inject explicitly so
- *    the in-app path never depends on the adapter keeping project/local
- *    settingSources enabled.
+ * 1. **ACP protocol** (in-app agent) — `getMcpServersForAcp` hands
+ *    `newSession({ mcpServers })` exactly one entry: libi's HTTP endpoint,
+ *    tagged with the in-app surface header. NOTE: the `claude-agent-acp`
+ *    adapter sets `settingSources: ["user","project","local"]` and merges
+ *    `mcpServers: { ...explicit }`, so the in-app SDK ALSO reads any workspace
+ *    `.mcp.json` the user happens to have. libi itself no longer writes such a
+ *    file; we inject explicitly so the in-app path never depends on the
+ *    adapter keeping project/local settingSources enabled.
  *
- * 2. **Settings file** (bring your own CLI) — servers written to
- *    `.claude/settings.local.json` for standalone Claude Code sessions
- *    that read settings directly from disk (e.g., `npx libi --connect-agent`).
+ *    Test mode is the one exception: the fake fal and fake ElevenLabs
+ *    stdio servers ride along under their real names — see
+ *    `getMcpServersForAcp` and `setTestModeFakesEnabled`.
+ *
+ * 2. **HTTP aggregator** (bring your own CLI) — libi's streamable-HTTP MCP
+ *    endpoint serves libi's tools to a CLI the user registered once via
+ *    `libi connect`. Nothing is written to a workspace.
  */
 
-import fs from "fs";
 import path from "path";
 import { serverLogger as logger } from "@/lib/logger";
-import { getDb } from "@/lib/db/client";
-import { mcpServers as mcpServersTable } from "@/lib/db/schema/sqlite";
-import { and, eq, ne } from "drizzle-orm";
 import { buildSpawnEnv } from "@/mcp/registry/spawn-env";
+import { getLibiBinDir } from "@/lib/libi-home";
+import { sqliteBuildDirForChildren } from "@/lib/db/native-binding";
+import { isWindows } from "@/lib/platform";
 import { resolveBundledSpawn } from "@/mcp/registry/local-bin-resolver";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
-import { getAgentDirWriteTargets, getConnectedAgentDir } from "@/lib/libi-home";
-import { inAppSurfaceEnvEntry } from "@/lib/mcp/agent-surface";
-import { buildSafeServerEnv, buildReferenceServerEnv } from "@/lib/mcp/safe-env";
+import { getLiveMcpPort, getMcpHttpChild } from "@/lib/server/lifecycle/mcp-http-handle";
+import {
+  SURFACE_HEADER,
+  IN_APP_SURFACE,
+  LIBI_MCP_ENTRY_NAME,
+  LIBI_MCP_FALLBACK_ENTRY_NAME,
+} from "@/lib/mcp/agent-surface";
 import { isTestMode } from "@/lib/test-mode";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import {
   entryResolutionDiagnostic,
   resolveEntrySpawn,
 } from "@/lib/runtime/compiled-entry";
-import { syncCodexGlobalMcpsIfConnected } from "@/lib/codex-config/sync";
 import type { McpServer } from "@agentclientprotocol/sdk";
-import type { McpServerRecord } from "@/lib/db/schema/types";
 import type { BundledMcpDef } from "@/mcp/registry/types";
 
 /**
- * A single MCP server entry as written to `.claude/settings.local.json`.
+ * A single MCP server entry in the settings-file shape (`.claude.json`,
+ * `config.toml`).
  *
  * stdio entries are plain `{ command, args, env }` (no `type` field for
  * backwards compatibility with how Claude Code reads stdio servers).
  *
  * HTTP entries set `type: "http"` and include `url` + optional `headers`.
- * Header values may have been substituted from the row's `envVars`.
  */
 export type McpServerEntry =
   | { command: string; args?: string[]; env?: Record<string, string> }
   | { type: "http"; url: string; headers?: Record<string, string> };
 
-/**
- * Replace `${VAR}` placeholders in a header value with values from the
- * row's `envVars`. Missing vars resolve to an empty string — keeps the
- * row valid even when config is partial (the install-status filter
- * already prevents `needs_config` rows from reaching this code path).
- */
-function substituteVars(value: string, env: Record<string, string>): string {
-  return value.replace(/\$\{([A-Z0-9_]+)\}/g, (_, key) => env[key] ?? "");
-}
-
 /** Index bundled defs by id for O(1) lookup. */
 const BUNDLED_DEFS_BY_ID = new Map<string, BundledMcpDef>(
   BUNDLED_MCP_SERVERS.map((def) => [def.id, def]),
 );
-
-/** Build a single settings entry from a DB row. Returns null for malformed rows.
- *
- * For bundled MCPs with a pinned npm package, the spawn command is resolved
- * via `resolveBundledSpawn` so the agent (and ACP) hits the local
- * `~/.libi/node_modules/.bin/<bin>` instead of `npx -y <pkg>@<ver>`. The DB
- * row's `command`/`args` act only as a fallback if the install hasn't
- * landed yet. For custom (user-added) rows the DB row is authoritative. */
-function buildEntryForRow(row: McpServerRecord): McpServerEntry | null {
-  const envVars: Record<string, string> = row.envVars ? JSON.parse(row.envVars) : {};
-
-  if (row.type === "http") {
-    if (!row.url) return null;
-    const rawHeaders: Record<string, string> = row.headers ? JSON.parse(row.headers) : {};
-    const headers: Record<string, string> = {};
-    for (const [k, v] of Object.entries(rawHeaders)) {
-      headers[k] = substituteVars(v, envVars);
-    }
-    return { type: "http", url: row.url, headers };
-  }
-
-  const def = BUNDLED_DEFS_BY_ID.get(row.id);
-  // Bundled defs that ship as a pinned npm package OR in-repo (libi-tracking)
-  // resolve their spawn command through the single shared resolver, so the
-  // settings path matches the prober/diagnose paths exactly. The DB row's
-  // command/args is only the resolver's last-resort fallback.
-  if (def && ((def.npmPackage && def.pinnedVersion) || def.inRepoEntry)) {
-    const resolved = resolveBundledSpawn(def);
-    return {
-      command: resolved.command,
-      args: resolved.args,
-      env: buildSpawnEnv(envVars),
-    };
-  }
-
-  if (!row.command) return null;
-  const args: string[] = row.args ? JSON.parse(row.args) : [];
-  return {
-    command: row.command,
-    args,
-    env: buildSpawnEnv(envVars),
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Building
@@ -176,6 +129,27 @@ function buildEntryForRow(row: McpServerRecord): McpServerEntry | null {
 /** The core MCP server's entry point, relative to libi's package root. */
 const LIBI_MCP_ENTRY = "mcp/index.ts";
 
+/**
+ * The STDIO libi server's spawn spec.
+ *
+ * No caller inside libi since `getMcpServersForSettings()` was deleted, its
+ * last one: every agent — in-app over ACP, the user's own CLI via `libi
+ * connect`, and codex through its config — reaches libi over the HTTP
+ * aggregator (`buildLibiHttpEntry`) instead.
+ *
+ * KEPT, as a decision rather than an oversight. Stdio is a supported
+ * surface: `mcp/index.ts` is compiled into `dist-cli/mcp/index.js`, that file
+ * is one of the artifacts `scripts/local-registry` refuses to publish without,
+ * and this function is the spawn spec an MCP client is pointed at by hand —
+ * an inspector, a client with no HTTP transport, a debugging session. What was
+ * actually missing was evidence it still WORKS, since nothing in the product
+ * exercised it: `__tests__/integration/mcp-stdio-entry-spawn.test.ts` now
+ * spawns this spec and completes an `initialize` + `tools/list` handshake
+ * against it. The tests around this function additionally pin the
+ * packaged-build spawn resolution the HTTP and tracking entries share.
+ *
+ * Do not re-wire it into a config path without a reason to prefer stdio.
+ */
 export function buildLibiEntry(): McpServerEntry {
   const projectRoot = process.cwd();
 
@@ -185,9 +159,9 @@ export function buildLibiEntry(): McpServerEntry {
   // without an explicit LIBI_HOME the libi MCP child fell back to the default
   // `~/.libi` and wrote to the WRONG home (a worktree/dev/custom-LIBI_HOME
   // session's pieces landed in the canonical DB). buildSpawnEnv() carries
-  // LIBI_HOME through for every adapter. The .mcp.json/BYO path re-filters this
-  // env through buildSafeServerEnv (secret-free on disk); the ACP path passes
-  // it in-memory to the adapter (no disk leak, symmetric with Claude).
+  // LIBI_HOME through for every adapter. The codex `config.toml` path re-filters
+  // this env through buildSafeServerEnv (secret-free on disk); the ACP path
+  // passes it in-memory to the adapter (no disk leak, symmetric with Claude).
   const env = buildSpawnEnv();
 
   // Source+tsx in dev and in the packaged Electron app (unchanged); the
@@ -208,6 +182,101 @@ export function buildLibiEntry(): McpServerEntry {
   );
 }
 
+/** The HTTP MCP aggregator's entry point, relative to libi's package root. */
+const LIBI_MCP_HTTP_ENTRY = "mcp/http/index.ts";
+
+/** Spawn spec for the HTTP MCP aggregator child (`mcp/http/index.ts`). */
+export function buildLibiHttpEntry(): {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  /** Whether the server runs under tsx's wrapper or as the one compiled process; the supervisor signals each differently. */
+  mode: "tsx" | "compiled";
+} {
+  const projectRoot = process.cwd();
+  const env = buildSpawnEnv();
+  const resolved = resolveEntrySpawn(projectRoot, LIBI_MCP_HTTP_ENTRY);
+  if (resolved) return { command: resolved.command, args: resolved.args, env, mode: resolved.mode };
+  throw new Error(`buildLibiHttpEntry: could not resolve mcp/http/index.ts — ${entryResolutionDiagnostic(projectRoot, LIBI_MCP_HTTP_ENTRY)}`);
+}
+
+/**
+ * The name libi's own endpoint is registered under for IN-APP ACP sessions —
+ * the SAME name `libi connect` writes into the user's own agent config, on
+ * purpose. The collision is what makes the in-app entry REPLACE the config one
+ * instead of mounting alongside it; see `LIBI_MCP_ENTRY_NAME`
+ * (`lib/mcp/agent-surface.ts`) for the measurements behind that, and
+ * `lib/agents/process-manager.ts` for the codex-acp flag it needs.
+ */
+export const IN_APP_MCP_NAME = LIBI_MCP_ENTRY_NAME;
+
+/**
+ * Whether the two test-mode fakes (`fal-ai`, `ElevenLabs`) are attached to ACP
+ * sessions. Meaningful ONLY when `isTestMode()` — production never reads it.
+ *
+ * Default `true`, so a plain `LIBI_TEST_MODE=1 npm run dev` behaves exactly as
+ * test mode is meant to: both fakes in front of the agent at zero cost.
+ *
+ * The one caller that turns it OFF is `POST /api/skill-eval/configure`,
+ * which sets it from the scenario's `mcps:` list. A scenario with
+ * `mcps: []` is asserting "the agent has NO provider" — that is the whole
+ * point of the `_meta/no-provider` scenario and of the provider gate it
+ * exercises. Without this flag the fakes are attached unconditionally, the
+ * scenario runs with a working fal, and its `absent` assertions fail (or, worse
+ * for a future variant, pass for the wrong reason). Process-level rather than
+ * per-request because `getMcpServersForAcp` is called from the session builder,
+ * not from the HTTP request that configured the run.
+ *
+ * Flipping it invalidates the per-agent ACP cache — otherwise the standby
+ * session built before `configure` ran would keep the stale entry list.
+ */
+let testModeFakesOn = true;
+
+/** True when the value actually changed (and an invalidation was fired for
+ *  it), so a caller does not have to invalidate again on top — see
+ *  `POST /api/skill-eval/configure`. */
+export function setTestModeFakesEnabled(on: boolean): boolean {
+  if (testModeFakesOn === on) return false;
+  testModeFakesOn = on;
+  invalidateMcpConfig({ reason: on ? "test-mode-fakes-on" : "test-mode-fakes-off" });
+  logger.info({ tag: "mcp-config", op: "test_mode_fakes", enabled: on }, "test-mode fakes toggled");
+  return true;
+}
+
+export function testModeFakesEnabled(): boolean {
+  return testModeFakesOn;
+}
+
+/**
+ * The REAL upstream names the two test-mode fakes are attached under, in the
+ * order they are pushed. Single-sourced because the instructions core names
+ * them to the agent (`testModeCoreBanner`) and a banner that named a fake the
+ * ACP list did not carry would be exactly the kind of lie that got removed.
+ */
+export const TEST_MODE_FAKE_NAMES = ["fal-ai", "ElevenLabs"] as const;
+
+/**
+ * Tell the running aggregator to re-read its instructions.
+ * Fire-and-forget: it is normal for the child to be down (boot order, tests).
+ *
+ * The body carries `testModeFakes` because the aggregator renders the
+ * instructions core, and the core's TEST MODE banner must name only the fakes
+ * that are actually attached — a flag that lives in THIS process
+ * (`testModeFakesOn`). Sending it on every reload keeps the child in step
+ * without it having to ask; both sides start from the same `true` default, so
+ * a child that has never seen a reload is not wrong either.
+ */
+export function notifyMcpHttpReload(reason: string): void {
+  // While this instance's child is not running, whatever holds its port may be
+  // another libi instance's aggregator, and a reload there would re-render that
+  // instance's instructions with this process's test-mode flag.
+  const handle = getMcpHttpChild();
+  if (handle && handle.status() !== "running") return;
+  const url = `http://127.0.0.1:${getLiveMcpPort()}/reload`;
+  void fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reason, testModeFakes: testModeFakesOn }) })
+    .catch((err) => logger.debug({ err, tag: "mcp-http", op: "reload_notify_failed", reason }, "aggregator not reachable for reload"));
+}
+
 // buildFakeFalEntry / buildFakeElevenLabsEntry resolve tsx the same way
 // buildLibiEntry does (node_modules/tsx/dist/cli.mjs via `node`, not the
 // `.bin/tsx` shim electron-builder never copies) purely for consistency
@@ -218,13 +287,58 @@ export function buildLibiEntry(): McpServerEntry {
 // here either way, unlike buildLibiEntry/buildTrackingEntry which have no
 // `npx libi ...` fallback to avoid at all — these two never had one.
 
+/**
+ * The names a test-mode fake is allowed to inherit from this process. This is
+ * a WHITELIST, deliberately not `buildSpawnEnv()` (which copies the entire
+ * `process.env`): the fakes go to the agent over ACP, and claude-agent-acp
+ * serialises an ACP stdio entry's env straight into the `--mcp-config` JSON
+ * on the Claude child's argv — so every name here is readable in `ps`. With
+ * the whole process env, a developer's FAL_AI / ANTHROPIC_API_KEY /
+ * ELEVENLABS_API_KEY sat on a command line whenever LIBI_TEST_MODE was on.
+ *
+ * What the fakes' import graph actually reads (grep `process.env` under
+ * `mcp/dev/**` and the `lib/` modules they pull in):
+ *   - LIBI_HOME        — lib/libi-home.ts: the DB, storage, recordings,
+ *                        bundled ffmpeg, the port files. codex-acp sanitises
+ *                        the child env, so it MUST travel explicitly.
+ *   - LIBI_TEST_MODE   — lib/test-mode.ts; the fakes only exist in test mode.
+ *   - LIBI_FAKE_FAL_CONFIG — mcp/dev/fake-fal/config.ts, the scenario file
+ *                        (fal only, and only when the parent has one).
+ *   - PATH / HOME      — node + tsx + ffmpeg resolution; PATH gets libi's bin
+ *                        dir prepended exactly as buildSpawnEnv does.
+ *   - LIBI_SQLITE_BINDING_DIR — lib/db/native-binding.ts: `storeFile` opens
+ *                        the DB, and the child's cwd is the agent workspace,
+ *                        so it cannot locate the better-sqlite3 build itself.
+ * tsx needs no NODE_OPTIONS / NODE_* from us — no launcher sets any.
+ */
+const FAKE_MCP_ENV_NAMES = ["LIBI_HOME", "LIBI_TEST_MODE", "HOME"] as const;
+
+/**
+ * Minimal spawn env for a test-mode fake: the whitelist above plus `extra`.
+ * Never spread `process.env` into this — see FAKE_MCP_ENV_NAMES.
+ */
+export function fakeMcpSpawnEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const name of FAKE_MCP_ENV_NAMES) {
+    const value = process.env[name];
+    if (typeof value === "string") env[name] = value;
+  }
+  const pathSep = isWindows() ? ";" : ":";
+  env.PATH = `${getLibiBinDir()}${pathSep}${process.env.PATH ?? ""}`;
+  const sqliteBuildDir = sqliteBuildDirForChildren();
+  if (sqliteBuildDir) env.LIBI_SQLITE_BINDING_DIR = sqliteBuildDir;
+  return { ...env, ...extra };
+}
+
 /** Test-mode only: spawn the fake-fal stdio server (masquerades as fal-ai). */
 export function buildFakeFalEntry(): McpServerEntry {
   const projectRoot = process.cwd();
   const entryPoint = path.join(projectRoot, "mcp", "dev", "fake-fal", "index.ts");
   const tsxCli = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
   const tsconfig = path.join(projectRoot, "tsconfig.json");
-  return { command: resolveNodeCommand(), args: [tsxCli, "--tsconfig", tsconfig, entryPoint], env: buildSpawnEnv() };
+  const scenario = process.env.LIBI_FAKE_FAL_CONFIG;
+  const env = fakeMcpSpawnEnv(scenario ? { LIBI_FAKE_FAL_CONFIG: scenario } : {});
+  return { command: resolveNodeCommand(), args: [tsxCli, "--tsconfig", tsconfig, entryPoint], env };
 }
 
 /** Test-mode only: spawn the fake-elevenlabs stdio server (masquerades as ElevenLabs). */
@@ -233,7 +347,25 @@ export function buildFakeElevenLabsEntry(): McpServerEntry {
   const entryPoint = path.join(projectRoot, "mcp", "dev", "fake-elevenlabs", "index.ts");
   const tsxCli = path.join(projectRoot, "node_modules", "tsx", "dist", "cli.mjs");
   const tsconfig = path.join(projectRoot, "tsconfig.json");
-  return { command: resolveNodeCommand(), args: [tsxCli, "--tsconfig", tsconfig, entryPoint], env: buildSpawnEnv() };
+  return { command: resolveNodeCommand(), args: [tsxCli, "--tsconfig", tsconfig, entryPoint], env: fakeMcpSpawnEnv() };
+}
+
+/**
+ * A settings-shaped stdio entry as the ACP `McpServerStdio` variant. The
+ * builders return `env` as a record; ACP wants `Array<{ name, value }>`, and
+ * claude-agent-acp calls `server.env.map(...)` on it — a record there throws
+ * inside `newSession` and the server never spawns.
+ */
+function toAcpStdioEntry(name: string, entry: McpServerEntry): McpServer {
+  if ("type" in entry) {
+    throw new Error(`toAcpStdioEntry: ${name} is an HTTP entry, not stdio`);
+  }
+  return {
+    name,
+    command: entry.command,
+    args: entry.args ?? [],
+    env: Object.entries(entry.env ?? {}).map(([key, value]) => ({ name: key, value })),
+  };
 }
 
 /**
@@ -268,150 +400,6 @@ export function buildTrackingEntry(): McpServerEntry {
   };
 }
 
-/**
- * Build the full MCP server config from the database.
- * Includes libi itself + enabled external servers with status "installed" or "not_required".
- *
- * All MCP child spawns must build env via `buildSpawnEnv` from
- * `mcp/registry/spawn-env.ts` — both probe (`server-prober.ts`) and here.
- *
- * Logs the resulting set under the `mcp-config` tag with one line per cache
- * build (`reason`-tagged). Filtered rows are logged at debug so investigations
- * can see exactly why a particular MCP didn't make it into a session.
- */
-/**
- * Bundled rows flagged `noServer` are surfaced in Settings / list_bundled_mcps
- * and own an install plan, but their work runs inside libi's own MCP/tools
- * (e.g. `whisper` → analysis_transcribe_audio). They must never be spawned —
- * excluded here the same way the synthesized libi-core row is.
- */
-const NO_SERVER_IDS = new Set(
-  BUNDLED_MCP_SERVERS.filter((d) => d.noServer).map((d) => d.id),
-);
-
-function buildMcpServers(reason: string): Record<string, McpServerEntry> {
-  const servers: Record<string, McpServerEntry> = {
-    libi: buildLibiEntry(),
-  };
-
-  const filtered: Array<{ id: string; reason: string; serverStatus?: string; installStatus?: string }> = [];
-
-  try {
-    const db = getDb();
-    // Pull every enabled non-libi row so we can log what got filtered out
-    // and why — that data is invaluable when an MCP "isn't accessible".
-    const allEnabled = db
-      .select()
-      .from(mcpServersTable)
-      .where(and(eq(mcpServersTable.enabled, true), ne(mcpServersTable.id, "libi")))
-      .all();
-
-    for (const row of allEnabled) {
-      if (NO_SERVER_IDS.has(row.id)) {
-        filtered.push({ id: row.id, reason: "no-server-capability-row" });
-        continue;
-      }
-      if (isTestMode() && row.id === "fal-ai") {
-        // Masquerade: spawn the fake-fal stdio server under the real "fal-ai"
-        // server name so the agent walks the identical generation tool path
-        // (recommend_model → endpoint_id → run_model/submit_job) without spending
-        // credits, and every call is recorded for the skill-eval harness.
-        servers[row.name] = buildFakeFalEntry();
-        continue;
-      }
-      if (isTestMode() && row.id === "elevenlabs") {
-        // Masquerade: spawn the fake-elevenlabs stdio server under the real
-        // "ElevenLabs" server name so the agent walks the identical audio tool
-        // path (text_to_speech / voice_clone / compose_music / …) at zero cost,
-        // and every call is recorded for the skill-eval harness. Placed BEFORE
-        // the needs_config gate so it injects even without ELEVENLABS_API_KEY.
-        servers[row.name] = buildFakeElevenLabsEntry();
-        continue;
-      }
-      // The 13 tracking tools are now hosted on the always-on core `libi`
-      // MCP (see mcp/server.ts → registerTrackingTools). Spawning the
-      // standalone `libi-tracking` MCP in the same session would register
-      // duplicate `libi.*` tool names and reintroduce the very
-      // session-race fragility we removed. Keep the DB row + bundled def
-      // (Settings shows it for the lazy tracking-engine dependency card +
-      // install plan) but never spawn it as a session MCP.
-      if (row.id === "libi-tracking") {
-        filtered.push({ id: row.id, reason: "hosted-in-core-libi" });
-        continue;
-      }
-      // Tier-2 MCPs run via npx (or HTTP) by default — they're "available"
-      // for the agent to use unless the install state explicitly blocks them.
-      // `needs_config` means a required env var (e.g. API key) is missing;
-      // `failed` means a previous probe permanently failed. Otherwise we
-      // include the row even if installStatus is `pending` — the npx spawn
-      // path is the install path for most MCPs.
-      if (["needs_config", "failed"].includes(row.installStatus)) {
-        filtered.push({
-          id: row.id,
-          reason: "install-not-ready",
-          installStatus: row.installStatus,
-        });
-        continue;
-      }
-      if (!["unknown", "starting", "up"].includes(row.serverStatus)) {
-        filtered.push({
-          id: row.id,
-          reason: "server-status-excluded",
-          serverStatus: row.serverStatus,
-        });
-        continue;
-      }
-      // buildEntryForRow routes bundled in-repo defs (libi-tracking) and
-      // pinned-npm defs through resolveBundledSpawn() — the same shared
-      // resolver the prober/diagnose paths use — so the tsx-direct entry is
-      // substituted here too when the source tree is present. No per-id
-      // special-casing needed: the def's `inRepoEntry` drives it.
-      const entry = buildEntryForRow(row);
-      if (!entry) {
-        filtered.push({ id: row.id, reason: "malformed-row" });
-        continue;
-      }
-      servers[row.name] = entry;
-    }
-  } catch (err) {
-    logger.warn({ err, reason, tag: "mcp-config" }, "Failed to load external MCP servers from DB");
-  }
-
-  // Dump per-entry spawn details. envKeys (not envValues) — keeps secrets
-  // out of the log but lets us spot a missing PATH / HOME / NODE_OPTIONS.
-  // `command` + `args` go in verbatim — we need to confirm the actual binary
-  // and flags we're passing to claude-agent-acp / Claude Code.
-  const includedDetails = Object.entries(servers).map(([name, entry]) => {
-    if ("type" in entry && entry.type === "http") {
-      return { name, transport: "http" as const, url: entry.url, headerKeys: Object.keys(entry.headers ?? {}) };
-    }
-    const stdio = entry as { command: string; args?: string[]; env?: Record<string, string> };
-    return {
-      name,
-      transport: "stdio" as const,
-      command: stdio.command,
-      args: stdio.args ?? [],
-      envKeys: stdio.env ? Object.keys(stdio.env).sort() : [],
-    };
-  });
-
-  logger.info(
-    {
-      tag: "mcp-config",
-      op: "cache_build",
-      reason,
-      includedCount: Object.keys(servers).length,
-      included: Object.keys(servers),
-      includedDetails,
-      filteredCount: filtered.length,
-      filtered,
-    },
-    `MCP config built (${Object.keys(servers).length} included, ${filtered.length} filtered, reason=${reason})`,
-  );
-
-  return servers;
-}
-
 // ---------------------------------------------------------------------------
 // Cache
 // ---------------------------------------------------------------------------
@@ -435,14 +423,13 @@ function buildMcpServers(reason: string): Record<string, McpServerEntry> {
 // ONE settings cache, ONE per-agent ACP cache, and ONE invalidate-callback
 // slot, so invalidation from any instance reaches the SessionManager's reads.
 //
-// The per-agent ACP cache (`cachedAcpByAgent`) exists because different agents
-// have different transport capabilities (claude-agent-acp rejects HTTP+SSE;
-// codex-acp accepts HTTP) so the emitted server list isn't identical across
-// agents — see ACP_HTTP_CAPABLE.
+// The per-agent ACP cache (`cachedAcpByAgent`) exists because the single HTTP
+// entry's `?agent=` query picks the instruction dialect (claude vs codex), so
+// the URL isn't identical across agents even though both get the same
+// aggregator.
 const MCP_CONFIG_GLOBAL_KEY = "__libiMcpConfig_v1";
 
 interface McpConfigState {
-  cachedSettings: Record<string, McpServerEntry> | null;
   cachedAcpByAgent: Map<string, McpServer[]>;
   onInvalidateCallback: ((opts: { reason: string }) => void) | null;
 }
@@ -455,7 +442,6 @@ function mcpConfigState(): McpConfigState {
   let state = globalForMcpConfig[MCP_CONFIG_GLOBAL_KEY];
   if (!state) {
     state = {
-      cachedSettings: null,
       cachedAcpByAgent: new Map<string, McpServer[]>(),
       onInvalidateCallback: null,
     };
@@ -465,361 +451,88 @@ function mcpConfigState(): McpConfigState {
 }
 
 /**
- * Agents whose ACP adapter accepts HTTP-transport MCP servers in
- * `newSession({ mcpServers })`.
+ * The MCP list for `newSession({ mcpServers })`.
  *
- *  - `claude-agent-acp` v0.29.1+ accepts HTTP entries (verified empirically
- *    on 2026-05-26 via `scripts/probe-fal-http-mcp.ts` against fal.ai's HTTP
- *    MCP at `https://mcp.fal.ai/mcp`, plus by reading
- *    `node_modules/@agentclientprotocol/claude-agent-acp/dist/acp-agent.js:1058`
- *    and `@anthropic-ai/claude-agent-sdk@0.2.112`'s
- *    `McpServerConfig = McpStdio | McpSSE | McpHttp | …` union). An earlier
- *    investigation note (`docs-local/superpowers/notes/2026-05-23-codex-acp-investigation.md`)
- *    concluded claude-agent-acp rejected HTTP — that conclusion is now stale.
- *  - `@agentclientprotocol/codex-acp` accepts HTTP entries (it advertises
- *    `mcpCapabilities.http: true`).
+ * PRODUCTION: exactly one entry — libi's HTTP endpoint. The header marks the
+ * in-app surface (`lib/mcp/agent-surface.ts`); `?agent=` picks the instruction
+ * dialect. Every other MCP the agent has comes from the agent's OWN config
+ * (`~/.claude.json`, `$CODEX_HOME/config.toml`), which libi reads but never
+ * writes and never carries a key for.
  *
- * Match against libi's internal `agentId` values from
- * `lib/agents/acp/agent-registry.ts` (`claude-code`, `codex`),
- * not the user-facing display names. The bare `"claude"` form is kept for
- * back-compat in case any older caller still hands that in.
+ * The entry is named `libi` — the SAME name `libi connect` writes — precisely
+ * so that, on a machine that has run `libi connect`, this session-scoped entry
+ * REPLACES the user's headerless one instead of mounting libi a second time.
+ * Both adapters resolve the collision in favour of the ACP entry (Claude:
+ * `--mcp-config` beats config; Codex: a `thread/start` config override
+ * deep-merges over the config layers, once codex-acp's own name filter is off
+ * — `lib/agents/process-manager.ts`), and BOTH leave every other config MCP
+ * alone. `LIBI_MCP_ENTRY_NAME` carries the measurements.
  *
- * SSE is silently dropped by codex-acp and historically unsupported by
- * claude-agent-acp; keep SSE skipped for both pending a fresh probe.
- */
-const ACP_HTTP_CAPABLE = new Set<string>(["claude", "claude-code", "codex"]);
-
-/**
- * Get MCP servers in settings format (for writing .claude/settings.local.json).
- * Cached — call `invalidateMcpConfig()` when config changes.
- */
-export function getMcpServersForSettings(): Record<string, McpServerEntry> {
-  const state = mcpConfigState();
-  if (!state.cachedSettings) {
-    state.cachedSettings = buildMcpServers("settings");
-  }
-  return state.cachedSettings;
-}
-
-/**
- * Get MCP servers in ACP protocol format (for `newSession({ mcpServers })`).
- * Cached per agentId — call `invalidateMcpConfig()` when config changes.
+ * TEST MODE: the ONE case where libi passes extra MCPs over ACP — the
+ * fake fal and fake ElevenLabs stdio servers, under the REAL upstream names
+ * (`fal-ai`, `ElevenLabs`) so the agent walks the identical tool path at zero
+ * cost and every call is recorded for the skill-eval harness. `isTestMode()`
+ * is forced off in packaged production builds (`lib/test-mode.ts`) and
+ * `mcp/dev/**` is excluded from both shipped artifacts.
  *
- * HTTP entries are included only for agents in `ACP_HTTP_CAPABLE` (currently
- * codex). For other agents (claude), HTTP rows are skipped because
- * `claude-agent-acp` rejects the request when an HTTP entry is present.
- * HTTP rows are still emitted into the settings file for BYO-CLI mode.
+ * Cached per agent because `?agent=` differs; `invalidateMcpConfig` clears it.
  */
 export function getMcpServersForAcp(agentId: string): McpServer[] {
   const state = mcpConfigState();
   const cached = state.cachedAcpByAgent.get(agentId);
   if (cached) return cached;
-
-  const httpCapable = ACP_HTTP_CAPABLE.has(agentId);
-  const settings = getMcpServersForSettings();
-  const entries: McpServer[] = [];
-  const httpSkipped: string[] = [];
-  const httpIncluded: string[] = [];
-
-  for (const [name, entry] of Object.entries(settings)) {
-    if ("type" in entry && entry.type === "http") {
-      if (!httpCapable) {
-        httpSkipped.push(name);
-        continue;
-      }
-      entries.push({
-        type: "http",
-        name,
-        url: entry.url,
-        headers: Object.entries(entry.headers ?? {}).map(([n, value]) => ({
-          name: n,
-          value,
-        })),
-      });
-      httpIncluded.push(name);
-      continue;
-    }
-    // Coexist note: libi is ALSO discoverable by the in-app SDK via the
-    // workspace `.mcp.json` (project settingSource) — verified callable through
-    // ACP without this explicit entry. We inject it here too, belt-and-
-    // suspenders, so the in-app path is robust if the adapter ever stops
-    // reading project/local settings. Same server name → deduped, no double-spawn.
-    const stdio = entry as { command: string; args?: string[]; env?: Record<string, string> };
-    const envPairs = stdio.env
-      ? Object.entries(stdio.env).map(([k, v]) => ({ name: k, value: v }))
-      : [];
-    // Mark the libi core MCP as the in-app chat surface ONLY on the ACP
-    // `newSession` channel. Surface-gated tools (e.g. libi.show_in_chat) read
-    // this to register only for the in-app chat; the settings-file channel
-    // (terminal / BYO-CLI) never sets it. See lib/mcp/agent-surface.ts.
-    if (name === "libi") {
-      envPairs.push(inAppSurfaceEnvEntry());
-    }
-    entries.push({
-      name,
-      command: stdio.command,
-      args: stdio.args ?? [],
-      env: envPairs,
-    });
-  }
-
-  if (httpSkipped.length > 0) {
-    logger.warn(
-      { tag: "mcp-config", op: "acp_skip_http", agentId, skipped: httpSkipped },
-      `Skipping HTTP MCP servers for ACP (transport not supported by agent=${agentId})`,
+  const dialect = agentId === "codex" ? "codex" : "claude";
+  const entries: McpServer[] = [{
+    type: "http",
+    name: IN_APP_MCP_NAME,
+    // This instance's own port in every supervisor state, never a guess that
+    // may name another instance's aggregator (see `getLiveMcpPort`).
+    url: `http://127.0.0.1:${getLiveMcpPort()}/mcp?agent=${dialect}`,
+    headers: [{ name: SURFACE_HEADER, value: IN_APP_SURFACE }],
+  }];
+  if (isTestMode() && testModeFakesEnabled()) {
+    entries.push(
+      toAcpStdioEntry(TEST_MODE_FAKE_NAMES[0], buildFakeFalEntry()),
+      toAcpStdioEntry(TEST_MODE_FAKE_NAMES[1], buildFakeElevenLabsEntry()),
     );
   }
+  state.cachedAcpByAgent.set(agentId, entries);
   logger.info(
     {
       tag: "mcp-config",
       op: "acp_cache_built",
       agentId,
-      httpCapable,
-      includedCount: entries.length,
-      included: entries.map((s) => s.name),
-      // Per-entry spawn/transport details. Stdio: command + args + env keys
-      // (values stripped). HTTP: url + header keys (values stripped). Lets
-      // us confirm exactly what gets handed to the ACP adapter.
-      includedDetails: entries.map((s) => {
-        if ("type" in s && (s.type === "http" || s.type === "sse")) {
-          return {
-            name: s.name,
-            transport: s.type,
-            url: s.url,
-            headerKeys: (s.headers ?? []).map((h) => h.name).sort(),
-          };
-        }
-        // Only the stdio transport variant lacks a `type` discriminant in the
-        // McpServer union (SDK 0.25 added an `acp` variant); narrow to it.
-        const stdio = s as Extract<McpServer, { command: string }>;
-        return {
-          name: stdio.name,
-          transport: "stdio" as const,
-          command: stdio.command,
-          args: stdio.args,
-          envKeys: (stdio.env ?? []).map((e) => e.name).sort(),
-        };
-      }),
-      httpIncludedCount: httpIncluded.length,
-      httpIncluded,
-      httpSkippedCount: httpSkipped.length,
-      httpSkipped,
+      names: entries.map((e) => e.name),
+      testMode: isTestMode(),
     },
-    `ACP MCP cache built for agent=${agentId} (${entries.length} servers, ${httpIncluded.length} http, ${httpSkipped.length} http skipped)`,
+    "ACP MCP entries built",
   );
-
-  state.cachedAcpByAgent.set(agentId, entries);
   return entries;
 }
 
-// ---------------------------------------------------------------------------
-// Settings file
-// ---------------------------------------------------------------------------
-
 /**
- * Server names libi manages. Used by `writeSettingsFile` to refresh libi's
- * own entries in a (possibly user-owned) `.mcp.json` without dropping servers
- * the user added themselves — matters for `--connect-agent`, where `.mcp.json`
- * lives in the user's repo. Includes disabled rows so a server disabled in
- * libi's Settings is removed from `.mcp.json` rather than lingering.
+ * The same list, with libi's own entry renamed to
+ * `LIBI_MCP_FALLBACK_ENTRY_NAME` — the ONE-SHOT retry list for the Codex edge
+ * where the deliberate name collision is fatal instead of replacing.
+ *
+ * Only `lib/sessions/session-manager.ts` calls this, and only after observing
+ * `isLibiMcpEntryConfigError` on a `newSession` rejection. Everything else in
+ * the list (the test-mode fakes) is passed through untouched, and nothing is
+ * cached: this is a cold path that should stay rare, and caching a degraded
+ * shape risks it outliving the config that caused it.
+ *
+ * Renaming re-creates the duplicated tool surface for that session — the
+ * entry no longer collides, so codex mounts the user's config entry too. That
+ * is the trade being made on purpose: `LIBI_MCP_FALLBACK_ENTRY_NAME` carries
+ * the reasoning, and `lib/agents/mcp-tool-id.ts` keeps the resulting wire
+ * segment resolving to `libi`.
  */
-function libiManagedServerNames(): Set<string> {
-  const names = new Set<string>(["libi"]);
-  try {
-    const db = getDb();
-    for (const row of db.select({ name: mcpServersTable.name }).from(mcpServersTable).all()) {
-      names.add(row.name);
-    }
-  } catch {
-    // DB unavailable — managed set is just the core libi server.
-  }
-  return names;
-}
-
-/**
- * Map of server name → RAW (unsubstituted) HTTP headers from the DB, e.g.
- * `{ Authorization: "Bearer ${FAL_KEY}" }`. Used when writing the EXTERNAL
- * connect-agent `.mcp.json` so the file references the env var instead of the
- * substituted literal secret value `buildEntryForRow` would otherwise bake in.
- */
-function rawHttpHeadersByName(): Map<string, Record<string, string>> {
-  const map = new Map<string, Record<string, string>>();
-  try {
-    const db = getDb();
-    for (const row of db.select().from(mcpServersTable).all()) {
-      if (row.type === "http" && row.headers) {
-        try {
-          const parsed = JSON.parse(row.headers);
-          if (parsed && typeof parsed === "object") map.set(row.name, parsed);
-        } catch {
-          // Malformed headers JSON — skip; the substituted entry is the fallback.
-        }
-      }
-    }
-  } catch {
-    // DB unavailable — no raw headers; callers fall back to the built entry.
-  }
-  return map;
-}
-
-/**
- * Ensure `.gitignore` in an external connect-agent dir excludes the agent
- * config files. Idempotent: only appends entries not already present, creating
- * the file if absent. Best-effort — a failure here must never block the
- * settings-file write (the primary secret-free guarantee).
- */
-function ensureConnectAgentGitignore(dir: string, entries: string[]): void {
-  const gitignorePath = path.join(dir, ".gitignore");
-  let content = "";
-  try {
-    content = fs.readFileSync(gitignorePath, "utf-8");
-  } catch {
-    // No existing .gitignore — we'll create it.
-  }
-  const present = new Set(
-    content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean),
+export function getMcpServersForAcpFallback(agentId: string): McpServer[] {
+  return getMcpServersForAcp(agentId).map((entry) =>
+    entry.name === IN_APP_MCP_NAME
+      ? { ...entry, name: LIBI_MCP_FALLBACK_ENTRY_NAME }
+      : entry,
   );
-  const missing = entries.filter((e) => !present.has(e));
-  if (missing.length === 0) return;
-  const prefix = content.length === 0 || content.endsWith("\n") ? "" : "\n";
-  const block =
-    prefix +
-    "# Added by libi --connect-agent — references API keys & agent config; do not commit\n" +
-    missing.join("\n") +
-    "\n";
-  try {
-    fs.writeFileSync(gitignorePath, content + block);
-  } catch (err) {
-    logger.warn(
-      { err, tag: "security", op: "connect_agent_gitignore_failed", dir },
-      "Failed to write .gitignore in connect-agent dir",
-    );
-  }
-}
-
-/**
- * Write .mcp.json + .claude/settings.local.json for Claude Code.
- *
- * Claude Code reads MCP server definitions from `.mcp.json` (not from
- * `mcpServers` in settings files — verified against v2.1.170). Server
- * definitions go there; `enableAllProjectMcpServers: true` in settings
- * suppresses the per-session "approve N servers?" prompt.
- *
- * Used by standalone CLI sessions (`npx libi --connect-agent`) that read
- * settings directly from disk. For ACP sessions, MCP servers are passed
- * explicitly via `newSession({ mcpServers })` — see `getMcpServersForAcp()`.
- */
-export function writeSettingsFile(workspaceDir: string): void {
-  // Persist a SECRET-FREE copy: the in-memory entries carry buildSpawnEnv()'s
-  // full process env (every service's API key), but a stdio server written to
-  // .mcp.json on disk must only carry the operational vars + its OWN declared
-  // requiredEnvVars + LIBI_HOME. HTTP entries have no env and pass through.
-  // (The in-app ACP path keeps the full in-memory env — nothing is persisted
-  // there — so this filtering is scoped to the file write only.)
-  // Is this the EXTERNAL --connect-agent target (the user's own, often
-  // git-tracked, dir)? If so, write env-var REFERENCES instead of baked-in
-  // literal secret values so a routine `git add -A && push` cannot leak keys.
-  // The internal ~/.libi/agent dir keeps the current (literal safe-env)
-  // behavior — nothing user-committable lives there.
-  const connectedDir = getConnectedAgentDir();
-  const isExternalTarget =
-    connectedDir !== null && path.resolve(workspaceDir) === connectedDir;
-  const rawHeaders = isExternalTarget ? rawHttpHeadersByName() : null;
-
-  const rawServers = getMcpServersForSettings();
-  const mcpServers: Record<string, McpServerEntry> = {};
-  for (const [name, entry] of Object.entries(rawServers)) {
-    if ("type" in entry && entry.type === "http") {
-      if (isExternalTarget) {
-        // Prefer the RAW (unsubstituted) headers so a `${FAL_KEY}` reference
-        // is written, not `Bearer <real key>`. Fall back to the built entry
-        // only if the raw headers are unavailable (never re-bake a secret).
-        const raw = rawHeaders?.get(name);
-        mcpServers[name] = raw
-          ? { type: "http", url: entry.url, headers: raw }
-          : { type: "http", url: entry.url, headers: {} };
-      } else {
-        mcpServers[name] = entry;
-      }
-      continue;
-    }
-    const stdio = entry as {
-      command: string;
-      args?: string[];
-      env?: Record<string, string>;
-    };
-    mcpServers[name] = {
-      command: stdio.command,
-      args: stdio.args,
-      env: isExternalTarget
-        ? buildReferenceServerEnv(name, stdio.env)
-        : buildSafeServerEnv(name, stdio.env),
-    };
-  }
-
-  // 1. Server DEFINITIONS go in `.mcp.json` — the file Claude Code actually
-  //    reads for project MCP servers. (Its CLI ignores a `mcpServers` key in
-  //    settings.local.json; verified against Claude Code v2.1.170.) Merge into
-  //    any existing `.mcp.json`: refresh every libi-managed name, preserve
-  //    servers the user added themselves (the `--connect-agent` case).
-  fs.mkdirSync(workspaceDir, { recursive: true });
-  const mcpJsonPath = path.join(workspaceDir, ".mcp.json");
-  let mcpJson: Record<string, unknown> & { mcpServers?: Record<string, unknown> } = {};
-  if (fs.existsSync(mcpJsonPath)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-      // Only adopt a plain object — an array or primitive would lose servers
-      // when we assign `.mcpServers` onto it, so treat those as malformed.
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        mcpJson = parsed;
-      }
-    } catch {
-      // Malformed — start fresh.
-    }
-  }
-  const managed = libiManagedServerNames();
-  // A user entry whose name collides with a libi-managed name is treated as
-  // managed — libi's definition supersedes it (because the `managed.has(name)`
-  // filter excludes it from `preserved`).
-  const preserved: Record<string, unknown> = {};
-  for (const [name, def] of Object.entries(mcpJson.mcpServers ?? {})) {
-    if (!managed.has(name)) preserved[name] = def;
-  }
-  mcpJson.mcpServers = { ...preserved, ...mcpServers };
-  fs.writeFileSync(mcpJsonPath, JSON.stringify(mcpJson, null, 2) + "\n");
-
-  // 2. settings.local.json auto-enables every project `.mcp.json` server so a
-  //    new BYO session never shows the "N new MCP servers found — approve?"
-  //    prompt. It no longer carries the (CLI-ignored) `mcpServers` block.
-  //    Preserve any other pre-existing keys (permissions, etc.).
-  const claudeDir = path.join(workspaceDir, ".claude");
-  fs.mkdirSync(claudeDir, { recursive: true });
-  const settingsPath = path.join(claudeDir, "settings.local.json");
-  let existing: Record<string, unknown> = {};
-  if (fs.existsSync(settingsPath)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-      // Only adopt a plain object — an array or primitive would lose existing
-      // keys when we assign onto it, so treat those as malformed.
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        existing = parsed;
-      }
-    } catch {
-      // Malformed — start fresh.
-    }
-  }
-  delete existing.mcpServers;
-  existing.enableAllProjectMcpServers = true;
-  fs.writeFileSync(settingsPath, JSON.stringify(existing, null, 2) + "\n");
-
-  // 3. For an EXTERNAL connect-agent dir, keep these agent-config files out of
-  //    the user's git history — they reference API keys / contain agent config.
-  if (isExternalTarget) {
-    ensureConnectAgentGitignore(workspaceDir, [
-      ".mcp.json",
-      ".claude/settings.local.json",
-    ]);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -841,11 +554,13 @@ export function onMcpConfigInvalidated(cb: (opts: { reason: string }) => void): 
 }
 
 /**
- * Invalidate the MCP config cache, rewrite the settings file, and refresh
- * the standby ACP session so the next agent session gets updated servers.
+ * Invalidate the MCP config cache, tell the HTTP aggregator to reload, and
+ * refresh the standby ACP session so the next agent session gets updated
+ * servers.
  *
- * Called when MCP servers are added, removed, or reconfigured, and after
- * Category B's pre-warm phase to swap the cold-cache standby for a warm one.
+ * Called when the aggregator port or the test-mode fakes flag changes, and
+ * after Category B's pre-warm phase to swap the cold-cache standby for a warm
+ * one.
  *
  * The optional `reason` is logged so investigations can correlate a cache
  * drop with what triggered it (settings CRUD, retry, pre-warm, db-resolve).
@@ -853,31 +568,11 @@ export function onMcpConfigInvalidated(cb: (opts: { reason: string }) => void): 
 export function invalidateMcpConfig(opts?: { reason?: string }): void {
   const reason = opts?.reason ?? "unspecified";
   const state = mcpConfigState();
-  state.cachedSettings = null;
   state.cachedAcpByAgent.clear();
+  notifyMcpHttpReload(reason);
 
-  // Rewrite agent config files in every agent dir — the default
-  // (<libi-home>/agent/) plus the connected external dir in connect-agent
-  // mode, so an outside CLI always reads fresh config. Guard each dir
-  // independently: a connected dir is user-supplied and may be read-only,
-  // and a failure there must never skip libi's own (always-writable) dir.
-  // The warning names the failing dir so the cause is actionable.
-  for (const dir of getAgentDirWriteTargets()) {
-    try {
-      writeSettingsFile(dir);
-    } catch (err) {
-      logger.warn({ err, reason, dir }, "Failed to rewrite settings file after MCP config change");
-    }
-  }
-
-  // Sync the user's global ~/.codex MCP entries via codex's own `mcp add/remove`
-  // — but ONLY when they opted in (connected) AND this is the canonical instance
-  // (double-gated worktree safety). Default: no-op, nothing written to ~/.codex.
-  // Fire-and-forget — it has its own error handling and never throws; we don't
-  // want to block the caller (typically an API mutation) on disk I/O.
-  void syncCodexGlobalMcpsIfConnected().catch((err) => {
-    logger.warn({ err, reason, tag: "codex-config", op: "invalidate_error" }, "Failed to sync codex global MCPs after MCP config change");
-  });
+  // No agent config is written from here any more: registration is a command
+  // the user submits on the Agents page.
 
   // Refresh standby session so next ACP session gets updated servers. The
   // callback decides whether to also fan out and refresh active sessions —

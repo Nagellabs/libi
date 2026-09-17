@@ -53,6 +53,73 @@ describe("forwardJobProgressViaMcp", () => {
     }
   });
 
+  /**
+   * `total: 0` is how a job says "size unknown". Clamping it to
+   * `Math.max(total, 1)` told the agent `progress: 43, total: 1` and climbing
+   * — so the model's own rendering read "43/1 bytes". The MCP progress
+   * notification represents indeterminate by OMITTING `total`.
+   */
+  it("omits total (and drops it from the message) for an indeterminate job", async () => {
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    registerRunner({
+      kind: "k", maxConcurrent: 1, resumable: false,
+      paramsSchema: z.object({}),
+      async run(ctx) {
+        ctx.reportProgress(43, 0, "bytes");
+        return { ok: true };
+      },
+    });
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("k", {}));
+
+    const unsubscribe = forwardJobProgressViaMcp({
+      mgr, jobId, progressToken: "tok", sendNotification,
+    });
+    try {
+      await mgr.runToCompletion(jobId);
+    } finally {
+      unsubscribe();
+    }
+
+    const params = sendNotification.mock.calls.map(
+      ([n]) => (n as { params: { progress: number; total?: number; message?: string } }).params,
+    );
+    expect(params).toHaveLength(1);
+    expect(params[0].progress).toBe(43);
+    expect("total" in params[0]).toBe(false);
+    expect(params[0].message).toBe("43 bytes");
+  });
+
+  it("keeps total when the job knows its size", async () => {
+    const sendNotification = vi.fn().mockResolvedValue(undefined);
+    registerRunner({
+      kind: "k", maxConcurrent: 1, resumable: false,
+      paramsSchema: z.object({}),
+      async run(ctx) {
+        ctx.reportProgress(3, 10, "frames");
+        return { ok: true };
+      },
+    });
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("k", {}));
+
+    const unsubscribe = forwardJobProgressViaMcp({
+      mgr, jobId, progressToken: "tok", sendNotification,
+    });
+    try {
+      await mgr.runToCompletion(jobId);
+    } finally {
+      unsubscribe();
+    }
+
+    const params = sendNotification.mock.calls.map(
+      ([n]) => (n as { params: { progress: number; total?: number; message?: string } }).params,
+    );
+    expect(params).toEqual([
+      expect.objectContaining({ progress: 3, total: 10, message: "3/10 frames" }),
+    ]);
+  });
+
   it("no-ops when progressToken is undefined", async () => {
     const sendNotification = vi.fn();
     registerRunner({

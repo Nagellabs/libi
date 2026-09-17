@@ -119,7 +119,6 @@ export async function clonePieceInto(
         proxyFilename: carryProxy ? f.proxyFilename : null,
         proxyStatus: carryProxy ? f.proxyStatus : "idle",
         proxyGeneratedAt: carryProxy ? f.proxyGeneratedAt : null,
-        falUploadedUrl: null,
       }).run();
       done++;
       onProgress?.(done, total);

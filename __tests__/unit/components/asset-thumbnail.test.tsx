@@ -31,7 +31,6 @@ function makeFile(overrides: Partial<FileRecord> = {}): FileRecord {
     filmstripGeneratedAt: null,
     filmstripFrames: null,
     filmstripHeight: null,
-    falUploadedUrl: null,
     aiGeneration: null,
     notes: null,
     createdAt: new Date(),

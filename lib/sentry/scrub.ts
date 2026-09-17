@@ -213,17 +213,26 @@ export function redactDeep<T>(input: T, depth = 0): T {
 }
 
 /**
- * The identity + secret scrubbing that is IDENTICAL for error events and
- * transaction events. Both shapes carry the same identifying/secret-bearing
- * sections (`user`, `server_name`, `request`, `contexts`, `extra`, `tags`,
- * `breadcrumbs`, `message`), so this lives in exactly one place — the two
- * public hooks below used to hand-duplicate ~35 lines of it, which meant a
- * newly-redacted field could silently be added to one and not the other.
+ * The identity + secret scrubbing that is IDENTICAL for error events,
+ * transaction events and feedback events. All three shapes carry the same
+ * identifying/secret-bearing sections (`user`, `server_name`, `request`,
+ * `contexts`, `extra`, `tags`, `breadcrumbs`, `message`), so this lives in
+ * exactly one place — the public hooks below used to hand-duplicate ~35 lines
+ * of it, which meant a newly-redacted field could silently be added to one and
+ * not the other.
+ *
+ * `FeedbackLikeEvent` is in the constraint because the SDK merges the scope
+ * onto a feedback event exactly as it does onto an error event — see that
+ * type's own comment for the evidence. Widening the constraint is deliberately
+ * preferred over a parallel redaction path in `scrubFeedback`: one tested
+ * implementation, three event types.
  *
  * Generic (rather than taking a union) so each caller gets its own event type
  * back unchanged. Mutates in place and returns the same reference.
  */
-function scrubCommonEventFields<T extends ErrorEvent | TransactionEvent>(event: T): T {
+function scrubCommonEventFields<
+  T extends ErrorEvent | TransactionEvent | FeedbackLikeEvent,
+>(event: T): T {
   // 1. Identity: drop anything that could identify the user.
   delete event.user;
   delete event.server_name;
@@ -405,4 +414,122 @@ function scrubSpanFields(span: SpanJSON): SpanJSON {
   }
   if (span.data) redactDeep(span.data);
   return span;
+}
+
+/**
+ * The shape of a user-feedback event, declared structurally for the same reason
+ * `SpanJSON` / `TransactionEvent` are above: @sentry/nextjs's public `.d.ts`
+ * does not re-export it, and reaching into the undeclared @sentry/core
+ * transitive dependency is worse than a local shape. Built by `captureFeedback`
+ * (@sentry/core/build/cjs/feedback.js), which is the only producer.
+ *
+ * IT DECLARES THE SHARED SECTIONS TOO — `user`, `server_name`, `request`,
+ * `extra`, `tags`, `breadcrumbs`, `message` — none of which `captureFeedback`
+ * writes. They arrive later: the SDK merges the whole scope onto a feedback
+ * event exactly as it does onto an error event, because
+ * `applyScopeDataToEvent` (@sentry/core/build/cjs/utils/applyScopeDataToEvent.js)
+ * and `httpContextIntegration.preprocessEvent` both run with NO branch on
+ * `event.type`. A feedback envelope captured off the installed SDK carried
+ * console breadcrumbs (including an error message with an absolute media
+ * path), `request.url` + `request.headers.User-Agent`, a `piece_id` tag, an
+ * `extra.last_export_path`, and `contexts.culture` (locale + timezone). Every
+ * one of those is deleted or redacted for an error event, so it has to be
+ * described here for `scrubFeedback` to hand to `scrubCommonEventFields`.
+ */
+type FeedbackLikeEvent = {
+  type?: unknown;
+  user?: unknown;
+  server_name?: unknown;
+  request?: {
+    cookies?: unknown;
+    headers?: unknown;
+    query_string?: unknown;
+    env?: unknown;
+    url?: unknown;
+    data?: unknown;
+  };
+  contexts?: { feedback?: { message?: unknown; contact_email?: unknown } };
+  extra?: unknown;
+  tags?: unknown;
+  breadcrumbs?: Array<{ data?: unknown; message?: unknown }>;
+  message?: unknown;
+};
+
+/**
+ * Redact the message a user typed into the feedback widget. Registered as a
+ * Sentry EVENT PROCESSOR, not a `beforeSend*` hook.
+ *
+ * WHY A PROCESSOR. The SDK selects its before-send hook by event type, and its
+ * test for "is this an error event" is literally `event.type === void 0`
+ * (@sentry/core/build/cjs/client.js:798). A feedback event carries
+ * `type: "feedback"`, so `scrubEvent` NEVER runs on one — the typed message
+ * would ship with no redaction at all. `prepareEvent` calls
+ * `notifyEventProcessors` with no branch on type whatsoever
+ * (@sentry/core/build/cjs/utils/prepareEvent.js:47), so a processor is the one
+ * seam that reliably sees feedback.
+ *
+ * WHY IT IS NOT GATED ON `shouldSendCrashReports()`, unlike `scrubEvent` right
+ * above. Feedback is now sent even while the user has opted out
+ * (lib/sentry/gated-transport.ts — the user composed it and pressed Send). A
+ * gate here would therefore skip redaction for exactly the users who asked for
+ * less telemetry, shipping their raw message. It must always redact, and it
+ * must never return null: dropping a message the user deliberately sent is the
+ * one outcome this path must not produce.
+ *
+ * WHAT IT TOUCHES. THE WHOLE EVENT, not just the typed message. By the time a
+ * processor runs, the SDK has merged the scope on: breadcrumbs, `request`
+ * (URL + headers), `tags`, `extra` and `contexts.culture` are all present, with
+ * no branch on `event.type` anywhere in that path (see `FeedbackLikeEvent`
+ * above for the captured evidence). Redacting only the message would mean a
+ * user who opted OUT of crash reports, and then sent one feedback message,
+ * shipped their console/fetch/navigation breadcrumb trail, their User-Agent and
+ * their timezone — a privacy regression against the exact people who asked for
+ * less. So:
+ *
+ *   1. `scrubCommonEventFields` — the same tested identity/secret/path
+ *      redaction an error event gets. Reused, never re-implemented.
+ *   2. `breadcrumbs` are DELETED OUTRIGHT rather than redacted. They have no
+ *      debugging value on a feedback event: they record whatever the user did
+ *      on the way to opening Settings, typically minutes after the thing they
+ *      are describing. They are also the highest-risk section, and deleting is
+ *      easier to keep honest than redacting.
+ *   3. `contexts.feedback.message` gets `redactString` — NOT `redactPaths`.
+ *      `redactString` is what `event.message`, `span.description` and exception
+ *      values use: it applies `SECRET_VALUE_PATTERNS` (Bearer tokens, JWTs,
+ *      `sk-…`, `gh?_…`, `sntrys_…`) and THEN `redactPaths`. The feedback box is
+ *      the single field a user is most likely to paste a raw log or an API key
+ *      into, so it gets the stronger of the two, not the weaker. Step 1's
+ *      `redactDeep(contexts)` already reaches this field with the same
+ *      function, so this line is belt-and-braces — kept because the strongest
+ *      treatment should be NAMED at the field that most needs it, and because
+ *      `redactDeep` is depth-limited and generic where this is neither.
+ *
+ * `contact_email` is deliberately LEFT ALONE: that field exists so we can
+ * reply, and scrubbing it would silently defeat it. It has to be lifted out and
+ * put back, because step 1 redacts `contexts` wholesale and `redactPaths`
+ * censors the registered OS user name as a delimited token — on a machine whose
+ * user is `jane`, `jane@example.com` would come back `[user]@example.com`.
+ *
+ * Non-feedback events pass straight through — they have their own hooks.
+ */
+export function scrubFeedback<T>(event: T): T {
+  const candidate = event as FeedbackLikeEvent | null | undefined;
+  if (!candidate || candidate.type !== "feedback") return event;
+
+  // Captured BEFORE the common scrub, restored after — `redactDeep` mutates
+  // objects in place and returns the same reference, so this handle stays valid.
+  const feedback = candidate.contexts?.feedback;
+  const contactEmail = feedback?.contact_email;
+
+  scrubCommonEventFields(candidate);
+
+  delete candidate.breadcrumbs;
+
+  if (feedback) {
+    if (typeof feedback.message === "string") {
+      feedback.message = redactString(feedback.message);
+    }
+    if (contactEmail !== undefined) feedback.contact_email = contactEmail;
+  }
+  return event;
 }

@@ -17,10 +17,18 @@ let modelsDir: string;
 let installed = false;
 
 const retryDep = vi.fn();
+const ensureDep = vi.fn();
+/** Every DependencyManager call in the order the runner made it. */
+let calls: string[] = [];
 
 vi.mock("@/mcp/registry/dependency-manager", () => ({
   DependencyManager: class {
+    ensureDep(mcpId: string, binary: string): Promise<void> {
+      calls.push(`ensureDep:${mcpId}/${binary}`);
+      return ensureDep(mcpId, binary);
+    }
     retryDep(mcpId: string, binary: string): Promise<void> {
+      calls.push(`retryDep:${mcpId}/${binary}`);
       return retryDep(mcpId, binary);
     }
   },
@@ -67,6 +75,9 @@ describe("trackingEngineInstallRunner", () => {
     modelsDir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-trk-models-"));
     installed = false;
     retryDep.mockReset();
+    ensureDep.mockReset();
+    ensureDep.mockResolvedValue(undefined); // uv already on disk unless a test says otherwise
+    calls = [];
     vi.unstubAllEnvs();
   });
   afterEach(() => {
@@ -178,5 +189,41 @@ describe("trackingEngineInstallRunner", () => {
     await expect(
       trackingEngineInstallRunner.run(makeCtx([]) as never),
     ).rejects.toThrow(/uv sync failed/);
+  });
+
+  it("ensures uv (ensureDep, not retryDep) BEFORE the pyenv install", async () => {
+    // The tracking-pyenv installer runs `uv sync --locked` through
+    // `uvPath()`, which falls back to a bare "uv" when <LIBI_HOME>/bin/uv is
+    // absent — ENOENT on a fresh machine without a system uv. `ensureMcp`
+    // guarantees standard-before-custom inside its own loop, but this runner
+    // calls retryDep on the pyenv dep directly and bypasses that loop, so it
+    // must make the same guarantee itself. ensureDep, not retryDep: uv must
+    // not be re-downloaded (52 MB) on every engine install attempt.
+    const { trackingEngineInstallRunner } = await import(
+      "@/lib/jobs/runners/tracking-engine-install"
+    );
+    retryDep.mockImplementation(async () => {
+      installed = true;
+    });
+    await trackingEngineInstallRunner.run(makeCtx([]) as never);
+    expect(ensureDep).toHaveBeenCalledWith("libi-tracking", "uv");
+    expect(ensureDep).toHaveBeenCalledTimes(1);
+    expect(retryDep).toHaveBeenCalledWith("libi-tracking", "tracking-pyenv");
+    expect(retryDep).not.toHaveBeenCalledWith("libi-tracking", "uv");
+    expect(calls).toEqual([
+      "ensureDep:libi-tracking/uv",
+      "retryDep:libi-tracking/tracking-pyenv",
+    ]);
+  });
+
+  it("fails the job with a message naming uv when the uv install fails, without starting the pyenv", async () => {
+    const { trackingEngineInstallRunner } = await import(
+      "@/lib/jobs/runners/tracking-engine-install"
+    );
+    ensureDep.mockRejectedValue(new Error("fetch failed: github.com"));
+    await expect(
+      trackingEngineInstallRunner.run(makeCtx([]) as never),
+    ).rejects.toThrow(/\buv\b.*fetch failed: github\.com/);
+    expect(retryDep).not.toHaveBeenCalled();
   });
 });

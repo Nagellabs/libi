@@ -9,219 +9,100 @@ vi.mock("@/mcp/notify", () => ({
   },
 }));
 
-const loggerInfoSpy = vi.fn();
 vi.mock("@/lib/logger", () => ({
-  mcpLogger: {
-    info: (...args: unknown[]) => loggerInfoSpy(...args),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
-  serverLogger: {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-  },
+  mcpLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+  serverLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
 import { notify } from "@/mcp/notify";
-import {
-  updateMcpServer,
-  setMcpServerEnabled,
-  removeMcpServer,
-} from "@/mcp/tools/mcp-server-tools";
+import { updateMcpServer } from "@/mcp/tools/mcp-server-tools";
 
 let db: ReturnType<typeof createTestDb>;
 
-const BUNDLED_ID = "elevenlabs";
-const CUSTOM_ID = "custom-1";
+// The table holds only libi-owned rows now that libi bundles no third-party MCP: the core row plus
+// extension rows. Seeded by id so the tool's `kind` lookup against
+// BUNDLED_MCP_SERVERS resolves.
+function seed(id: string, name: string) {
+  return {
+    id,
+    name,
+    description: null,
+    type: "stdio" as const,
+    command: "node",
+    args: null,
+    requireApproval: false,
+    bundled: true,
+    installStatus: "installed",
+    envVars: null,
+  };
+}
 
 beforeEach(() => {
   db = createTestDb();
   db.insert(mcpServers)
-    .values([
-      {
-        id: BUNDLED_ID,
-        name: "ElevenLabs",
-        description: "stt + tts",
-        type: "stdio",
-        command: "uvx",
-        args: JSON.stringify(["elevenlabs-mcp"]),
-        enabled: true,
-        requireApproval: true,
-        bundled: true,
-        installStatus: "needs_config",
-        envVars: null,
-      },
-      {
-        id: CUSTOM_ID,
-        name: "Custom",
-        description: "user-added",
-        type: "stdio",
-        command: "node",
-        args: JSON.stringify(["x.js"]),
-        enabled: true,
-        requireApproval: true,
-        bundled: false,
-        installStatus: "installed",
-        envVars: JSON.stringify({ FOO: "bar" }),
-      },
-    ])
+    .values([seed("libi", "libi"), seed("libi-tracking", "Tracking"), seed("whisper", "Whisper")])
     .run();
   vi.mocked(notify.refreshMcpConfig).mockReset();
-  loggerInfoSpy.mockReset();
 });
 
 afterEach(() => {
   resetTestDb();
 });
 
-describe("updateMcpServer", () => {
-  it("applies a PATCH on a custom row and returns the subset", async () => {
-    const result = await updateMcpServer({
-      id: CUSTOM_ID,
-      name: "Custom Renamed",
-      command: "node",
-      args: ["y.js", "--verbose"],
-      envVars: { FOO: "baz", NEW: "value" },
-      requireApproval: false,
-    });
+describe("MCP row edit tools after providers", () => {
+  it("has no way to create or delete a row", async () => {
+    const mod = await import("@/mcp/tools/mcp-server-tools");
+    expect("registerMcpServer" in mod).toBe(false);
+    expect("removeMcpServer" in mod).toBe(false);
+  });
 
-    expect(result.success).toBe(true);
-    expect(result.data).toMatchObject({
-      id: CUSTOM_ID,
-      name: "Custom Renamed",
-      type: "stdio",
-      enabled: true,
-      requireApproval: false,
-    });
-
-    const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, CUSTOM_ID)).all();
-    expect(row.name).toBe("Custom Renamed");
-    expect(row.command).toBe("node");
-    expect(JSON.parse(row.args!)).toEqual(["y.js", "--verbose"]);
-    expect(JSON.parse(row.envVars!)).toEqual({ FOO: "baz", NEW: "value" });
-    expect(row.requireApproval).toBe(false);
+  it("accepts requireApproval on a libi-owned row", async () => {
+    const res = await updateMcpServer({ id: "libi-tracking", requireApproval: true });
+    expect(res.success).toBe(true);
+    expect(res.data).toEqual({ id: "libi-tracking", requireApproval: true });
+    const row = db.select().from(mcpServers).where(eq(mcpServers.id, "libi-tracking")).get();
+    expect(row!.requireApproval).toBe(true);
     expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects restricted-field edits on a bundled row", async () => {
-    const result = await updateMcpServer({
-      id: BUNDLED_ID,
-      name: "Hacked Name",
-      command: "rm",
-      args: ["-rf", "/"],
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("bundled MCP fields are read-only");
-    expect(result.data).toMatchObject({
-      id: BUNDLED_ID,
-      rejectedFields: expect.arrayContaining(["name", "command", "args"]),
-      editableFields: ["envVars", "requireApproval"],
-    });
-
-    const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, BUNDLED_ID)).all();
-    expect(row.name).toBe("ElevenLabs");
-    expect(row.command).toBe("uvx");
+  it("rejects every other field", async () => {
+    const res = await updateMcpServer({ id: "libi-tracking", command: "evil" } as never);
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/read-only/i);
+    expect(res.data).toMatchObject({ message: expect.stringContaining("command") });
+    const row = db.select().from(mcpServers).where(eq(mcpServers.id, "libi-tracking")).get();
+    expect(row!.command).toBe("node");
     expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
   });
 
-  it("honors envVars + requireApproval edits on a bundled row", async () => {
-    const result = await updateMcpServer({
-      id: BUNDLED_ID,
-      envVars: { ELEVENLABS_API_KEY: "sk_secret_value_xxx" },
-      requireApproval: false,
-    });
-
-    expect(result.success).toBe(true);
-
-    const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, BUNDLED_ID)).all();
-    expect(JSON.parse(row.envVars!)).toEqual({ ELEVENLABS_API_KEY: "sk_secret_value_xxx" });
-    expect(row.requireApproval).toBe(false);
-    expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
+  it("refuses to touch the core libi row", async () => {
+    const res = await updateMcpServer({ id: "libi", requireApproval: true });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/read-only/i);
+    const row = db.select().from(mcpServers).where(eq(mcpServers.id, "libi")).get();
+    expect(row!.requireApproval).toBe(false);
   });
 
-  it("returns a structured error when id is missing", async () => {
-    const result = await updateMcpServer({ id: "does-not-exist", name: "x" });
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("mcp server not found");
-    expect(result.data).toEqual({ id: "does-not-exist" });
+  it("returns no_change when requireApproval is omitted", async () => {
+    const res = await updateMcpServer({ id: "libi-tracking" });
+    expect(res.success).toBe(false);
+    expect(res.error).toBe("no_change");
     expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
   });
 
-  it("never logs envVar VALUES — only keys", async () => {
-    const SECRET = "sk_live_super_secret_value_do_not_log";
-    await updateMcpServer({
-      id: BUNDLED_ID,
-      envVars: { ELEVENLABS_API_KEY: SECRET, OTHER: "another_secret_value" },
-    });
-
-    const allLoggedJson = JSON.stringify(loggerInfoSpy.mock.calls);
-    expect(allLoggedJson).not.toContain(SECRET);
-    expect(allLoggedJson).not.toContain("another_secret_value");
-    expect(allLoggedJson).toContain("ELEVENLABS_API_KEY");
-    expect(allLoggedJson).toContain("OTHER");
-  });
-});
-
-describe("setMcpServerEnabled", () => {
-  it("disables a bundled row and persists the value", async () => {
-    const result = await setMcpServerEnabled({ id: BUNDLED_ID, enabled: false });
-    expect(result.success).toBe(true);
-    expect(result.data).toEqual({ id: BUNDLED_ID, name: "ElevenLabs", enabled: false });
-
-    const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, BUNDLED_ID)).all();
-    expect(row.enabled).toBe(false);
-    expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
+  it("returns not_found for an unknown id", async () => {
+    const res = await updateMcpServer({ id: "nope", requireApproval: true });
+    expect(res.success).toBe(false);
+    expect(res.error).toBe("not_found");
+    expect(res.data).toEqual({ id: "nope" });
   });
 
-  it("toggles a custom row", async () => {
-    const result = await setMcpServerEnabled({ id: CUSTOM_ID, enabled: false });
-    expect(result.success).toBe(true);
-
-    const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, CUSTOM_ID)).all();
-    expect(row.enabled).toBe(false);
-    expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
-  });
-
-  it("returns a structured error when id is missing", async () => {
-    const result = await setMcpServerEnabled({ id: "nope", enabled: true });
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("mcp server not found");
-    expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
-  });
-});
-
-describe("removeMcpServer", () => {
-  it("deletes a custom row", async () => {
-    const result = await removeMcpServer({ id: CUSTOM_ID });
-    expect(result.success).toBe(true);
-    expect(result.data).toMatchObject({ id: CUSTOM_ID, name: "Custom" });
-
-    const rows = db.select().from(mcpServers).where(eq(mcpServers.id, CUSTOM_ID)).all();
-    expect(rows).toHaveLength(0);
-    expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
-  });
-
-  it("refuses to delete a bundled row and preserves it", async () => {
-    const result = await removeMcpServer({ id: BUNDLED_ID });
-    expect(result.success).toBe(false);
-    expect(result.error).toBe(
-      "cannot delete bundled MCP; use libi.set_mcp_server_enabled to disable",
-    );
-    expect(result.data).toEqual({ id: BUNDLED_ID, name: "ElevenLabs" });
-
-    const rows = db.select().from(mcpServers).where(eq(mcpServers.id, BUNDLED_ID)).all();
-    expect(rows).toHaveLength(1);
-    expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
-  });
-
-  it("returns a structured error when id is missing", async () => {
-    const result = await removeMcpServer({ id: "nope" });
-    expect(result.success).toBe(false);
-    expect(result.error).toBe("mcp server not found");
-    expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
+  it("has no enabled toggle — the column is gone with migration 0051", async () => {
+    const mod = await import("@/mcp/tools/mcp-server-tools");
+    expect("setMcpServerEnabled" in mod).toBe(false);
+    const schemas = await import("@/mcp/tools/schemas");
+    expect("setMcpServerEnabledSchema" in schemas).toBe(false);
+    const row = db.select().from(mcpServers).where(eq(mcpServers.id, "whisper")).get();
+    expect(row).not.toHaveProperty("enabled");
   });
 });

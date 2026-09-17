@@ -2,10 +2,17 @@ import { describe, it, expect } from "vitest";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 
 describe("mediapipe-vision dep", () => {
-  it("is declared on the libi MCP with correct version + structure", () => {
+  it("is declared on libi-tracking as tier-2 with correct version + structure", () => {
+    // Moved off the `libi` core def on 2026-09-08: 33 MB nobody
+    // who never tracks an object should pay at boot. It is NOT gated behind
+    // tracking-pyenv — `ensureDep("libi-tracking", "mediapipe-vision")`
+    // installs this one dep alone, which is what the tracker runs first.
     const libi = BUNDLED_MCP_SERVERS.find((d) => d.id === "libi")!;
-    const mp = libi.dependencies.find((d) => d.binary === "mediapipe-vision");
+    expect(libi.dependencies.some((d) => d.binary === "mediapipe-vision")).toBe(false);
+    const tracking = BUNDLED_MCP_SERVERS.find((d) => d.id === "libi-tracking")!;
+    const mp = tracking.dependencies.find((d) => d.binary === "mediapipe-vision");
     expect(mp).toBeTruthy();
+    expect(mp!.installFlow).toBe("tier-2");
     expect(mp!.destination).toBe("models");
     expect(mp!.files!.length).toBe(7);
     expect(mp!.files!.every((f) => /^[0-9a-f]{64}$/.test(f.sha256 ?? ""))).toBe(true);
@@ -43,6 +50,8 @@ describe("mediapipe-vision dep", () => {
     expect(src).toMatch(/modelBaseUrl[\s\S]{0,80}throw/);
   });
 
+  // The "installs the assets itself before launching Chromium" behaviour is
+  // covered behaviourally in __tests__/unit/tracking/mediapipe-runner-ensure-dep.test.ts.
   it("mediapipe-runner injects modelBaseUrl via addInitScript before page.goto", async () => {
     const fs = await import("node:fs/promises");
     const path = await import("node:path");

@@ -58,14 +58,6 @@ export async function register(): Promise<void> {
   // runtime must never reach it.
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
 
-  // Register built-in script providers early so the JobManager runner can
-  // find them without ordering issues. This is idempotent — safe to call
-  // again from the runner as a safety net.
-  const { registerBuiltinScriptProviders } = await import(
-    "./lib/analysis/script-providers/register"
-  );
-  registerBuiltinScriptProviders();
-
   try {
     const { runBootPhase } = await import("./lib/server/lifecycle");
     // Lifecycle events flow into the SSE event bus via `lifecycleEvents`;

@@ -24,7 +24,6 @@ export * from "./tts-tools";
 export * from "./music-tools";
 export {
   computeObjectTrack,
-  computeObjectTrackProviders,
   addTrackedOverlay,
   updateTrackedOverlay,
   deleteTrack,
@@ -36,7 +35,6 @@ export {
   groundTarget,
   listIdentityCandidates,
   pickCandidate,
-  refineTrackWithSam2,
   installTrackingEngine,
   verifyInstall,
   verifyTrackedOverlay,

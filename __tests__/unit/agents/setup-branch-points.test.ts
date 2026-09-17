@@ -17,7 +17,7 @@ describe("agent setup is declared, not branched on", () => {
     expect(src).not.toMatch(/if\s*\(\s*agent\.id\s*===\s*["']claude-code["']\s*\)/);
   });
 
-  it("the sign-in remedy is looked up, not forked", () => {
+  it("the session manager looks agents up, never forks on an id", () => {
     const src = stripComments(read("lib/sessions/session-manager.ts"));
     expect(src).not.toMatch(/agentId\s*===\s*["']codex["']/);
     expect(src).not.toMatch(/agentId\s*===\s*["']claude-code["']/);
@@ -36,6 +36,11 @@ describe("agent setup is declared, not branched on", () => {
     // If one of these ever disappears, this test should be revisited, not
     // silently deleted.
     expect(stripComments(read("lib/sessions/session-meta.ts"))).toMatch(/claude-code/);
-    expect(stripComments(read("lib/mcp-config.ts"))).toMatch(/ACP_HTTP_CAPABLE/);
+    // getMcpServersForAcp still branches per agentId — not on capability
+    // (both agents get the same HTTP aggregator entry now), but on which
+    // instruction dialect the `?agent=` query should ask the server for.
+    expect(stripComments(read("lib/mcp-config.ts"))).toMatch(
+      /agentId\s*===\s*["']codex["']/,
+    );
   });
 });

@@ -40,8 +40,10 @@ sync-log.ts); under `npx` in a real browser they exist only in that browser's De
 (plus Sentry for uncaught exceptions, unless opted out).
 
 Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export`, `overlay`,
-`analysis`, `tracking-engine`, `tracking-pyenv`, `matte`, `mcp-config`, `session-manager`,
-`lifecycle`, `snapshot`, `codex-config`, `terminal`, `analytics`, `onboarding`.
+`analysis`, `tracking-engine`, `tracking-pyenv`, `matte`, `mcp-config`, `mcp-http`,
+`session-manager`, `lifecycle`, `snapshot`, `codex-config`, `terminal`, `analytics`,
+`onboarding`, `skills`, `video-download`, `providers`, `db`, `agent-cli`, `agent-install`,
+`libi-registration`, `process-manager`, `agent-registry`, `session-event-handler`.
 
 ## Hard rules
 
@@ -75,24 +77,106 @@ Every one of these has broken something. Do not relax one without evidence.
   JSON-schema conversion fails **silently** and every tool disappears from `tools/list`.
 - Nothing under `mcp/` may import `lib/jobs/*`. The MCP child doesn't run jobs — go
   through the HTTP client `mcp/jobs-client.ts`.
-- **Agent availability is never decided by `which claude` / `which codex`.** libi installs
-  its own CLIs and puts nothing on PATH; a PATH probe reports working installs as broken.
-  "Installed" ≠ "signed in" ≠ "the user has their own CLI" — see
-  `lib/agents/agent-readiness.ts`. `needs-auth` is only ever set from an *observed* auth
-  rejection, never inferred by probing credentials. The one place the user's own binary
-  genuinely is the question is the `codex mcp add` flow
-  (`lib/codex-config/codex-cli.ts#userCodexCli`), which asks the login shell and rejects
-  any hit inside libi's own tree.
-- Never hand-edit `~/.codex/config.toml`. Codex re-serializes it and ate users' TOML;
-  registration goes through codex's own `codex mcp add` (`lib/codex-config/`).
+- **One resolver decides whether the user has a CLI: `lib/agents/cli/resolve.ts#resolveAgentCli`.**
+  It searches the login-shell PATH (fresh, not on Windows; a probe still running at 2 s is
+  killed by process group — SIGTERM, then SIGKILL 500 ms later — and the probe gives up
+  within 3.5 s), then this process's PATH, then the known install folders (`knownInstallDirs`:
+  `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and for Codex on macOS the
+  `Contents/Resources` of `ChatGPT.app` / `Codex.app` in `/Applications` and `~/Applications`;
+  on Windows `%USERPROFILE%\.local\bin`, and for Codex `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`);
+  rejects any hit inside libi's own tree; realpaths the hit; runs `--version` under a hard 3 s
+  bound — so a cold resolve including `--version` is bounded at about 6.5 s; and compares
+  against `AGENT_CLI_MIN_VERSION` (`lib/agents/cli/min-versions.ts`). The
+  status route, the process manager (which sets `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH` from
+  it), provider detection, libi-registration detection and `libi connect` all read it. At
+  session start (`staleOk`) a remembered result is served without waiting on a re-probe, and
+  refreshed in the background — a stale memo is served only while its binary still exists and
+  its result was usable; otherwise it is resolved fresh. That is deliberate: don't "fix" it
+  into always re-probing, or into serving a vanished path or an unusable result. A bare
+  `which claude` in the SERVER process is still wrong: a
+  Finder-launched app has launchd's PATH, and an fnm/nvm shim path changes per shell — which
+  is why the resolver probes the login shell and realpaths.
+  "Installed" ≠ "signed in": `needs-auth` is only ever set from an *observed* auth rejection,
+  never inferred by probing credentials (`lib/agents/agent-readiness.ts`). Claude authenticates at
+  `session/prompt`, so a clean Claude `session/new` is never proof of sign-in, and a Claude turn whose
+  reply OPENS with `Failed to authenticate` is an observed rejection (`lib/agents/session-event-handler.ts`).
+- The studio server, its MCP children and its API routes never write an agent's config (no `mcp add` / `mcp remove`, installers, or sign-in). Every such write is a command printed into a setup terminal that the user submits. The one exception is the `libi connect` CLI, which the user runs by hand in their own project. The builder is `lib/agents/setup/commands.ts`; the terminals are `purpose: "setup"` PTYs owned by the Agents page.
+- Never hand-edit `~/.codex/config.toml`. Codex re-serializes it and ate users' TOML; the
+  only writers are codex's own `mcp add` / `mcp remove` — typed by the user in a setup
+  terminal, or run by the `libi connect` CLI the user invokes.
+- Approval mode `auto` maps to the agent's default (permission-routing) mode, not bypass —
+  bypass suppresses the extension approval gate (`lib/sessions/approval-mode-map.ts`).
+  The gate is implemented for Claude in-app sessions only, so for Codex an extension's
+  `requireApproval` is advisory (the manual's REQUIRES APPROVAL prose), not enforced.
+  That is a gap, **not** a platform limit — the old claim that codex-acp exposes no MCP
+  tool-call approval hook was disproved live on 1.10.0: the elicitation is emitted, and
+  the nameless request correlates by `toolCallId` to a `tool_call` update carrying
+  `rawInput.server` / `.tool`. It could only ever fire in `ask` mode, since codex's own
+  Guardian approves MCP calls in the auto modes (`lib/approval/extensions.ts` LIMITATIONS).
+- **Never canonicalize a codex tool call from its TITLE.** Titles are presentation and have
+  changed shape twice (`<server>/<tool>`, now `mcp.<server>.<tool>`); the `tool_call` update
+  carries `rawInput: { server, tool }`, which is the contract. Use `toolIdForCall`
+  (`lib/agents/mcp-tool-id.ts`) at every ingest — a null `toolId` blinds the jobs progress
+  bridge, the approval gate and the chat's tool labels, and nothing fails loudly.
+- libi's MCP is served over streamable HTTP by the `serve-mcp-http` child (`mcp/http/`),
+  on **3457 when free** (falls back to the studio port + 1, then any free port);
+  `LIBI_MCP_PORT` overrides. The live port is in `<LIBI_HOME>/mcp-port` and on the
+  endpoint card (Agents → Libi MCP). The port must be STABLE across launches — `libi connect` writes the URL
+  statically into `~/.claude.json`, and the packaged studio port is ephemeral.
+  A supervisor-launched child gets a per-launch token that `/healthz` must echo before the
+  supervisor will publish its port, and such a child shuts itself down when its stdin pipe
+  closes — so it cannot outlive the libi server that spawned it; a hand-run `serve-mcp-http`
+  gets no token and ignores stdin.
+  The in-app agent and a user's own CLI use the SAME entry, under the SAME name
+  (`LIBI_MCP_ENTRY_NAME` = `libi`, `lib/mcp/agent-surface.ts`); the only difference is the
+  `x-libi-surface: in-app` header — never an env var, never a second entry. **The name
+  collision is load-bearing.** libi never edits the user's config, so the only way an
+  in-app session mounts libi ONCE on a `libi connect`-ed machine is for the ACP entry to
+  REPLACE the config one, which both adapters do by name (Claude: `--mcp-config` beats
+  config; Codex: a `thread/start` config override deep-merges per name). Codex needs
+  `DISABLE_MCP_CONFIG_FILTERING=true` in the ACP child env for that
+  (`lib/agents/process-manager.ts`) — codex-acp otherwise DROPS an ACP entry whose name is
+  already in config, which is what the old `libi-app` name worked around at the cost of
+  mounting libi twice (~194 duplicated tool schemas per in-app context). Renaming the
+  in-app entry away from `libi` re-creates that twin and no migration can undo it.
+  Codex merges the override into the config table FIELD BY FIELD, which has two
+  consequences you must not "clean up": a hand-written STDIO `[mcp_servers.libi]` (older
+  libi versions wrote those) merges to `command` + `url` and codex refuses the whole
+  config, so `session/new` is caught and retried ONCE under `LIBI_MCP_FALLBACK_ENTRY_NAME`
+  — hence the `libi-app` alias in `lib/agents/mcp-tool-id.ts` is LIVE, not just history;
+  and `enabled = false` survives, costing every libi tool with nothing thrown, so it is
+  named in the log instead (`session-manager/libi_mcp_entry_disabled`, cause read from
+  `codex mcp list --json`, never from parsing the user's TOML). An
+  in-app-only tool asked for on a `cli` session logs and errors (`mcp/http/session.ts`) —
+  a tripwire for the replacement having failed, not a routine path; gate a new
+  tool to in-app and you must list it in `IN_APP_ONLY_TOOLS` (a drift test enforces it). The aggregator serves libi's OWN tools and nothing else: it proxies no
+  third-party MCP, and the in-app session gets exactly one `mcpServers` entry — except in
+  test mode, where the fake fal-ai / ElevenLabs stdio servers ride along under their real
+  names (`lib/mcp-config.ts#getMcpServersForAcp`).
+- **A chat's third-party MCP servers are read when its session is created — including the
+  standby libi pre-creates for the next New chat.** A provider added after the standby was made
+  (Providers tab, or the user's own `claude mcp add`) is missing from the chat it becomes, while
+  the tab says a new chat has it (found on Windows: fal.ai Connected, no fal tools). So
+  `openNewSession` discards a standby whose agent MCP config changed since, or that overlapped a
+  setup terminal (`lib/sessions/standby-freshness.ts`, `lib/terminal/setup-activity.ts`), and that
+  chat starts fresh. Don't drop the check to win back the standby's ~2 s.
+- Nothing writes CLAUDE.md, AGENTS.md, `.mcp.json` or `settings.local.json` into any folder.
+  Instructions are tiered: a short core in the MCP `instructions` field plus
+  `libi.read_manual` for the rest — SECTIONED (`mcp/manual-sections.ts`), because the
+  manual is ~87 KB and a client spools a result that size to disk: no argument returns
+  the index plus the pre-first-edit essentials, a key returns one section, `"all"` the
+  lot; skills are the only files on disk (`.claude/skills`,
+  `.agents/skills`), mirrored by `libi connect` and into `~/.libi/agent`.
 
 **Licensing — legal, not stylistic**
 - `@agentclientprotocol/claude-agent-acp` **MUST stay a `devDependency`.** It transitively
   pulls a proprietary ~306 MB Anthropic binary that libi (GPL-3.0) has no licence to
   redistribute. Three gates enforce it: `scripts/check-licenses.sh`,
   `electron-builder.yml`'s `files` exclusions, and the `afterPack` hook. `codex-acp` is
-  Apache-2.0 and stays bundled. Same reasoning blocks hosting the AGPL-derived YOLOE
-  export — it is built on the user's machine from pinned inputs instead.
+  Apache-2.0 — it is ALSO a devDependency installed at runtime (since 2026-09-08), but for
+  size, not licence: the gates name only the Claude adapter, and must keep doing so. Same
+  reasoning blocks hosting the AGPL-derived YOLOE export — it is built on the user's
+  machine from pinned inputs instead.
 
 **Long-running work**
 - Anything over a few seconds runs through `JobManager` (`lib/jobs/`): persistence,
@@ -115,6 +199,9 @@ Every one of these has broken something. Do not relax one without evidence.
   up (`app/api/pieces/[pieceId]/route.ts`). FK `onDelete: "cascade"` covers DB rows;
   nothing else is automatic.
 - Never hand-edit generated migrations under `drizzle/`.
+- Outside `<LIBI_HOME>/agent`, skill roots are written only through
+  `writeSkillsToRoot({ external: true })`; libi may delete only manifest-listed real skill
+  folders there — never a link, a file, or a folder it didn't write.
 
 ## Orientation
 
@@ -149,7 +236,7 @@ Two seams worth knowing before you touch persistence or export:
 
 Everything the app generates lives under `~/.libi/` (`lib/libi-home.ts`; override with
 `LIBI_HOME`). Note `agent/` (the agent *workspace*) and `agents/` (an npm root for the
-runtime-installed Claude adapter) are different things.
+runtime-installed ACP adapters) are different things.
 
 ## Conventions
 
@@ -162,7 +249,10 @@ runtime-installed Claude adapter) are different things.
   mutations invalidate. One global SSE connection routes events by `sessionId` — never open
   another `EventSource`.
 - **Loading states:** skeletons that mirror the real layout (`components/ui/skeleton.tsx`),
-  never spinners or "Loading…" text.
+  never spinners or "Loading…" text. The exception is a wait the user started or is blocked
+  on — a running download, a button whose action is still going: name it on the element the
+  user is looking at, with a spinner (`components/agents-page/agents-tab/steps/busy-label.tsx`,
+  `adapter-download.tsx`). A disabled button that only says "Next" reads as broken.
 - **UI:** add `cursor-pointer` to every interactive element — base-ui's `Button` doesn't set
   it. Tailwind v4, dark theme.
 - **Naming:** the user-facing entity is a **Piece** (`pieces`, `pieceId`, `Piece`).
@@ -170,9 +260,9 @@ runtime-installed Claude adapter) are different things.
 ## When you add…
 
 - **A new MCP tool** — implementation in `mcp/tools/`, Zod v3 schema in
-  `mcp/tools/schemas.ts`, register in `mcp/server.ts`. Paid tools hosted on bundled MCPs
-  gate on `generation: true` in `mcp/registry/bundled.ts`; paid tools on libi's own MCP have
-  no automatic gate, so the owning skill must make the agent disclose cost and confirm.
+  `mcp/tools/schemas.ts`, register in `mcp/server.ts`. libi bundles no third-party MCP and
+  has no `generation` gate any more; a paid tool on libi's own MCP has no automatic gate,
+  so the owning skill must make the agent disclose cost and confirm.
 - **A job runner** — `lib/jobs/runners/<kind>.ts`, register in `registry.ts`, set
   `mcpToolId` when an agent-called tool drives it, pick `maxConcurrent` by resource cost.
 - **A bundled skill, or a substantive change to one** — ship a `skill-eval` scenario with
@@ -194,6 +284,9 @@ that mirror the real tool surface and return deterministic placeholder media at 
 Use it after touching MCP tools, skills, agent instructions, or any `libi.*` route — the
 agent walks the identical path it would in production. Calls are recorded to
 `~/.libi/test-mode/*.jsonl`, which is what the skill-eval assertions read.
+
+`curl -s http://127.0.0.1:$(cat ~/.libi/mcp-port)/healthz` answers `{ok, version, port, sessions}`;
+`npx @modelcontextprotocol/inspector` against `/mcp` shows what an agent sees.
 
 Do not claim something works because the code looks right or a unit test passed. Run it,
 read both log files, and say what you actually observed. For tracking changes specifically,

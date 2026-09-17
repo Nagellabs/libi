@@ -1,11 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { eq } from "drizzle-orm";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
-import { getDb } from "@/lib/db/client";
-import { mcpServers } from "@/lib/db/schema";
 import {
   invalidateMcpConfig,
-  getMcpServersForSettings,
   getMcpServersForAcp,
   onMcpConfigInvalidated,
 } from "@/lib/mcp-config";
@@ -31,7 +29,6 @@ const GLOBAL_KEY = "__libiMcpConfig_v1";
 const g = globalThis as unknown as Record<string, unknown>;
 
 interface SharedState {
-  cachedSettings: Record<string, unknown> | null;
   cachedAcpByAgent: Map<string, unknown[]>;
   onInvalidateCallback: ((opts: { reason: string }) => void) | null;
 }
@@ -50,69 +47,29 @@ describe("mcp-config — globalThis-backed cache singleton", () => {
   });
 
   it("stores cache state on globalThis under the stable singleton key", () => {
-    getMcpServersForSettings();
+    getMcpServersForAcp("claude-code");
     const state = g[GLOBAL_KEY] as SharedState | undefined;
     expect(state).toBeDefined();
-    expect(state!.cachedSettings).not.toBeNull();
+    expect(state!.cachedAcpByAgent.size).toBeGreaterThan(0);
   });
 
-  it("invalidateMcpConfig busts the globalThis-stored settings + ACP caches", () => {
-    getMcpServersForSettings();
-    getMcpServersForAcp("claude-code");
+  // `getMcpServersForSettings` (and with it `cachedSettings`) was deleted,
+  // so the ACP cache is the whole of what invalidate has to bust.
+  it("invalidateMcpConfig busts the globalThis-stored ACP cache", () => {
+    const before = getMcpServersForAcp("claude-code");
     const state = g[GLOBAL_KEY] as SharedState;
-    const settingsBefore = state.cachedSettings;
-    expect(settingsBefore).not.toBeNull();
     expect(state.cachedAcpByAgent.size).toBeGreaterThan(0);
 
     invalidateMcpConfig({ reason: "test" });
 
-    // The ACP cache is cleared outright (nothing repopulates it during
-    // invalidate — only a fresh getMcpServersForAcp() call would).
+    // Cleared outright — nothing repopulates it during invalidate; only a
+    // fresh getMcpServersForAcp() call does.
     expect(state.cachedAcpByAgent.size).toBe(0);
-    // The settings cache is eagerly rebuilt by writeSettingsFile() during
-    // invalidate — so it's non-null but a BRAND-NEW object (busted, not stale).
-    expect(state.cachedSettings).not.toBeNull();
-    expect(state.cachedSettings).not.toBe(settingsBefore);
-  });
 
-  it("a newly-configured MCP becomes visible to a fresh ACP build after invalidation (no stale cache)", () => {
-    // Seed a bundled MCP that needs its API key — excluded from the build.
-    getDb()
-      .insert(mcpServers)
-      .values({
-        id: "elevenlabs",
-        name: "ElevenLabs",
-        description: "test",
-        type: "stdio",
-        command: "uvx",
-        args: JSON.stringify(["elevenlabs-mcp"]),
-        envVars: "{}",
-        bundled: true,
-        enabled: true,
-        installStatus: "needs_config",
-        serverStatus: "unknown",
-        dependencyStatus: "[]",
-      })
-      .run();
-    invalidateMcpConfig();
-
-    const before = getMcpServersForAcp("claude-code");
-    expect(before.find((s) => s.name === "ElevenLabs")).toBeUndefined();
-
-    // User adds the key → row flips to installed + up (the Settings PATCH flow).
-    getDb()
-      .update(mcpServers)
-      .set({
-        installStatus: "installed",
-        serverStatus: "up",
-        envVars: JSON.stringify({ ELEVENLABS_API_KEY: "sk_test" }),
-      })
-      .where(eq(mcpServers.id, "elevenlabs"))
-      .run();
-    invalidateMcpConfig({ reason: "mcp-server-updated" });
-
+    // …and that call rebuilds it as a BRAND-NEW array (busted, not stale).
     const after = getMcpServersForAcp("claude-code");
-    expect(after.find((s) => s.name === "ElevenLabs")).toBeDefined();
+    expect(state.cachedAcpByAgent.size).toBe(1);
+    expect(after).not.toBe(before);
   });
 
   it("the invalidate callback is stored on the shared global and fires on any invalidate", () => {
@@ -122,5 +79,11 @@ describe("mcp-config — globalThis-backed cache singleton", () => {
     });
     invalidateMcpConfig({ reason: "test-cb" });
     expect(fired).toBe(1);
+  });
+
+  it("lib/mcp-config.ts no longer reaches the Codex config writer", () => {
+    const src = readFileSync(path.join(process.cwd(), "lib/mcp-config.ts"), "utf8");
+    expect(src).not.toMatch(/@\/lib\/codex-config\//);
+    expect(src).not.toMatch(/syncCodexGlobalMcpsIfConnected/);
   });
 });

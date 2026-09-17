@@ -5,7 +5,7 @@ describe("normalizePagePath", () => {
   it("collapses known dynamic segments to templates", () => {
     expect(normalizePagePath("/characters/abc123")).toBe("/characters/[id]");
     expect(normalizePagePath("/items/xyz")).toBe("/items/[id]");
-    expect(normalizePagePath("/mcps-skills/skills/my-skill")).toBe("/mcps-skills/skills/[name]");
+    expect(normalizePagePath("/agents/skills/my-skill")).toBe("/agents/skills/[name]");
   });
   it("passes through static routes unchanged", () => {
     expect(normalizePagePath("/editor")).toBe("/editor");

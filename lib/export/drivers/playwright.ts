@@ -168,8 +168,13 @@ async function launchChromium(mode: RenderMode): Promise<Browser> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (/Executable doesn't exist|browserType\.launch/i.test(message)) {
+      // The export runner ran `ensureChromium` before reaching this driver
+      // (lib/jobs/runners/export.ts), so a missing executable here is a
+      // broken install, not an uninstalled one. The dep reads `installed`
+      // in Settings, where the chip's action is "Re-download" (a forced
+      // reinstall) — not "Retry", which only the `failed` state shows.
       throw new Error(
-        "Playwright Chromium not found. Run 'npx playwright install chromium' to enable canvas-scene exports in this runtime.",
+        "Playwright Chromium failed to launch after install. Use Re-download on the chromium dependency under Settings → Canvas export (Chromium) to replace it.",
       );
     }
     throw err;

@@ -42,10 +42,10 @@ describe("diagnoseMcp", () => {
     expect(result.success).toBe(false);
   });
 
-  it("returns the row + spawn config + aux checks for youtube-downloader", async () => {
-    const result = await diagnoseMcp({ mcpId: "youtube-downloader" });
+  it("returns the row + spawn config + aux checks for youtube-download", async () => {
+    const result = await diagnoseMcp({ mcpId: "youtube-download" });
     if (!result.success) throw new Error(result.error);
-    expect(result.mcpId).toBe("youtube-downloader");
+    expect(result.mcpId).toBe("youtube-download");
     expect(result.installStatus).toBeDefined();
     expect(result.serverStatus).toBeDefined();
     expect(result.spawn.command).toBeDefined();
@@ -55,31 +55,25 @@ describe("diagnoseMcp", () => {
     expect(result.auxiliary[0].name).toContain("yt-dlp");
   });
 
-  it("reports inCurrentSession=false for needs_config MCPs (filtered out)", async () => {
+  it("reports inCurrentSession=false for a failed row (filtered out)", async () => {
     db.update(mcpServers)
-      .set({ installStatus: "needs_config", installError: "Missing FAL_KEY" })
-      .where(eq(mcpServers.id, "fal-ai"))
+      .set({ installStatus: "failed", installError: "uv sync exploded" })
+      .where(eq(mcpServers.id, "libi-tracking"))
       .run();
-    const result = await diagnoseMcp({ mcpId: "fal-ai" });
+    const result = await diagnoseMcp({ mcpId: "libi-tracking" });
     if (!result.success) throw new Error(result.error);
     expect(result.inCurrentSession).toBe(false);
-    expect(result.whyExcluded).toMatch(/needs_config|env var/i);
+    expect(result.whyExcluded).toMatch(/failed: uv sync exploded/);
   });
 
-  it("includes API-key aux check for fal-ai (without leaking value)", async () => {
-    db.update(mcpServers)
-      .set({ envVars: JSON.stringify({ FAL_KEY: "sk_secret_test" }) })
-      .where(eq(mcpServers.id, "fal-ai"))
-      .run();
-    const result = await diagnoseMcp({ mcpId: "fal-ai" });
+  it("runs no API-key aux check for any row — libi holds no provider key", async () => {
+    const result = await diagnoseMcp({ mcpId: "libi-tracking" });
     if (!result.success) throw new Error(result.error);
-    const falKeyCheck = result.auxiliary.find((a) => a.name === "FAL_KEY");
-    expect(falKeyCheck?.ok).toBe(true);
-    expect(JSON.stringify(result)).not.toContain("sk_secret_test");
+    expect(result.auxiliary).toEqual([]);
   });
 
   it("produces hints in plain English", async () => {
-    const result = await diagnoseMcp({ mcpId: "elevenlabs" });
+    const result = await diagnoseMcp({ mcpId: "libi-tracking" });
     if (!result.success) throw new Error(result.error);
     expect(result.hints.length).toBeGreaterThan(0);
     expect(typeof result.hints[0]).toBe("string");
@@ -87,7 +81,7 @@ describe("diagnoseMcp", () => {
 
   it("does NOT re-probe by default", async () => {
     // No mock needed — if it re-probed, it'd error on the real network
-    const result = await diagnoseMcp({ mcpId: "youtube-downloader" });
+    const result = await diagnoseMcp({ mcpId: "youtube-download" });
     expect(result.success).toBe(true);
   });
 });

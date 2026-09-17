@@ -144,4 +144,122 @@ describe("TimelineOverlayRow drop targets", () => {
     expect(resolved.group).toBe("graphics");
     expect(resolved.startTime).toBeCloseTo(5, 1);
   });
+
+  // An audio asset dropped on an EXISTING lane used to be classified by a
+  // private copy of kindFromContentType that only knew video-or-image, so an
+  // mp3 became a 3s IMAGE overlay pointing at the audio file: no audio clip
+  // reached the timeline and the over-length dialog (which lives on the audio
+  // path) never opened. Observed on a real piece — two image overlays whose
+  // fileIds were mp3s. The lane now uses the shared resolver.
+  it("routes an audio asset payload to onDropAudio, not onDropCreate", () => {
+    const onDropCreate = vi.fn();
+    const onDropAudio = vi.fn();
+    const { container } = render(
+      <TimelineOverlayRow
+        row={row}
+        timingById={{}}
+        view={{ trackWidth: 1000, totalFrames: 300, fps: 30 }}
+        collapsed={false}
+        onSelect={() => {}}
+        onCommitTiming={() => {}}
+        onCrossRow={() => {}}
+        durationSec={10}
+        rowGroup="graphics"
+        rowZ={2}
+        onDropCreate={onDropCreate}
+        onDropAudio={onDropAudio}
+      />,
+    );
+    const lane = container.querySelector(
+      '[data-testid="overlay-lane-graphics"]',
+    ) as HTMLElement;
+    lane.getBoundingClientRect = () =>
+      ({ left: 0, width: 1000, top: 0, height: 20, right: 1000, bottom: 20, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    fireDrop(
+      lane,
+      500,
+      makeDataTransfer(encodeFileDrag({ fileId: "aud1", contentType: "audio/mpeg" })),
+    );
+
+    expect(onDropCreate).not.toHaveBeenCalled();
+    expect(onDropAudio).toHaveBeenCalledTimes(1);
+    expect(onDropAudio.mock.calls[0][0].fileId).toBe("aud1");
+    expect(onDropAudio.mock.calls[0][0].startTime).toBeCloseTo(5, 1);
+  });
+
+  it("routes an audio OS file to onDropAudio, not onDropFiles", () => {
+    const onDropFiles = vi.fn();
+    const onDropAudio = vi.fn();
+    const { container } = render(
+      <TimelineOverlayRow
+        row={row}
+        timingById={{}}
+        view={{ trackWidth: 1000, totalFrames: 300, fps: 30 }}
+        collapsed={false}
+        onSelect={() => {}}
+        onCommitTiming={() => {}}
+        onCrossRow={() => {}}
+        durationSec={10}
+        rowGroup="graphics"
+        rowZ={2}
+        onDropFiles={onDropFiles}
+        onDropAudio={onDropAudio}
+      />,
+    );
+    const lane = container.querySelector(
+      '[data-testid="overlay-lane-graphics"]',
+    ) as HTMLElement;
+    lane.getBoundingClientRect = () =>
+      ({ left: 0, width: 1000, top: 0, height: 20, right: 1000, bottom: 20, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    const file = new File(["x"], "track.mp3", { type: "audio/mpeg" });
+    fireDrop(lane, 250, makeDataTransfer("", [file]));
+
+    expect(onDropFiles).not.toHaveBeenCalled();
+    expect(onDropAudio).toHaveBeenCalledTimes(1);
+    expect(onDropAudio.mock.calls[0][0].file).toBe(file);
+    expect(onDropAudio.mock.calls[0][0].startTime).toBeCloseTo(2.5, 1);
+  });
+
+  // The private classifier fell back to "image" for ANYTHING non-video, so a
+  // PDF became a broken image overlay. The shared resolver yields null and the
+  // drop is ignored.
+  it("ignores a drop whose content type is neither image, video nor audio", () => {
+    const onDropCreate = vi.fn();
+    const onDropFiles = vi.fn();
+    const onDropAudio = vi.fn();
+    const { container } = render(
+      <TimelineOverlayRow
+        row={row}
+        timingById={{}}
+        view={{ trackWidth: 1000, totalFrames: 300, fps: 30 }}
+        collapsed={false}
+        onSelect={() => {}}
+        onCommitTiming={() => {}}
+        onCrossRow={() => {}}
+        durationSec={10}
+        rowGroup="graphics"
+        rowZ={2}
+        onDropCreate={onDropCreate}
+        onDropFiles={onDropFiles}
+        onDropAudio={onDropAudio}
+      />,
+    );
+    const lane = container.querySelector(
+      '[data-testid="overlay-lane-graphics"]',
+    ) as HTMLElement;
+    lane.getBoundingClientRect = () =>
+      ({ left: 0, width: 1000, top: 0, height: 20, right: 1000, bottom: 20, x: 0, y: 0, toJSON() {} }) as DOMRect;
+
+    fireDrop(
+      lane,
+      500,
+      makeDataTransfer(encodeFileDrag({ fileId: "doc1", contentType: "application/pdf" })),
+    );
+
+    expect(onDropCreate).not.toHaveBeenCalled();
+    expect(onDropFiles).not.toHaveBeenCalled();
+    expect(onDropAudio).not.toHaveBeenCalled();
+  });
 });

@@ -17,7 +17,10 @@ const read = (rel: string) =>
   fs.readFileSync(path.join(root, rel), "utf-8");
 
 describe("splash window isolation (RC-G)", () => {
-  const mainTs = read("electron/main.ts");
+  // `createSplash` lives in its own module (the Electron e2e calls
+  // the real one instead of hand-writing a BrowserWindow); these assertions
+  // follow it there.
+  const mainTs = read("electron/splash-window.ts");
   const splashHtml = read("electron/splash.html");
   const splashPreload = read("electron/splash-preload.ts");
 
@@ -45,6 +48,10 @@ describe("splash window isolation (RC-G)", () => {
     expect(splashHtml).toContain("window.splashAPI");
     expect(splashHtml).toContain("splashAPI.onLifecycle");
     expect(splashHtml).toContain("splashAPI.quit()");
+    // contextBridge exposes the global as NON-configurable; a top-level
+    // `const`/`let splashAPI` against it is a SyntaxError that kills the whole
+    // inline script before it subscribes (shipped that way v0.1.5–v0.1.9).
+    expect(splashHtml).not.toMatch(/^\s*(const|let|var)\s+splashAPI\b/m);
   });
 
   it("splash preload exposes splashAPI via contextBridge", () => {

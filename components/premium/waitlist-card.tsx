@@ -149,9 +149,11 @@ export function WaitlistCard({
   const [error, setError] = useState<string | null>(null);
 
   // The running runtime version, for the signup record. This query is already
-  // mounted app-wide by the sidebar with a 5-minute staleTime, so in practice
-  // this is a cache read rather than a request — and it never rejects on a
-  // network failure, so a missing version just means the field is omitted.
+  // mounted app-wide by the sidebar, which polls it every IDLE_POLL_MS (30s)
+  // when idle — and staleTime is that same 30s, so a mount here lands inside
+  // or outside the stale window at random: roughly half the time this is a
+  // cache read, the other half a real refetch. Either way it never rejects on
+  // a network failure, so a missing version just means the field is omitted.
   const { data: runtime } = useRuntimeUpdate();
 
   const subscribe = useCallback((onChange: () => void) => {

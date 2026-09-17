@@ -71,31 +71,31 @@ describe("dominantObjectKind", () => {
   });
 });
 
-describe("sam2-refine objectKind inheritance (regression lock)", () => {
-  it("face track + sam2-refine segment that inherited 'face' does NOT trip mixedBoxSemantics", () => {
-    // This is the FIXED behavior: sam2-refine segment inherits the parent track's objectKind
+describe("agent repair-segment objectKind inheritance (regression lock)", () => {
+  it("face track + agent repair segment that inherited 'face' does NOT trip mixedBoxSemantics", () => {
+    // This is the FIXED behavior: an agent repair segment inherits the parent track's objectKind
     const segs = [
       { id: "seg-0-10000", startTime: 0, endTime: 10, method: "yoloe+botsort", status: "ok", samples: [], objectKind: "face" },
-      { id: "seg-sam2-refine-0", startTime: 0, endTime: 10, method: "sam2-refine", status: "ok", samples: [], objectKind: "face" },
+      { id: "seg-sot-0", startTime: 0, endTime: 10, method: "sot", status: "ok", samples: [], objectKind: "face" },
     ] as never[];
     expect(mixedBoxSemantics(segs)).toBe(false);
   });
 
-  it("face track + sam2-refine segment with absent/object objectKind DOES trip mixedBoxSemantics (the old bug)", () => {
+  it("face track + agent repair segment with absent/object objectKind DOES trip mixedBoxSemantics (the old bug)", () => {
     // This is the OLD buggy behavior we're locking the regression for:
-    // sam2-refine segment defaulted to absent (=> "object"), causing false mixed-semantics rejection
+    // the repair segment defaulted to absent (=> "object"), causing false mixed-semantics rejection
     const segs = [
       { id: "seg-0-10000", startTime: 0, endTime: 10, method: "yoloe+botsort", status: "ok", samples: [], objectKind: "face" },
-      // sam2-refine without objectKind set (old behavior) — absent => "object"
-      { id: "seg-sam2-refine-0", startTime: 0, endTime: 10, method: "sam2-refine", status: "ok", samples: [] },
+      // repair segment without objectKind set (old behavior) — absent => "object"
+      { id: "seg-sot-0", startTime: 0, endTime: 10, method: "sot", status: "ok", samples: [] },
     ] as never[];
     expect(mixedBoxSemantics(segs)).toBe(true);
   });
 
-  it("object track + sam2-refine that inherited 'object' does NOT trip mixedBoxSemantics", () => {
+  it("object track + agent repair segment that inherited 'object' does NOT trip mixedBoxSemantics", () => {
     const segs = [
       { id: "seg-0-10000", startTime: 0, endTime: 10, method: "yoloe+botsort", status: "ok", samples: [] },
-      { id: "seg-sam2-refine-0", startTime: 0, endTime: 10, method: "sam2-refine", status: "ok", samples: [], objectKind: "object" },
+      { id: "seg-sot-0", startTime: 0, endTime: 10, method: "sot", status: "ok", samples: [], objectKind: "object" },
     ] as never[];
     expect(mixedBoxSemantics(segs)).toBe(false);
   });

@@ -12,7 +12,12 @@ import { buildSpawnEnv } from "@/mcp/registry/spawn-env";
  *
  * libi has TWO such roots, deliberately kept separate because `npm install` is
  * all-or-nothing per root:
- *   - `~/.libi`         — bundled MCP packages (`lib/mcp/bundled-install.ts`)
+ *   - `~/.libi`         — bundled MCP packages. Its writer,
+ *                         `lib/mcp/bundled-install.ts`, was deleted on
+ *                         2026-09-08 (no bundled MCP is npm-installed at boot
+ *                         any more), so nothing writes `~/.libi/node_modules`
+ *                         today; the root stays reserved so the agent root
+ *                         never collides with an older install.
  *   - `~/.libi/agents`  — runtime agent packages (`lib/agents/runtime-install.ts`)
  *
  * Sharing one root would mean a single failing package (e.g. a yanked Claude
@@ -29,10 +34,10 @@ const LOCK_POLL_MS = 200;
 
 /**
  * npm timeout `lockTimingForNpmTimeout` derives from when a caller doesn't
- * pass its own `staleMs`/`timeoutMs`. Matches the bundled-MCP root's npm
- * timeout (`NPM_INSTALL_TIMEOUT_MS` in `lib/mcp/bundled-install.ts`), so
- * that root's lock behaviour (10 min stale / 10 min acquire-timeout) is
- * unchanged by this module gaining per-root lock timing.
+ * pass its own `staleMs`/`timeoutMs`. Matched the bundled-MCP root's npm
+ * timeout (`NPM_INSTALL_TIMEOUT_MS` in `lib/mcp/bundled-install.ts`, deleted
+ * 2026-09-08), so that root's lock behaviour (10 min stale / 10 min
+ * acquire-timeout) was unchanged by this module gaining per-root lock timing.
  */
 const DEFAULT_LOCK_NPM_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -169,9 +174,10 @@ export function npmResolveAnchors(cwd: string = process.cwd()): string[] {
  * literally `path.join(path.dirname(467884), "bin", "npm-cli.js")`, so this
  * function threw `TypeError: The "path" argument must be of type string.
  * Received type number (467884)` in EVERY bundled build — packaged Electron
- * and `npx libi` alike. It went unnoticed because `getManagedBundledNpmMcps()`
- * returns `[]` today, so no bundled build had ever reached `runNpmInstall`;
- * the runtime Claude-adapter install is the first caller that does.
+ * and `npx libi` alike. It went unnoticed because the bundled-MCP installer
+ * (`lib/mcp/bundled-install.ts`, deleted 2026-09-08) managed zero packages,
+ * so no bundled build had ever reached `runNpmInstall`; the runtime
+ * Claude-adapter install is the first caller that does.
  *
  * `createRequire` produces a REAL Node require that the bundler cannot see
  * through, so resolution happens on disk at runtime, where it belongs. Each
@@ -199,12 +205,14 @@ export function resolveVendoredNpmCli(): string {
 export interface RunNpmInstallOptions {
   /**
    * Hard timeout for the npm child process. Sized per-root: small MCP packages
-   * install in seconds, while the Claude ACP adapter drags a ~306MB platform
-   * binary behind it and needs a much longer ceiling on a slow connection.
+   * install in seconds, while the agent root's ACP adapters are tens of MB and
+   * get a much longer ceiling on a slow connection.
    */
   timeoutMs: number;
   /** Logger `tag` so each root's installs are filterable independently. */
   logTag: string;
+  /** Pass `--omit=optional` — see `npmInstallArgs`. */
+  omitOptional?: boolean;
 }
 
 /**
@@ -227,12 +235,25 @@ const MAX_CAPTURE_BYTES = 16 * 1024 * 1024;
  * to everything; add a per-package exemption here only if a future bundled
  * package is verified to need them.
  *
+ * `--omit=optional` (only when asked) — the agent root's adapters list their
+ * engines as optionalDependencies; the chat runs the user's own CLI, so the
+ * engines are never installed.
+ *
  * Extracted so the two runners below can never drift apart in what they
  * actually ask npm to do, and so a unit test can assert the flag set without
  * spawning anything.
  */
-export function npmInstallArgs(root: string): string[] {
-  return ["install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-save", "--prefix", root];
+export function npmInstallArgs(root: string, opts: { omitOptional?: boolean } = {}): string[] {
+  return [
+    "install",
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--no-save",
+    "--prefix",
+    root,
+    ...(opts.omitOptional ? ["--omit=optional"] : []),
+  ];
 }
 
 /** Mechanism used to execute the vendored npm CLI. */
@@ -253,10 +274,11 @@ export type NpmRunner = "execfile-node" | "electron-utility-process";
  * entirely. The spawn therefore launched a SECOND Libi GUI instance instead of
  * npm, and the install hung until its timeout (30 min for the agent root).
  *
- * This stayed invisible for a long time because `getManagedBundledNpmMcps()`
- * returns `[]` today — no bundled MCP is tier-1 — so `runNpmInstall` had never
- * actually executed inside a packaged app. The runtime Claude-adapter install
- * is the first code to need npm at runtime, which activated the latent bug.
+ * This stayed invisible for a long time because the bundled-MCP installer
+ * (`lib/mcp/bundled-install.ts`, deleted 2026-09-08) managed zero packages —
+ * no bundled MCP was tier-1 — so `runNpmInstall` had never actually executed
+ * inside a packaged app. The runtime Claude-adapter install is the first code
+ * to need npm at runtime, which activated the latent bug.
  *
  * The fix keeps the fuse (it is a real hardening measure) and instead uses
  * Electron's `utilityProcess.fork()`, which spawns a genuine Node.js child
@@ -282,9 +304,10 @@ interface NpmFailureExtras {
 /**
  * Build a rejection that matches `execFileAsync`'s shape — same
  * `Command failed: …` message prefix, same `code`/`killed`/`signal`/`stdout`/
- * `stderr` properties — so callers (`lib/mcp/bundled-install.ts`,
- * `lib/agents/runtime-install.ts`), which stringify `err.message`, behave
- * identically no matter which runner produced the failure.
+ * `stderr` properties — so callers (`lib/agents/runtime-install.ts`; formerly
+ * also `lib/mcp/bundled-install.ts`, deleted 2026-09-08), which stringify
+ * `err.message`, behave identically no matter which runner produced the
+ * failure.
  */
 function npmFailure(
   npmCli: string,
@@ -450,7 +473,7 @@ export async function runNpmViaUtilityProcess(
     }, opts.timeoutMs);
 
     // Electron emits `'error'` on a non-continuable V8 fault (e.g. the npm
-    // child OOMing while pulling the ~306MB adapter on a low-RAM machine).
+    // child OOMing while pulling a large package tree on a low-RAM machine).
     // With NO listener, an `'error'` event on any EventEmitter — including a
     // `UtilityProcess` — THROWS instead of being ignored, so the Electron
     // MAIN process takes an uncaught throw and the whole app disappears with
@@ -488,7 +511,7 @@ export async function runNpmViaUtilityProcess(
 export async function runNpmInstall(root: string, options: RunNpmInstallOptions): Promise<void> {
   const start = Date.now();
   const npmCli = resolveVendoredNpmCli();
-  const args = npmInstallArgs(root);
+  const args = npmInstallArgs(root, { omitOptional: options.omitOptional });
   const env = buildSpawnEnv();
   const runner = selectNpmRunner();
 

@@ -1,7 +1,6 @@
 import { eq } from "drizzle-orm";
 import { getDb } from "./client";
 import { settings } from "./schema";
-import { serverLogger } from "@/lib/logger";
 import { DEFAULT_ASPECT_RATIO_ID, ratioById } from "@/lib/composition/aspect-ratio";
 import {
   type AnalyticsSettings,
@@ -32,6 +31,16 @@ export interface AppSettings {
    *  independent of onboardingDemoOfferedAt so a dismissal is never confused
    *  with "never offered". */
   onboardingDemoDismissedAt: Date | null;
+  /** The setup wizard's sign-in confirmation per agent — see lib/agents/sign-in-confirmation.ts. */
+  claudeSignInConfirmedAt: Date | null;
+  codexSignInConfirmedAt: Date | null;
+  /** The Agents tab's setup wizard: when an agent was FIRST picked in it (null =
+   *  never), and which agent is being set up — the latest pick until the wizard
+   *  is finished. See app/api/onboarding/state/route.ts. */
+  agentWizardChosenAt: Date | null;
+  agentWizardAgent: string | null;
+  /** When the setup wizard first reached its end (Open chat succeeded). Null = never. */
+  agentWizardFinishedAt: Date | null;
 }
 
 const DEFAULTS: AppSettings = {
@@ -48,6 +57,11 @@ const DEFAULTS: AppSettings = {
   agentEverConnected: false,
   onboardingDemoOfferedAt: null,
   onboardingDemoDismissedAt: null,
+  claudeSignInConfirmedAt: null,
+  codexSignInConfirmedAt: null,
+  agentWizardChosenAt: null,
+  agentWizardAgent: null,
+  agentWizardFinishedAt: null,
 };
 
 /**
@@ -78,6 +92,11 @@ export function getSettings(): AppSettings {
     agentEverConnected: row.agentEverConnected,
     onboardingDemoOfferedAt: row.onboardingDemoOfferedAt ?? null,
     onboardingDemoDismissedAt: row.onboardingDemoDismissedAt ?? null,
+    claudeSignInConfirmedAt: row.claudeSignInConfirmedAt ?? null,
+    codexSignInConfirmedAt: row.codexSignInConfirmedAt ?? null,
+    agentWizardChosenAt: row.agentWizardChosenAt ?? null,
+    agentWizardAgent: row.agentWizardAgent ?? null,
+    agentWizardFinishedAt: row.agentWizardFinishedAt ?? null,
   };
 }
 
@@ -103,6 +122,11 @@ export function updateSettings(partial: Partial<AppSettings>): void {
   if (partial.agentEverConnected !== undefined) set.agentEverConnected = partial.agentEverConnected;
   if (partial.onboardingDemoOfferedAt !== undefined) set.onboardingDemoOfferedAt = partial.onboardingDemoOfferedAt;
   if (partial.onboardingDemoDismissedAt !== undefined) set.onboardingDemoDismissedAt = partial.onboardingDemoDismissedAt;
+  if (partial.claudeSignInConfirmedAt !== undefined) set.claudeSignInConfirmedAt = partial.claudeSignInConfirmedAt;
+  if (partial.codexSignInConfirmedAt !== undefined) set.codexSignInConfirmedAt = partial.codexSignInConfirmedAt;
+  if (partial.agentWizardChosenAt !== undefined) set.agentWizardChosenAt = partial.agentWizardChosenAt;
+  if (partial.agentWizardAgent !== undefined) set.agentWizardAgent = partial.agentWizardAgent;
+  if (partial.agentWizardFinishedAt !== undefined) set.agentWizardFinishedAt = partial.agentWizardFinishedAt;
 
   // Upsert: insert defaults if row doesn't exist, update if it does
   db.insert(settings)
@@ -160,73 +184,6 @@ export function setNotificationsSetting(s: NotificationsSetting): void {
   const db = getDb();
   const value = JSON.stringify(s);
   const set = { notifications: value, updatedAt: new Date() };
-
-  db.insert(settings)
-    .values({ id: 1, ...set })
-    .onConflictDoUpdate({ target: settings.id, set })
-    .run();
-}
-
-// ---------------------------------------------------------------------------
-// Codex connect setting (typed helpers over the settings.codex JSON column)
-// ---------------------------------------------------------------------------
-
-export type CodexConnectSetting = {
-  /** Whether the user opted in to keep their global ~/.codex MCP entries in sync with libi. */
-  connected: boolean;
-  /** Outcome of the last sync attempt. */
-  lastSyncStatus: "ok" | "error" | "idle";
-};
-
-const CODEX_CONNECT_DEFAULTS: CodexConnectSetting = {
-  connected: false,
-  lastSyncStatus: "idle",
-};
-
-/**
- * Read the codex connect setting. Returns defaults if the row is missing,
- * the column is null/empty, the stored JSON is malformed / wrong-shape, or
- * the DB read itself fails (e.g. a pending migration) — this is a defensive
- * read that must never throw.
- */
-export function getCodexConnectSetting(): CodexConnectSetting {
-  try {
-    const db = getDb();
-    const [row] = db
-      .select({ codex: settings.codex })
-      .from(settings)
-      .where(eq(settings.id, 1))
-      .limit(1)
-      .all();
-
-    const raw = row?.codex;
-    if (!raw) return { ...CODEX_CONNECT_DEFAULTS };
-
-    const parsed = JSON.parse(raw) as Partial<CodexConnectSetting> | null;
-    if (!parsed || typeof parsed !== "object") return { ...CODEX_CONNECT_DEFAULTS };
-    if (typeof parsed.connected !== "boolean") return { ...CODEX_CONNECT_DEFAULTS };
-    const status = parsed.lastSyncStatus;
-    if (status !== "ok" && status !== "error" && status !== "idle") {
-      return { ...CODEX_CONNECT_DEFAULTS };
-    }
-    return { connected: parsed.connected, lastSyncStatus: status };
-  } catch (err) {
-    serverLogger.warn(
-      { err, tag: "codex-connect", op: "read_degraded" },
-      "getCodexConnectSetting: read failed, returning defaults",
-    );
-    return { ...CODEX_CONNECT_DEFAULTS };
-  }
-}
-
-/**
- * Persist the codex connect setting as a JSON string in the settings table.
- * Upserts the single-row settings record if it doesn't already exist.
- */
-export function setCodexConnectSetting(s: CodexConnectSetting): void {
-  const db = getDb();
-  const value = JSON.stringify(s);
-  const set = { codex: value, updatedAt: new Date() };
 
   db.insert(settings)
     .values({ id: 1, ...set })

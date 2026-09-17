@@ -67,7 +67,11 @@ if (!RUN)
   );
 
 describe.skipIf(!RUN)("real faster-whisper E2E (tiny)", () => {
-  it("transcribes jfk.wav within tolerance of the ElevenLabs golden", async () => {
+  // The golden is a FROZEN, independent reference (ElevenLabs scribe_v1,
+  // 2026-09-07) — see __tests__/fixtures/audio/jfk.SOURCE.md. It must never
+  // be re-derived from Whisper: that would compare Whisper to itself and make
+  // every assertion below hold by construction.
+  it("transcribes jfk.wav within tolerance of the frozen independent golden", async () => {
     const expected = JSON.parse(
       fs.readFileSync(
         path.resolve("__tests__/fixtures/whisper/jfk.expected.json"),

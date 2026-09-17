@@ -52,9 +52,11 @@ describe("using-object-tracking SKILL.md", () => {
     expect(content).toMatch(/NOT the\s+face path/);
   });
 
-  it("states the local engine is the default and SAM2 is opt-in paid only", () => {
-    expect(content).toMatch(/default tracker/i);
-    expect(content).toMatch(/SAM2/);
-    expect(content).toMatch(/paid/i);
+  it("states there is no paid tracking provider and update_track_result is boxes-only", () => {
+    // Tolerate Markdown line-wrapping inside the phrase.
+    expect(content).toMatch(/There is no\s+paid tracking provider/i);
+    expect(content).toMatch(/update_track_result[\s\S]{0,400}boxes only/i);
+    // The removed fal SAM2 tools must not come back as an offer.
+    expect(content).not.toMatch(/refine_track_with_sam2|compute_object_track_providers/);
   });
 });

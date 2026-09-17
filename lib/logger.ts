@@ -192,9 +192,9 @@ function getDestination(): ReturnType<typeof pino.destination> | null {
 
 /**
  * Backstop redaction for the whole logger, on top of (never instead of)
- * scrubbing at each call site — e.g. `lib/codex-config/codex-cli.ts`'s `run()`
- * routes a codex failure message through `scrubSecrets` before it ever
- * reaches `logger.warn`. Call sites can't all be trusted to remember that, so
+ * scrubbing at each call site — e.g. `mcp/registry/server-prober.ts` routes a
+ * probe failure message through `scrubSecrets` before it ever reaches the
+ * logger. Call sites can't all be trusted to remember that, so
  * pino's own `redact` catches whatever a log call passes under one of these
  * KEY names, no matter how deep — `wildcard` matches exactly one path
  * segment, so each carrier is listed at a few likely nesting depths rather

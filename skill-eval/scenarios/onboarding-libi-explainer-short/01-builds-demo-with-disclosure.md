@@ -6,7 +6,7 @@ mcps: []
 agent: claude-code
 runs: 1
 timeoutSec: 300
-covers: [onboarding, no-generation, single-tool-call, disclosure, pre-made-film, built-in-libi]
+covers: [onboarding, no-generation, single-tool-call, disclosure, pre-made-film, built-in-libi, no-provider-gate]
 ---
 
 ## Prompt
@@ -23,18 +23,32 @@ assertions:
   - { tool: "recommend_model", expect: absent }
   # No ElevenLabs TTS/SFX/music calls either — the film carries its own audio.
   - { provider: "elevenlabs", expect: absent }
+  # The opposite failure from the four above, and the only live one here. This skill
+  # is deliberately ungated while every generation skill opens with a provider gate, so
+  # the risk is an agent greeting a brand-new user by asking them to connect a provider —
+  # before they have seen anything work. `transcript_contains` reads the rendered
+  # transcript rather than the fal/ElevenLabs trace, so unlike the four above it
+  # discriminates even under `mcps: []`.
+  - { transcript_contains: "[tool-call mcp__libi__libi_suggest_provider]", expect: absent }
+  # …and two PRESENT ones, so a run that loads nothing and builds nothing can no longer
+  # pass on absences alone.
+  - { transcript_contains: "Launching skill: onboarding-libi-explainer-short", expect: present }
+  - { transcript_contains: "[tool-call mcp__libi__libi_build_onboarding_piece]", expect: present }
 ```
 
-**Two reasons nothing above is a live guard — read before adding more.** (1) The trace
-is built only from `fal-calls.jsonl` and `elevenlabs-calls.jsonl`
+**Two reasons the FIRST FOUR assertions above are not live guards — read before adding
+more.** (1) The trace is built only from `fal-calls.jsonl` and `elevenlabs-calls.jsonl`
 (`scripts/skill-eval/harness.ts#readTrace`), so a `libi.*` matcher would select from a
 trace those calls never enter and pass vacuously. (2) `mcps: []` in the frontmatter makes
-`/api/skill-eval/configure` disable every external MCP row, so fal-ai and ElevenLabs are
-not wired into the session at all and those four files stay empty however the agent
-behaves — the four assertions above are inherited from the previous version of this
-scenario and are vacuous too. Pre-existing, left in place deliberately: they cost nothing
-and become real the day this scenario is given MCPs. **Every invariant that actually
-discriminates is in the prose below**, judged from the transcript.
+`/api/skill-eval/configure` detach the test-mode fakes (`setTestModeFakesEnabled(false)`,
+lib/mcp-config.ts), so fal-ai and ElevenLabs are not wired into the session at all and
+those trace files stay empty however the agent behaves — the four assertions above are
+inherited from the previous version of this scenario and are vacuous too. Pre-existing, left
+in place deliberately: they cost nothing and become real the day this scenario is given
+MCPs. Neither reason applies to the three `transcript_contains` matchers, which read the
+rendered transcript and are live as written (`scripts/skill-eval/assertions.ts` rejects
+combining `transcript_contains` with a trace selector for exactly this reason). **Every
+other invariant is in the prose below**, judged from the transcript.
 
 ## Behavioral expectations
 - Called `libi.build_onboarding_piece` exactly ONCE, with no arguments (no `version`,
@@ -48,6 +62,9 @@ discriminates is in the prose below**, judged from the transcript.
   effect — the single build call is the entire build.
 - Did NOT call any image or video generation tool (no fal-ai model, no recommend_model
   for generation, no ElevenLabs TTS/SFX/music).
+- Did NOT ask the user to connect a provider, and did NOT call `libi.suggest_provider` or
+  `libi.list_providers`. Nothing here is generated, so there is no provider to pick — a
+  brand-new user's first interaction must not be a request to connect one.
 - Called `libi.show_piece` with the `pieceId` returned by the build to reveal it.
 - The closing message plainly stated that the film is PRE-MADE / downloaded, NOT
   generated live in this session — the transparency disclosure was NOT skipped.

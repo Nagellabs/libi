@@ -1,55 +1,24 @@
 /**
- * Standalone MCP server entry point.
+ * Standalone MCP server entry point — libi's tools on stdio.
  *
- * Run directly with tsx: `tsx mcp/index.ts`
- * Or via the CLI: `npx libi serve-mcp`
+ * Run it directly: `tsx mcp/index.ts`, or, in an npm install, the compiled
+ * `node dist-cli/mcp/index.js`. `buildLibiEntry()` (`lib/mcp-config.ts`) is the
+ * spawn spec for exactly that, and resolves between the two.
  *
- * Connects the Libi MCP server to stdio transport.
+ * `libi serve-mcp` serves the SAME server, but it does not run this file: the
+ * CLI routes through `lib/cli/index.ts`. Both call `serveMcp()`, which is where
+ * the implementation lives — this file is only the executable wrapper.
+ * It used to hold a second copy, and the copies had drifted.
+ *
  * All tool calls execute in-process (direct DB/storage access).
- * Logs are written to ~/.libi/logs/mcp-server.log
+ * Logs are written to ~/.libi/logs/mcp-server.log.
  */
 
-// Import logger first — sets up file logging and crash handlers
+// Import logger first — sets up file logging and crash handlers.
 import { mcpLogger as logger } from "@/lib/logger";
-import { ensureLibiDirs } from "@/lib/libi-home";
-import { createLibiMcpServer } from "@/mcp/server";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveMcp } from "@/lib/cli/serve-mcp";
 
-async function main() {
-  ensureLibiDirs();
-  // MCP children DO NOT migrate the DB — the parent (libi server) is
-  // responsible for that via the lifecycle prelude. If you're getting
-  // "no such table" errors here, the parent didn't migrate before
-  // spawning us. In tests, call migrateDatabase() in `beforeAll` against
-  // your temp LIBI_HOME path before spawning the MCP child.
-
-  // JobManager runs in the Next.js process. MCP-side tools that need to
-  // invoke jobs use `mcp/jobs-client.ts`, which talks to the Next.js
-  // server over HTTP. The runner registry intentionally does NOT exist
-  // in this process.
-
-  logger.info("Loading MCP server...");
-
-  const server = createLibiMcpServer();
-  const transport = new StdioServerTransport();
-
-  // LIBI_DEBUG=1 enables MCP transport tracing
-  if (process.env.LIBI_DEBUG) {
-    const origOnMessage = transport.onmessage;
-    transport.onmessage = (msg) => {
-      logger.debug({ method: (msg as { method?: string }).method }, "MCP ← received");
-      origOnMessage?.(msg);
-    };
-    transport.onerror = (err) => logger.error({ err }, "MCP transport error");
-    transport.onclose = () => logger.warn("MCP transport closed");
-  }
-
-  await server.connect(transport);
-
-  logger.info("MCP server running (stdio mode)");
-}
-
-main().catch((err) => {
+serveMcp().catch((err) => {
   logger.fatal({ err }, "MCP server failed to start");
   setTimeout(() => process.exit(1), 100);
 });

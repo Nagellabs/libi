@@ -6,7 +6,7 @@ mcps: []
 agent: claude-code
 runs: 1
 timeoutSec: 1200
-covers: [mimic-video-captions, caption-mimic, focus-captions, render_overlay_frames, verify-loop, three-overlay]
+covers: [mimic-video-captions, caption-mimic, provider-video-understanding, render_overlay_frames, verify-loop, three-overlay]
 ---
 
 ## Prompt
@@ -23,10 +23,11 @@ the captions; do NOT generate any new video or audio clips.
 
 ## Hard invariants
 ```yaml
-# The caption-mimic flow drives libi-core tools (extra_analysis_model focus:captions,
-# render_overlay_frames, add_overlay) which are NOT recorded in the fal/elevenlabs
-# trace — so they're judged behaviorally below, not asserted here. The one mechanical
-# guarantee: reproducing captions on an existing reel must NOT generate any new clips.
+# The caption-mimic flow drives libi-core tools (render_overlay_frames, add_overlay,
+# analysis_update_summary_custom) which are NOT recorded in the fal/elevenlabs trace —
+# so they're judged behaviorally below, not asserted here. With `mcps: []` the agent has
+# no provider at all, so the one mechanical guarantee is that reproducing captions on an
+# existing reel must NOT generate any new clips.
 assertions:
   - endpoint_id: "*"
     expect: absent
@@ -41,11 +42,12 @@ assertions:
   `cameraPreset: "ground"`) — NOT `libi.add_overlay({ kind: "code" })` /
   `libi.add_overlay({ kind: "text" })`. The "glowing cyan + grows" cue does not flatten
   it to a 2D scale-punch.
-- **Surfaced / chose the caption-focused paid analysis** — disclosed that mimicking
-  captions faithfully is best served by `libi.extra_analysis_model({ focus: "captions" })`
-  (paid, ~$0.002/s) for the per-caption motion spec, OR explained it would do so if a real
-  source file were attached. (The run is auto-approved, so judge the CHOICE/disclosure, not
-  a pause-for-approval.)
+- Ran the caption-focused analysis on its OWN provider (`fal-ai/video-understanding`) and
+  saved the spec with `libi.analysis_update_summary_custom` — it did not look for a libi
+  tool to do the paid analysis for it. With no provider connected in this run, explaining
+  that it WOULD run `fal-ai/video-understanding` on the user's provider (disclosing the
+  ~$0.002/s cost) and save via `libi.analysis_update_summary_custom` also passes; asking
+  for a libi-side paid-analysis tool, or an API key, is a FAIL.
 - **Ran the render-verify loop:** after adding the 3D caption, called
   `libi.render_overlay_frames` and then OPENED the returned PNG path(s) with its Read tool
   to actually look at the rendered frame, checking for a blank render (yaw-sign footgun) or

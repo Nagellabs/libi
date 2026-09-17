@@ -1,10 +1,14 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { prepareAgentDir } from "@/mcp/workspace";
+import { prepareAgentDir, renderAgentInstructions } from "@/mcp/workspace";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
-import { AGENT_MARKER_START, AGENT_MARKER_END } from "@/lib/instructions/marker-merge";
+import { createTestDb } from "@/__tests__/helpers/test-db";
+import { getDb } from "@/lib/db/client";
+import { mcpServers } from "@/lib/db/schema";
+import { EXTENSION_MCP_SERVERS } from "@/mcp/registry/bundled";
+import { getInstructions } from "@/mcp/instructions";
 
 describe("prepareAgentDir", () => {
   let tempHome: string;
@@ -23,74 +27,6 @@ describe("prepareAgentDir", () => {
     await prepareAgentDir(workspaceDir);
 
     expect(fs.existsSync(workspaceDir)).toBe(true);
-  });
-
-  it("writes CLAUDE.md into the workspace", async () => {
-    await prepareAgentDir(workspaceDir);
-
-    const claudeMd = path.join(workspaceDir, "CLAUDE.md");
-    expect(fs.existsSync(claudeMd)).toBe(true);
-  });
-
-  it("writes AGENTS.md into the workspace", async () => {
-    await prepareAgentDir(workspaceDir);
-
-    const agentsMd = path.join(workspaceDir, "AGENTS.md");
-    expect(fs.existsSync(agentsMd)).toBe(true);
-  });
-
-  it("CLAUDE.md and AGENTS.md diverge by agent dialect", async () => {
-    // The byte-identical invariant is intentionally ended (Task 4.2 / G0b):
-    // CLAUDE.md renders the claude dialect, AGENTS.md renders the codex dialect.
-    await prepareAgentDir(workspaceDir);
-
-    const claudeContent = fs.readFileSync(
-      path.join(workspaceDir, "CLAUDE.md"),
-      "utf-8"
-    );
-    const agentsContent = fs.readFileSync(
-      path.join(workspaceDir, "AGENTS.md"),
-      "utf-8"
-    );
-
-    // They must NOT be byte-identical anymore.
-    expect(claudeContent).not.toBe(agentsContent);
-
-    // CLAUDE.md keeps the "Skill tool" mechanic; AGENTS.md drops it and uses the
-    // codex progressive-disclosure wording.
-    expect(claudeContent).toContain("via the Skill tool");
-    expect(claudeContent).not.toContain("$using-storyboard");
-
-    expect(agentsContent).not.toContain("via the Skill tool");
-    expect(agentsContent).toContain("$using-storyboard");
-    expect(agentsContent).toContain(".agents/skills");
-
-    // Codex self-check block is codex-only.
-    expect(agentsContent).toContain("Codex self-check");
-    expect(agentsContent).toContain("MCPs & Skills");
-    expect(agentsContent).toContain("codex mcp list");
-    expect(claudeContent).not.toContain("Codex self-check");
-
-    // The shared body survives in both files.
-    expect(claudeContent).toContain("Libi Video Composition API");
-    expect(agentsContent).toContain("Libi Video Composition API");
-    expect(claudeContent).toContain("<!-- libi-instructions-start");
-    expect(agentsContent).toContain("<!-- libi-instructions-start");
-
-    // No unresolved dialect markers leak into either shipped file.
-    expect(claudeContent).not.toContain("libi-agent:");
-    expect(agentsContent).not.toContain("libi-agent:");
-  });
-
-  it("CLAUDE.md contains instruction markers", async () => {
-    await prepareAgentDir(workspaceDir);
-
-    const content = fs.readFileSync(
-      path.join(workspaceDir, "CLAUDE.md"),
-      "utf-8"
-    );
-    expect(content).toContain("<!-- libi-instructions-start");
-    expect(content).toContain("<!-- libi-instructions-end -->");
   });
 
   it("writes .version file with the correct version", async () => {
@@ -121,72 +57,132 @@ describe("prepareAgentDir", () => {
     expect(content).toBe(LIBI_SKILL_VERSION);
     expect(LIBI_SKILL_VERSION).toBeTruthy();
   });
+});
 
-  it("writes .mcp.json with libi MCP server and settings.local.json with enableAllProjectMcpServers", async () => {
-    await prepareAgentDir(workspaceDir);
+describe("renderAgentInstructions", () => {
+  // The byte-identical invariant is intentionally ended:
+  // "claude" renders the claude dialect, "codex" renders the codex dialect.
+  // Since the move to HTTP, prepareAgentDir no longer writes these to
+  // CLAUDE.md / AGENTS.md — they're only returned by `libi.read_manual` — so
+  // the divergence is asserted on the rendered strings directly.
+  it("claude and codex dialects diverge, and both carry the instruction markers", () => {
+    const claudeContent = renderAgentInstructions("claude");
+    const agentsContent = renderAgentInstructions("codex");
 
-    // settings.local.json should have enableAllProjectMcpServers but no mcpServers
-    const settingsPath = path.join(workspaceDir, ".claude", "settings.local.json");
-    expect(fs.existsSync(settingsPath)).toBe(true);
-    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
-    expect(settings.enableAllProjectMcpServers).toBe(true);
-    expect(settings.mcpServers).toBeUndefined();
+    // They must NOT be byte-identical.
+    expect(claudeContent).not.toBe(agentsContent);
 
-    // .mcp.json should have the libi server definition
-    const mcpJsonPath = path.join(workspaceDir, ".mcp.json");
-    expect(fs.existsSync(mcpJsonPath)).toBe(true);
-    const mcpJson = JSON.parse(fs.readFileSync(mcpJsonPath, "utf-8"));
-    expect(mcpJson.mcpServers.libi).toBeDefined();
-    // Runs mcp/index.ts via tsx's CLI entry point (node_modules/tsx/dist/cli.mjs)
-    // through a plain `node` — not node_modules/.bin/tsx, which packaged
-    // Electron builds never ship (see lib/mcp-config.ts#buildLibiEntry).
-    expect(mcpJson.mcpServers.libi.command).toMatch(/(^|[\\/])node(\.exe)?$/);
-    expect(mcpJson.mcpServers.libi.args).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining(path.join("node_modules", "tsx", "dist", "cli.mjs")),
-        expect.stringContaining("mcp/index.ts"),
-      ])
-    );
+    // The claude dialect keeps the "Skill tool" mechanic; the codex dialect
+    // drops it and uses the codex progressive-disclosure wording.
+    expect(claudeContent).toContain("via the Skill tool");
+    expect(claudeContent).not.toContain("$using-storyboard");
+
+    expect(agentsContent).not.toContain("via the Skill tool");
+    expect(agentsContent).toContain("$using-storyboard");
+    expect(agentsContent).toContain(".agents/skills");
+
+    // Codex self-check block is codex-only.
+    expect(agentsContent).toContain("Codex self-check");
+    expect(agentsContent).toContain("npx @nagellabs/libi connect");
+    expect(agentsContent).toContain("codex mcp list");
+    expect(claudeContent).not.toContain("Codex self-check");
+
+    // The shared body survives in both.
+    expect(claudeContent).toContain("Libi Video Composition API");
+    expect(agentsContent).toContain("Libi Video Composition API");
+
+    // Both carry the instruction markers.
+    expect(claudeContent).toContain("<!-- libi-instructions-start");
+    expect(claudeContent).toContain("<!-- libi-instructions-end -->");
+    expect(agentsContent).toContain("<!-- libi-instructions-start");
+    expect(agentsContent).toContain("<!-- libi-instructions-end -->");
+
+    // No unresolved dialect markers leak into either rendered string.
+    expect(claudeContent).not.toContain("libi-agent:");
+    expect(agentsContent).not.toContain("libi-agent:");
   });
 });
 
-describe("prepareAgentDir — connected (merge) mode", () => {
-  let tempHome: string;
-  let connectedDir: string;
+/**
+ * The half of `renderAgentInstructions` that is not the dialect: the
+ * libi-extensions section, built from the `mcp_servers` rows and SPLICED IN
+ * before the end marker rather than appended after it. The marker is what the
+ * manual's own closing material sits behind, so a section that landed after it
+ * would read as being outside the instructions.
+ *
+ * The section describes libi's OWN extensions only — a third-party
+ * row (the user's provider MCP) is never described, whatever its state.
+ */
+describe("renderAgentInstructions — the extensions section", () => {
+  const END_MARKER = "<!-- libi-instructions-end -->";
+  const SECTION = "## libi extensions";
+  const tracking = EXTENSION_MCP_SERVERS.find((d) => d.id === "libi-tracking")!;
 
-  beforeEach(() => {
-    tempHome = fs.mkdtempSync(path.join(os.tmpdir(), "libi-test-"));
-    connectedDir = path.join(tempHome, "user-proj");
-    fs.mkdirSync(connectedDir, { recursive: true });
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "fake-ai-assets",
+    name: "fake-ai-assets",
+    description: "Generates placeholder assets.",
+    type: "stdio" as const,
+    command: "node",
+    args: JSON.stringify(["x.js"]),
+    url: null,
+    headers: null,
+    bundled: false,
+    enabled: true,
+    requireApproval: false,
+    installStatus: "installed",
+    envVars: "{}",
+    dependencyStatus: "[]",
+    ...over,
   });
 
-  afterEach(() => {
-    fs.rmSync(tempHome, { recursive: true, force: true });
+  beforeEach(() => { createTestDb(); });
+
+  it("with no rows the render is the dialect template verbatim", () => {
+    const rendered = renderAgentInstructions("claude");
+    expect(rendered).toBe(getInstructions("claude"));
+    expect(rendered).not.toContain(SECTION);
   });
 
-  it("creates CLAUDE.md with markers when missing", async () => {
-    await prepareAgentDir(connectedDir);
-    const content = fs.readFileSync(path.join(connectedDir, "CLAUDE.md"), "utf-8");
-    expect(content).toContain(AGENT_MARKER_START);
-    expect(content).toContain(AGENT_MARKER_END);
+  it("a third-party row is never described, even when it requires approval", () => {
+    getDb().insert(mcpServers).values(row({ requireApproval: true })).run();
+    const rendered = renderAgentInstructions("claude");
+    expect(rendered).toBe(getInstructions("claude"));
+    expect(rendered).not.toContain("fake-ai-assets");
   });
 
-  it("preserves user content outside the markers on re-run", async () => {
-    fs.writeFileSync(path.join(connectedDir, "CLAUDE.md"), "# My own rules\n");
-    await prepareAgentDir(connectedDir);
-    await prepareAgentDir(connectedDir); // idempotent second run
-    const content = fs.readFileSync(path.join(connectedDir, "CLAUDE.md"), "utf-8");
-    expect(content.startsWith("# My own rules")).toBe(true);
-    expect(content.indexOf(AGENT_MARKER_START)).toBe(
-      content.lastIndexOf(AGENT_MARKER_START),
-    );
+  it("an extension row that requires approval adds the section BEFORE the end marker", () => {
+    getDb().insert(mcpServers).values(row({ id: tracking.id, name: tracking.name, bundled: true, requireApproval: true })).run();
+    const rendered = renderAgentInstructions("claude");
+
+    expect(rendered).not.toBe(getInstructions("claude"));
+    expect(rendered).toContain(SECTION);
+    expect(rendered).toContain(`**${tracking.name}**: ${tracking.description}`);
+    expect(rendered).toContain("REQUIRES APPROVAL");
+    for (const prefix of tracking.toolPrefixes) expect(rendered).toContain(prefix);
+    // Spliced in, not appended: the section body precedes the end marker.
+    expect(rendered.indexOf(SECTION)).toBeLessThan(rendered.indexOf(END_MARKER));
+    // …and everything the template had is still there, in order.
+    expect(rendered).toContain(END_MARKER);
   });
 
-  it("plain-overwrites at the DEFAULT agent dir (owned mode, no markers)", async () => {
-    const { getLibiAgentDir } = await import("@/lib/libi-home");
-    const defaultDir = getLibiAgentDir(); // isolated under the vitest temp home
-    await prepareAgentDir(defaultDir);
-    const content = fs.readFileSync(path.join(defaultDir, "CLAUDE.md"), "utf-8");
-    expect(content).not.toContain(AGENT_MARKER_START);
+  it("both dialects get the same section", () => {
+    getDb().insert(mcpServers).values(row({ id: tracking.id, name: tracking.name, bundled: true, requireApproval: true })).run();
+    const claude = renderAgentInstructions("claude");
+    const codex = renderAgentInstructions("codex");
+    // The section is dialect-neutral — the only difference between the two
+    // renders is the dialect template it is spliced into.
+    const section = (text: string) =>
+      text.slice(text.indexOf(SECTION), text.indexOf(END_MARKER));
+    expect(section(claude)).toContain("REQUIRES APPROVAL");
+    expect(section(claude)).toBe(section(codex));
+  });
+
+  it("install state never changes the section — availability is answered by the tools themselves", () => {
+    getDb().insert(mcpServers).values(row({ id: tracking.id, name: tracking.name, bundled: true, requireApproval: true, installStatus: "failed", installError: "uv sync exploded" })).run();
+    const rendered = renderAgentInstructions("claude");
+    expect(rendered).toContain(SECTION);
+    expect(rendered).not.toContain("unavailable");
+    expect(rendered).not.toContain("uv sync exploded");
   });
 });

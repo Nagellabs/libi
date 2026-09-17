@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { runInstallPhase, runBootPhase } from "@/lib/server/lifecycle/runner";
 import { testAdapter } from "@/lib/server/lifecycle/adapters/test";
-import { __resetLifecycleEventsForTests } from "@/lib/server/lifecycle/events";
+import { __resetLifecycleEventsForTests, lifecycleEvents } from "@/lib/server/lifecycle/events";
 import { BootPhaseError } from "@/lib/server/lifecycle/category-b";
 import type { CategoryADeps } from "@/lib/server/lifecycle/category-a";
 import type { CategoryBDeps } from "@/lib/server/lifecycle/category-b";
@@ -16,25 +16,28 @@ vi.mock("@/lib/agents/acp/agent-registry", () => ({
 vi.mock("@/lib/mcp-config", () => ({
   invalidateMcpConfig: vi.fn(),
 }));
+// Category B fires the disk-housekeeping sweep for real: without this mock
+// the suite would prune the developer's actual `~/Library/Caches/ms-playwright`.
+vi.mock("@/lib/server/lifecycle/housekeeping", () => ({
+  runBootHousekeeping: vi.fn(async () => {}),
+}));
 
 const baseADeps: CategoryADeps = {
-  ensureBundledNpm: async () => {},
   installBinaryDeps: async () => {},
-  probeMcp: async () => ({ status: "up", error: null, durationMs: 5 }),
-  defs: () => [],
   ensureNodeRuntime: async () => ({ ok: true, path: "/fake/bin/node", source: "already-managed" }),
-  ensureClaudeAdapter: async () => ({ installed: true, binPath: "/fake/bin/claude-agent-acp" }),
 };
 
 const baseBDeps: CategoryBDeps = {
   migrateDatabase: () => {},
   recoverOrphanedJobs: async () => {},
   writePortFile: () => {},
+  startMcpHttp: async () => {},
   prepareAgentDir: async () => {},
   warmAgentProcess: async () => {},
   loadSessions: async () => {},
   probeAndPersist: async () => {},
   createStandby: async () => {},
+  syncSkillInstalls: async () => {},
 };
 
 describe("runInstallPhase", () => {
@@ -60,9 +63,10 @@ describe("runInstallPhase", () => {
       adapter,
       deps: {
         ...baseADeps,
-        // Throwing from ensureBundledNpm — category-a.ts wraps it into
-        // InstallPhaseError("npm-install", "Failed to install bundled MCP npm packages: <msg>", …).
-        ensureBundledNpm: async () => {
+        // Throwing from installBinaryDeps — the one fatal phase left in
+        // category-a.ts, which wraps it into
+        // InstallPhaseError("binary-install", "Failed to install bundled binary deps: <msg>", …).
+        installBinaryDeps: async () => {
           throw new Error("ENETUNREACH");
         },
       },
@@ -70,47 +74,15 @@ describe("runInstallPhase", () => {
 
     expect(result.ok).toBe(false);
     expect(result.fatal?.phase).toBe("category-a");
-    expect(result.fatal?.step).toBe("npm-install");
+    expect(result.fatal?.step).toBe("binary-install");
     expect(result.fatal?.error).toContain("ENETUNREACH");
 
     const fatal = adapter.captured().find((e) => e.kind === "fatal");
     expect(fatal).toBeTruthy();
     if (fatal?.kind === "fatal") {
       expect(fatal.phase).toBe("category-a");
-      expect(fatal.step).toBe("npm-install");
+      expect(fatal.step).toBe("binary-install");
     }
-  });
-
-  it("returns { ok: false } and emits fatal when category A throws a generic error (no hint)", async () => {
-    const adapter = testAdapter();
-    // Throw an InstallPhaseError directly (not wrapped by category-a.ts) by
-    // having probeMcp return "down" — category-a.ts throws InstallPhaseError
-    // with step "probe:<id>" in that path.
-    const result = await runInstallPhase({
-      adapter,
-      deps: {
-        ...baseADeps,
-        probeMcp: async () => ({ status: "down", error: "timeout", durationMs: 10 }),
-        defs: () => [
-          {
-            id: "test-mcp",
-            name: "Test MCP",
-            description: "",
-            npmUrl: null,
-            type: "stdio" as const,
-            command: "echo",
-            args: [],
-            requireApproval: false,
-            dependencies: [],
-          },
-        ],
-      },
-    });
-
-    expect(result.ok).toBe(false);
-    expect(result.fatal?.phase).toBe("category-a");
-    expect(result.fatal?.step).toBe("probe:test-mcp");
-    expect(result.fatal?.error).toContain("timeout");
   });
 
   it("unsubscribes the adapter listener after completion (no event leakage)", async () => {
@@ -127,14 +99,43 @@ describe("runInstallPhase", () => {
     // First adapter's captured list must not have grown.
     expect(adapter.captured().length).toBe(countAfterFirst);
   });
+
+  it("keeps handing the adapter boot warnings, and only warnings, after a successful install phase", async () => {
+    // Category B runs later in the same process for npx and the desktop app,
+    // with no adapter of its own; the splash or the terminal is still up.
+    const adapter = testAdapter();
+    await runInstallPhase({ adapter, deps: baseADeps });
+    const before = adapter.captured().length;
+
+    lifecycleEvents.emit({ kind: "category-b-step", step: "mcp-http", status: "running" });
+    const warning = { kind: "warning", phase: "category-b", step: "mcp-http", message: "tools unavailable" } as const;
+    lifecycleEvents.emit(warning);
+    lifecycleEvents.emit({ kind: "category-b-step", step: "mcp-http", status: "done" });
+
+    expect(adapter.captured().slice(before)).toEqual([warning]);
+  });
+
+  it("forwards no boot warnings after an install phase that failed", async () => {
+    const adapter = testAdapter();
+    await runInstallPhase({
+      adapter,
+      deps: {
+        ...baseADeps,
+        installBinaryDeps: async () => {
+          throw new Error("ENETUNREACH");
+        },
+      },
+    });
+    const before = adapter.captured().length;
+    lifecycleEvents.emit({ kind: "warning", phase: "category-b", step: "mcp-http", message: "tools unavailable" });
+    expect(adapter.captured().length).toBe(before);
+  });
 });
 
 describe("runBootPhase", () => {
   beforeEach(() => {
     __resetLifecycleEventsForTests();
-    // Ensure connect-agent mode is not set so Category B runs the full path.
     vi.stubEnv("NODE_ENV", "test");
-    delete process.env.LIBI_CONNECT_AGENT_DIR;
   });
 
   it("returns { ok: true } on happy path", async () => {
@@ -147,13 +148,7 @@ describe("runBootPhase", () => {
 
   it("emits category-b-step events for db-migrate, jobs-recover, port-file", async () => {
     const adapter = testAdapter();
-    // Use connect-agent mode to short-circuit after the fixed steps + agent-dir prep.
-    process.env.LIBI_CONNECT_AGENT_DIR = "/tmp/libi-connect-test";
-    try {
-      await runBootPhase({ adapter, deps: baseBDeps });
-    } finally {
-      delete process.env.LIBI_CONNECT_AGENT_DIR;
-    }
+    await runBootPhase({ adapter, deps: baseBDeps });
 
     const kinds = adapter.captured().map((e) => e.kind);
     expect(kinds).toContain("category-b-step");

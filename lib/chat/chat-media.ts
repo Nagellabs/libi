@@ -48,7 +48,7 @@ export function isShowInChatName(name: string | null | undefined): boolean {
  *  plain tool-output object. MCP tools arrive as a content array
  *  (`[{type:"text",text}]` or `{content:[…]}`) whose text is the JSON-stringified
  *  output; non-MCP results may be a bare object or a JSON string. */
-function unwrapToolResult(result: unknown): unknown {
+export function unwrapToolResult(result: unknown): unknown {
   const items: unknown[] | null = Array.isArray(result)
     ? result
     : result &&

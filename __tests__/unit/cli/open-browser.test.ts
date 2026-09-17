@@ -3,8 +3,8 @@
 // wrong quietly:
 //
 //   - WHEN we open (a dev checkout must not pop a browser on every
-//     `npm run dev`; CI has no desktop; `--connect-agent` is headless by
-//     definition) — and that an explicit flag always wins;
+//     `npm run dev`; CI has no desktop) — and that an explicit flag always
+//     wins;
 //   - WHAT we hand the OS: only libi's own loopback URL, never a shell;
 //   - that a failed launch is one honest line, never an error;
 //   - that readiness means THIS libi answered, not merely that something is
@@ -33,10 +33,6 @@ describe("shouldOpenBrowser", () => {
   it("lets an explicit flag win over every default", () => {
     expect(shouldOpenBrowser({ flag: false, isDevCheckout: false, env: {} })).toBe(false);
     expect(shouldOpenBrowser({ flag: true, isDevCheckout: true, env: { CI: "1" } })).toBe(true);
-    // Even connect-agent, whose whole point is headless — the user asked.
-    expect(
-      shouldOpenBrowser({ flag: true, isDevCheckout: false, connectAgent: true, env: {} }),
-    ).toBe(true);
   });
 
   it("honours LIBI_OPEN in both directions, below the flag", () => {
@@ -51,8 +47,7 @@ describe("shouldOpenBrowser", () => {
     expect(shouldOpenBrowser({ isDevCheckout: false, env: { LIBI_OPEN: "maybe" } })).toBe(true);
   });
 
-  it("stays out of the way for connect-agent and CI", () => {
-    expect(shouldOpenBrowser({ isDevCheckout: false, connectAgent: true, env: {} })).toBe(false);
+  it("stays out of the way in CI", () => {
     expect(shouldOpenBrowser({ isDevCheckout: false, env: { CI: "true" } })).toBe(false);
     // `CI=0`/`CI=false` is how a runner says "not CI" — it must not disable it.
     expect(shouldOpenBrowser({ isDevCheckout: false, env: { CI: "0" } })).toBe(true);

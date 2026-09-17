@@ -23,7 +23,7 @@ type Handler = () => void;
 // This matches the repo's existing cross-instance singleton pattern
 // (`lib/db/client.ts`, `lib/jobs/manager.ts`, `lib/terminal/instance.ts`).
 //
-// Impact of the old shape: "Restart server" (always visible in MCPs & Skills)
+// Impact of the old shape: "Restart server" (always visible in Agents)
 // quit the packaged app without relaunching, and killed an `npx` server with
 // no message at all — the explanatory line lived in the dead handler.
 const slot = globalThis as unknown as { __libiRelaunchHandler?: Handler | null };

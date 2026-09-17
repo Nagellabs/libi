@@ -37,6 +37,18 @@ vi.mock("@/lib/agents/acp/agent-registry", () => ({
         },
 }));
 
+// The user's CLI is resolved separately from the adapter; default: a usable one.
+const USABLE = { path: "/u/bin/codex", realPath: "/u/bin/codex", execPath: "/u/bin/codex", version: "9.0.0", meetsMinimum: true };
+let resolved: unknown = USABLE;
+const resolveCalls: Array<[string, unknown]> = [];
+vi.mock("@/lib/agents/cli/resolve", () => ({
+  resolveAgentCli: async (agentId: string, deps?: unknown) => {
+    resolveCalls.push([agentId, deps]);
+    return resolved;
+  },
+  isUsableCli: (r: { meetsMinimum?: boolean } | null) => !!r && "meetsMinimum" in r && r.meetsMinimum === true,
+}));
+
 vi.mock("@/lib/terminal/active-surface", () => ({
   setTerminalSurfaceActive: vi.fn(),
 }));
@@ -57,6 +69,8 @@ function req(body: unknown) {
 beforeEach(() => {
   vi.clearAllMocks();
   installed = true;
+  resolved = USABLE;
+  resolveCalls.length = 0;
   sm.switchAgent.mockResolvedValue({ state: "ready" });
   sm.getReadiness.mockReturnValue({ state: "unknown" });
 });
@@ -86,7 +100,6 @@ describe("POST /api/agent/start", () => {
       state: "needs-auth",
       agentId: "codex",
       message: "codex needs to be signed in before it can run that message.",
-      remedy: { label: "Sign in to Codex", command: "/x/codex login", detail: "d" },
     });
 
     const r = await POST(req({ providerId: "codex" }));
@@ -94,7 +107,7 @@ describe("POST /api/agent/start", () => {
 
     expect(body.readiness.state).toBe("needs-auth");
     expect(body.readiness.message).toBeTruthy();
-    expect(body.readiness.remedy.command).toBe("/x/codex login");
+    expect(body.readiness).not.toHaveProperty("remedy");
   });
 
   it("reports a failed switch rather than claiming success", async () => {
@@ -123,6 +136,35 @@ describe("POST /api/agent/start", () => {
       reason: "Codex is still installing.",
     });
     expect(sm.switchAgent).not.toHaveBeenCalled();
+  });
+
+  it("returns not-installed readiness whose reason names Agents when the adapter is present but no CLI resolves", async () => {
+    resolved = null;
+
+    const r = await POST(req({ providerId: "codex" }));
+    const body = await r.json();
+
+    expect(r.status).toBe(400);
+    expect(body.success).toBe(false);
+    expect(body.readiness).toEqual({
+      state: "not-installed",
+      reason: "Codex isn't set up yet — open Agents to install it.",
+    });
+    expect(body.error).toBe("Codex isn't set up yet — open Agents to install it.");
+    expect(sm.switchAgent).not.toHaveBeenCalled();
+  });
+
+  it("resolves the CLI with staleOk, so a session start never waits on the login-shell probe once a memo exists", async () => {
+    await POST(req({ providerId: "codex" }));
+
+    expect(resolveCalls).toEqual([["codex", { staleOk: true }]]);
+  });
+
+  it("an agent without a setup declaration is never resolved as a CLI", async () => {
+    await POST(req({ providerId: "some-other-agent" }));
+
+    expect(resolveCalls).toEqual([]);
+    expect(sm.switchAgent).toHaveBeenCalledWith("some-other-agent", expect.anything());
   });
 
   it("answers unknown for the Terminal surface — it warms no ACP process", async () => {

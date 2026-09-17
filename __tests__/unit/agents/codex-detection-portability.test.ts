@@ -10,18 +10,11 @@
  *      without `shell: true` — so detection said installed and the adapter
  *      could never launch. `shell: true` is not the fix: it is the thing the
  *      CVE was about, and it breaks on the space in `C:\\Users\\First Last\\`.
- * C4 — `CODEX_PATH` was ignored by detection even though the adapter reads it
- *      FIRST and libi forwards the whole env to the child, so a user pointing
- *      it at their own engine was hard-blocked for a file the adapter would
- *      never consult.
- * C5 — a dev checkout missing the optional engine was told to "reinstall
- *      libi", which is not a thing a contributor can act on.
  */
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 
 import { spawnViaNodeIfScript, resolveCmdShimTarget } from "@/lib/agents/acp/agent-registry";
-import { codexNativeBinaryMissingError } from "@/lib/agents/codex-native-binary";
 
 // The shape npm's cmd-shim actually writes.
 const CMD_SHIM = String.raw`@ECHO off
@@ -96,35 +89,3 @@ describe("C3 — Windows .cmd shims", () => {
   });
 });
 
-describe("C5 — the message a dev checkout gets", () => {
-  const DEV = "/home/dev/libi";
-  const INSTALL = "/Applications/Libi.app/Resources/libi-bundle";
-
-  it("names npm install, not 'reinstall libi', for a checkout", () => {
-    const msg = codexNativeBinaryMissingError(DEV, {
-      platform: "darwin",
-      arch: "arm64",
-      exists: (p) => p === path.join(DEV, ".git"),
-    });
-    expect(msg).toContain("npm install");
-    expect(msg).toContain("--omit=optional");
-    expect(msg, "a contributor cannot 'reinstall libi'").not.toContain("reinstall libi");
-  });
-
-  it("keeps the reinstall advice for a real install", () => {
-    const msg = codexNativeBinaryMissingError(INSTALL, {
-      platform: "darwin",
-      arch: "arm64",
-      exists: () => false,
-    });
-    expect(msg).toContain("reinstall libi");
-    expect(msg).not.toContain("--omit=optional");
-  });
-
-  it("mentions CODEX_PATH as the escape hatch in a checkout", () => {
-    const msg = codexNativeBinaryMissingError(DEV, {
-      exists: (p) => p === path.join(DEV, ".git"),
-    });
-    expect(msg).toContain("CODEX_PATH");
-  });
-});

@@ -1,7 +1,7 @@
 ---
 id: skill-creation
 title: Skill creation tool — agent saves a user skill and it lands everywhere
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [skill-tools, skill-db, skill-writer-mirror, skills-ui]
 cost: subscription-tokens
@@ -24,7 +24,7 @@ cost: subscription-tokens
 - [ ] `~/.libi/skills/agent-eval-probe/SKILL.md` exists with the `testing` tag
       in frontmatter.
 - [ ] Workspace mirror exists: `~/.libi/agent/.claude/skills/agent-eval-probe/SKILL.md`.
-- [ ] Skill card appears in Settings → MCPs & Skills → Skills tab (source:
+- [ ] Skill card appears in Agents → Skills tab (source:
       user, tag chip "testing") without manual reload.
 - [ ] Round-trip: in a NEW terminal session, ask *"run a connectivity probe"*
       — the new skill loads and the agent lists pieces + version.

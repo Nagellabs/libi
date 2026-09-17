@@ -5,7 +5,7 @@
 const DYNAMIC_RULES: { re: RegExp; template: string }[] = [
   { re: /^\/characters\/[^/]+$/, template: "/characters/[id]" },
   { re: /^\/items\/[^/]+$/, template: "/items/[id]" },
-  { re: /^\/mcps-skills\/skills\/[^/]+$/, template: "/mcps-skills/skills/[name]" },
+  { re: /^\/agents\/skills\/[^/]+$/, template: "/agents/skills/[name]" },
 ];
 
 /** Collapse dynamic id/name segments so page_path stays low-cardinality. */

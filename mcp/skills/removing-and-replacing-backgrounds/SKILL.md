@@ -1,10 +1,41 @@
 ---
 name: removing-and-replacing-backgrounds
-description: Remove a video's or photo's background into a reusable alpha "cutout" asset (subject isolated, background transparent), then compose it over any new background or transplant it into another video — local free MatAnyone matting for video, paid fal fallback (bria video / birefnet photos). Triggers — "remove the background", "put her on a beach", "green screen this", "cut out the product", "transparent background", "place him in the other video".
+description: Remove a video's or photo's background into a reusable alpha "cutout" asset (subject isolated, background transparent), then compose it over any new background or transplant it into another video — local free MatAnyone matting for video, with a paid provider fallback for hard video subjects and for photos. Triggers — "remove the background", "put her on a beach", "green screen this", "cut out the product", "transparent background", "place him in the other video".
 when_to_use: When the user wants a subject separated from its background — background replacement, transparent/green-screen output, object transplant between videos, or a photo cutout. Single source of truth for the cutout workflow; composition reuses the normal scene/overlay tools.
 ---
 
 # Removing & Replacing Backgrounds
+
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
+This gate applies only when you must generate a new background; background removal itself is `libi.remove_background`, local and free, and needs no provider.
 
 The capability is a composable **cutout asset** — one tool produces an
 alpha-matted file; everything after that (replacement, transplant, export) is
@@ -16,15 +47,15 @@ libi's EXISTING compositing. Never write custom compositing code for this.
 > `mcpId: "libi-tracking"`, then — after disclosing ~10–20 min / ~2 GB on the
 > user's machine and getting approval — `libi.install_tracking_engine`, then
 > `libi.verify_install` until `ok:true`, then retry) — or offer the paid
-> fal path if the user prefers not to wait.
+> provider path if the user prefers not to wait.
 
 ## Route the request (decide FIRST)
 
 | Source | Subject | Route |
 |---|---|---|
 | Video | Person (or another YOLOE class) | **Local, free** — `libi.remove_background` (default) |
-| Video | Arbitrary object the local seed can't find, local result verified bad, or the user's machine is too slow | **fal, paid** — `bria/video/background-removal/v3` (disclose cost, get approval) |
-| Photo | Anything | **fal, paid** — `fal-ai/birefnet` (local photo matting is not available in v1) |
+| Video | Arbitrary object the local seed can't find, local result verified bad, or the user's machine is too slow | **Paid provider** (disclose cost, get approval) — endpoint in `references/providers/<id>.md` |
+| Photo | Anything | **Paid provider** (local photo matting is not available in v1) — endpoint in `references/providers/<id>.md` |
 
 The local engine is the hero: free, offline, temporally stable (MatAnyone
 consistent-memory propagation seeded from a real first-frame subject mask).
@@ -56,7 +87,7 @@ minutes on weak hardware. Tell the user before starting.
    A failure whose message starts with `no_seed_instance:` means the seed
    step found no subject at the range start — pass a `subject.box` from
    `libi.ground_target`, start `range` where the subject is clearly visible,
-   or offer the paid fal path.
+   or offer the paid provider path.
 3. **VERIFY PIXELS (mandatory — counts are not evidence).**
    `libi.generate_thumbnails({ fileId: cutoutFileId })` and LOOK at the
    frames. For alpha-bearing files the tool decodes alpha-preserving and
@@ -72,7 +103,7 @@ minutes on weak hardware. Tell the user before starting.
      subject chunks missing (magenta holes), or a frame that is entirely
      magenta (matte dropped the subject) / entirely scene (matte covered the
      full frame). Re-seed with a different `ground_target` box and
-     `forceNew: true`, or offer the paid fal upgrade with its price.
+     `forceNew: true`, or offer the paid provider upgrade with its price.
    - NO MAGENTA IN ANY FRAME — the file carries no alpha at all. Do NOT
      re-run the matte blindly: confirm you thumbnailed the CUTOUT
      (`…-cutout.webm`), not the source clip.
@@ -108,48 +139,38 @@ minutes on weak hardware. Tell the user before starting.
    (mode `append`) noting source fileId, engine (local matanyone / fal
    endpoint), subject seed, and range.
 
-## Paid fal path (video fallback + all photos)
+## Paid provider path (video fallback + all photos)
 
-Agent-driven through the fal-ai MCP — `libi.remove_background` never spends
-money (engine `"fal"` only returns these instructions).
+Agent-driven through your own provider MCP — `libi.remove_background` never spends money
+(engine `"fal"` only returns these instructions). Your provider's endpoints, their required
+params and the endpoints NOT to use are in `references/providers/<id>.md` — read it before
+you call anything; two plausible-looking background-removal endpoints on fal are traps.
 
-> **Paid is NOT strictly better — do not upsell it reflexively.** Measured on
-> real footage (bake-off, 2026-07-19, local MatAnyone vs Bria V-RMBG 3.0 vs
-> veed on the same clip):
-> - **Local resolves FINER HAIR** — individual curls and wisps, where V-RMBG
->   3.0 merges them into a more solid mass. Local also costs nothing.
-> - **V-RMBG 3.0 is STRUCTURALLY sturdier** — it kept a gesturing hand whole
->   where the local matte fragmented it. Being temporally aware rather than
->   frame-by-frame, it is also the better answer for flicker.
+> **Paid is NOT strictly better — do not upsell it reflexively.** Measured on real footage
+> (bake-off, 2026-07-19, local MatAnyone vs Bria V-RMBG 3.0 vs veed on the same clip):
+> - **Local resolves FINER HAIR** — individual curls and wisps, where V-RMBG 3.0 merges
+>   them into a more solid mass. Local also costs nothing.
+> - **V-RMBG 3.0 is STRUCTURALLY sturdier** — it kept a gesturing hand whole where the
+>   local matte fragmented it. Being temporally aware rather than frame-by-frame, it is
+>   also the better answer for flicker.
 >
-> So: local stays the default. Reach for the paid path when the local result
-> is verifiably broken (missing limbs, fragmentation, flicker), when the
-> subject is one the local seed can't find, or when the user's hardware makes
-> local matting impractically slow — not merely to sound premium.
+> So: local stays the default. Reach for the paid path when the local result is verifiably
+> broken (missing limbs, fragmentation, flicker), when the subject is one the local seed
+> can't find, or when the user's hardware makes local matting impractically slow — not
+> merely to sound premium.
 
-1. **Disclose + approve.** Get the price via fal `get_pricing` for the
-   endpoint and state it plainly; proceed only on explicit user approval.
-2. **Upload.** `libi.upload_file_to_fal({ fileId })` → a fal-hosted URL. Never
-   handle FAL_KEY or upload bytes yourself (see `ai-asset-generation` for the
-   full fal mechanics — queue tools, polling, downloads).
-3. **Run.** Video: `bria/video/background-removal/v3` (Bria V-RMBG 3.0) with
-   `{ video_url, background_color: "Transparent", output_container_and_codec: "webm_vp9" }`.
-   **Pass those two explicitly** — `background_color` defaults to `Black`, so
-   omitting it returns a black-matted video with NO alpha, and only the
-   webm/mkv VP9 outputs can carry alpha at all (any mp4/h264 variant silently
-   drops it).
-   Photo: `fal-ai/birefnet` with `{ image_url }` (transparent PNG out).
-
-   Do NOT use `bria/video/background-removal` (the v1 id): it is a real
-   endpoint but its worker crashes server-side on the transparent path
-   (status reports COMPLETED, result fetch 500s) and it is priced ~33x above
-   v3. Do not use `veed/video-background-removal` either — measured softer on
-   both hair and subject edges at ~5x v3's price.
-4. **Import.** `libi.import_remote_files` the transparent result into the
-   piece; verify pixels exactly like local step 3 (a video import gets the
-   same magenta-composited thumbnails; a photo cutout is a transparent PNG —
-   view it directly, `generate_thumbnails` is video-only); add the lineage
-   note.
+1. **Disclose + approve.** Get the price from your provider's pricing tool and state it
+   plainly; proceed only on explicit user approval.
+2. **Upload.** Put the source on the provider's CDN with the provider's own upload tool —
+   `references/providers/<id>.md` names it under this skill. Never handle a provider key or upload bytes yourself (see `ai-asset-generation` for the
+   full generation mechanics — queue tools, polling, downloads).
+3. **Run.** The endpoint and its exact params are in `references/providers/<id>.md`. The
+   params are not optional detail: on fal, omitting `background_color` returns a
+   black-matted video with no alpha at all.
+4. **Import.** `libi.import_remote_files` the transparent result into the piece; verify
+   pixels exactly like local step 3 (a video import gets the same magenta-composited
+   thumbnails; a photo cutout is a transparent PNG — view it directly,
+   `generate_thumbnails` is video-only); add the lineage note.
 5. **Compose** — same as local step 4.
 
 ## Honesty rules
@@ -158,4 +179,4 @@ money (engine `"fal"` only returns these instructions).
   overlay is NOT background removal).
 - A failed/ugly matte is reported, not hidden — offer the re-seed or the paid
   upgrade and let the user choose.
-- Do not silently spend — every fal call is disclosed and approved first.
+- Do not silently spend — every paid provider call is disclosed and approved first.

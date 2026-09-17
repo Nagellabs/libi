@@ -117,6 +117,107 @@ it("PUT rejects malformed JSON", async () => {
 });
 
 /**
+ * The Agents tab's setup wizard records two things about itself: when an agent
+ * was first picked (and which agent is being set up), and when the wizard first
+ * reached its end. Neither recorded is a first onboarding — the wizard alone.
+ */
+function put(body: unknown) {
+  return import("@/app/api/onboarding/state/route").then(({ PUT }) =>
+    PUT(new Request("http://x", { method: "PUT", body: JSON.stringify(body) })),
+  );
+}
+async function state() {
+  const { GET } = await import("@/app/api/onboarding/state/route");
+  return (await GET()).json();
+}
+
+it("GET reports a first onboarding by default: no agent chosen, the wizard not finished", async () => {
+  expect(await state()).toMatchObject({
+    wizardAgentChosenAt: null,
+    wizardAgent: null,
+    wizardFinishedAt: null,
+    wizardFinished: false,
+  });
+});
+
+it("PUT wizardAgentChosen keeps the first pick's time and follows the latest pick", async () => {
+  expect((await put({ wizardAgentChosen: "claude-code" })).status).toBe(200);
+  const first = await state();
+  expect(first.wizardAgent).toBe("claude-code");
+  expect(typeof first.wizardAgentChosenAt).toBe("string");
+  expect(first.wizardFinished).toBe(false);
+
+  expect((await put({ wizardAgentChosen: "codex" })).status).toBe(200);
+  const second = await state();
+  expect(second.wizardAgent).toBe("codex");
+  expect(second.wizardAgentChosenAt).toBe(first.wizardAgentChosenAt);
+});
+
+it("PUT wizardFinished keeps the first time the wizard reached its end, and a pick after it changes nothing", async () => {
+  await put({ wizardAgentChosen: "codex" });
+  expect((await put({ wizardFinished: true })).status).toBe(200);
+  const finished = await state();
+  expect(finished.wizardFinished).toBe(true);
+  expect(typeof finished.wizardFinishedAt).toBe("string");
+
+  expect((await put({ wizardFinished: true })).status).toBe(200);
+  expect((await put({ wizardAgentChosen: "claude-code" })).status).toBe(200);
+  const after = await state();
+  expect(after.wizardFinishedAt).toBe(finished.wizardFinishedAt);
+  expect(after.wizardAgent).toBe("codex");
+  expect(after.wizardAgentChosenAt).toBe(finished.wizardAgentChosenAt);
+});
+
+it("PUT rejects an agent id that isn't a setup agent, and writes nothing else from that body", async () => {
+  const { updateSettings } = await import("@/lib/db/settings");
+  updateSettings({ onboardingDemoOfferedAt: new Date() });
+  for (const wizardAgentChosen of ["wizard", "terminal", "", 42, null]) {
+    expect((await put({ wizardAgentChosen })).status).toBe(400);
+  }
+  expect((await put({ dismissDemoOffer: true, wizardAgentChosen: "gemini" })).status).toBe(400);
+  const json = await state();
+  expect(json.wizardAgent).toBeNull();
+  expect(json.wizardAgentChosenAt).toBeNull();
+  expect(json.demoOffered).toBe(true);
+});
+
+it("PUT rejects wizardFinished that isn't true, and a body that isn't an object", async () => {
+  for (const wizardFinished of [false, "yes", 1, null]) {
+    expect((await put({ wizardFinished })).status).toBe(400);
+  }
+  expect((await put(["wizardFinished"])).status).toBe(400);
+  expect((await put(null)).status).toBe(400);
+  expect((await state()).wizardFinishedAt).toBeNull();
+});
+
+it("an install whose agent connected before the wizard recorded anything counts as finished, and stays so after a pick", async () => {
+  const { updateSettings } = await import("@/lib/db/settings");
+  updateSettings({ agentEverConnected: true });
+  expect((await state()).wizardFinished).toBe(true);
+  await put({ wizardAgentChosen: "codex" });
+  const json = await state();
+  expect(json.wizardFinished).toBe(true);
+  expect(json.wizardAgentChosenAt).toBeNull();
+});
+
+it("PUT answers with the onboarding state as it now stands, in the shape GET reports", async () => {
+  const res = await put({ wizardAgentChosen: "codex" });
+  expect(res.status).toBe(200);
+  const answer = await res.json();
+  expect(answer).toEqual(await state());
+  expect(answer).toMatchObject({ needsPersona: true, wizardAgent: "codex", wizardFinished: false });
+  expect(typeof answer.wizardAgentChosenAt).toBe("string");
+});
+
+it("an agent connecting after the pick does not finish a first onboarding", async () => {
+  const { updateSettings } = await import("@/lib/db/settings");
+  await put({ wizardAgentChosen: "claude-code" });
+  // session-manager's markAgentConnected fires as soon as the download lets a standby session start.
+  updateSettings({ agentEverConnected: true });
+  expect((await state()).wizardFinished).toBe(false);
+});
+
+/**
  * Task 12 pin: the persona write must not depend on analytics. `updateSettings`
  * runs first and `trackServerEvent` fires after — as a synchronous, un-awaited,
  * cannot-throw enqueue (lib/analytics/server.ts). These two tests fail loudly

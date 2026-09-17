@@ -9,7 +9,7 @@ export default defineConfig({
     // Globally isolate LIBI_HOME for the whole run so tests can't write to
     // the user's real `~/.libi/`. invalidateMcpConfig/prepareAgentDir
     // resolve the agent dir from LIBI_HOME, so isolating the home is
-    // sufficient. LIBI_CONNECT_AGENT_DIR is never set globally.
+    // sufficient — no separate workspace-dir env var exists.
     globalSetup: ["./__tests__/setup/isolate-libi-home.ts"],
     coverage: {
       provider: "v8",

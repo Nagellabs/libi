@@ -13,6 +13,12 @@ vi.mock("@/hooks/terminal/use-terminal-file-drop", () => ({
 let lastOptions: unknown;
 let mockIsUploading = false;
 
+// The "New terminal" gate reads agent status and routes to setup; this file is
+// about drops.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("@/lib/queries/agent-status", () => ({
+  useAllAgentStatus: () => ({ data: undefined }),
+}));
 vi.mock("@/lib/queries/terminals", () => ({
   useTerminalSessions: () => ({ data: sessions, isLoading: false, isFetching: false }),
   useCreateTerminal: () => ({ mutateAsync: vi.fn(), isPending: false }),

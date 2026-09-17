@@ -77,7 +77,7 @@ export const matteGenRunner: JobRunner<MatteGenParams, MatteGenResult> = {
     if (!file) throw new Error(`file not found: ${ctx.params.fileId}`);
     if (file.type !== "video") {
       throw new Error(
-        `file is not a video: ${file.id} (photos go through the fal birefnet path)`,
+        `file is not a video: ${file.id} (photos go through the paid provider path — see the removing-and-replacing-backgrounds skill)`,
       );
     }
 

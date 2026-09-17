@@ -6,7 +6,7 @@ import {
   extractResultPreview,
   formatSubagentResult,
 } from "@/lib/agents/format-tool-name";
-import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
+import { makeMcpToolId, fromAnyToolName } from "@/lib/agents/mcp-tool-id";
 
 describe("formatToolId", () => {
   it("formats libi tools by stripping prefix + title-casing", () => {
@@ -28,21 +28,33 @@ describe("formatToolId", () => {
   });
 
   it("formats non-libi tools as <serverLabel> <Action>", () => {
+    // The user's own provider MCPs (libi bundles none): mixed-case names keep
+    // their casing, all-lowercase names get a capital.
     expect(formatToolId(makeMcpToolId("ElevenLabs", "speech_to_text")))
       .toBe("ElevenLabs Speech to text");
     expect(formatToolId(makeMcpToolId("YouTube_Downloader", "ytdlp_download_audio")))
       .toBe("YouTube Downloader Ytdlp download audio");
     expect(formatToolId(makeMcpToolId("fal-ai", "generate_image")))
-      .toBe("fal-ai Generate image");
+      .toBe("Fal-ai Generate image");
   });
 
   it("uses the bundled display name for canonical bundled ids", () => {
     // fromAnyToolName canonicalizes bundled servers to their bundled id —
     // the label must come from the def's display name, not the raw id.
-    expect(formatToolId(makeMcpToolId("youtube-downloader", "ytdlp_search_videos")))
-      .toBe("YouTube Downloader Ytdlp search videos");
-    expect(formatToolId(makeMcpToolId("elevenlabs", "text_to_speech")))
-      .toBe("ElevenLabs Text to speech");
+    expect(formatToolId(makeMcpToolId("whisper", "whisper_transcribe")))
+      .toBe("Whisper (local STT) Whisper transcribe");
+    expect(formatToolId(makeMcpToolId("local-tts", "tts_list_voices")))
+      .toBe("Local TTS (Kokoro) Tts list voices");
+  });
+
+  // The in-app ACP entry is `libi-app` (IN_APP_MCP_NAME); fromAnyToolName
+  // aliases that wire segment to the `libi` server id, so the chat label
+  // must be byte-identical to the one a `libi connect` session produces.
+  it("labels the in-app libi-app wire name exactly like the libi one", () => {
+    const inApp = formatToolId(fromAnyToolName("mcp__libi-app__libi_list_pieces")!);
+    const connect = formatToolId(fromAnyToolName("mcp__libi__libi_list_pieces")!);
+    expect(inApp).toBe("Libi List pieces");
+    expect(inApp).toBe(connect);
   });
 
   it("prettifies unknown (user-installed) server ids generically", () => {

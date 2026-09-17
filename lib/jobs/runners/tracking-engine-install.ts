@@ -23,11 +23,13 @@ const BYTES_PER_MB = 1_000_000;
  *  lands larger never renders "104%". */
 const ESTIMATED_TOTAL_BYTES = 2_000_000_000;
 
-/** These two strings come verbatim from `mcp/registry/bundled.ts`: the
- *  `libi-tracking` server's single dependency, `binary: "tracking-pyenv"`
- *  with `customInstallerId: "tracking-pyenv"`. */
+/** These strings come verbatim from `mcp/registry/bundled.ts`: the
+ *  `libi-tracking` def's engine dependency, `binary: "tracking-pyenv"` with
+ *  `customInstallerId: "tracking-pyenv"`, and the `uv` standard dep it runs
+ *  through. */
 const TRACKING_MCP_ID = "libi-tracking";
 const TRACKING_DEP_BINARY = "tracking-pyenv";
+const UV_DEP_BINARY = "uv";
 
 // NO params on purpose: there is exactly one tracking engine to install, so
 // one empty object means one paramsHash — every concurrent "install it"
@@ -88,6 +90,27 @@ export const trackingEngineInstallRunner: JobRunner<
       Math.floor(ESTIMATED_TOTAL_BYTES / BYTES_PER_MB),
     );
     ctx.reportProgress(0, totalMb, "MB");
+    const dm = new DependencyManager();
+    // uv FIRST. The tracking-pyenv installer runs `uv sync --locked` through
+    // `uvPath()` (lib/tracking/engine-deps.ts), which falls back to a bare
+    // "uv" when <LIBI_HOME>/bin/uv is absent — ENOENT on a fresh machine
+    // without a system uv. `ensureMcp` installs a def's standard deps before
+    // its custom installers, but this runner calls `retryDep` on the pyenv
+    // dep directly and so bypasses that loop; it has to make the same
+    // guarantee itself. `ensureDep`, not `retryDep`: a no-op once uv is in
+    // bin/ with a matching token, so a retry of the engine install never
+    // re-downloads 52 MB of uv. uv lands in bin/, outside the watched
+    // directories, so this step shows as 0 MB of engine progress.
+    try {
+      await dm.ensureDep(TRACKING_MCP_ID, UV_DEP_BINARY);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Installing uv (the tracking engine's \`uv sync\` needs it, and it ` +
+          `is no longer installed at boot) failed: ${msg}`,
+        { cause: err },
+      );
+    }
     const progress = trackDirectoryBytes({
       dir: [trackingVenvDir(), trackingModelsDir()],
       totalBytes: ESTIMATED_TOTAL_BYTES,
@@ -105,10 +128,7 @@ export const trackingEngineInstallRunner: JobRunner<
       // failed) the Settings UI polls, so the agent path and the human
       // Settings path stay one and the same install, observable in both
       // places.
-      await new DependencyManager().retryDep(
-        TRACKING_MCP_ID,
-        TRACKING_DEP_BINARY,
-      );
+      await dm.retryDep(TRACKING_MCP_ID, TRACKING_DEP_BINARY);
     } finally {
       progress.stop();
     }

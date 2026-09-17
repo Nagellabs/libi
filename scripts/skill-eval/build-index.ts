@@ -15,13 +15,34 @@ function walk(dir: string): string[] {
   return out;
 }
 
+/**
+ * The `invariants` column counts a scenario's hard-invariant needles, and reads `NONE` at
+ * zero. It exists because half the suite has none: such a scenario passes on
+ * `every([]) === true`, so its green says only "the run completed" — and until the count
+ * was visible somewhere, nothing in the index or the summary distinguished it from a
+ * scenario with real teeth. Reading down this column is how you tell what the suite can
+ * actually prove.
+ */
+function invariantsCell(s: ParsedScenario): string {
+  return s.assertions.length === 0 ? "**NONE**" : String(s.assertions.length);
+}
+
 export function renderIndexTable(scenarios: ParsedScenario[]): string {
   const rows = [...scenarios].sort((a, b) => a.id.localeCompare(b.id));
-  const header = "| id | title | skills | mcps | covers | path |\n|---|---|---|---|---|---|";
+  const header =
+    "| id | title | skills | mcps | invariants | covers | path |\n|---|---|---|---|---|---|---|";
   const body = rows.map((s) =>
-    `| ${s.id} | ${s.title} | ${s.skills.join(", ")} | ${s.mcps.join(", ")} | ${s.covers.join(", ")} | ${s.sourcePath} |`,
+    `| ${s.id} | ${s.title} | ${s.skills.join(", ")} | ${s.mcps.join(", ")} | ${invariantsCell(s)} | ${s.covers.join(", ")} | ${s.sourcePath} |`,
   );
-  return [header, ...body].join("\n");
+  const none = rows.filter((s) => s.assertions.length === 0).length;
+  return [
+    header,
+    ...body,
+    "",
+    `**${none} of ${rows.length} scenarios declare no hard invariants.** Those run and are ` +
+      "reported as `NO-ASSERTIONS`, never `HARD-PASS`: they prove the flow completed, and " +
+      "nothing about what the agent did. Judge them from `transcript.md`.",
+  ].join("\n");
 }
 
 export function buildIndex(repoRoot = process.cwd()): void {

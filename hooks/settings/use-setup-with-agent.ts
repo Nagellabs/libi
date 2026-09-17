@@ -56,7 +56,7 @@ export function useSetupWithAgent(): UseSetupWithAgentResult {
       // 3. Switch the editor to the newly created session and navigate
       //    there so the user can watch progress + respond to approvals.
       //    setActiveSessionId is harmless if we're already on /editor;
-      //    router.push triggers the page change when on /mcps-skills.
+      //    router.push triggers the page change when on /agents.
       sessionList.setActiveSessionId(sessionId);
       router.push("/editor");
 

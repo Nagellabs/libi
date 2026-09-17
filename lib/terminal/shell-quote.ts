@@ -15,7 +15,7 @@ export type ShellFlavor = "posix" | "powershell";
  * There is no `powershell` entry: PowerShell always quotes (see
  * `quoteForShell` below), so it has no "safe to leave bare" set to define.
  * There used to be one — a `[A-Za-z0-9_@%+=:,./\\-]` character class mirroring
- * the POSIX set plus backslash — until `lib/agents/terminal-remedy.ts`'s own
+ * the POSIX set plus backslash — until the old sign-in remedy module's own
  * "does this path look tame?" test proved that any such heuristic is a trap:
  * that file's OWN private safe set, historically `[A-Za-z0-9._\-/\\:]` — no
  * `@` — let a plain `C:\…\claude.cmd` through as tame while rejecting
@@ -42,6 +42,16 @@ export type ShellFlavor = "posix" | "powershell";
 const SAFE_POSIX = /^[A-Za-z0-9_@+:,./-][A-Za-z0-9_@%+=:,./-]*$/;
 
 /**
+ * Every character PowerShell's tokenizer treats as a single quote: the ASCII
+ * `'` AND the typographic U+2018, U+2019, U+201A and U+201B. Any of them ends a
+ * single-quoted string, so doubling only `'` lets a name like
+ * `x’; Write-Output PWNED; ’` run code and breaks a path such as
+ * `C:\Users\O’Neil\…`. Doubling any of them yields that same character.
+ * POSIX shells only know the ASCII quote.
+ */
+const POWERSHELL_SINGLE_QUOTES = /['\u2018\u2019\u201A\u201B]/g;
+
+/**
  * One path, ready to paste. POSIX: bare when it is in the safe set, otherwise
  * single-quoted. PowerShell: always single-quoted — see the `SAFE_POSIX`
  * comment for why no character class is trusted there.
@@ -50,7 +60,7 @@ export function quoteForShell(path: string, flavor: ShellFlavor): string {
   if (flavor === "posix" && SAFE_POSIX.test(path)) return path;
   const escaped =
     flavor === "powershell"
-      ? path.replaceAll("'", "''")
+      ? path.replace(POWERSHELL_SINGLE_QUOTES, (quote) => quote + quote)
       : path.replaceAll("'", "'\\''");
   return `'${escaped}'`;
 }

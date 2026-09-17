@@ -1,14 +1,9 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import {
   launchCommandForPreset,
   launchLineForPreset,
 } from "@/lib/terminal/launch-command";
-
-vi.mock("@/lib/terminal/user-cli", () => ({
-  resolveUserCli: vi.fn(),
-}));
-import { resolveUserCli } from "@/lib/terminal/user-cli";
-const mockResolve = vi.mocked(resolveUserCli);
+import { TERMINAL_CLI_PRESETS } from "@/lib/terminal/presets";
 
 describe("launchCommandForPreset", () => {
   it("returns the bare 'claude' command for claude-code", () => {
@@ -33,55 +28,34 @@ describe("launchCommandForPreset", () => {
 });
 
 /**
- * `DEFAULT_TERMINAL_CLI_ID` is `claude-code`, so a user who has never installed
- * it had their FIRST terminal greet them with `claude: command not found` and
- * no hint of what to do — found on a fresh Linux box, 2026-08-16 (F4).
+ * The preset types its CLI's bare name and never probes the machine: whether
+ * the agent is set up is decided on the Agents page, and the "Launch CLI"
+ * dropdown disables a preset whose agent is not ready.
  */
 describe("launchLineForPreset", () => {
-  afterEach(() => {
-    mockResolve.mockReset();
+  it("types the bare command for claude-code", () => {
+    expect(launchLineForPreset("claude-code")).toEqual({ text: "claude", kind: "command" });
   });
 
-  it("types the command when the user actually has the CLI", () => {
-    mockResolve.mockReturnValue("/usr/local/bin/claude");
-    expect(launchLineForPreset("claude-code")).toEqual({
-      text: "claude",
-      kind: "command",
-    });
+  it("types the bare command for codex", () => {
+    expect(launchLineForPreset("codex")).toEqual({ text: "codex", kind: "command" });
   });
 
-  it("types a shell COMMENT with the install hint when the CLI is missing", () => {
-    mockResolve.mockReturnValue(null);
-    const line = launchLineForPreset("claude-code");
-    expect(line?.kind).toBe("install-hint");
-    // Must be inert in bash, zsh AND powershell — the line is written to the
-    // shell's STDIN, so anything not commented out would execute.
-    expect(line?.text.startsWith("# ")).toBe(true);
-    expect(line?.text).toContain("npm i -g @anthropic-ai/claude-code");
-    expect(line?.text).toContain("Claude Code");
-  });
-
-  it("never emits a bare command as an install hint", () => {
-    mockResolve.mockReturnValue(null);
-    for (const id of ["claude-code", "codex"]) {
-      const line = launchLineForPreset(id);
-      expect(line?.kind).toBe("install-hint");
-      expect(line?.text.startsWith("#")).toBe(true);
-    }
-  });
-
-  it("does not probe at all for the plain shell preset", () => {
+  it("types nothing for the plain shell preset", () => {
     expect(launchLineForPreset("shell")).toBeNull();
-    expect(mockResolve).not.toHaveBeenCalled();
   });
 
-  it("returns null for an unknown preset without probing", () => {
+  it("types nothing for an unknown preset", () => {
     expect(launchLineForPreset("nope")).toBeNull();
-    expect(mockResolve).not.toHaveBeenCalled();
   });
 
-  it("uses the codex preset's own hint, not Claude's", () => {
-    mockResolve.mockReturnValue(null);
-    expect(launchLineForPreset("codex")?.text).toContain("npm i -g @openai/codex");
+  it("never types a shell comment or an install instruction", () => {
+    for (const preset of TERMINAL_CLI_PRESETS) {
+      const line = launchLineForPreset(preset.id);
+      if (!line) continue;
+      expect(line.kind, preset.id).toBe("command");
+      expect(line.text.startsWith("#"), preset.id).toBe(false);
+      expect(line.text, preset.id).not.toMatch(/npm|install/i);
+    }
   });
 });

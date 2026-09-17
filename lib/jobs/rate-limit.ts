@@ -24,9 +24,9 @@ import { getRunner } from "@/lib/jobs/runners/registry";
  *  Truth is sourced structurally from the runner's `paid: true` flag (see
  *  `JobRunner` in `lib/jobs/types.ts`), NOT a hand-maintained list — so a new
  *  paid runner cannot silently bypass this billing limiter by being forgotten
- *  in a literal. Today that flag is set on `tracking_provider` (fal.ai SAM2)
- *  and `extra_analysis_model` (fal.ai video-understanding); every other kind
- *  is local compute and returns false.
+ *  in a literal. No built-in runner carries the flag today (the last one, the
+ *  fal.ai SAM2 `tracking_provider`, was removed with libi's provider keys);
+ *  every built-in kind is local compute and returns false.
  *
  *  The registry lookup is valid here because this runs in the Next.js process
  *  (`POST /api/jobs`), where `registerBuiltinRunners()` has populated the

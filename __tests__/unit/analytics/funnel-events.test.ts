@@ -3,7 +3,7 @@
  *
  * Most of the twelve funnel steps are covered by other suites already
  * (first_launch, persona_selected, agent_connected, onboarding_piece_built —
- * all pre-existing). This file is the contract for the eight NEW ones:
+ * all pre-existing). This file is the contract for the rest:
  *   - every name is on the allow-list (routes reject anything that isn't)
  *   - `reason` is mapped through a bounded classifier that can never leak a
  *     filesystem path (the installer's raw error text routinely has one)
@@ -36,12 +36,8 @@ describe("funnel events — allow-list", () => {
   it("adds every funnel event to the allow-list", () => {
     for (const n of [
       "persona_prompt_shown",
-      "agent_connect_shown",
-      "agent_setup_started",
-      "agent_setup_command_copied",
       "agent_install_completed",
       "agent_install_failed",
-      "agent_sign_in_opened",
       "first_message_sent",
     ]) {
       expect(isEventName(n)).toBe(true);
@@ -66,7 +62,7 @@ describe("installFailureReason — bounded, never a path", () => {
     }
   });
 
-  it("recognizes cancellation, timeout, drift, and the native-binary trap — the real strings the installer produces", () => {
+  it("recognizes cancellation, timeout, drift, and the missing-engine trap — the real strings the installer produces", () => {
     // Exact string the runner throws on ctx.shouldCancel().
     expect(installFailureReason("cancelled")).toBe("cancelled");
     // lib/install/npm-root.ts's own timeout wording.
@@ -75,9 +71,9 @@ describe("installFailureReason — bounded, never a path", () => {
         "Command failed: node npm.js install --no-save — timed out after 1800000ms",
       ),
     ).toBe("timeout");
-    // claudeNativeBinaryMissingError()'s real message embeds an absolute
-    // path (`${root}`) — the classifier must still land on the bounded
-    // verdict, discarding the path entirely.
+    // An older installer's missing-engine message embeds an absolute path —
+    // the classifier must still land on the bounded verdict, discarding the
+    // path entirely.
     expect(
       installFailureReason(
         "the Claude native binary for darwin-arm64 is missing from /Users/x/.libi/agents " +

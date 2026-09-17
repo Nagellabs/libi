@@ -8,10 +8,9 @@ import {
   addSkill,
   removeSkill,
   setSkillEnabled,
-  listMcpServersTool,
 } from "@/mcp/tools/skill-tools";
 import { getDb } from "@/lib/db/client";
-import { skills, mcpServers } from "@/lib/db/schema";
+import { skills } from "@/lib/db/schema";
 
 const VALID_BODY = `---\nname: my-skill\ndescription: Mine\n---\nBody.\n`;
 
@@ -104,31 +103,4 @@ describe("skill tools", () => {
     expect(res.error).toMatch(/bundled/i);
   });
 
-  it("list_mcp_servers returns enabled servers without secrets", async () => {
-    getDb()
-      .insert(mcpServers)
-      .values({
-        id: "test-mcp",
-        name: "test-mcp",
-        description: "test",
-        type: "stdio",
-        command: "echo",
-        args: "[]",
-        envVars: JSON.stringify({ SECRET: "hush" }),
-        bundled: false,
-        enabled: true,
-        installStatus: "installed",
-        dependencyStatus: "[]",
-      })
-      .run();
-    const res = await listMcpServersTool({} as never, {});
-    const data = JSON.parse((res.content[0] as { text: string }).text);
-    const found = data.servers.find(
-      (s: { id: string }) => s.id === "test-mcp",
-    );
-    expect(found).toBeDefined();
-    // Verify no secrets leak through
-    expect(JSON.stringify(data)).not.toContain("hush");
-    expect(JSON.stringify(data)).not.toContain("SECRET");
-  });
 });

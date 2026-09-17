@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { CLAUDE_ADAPTER_PACKAGE } from "@/lib/agents/runtime-packages";
+import {
+  CLAUDE_ADAPTER_PACKAGE,
+  CODEX_ADAPTER_PACKAGE,
+  RUNTIME_AGENT_PACKAGES,
+  runtimeAgentPackage,
+} from "@/lib/agents/runtime-packages";
 
 /** Repo root — three levels up from __tests__/unit/agents/. */
 const REPO_ROOT = path.resolve(__dirname, "../../..");
@@ -98,5 +103,73 @@ describe("CLAUDE_ADAPTER_PACKAGE pin lockstep with package.json", () => {
       pkgJson.dependencies?.[CLAUDE_ADAPTER_PACKAGE.npmPackage],
       `${CLAUDE_ADAPTER_PACKAGE.npmPackage} must not be a regular dependency — npx libi installs dependencies, which would redistribute the proprietary @anthropic-ai/claude-agent-sdk it transitively pulls`,
     ).toBeUndefined();
+  });
+});
+
+describe("adapter pins are the versions this release ships", () => {
+  it("pins claude-agent-acp at 0.75.1", () => {
+    expect(CLAUDE_ADAPTER_PACKAGE.pinnedVersion).toBe("0.75.1");
+  });
+
+  it("declares codex-acp at 1.10.0 in package.json", () => {
+    const pkgJson = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf-8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const range =
+      pkgJson.dependencies?.["@agentclientprotocol/codex-acp"] ??
+      pkgJson.devDependencies?.["@agentclientprotocol/codex-acp"];
+    expect(range, "codex-acp must be declared somewhere in package.json").toBeDefined();
+    expect(satisfiesCaretRange(range!.startsWith("^") ? range! : `^${range!}`, "1.10.0")).toBe(true);
+  });
+});
+
+describe("CODEX_ADAPTER_PACKAGE", () => {
+  it("is in RUNTIME_AGENT_PACKAGES next to the Claude adapter", () => {
+    expect(RUNTIME_AGENT_PACKAGES.map((p) => p.npmPackage).sort()).toEqual([
+      "@agentclientprotocol/claude-agent-acp",
+      "@agentclientprotocol/codex-acp",
+    ]);
+  });
+
+  it("pins an exact x.y.z version that satisfies package.json's devDependency range", () => {
+    expect(CODEX_ADAPTER_PACKAGE.pinnedVersion).toMatch(/^\d+\.\d+\.\d+$/);
+    const pkgJson = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf-8")) as {
+      devDependencies?: Record<string, string>;
+    };
+    const range = pkgJson.devDependencies?.[CODEX_ADAPTER_PACKAGE.npmPackage];
+    expect(
+      range,
+      `${CODEX_ADAPTER_PACKAGE.npmPackage} must be a devDependency so npx libi and the packaged artifact stop carrying the 258 MB @openai/codex binary`,
+    ).toBeDefined();
+    expect(satisfiesCaretRange(range!, CODEX_ADAPTER_PACKAGE.pinnedVersion)).toBe(true);
+  });
+
+  it("is NOT a regular dependency (it is what makes the bundle 258 MB heavier)", () => {
+    const pkgJson = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf-8")) as {
+      dependencies?: Record<string, string>;
+    };
+    expect(pkgJson.dependencies?.["@agentclientprotocol/codex-acp"]).toBeUndefined();
+  });
+
+  it("maps agent ids to packages", () => {
+    expect(runtimeAgentPackage("codex")?.npmPackage).toBe("@agentclientprotocol/codex-acp");
+    expect(runtimeAgentPackage("claude-code")?.npmPackage).toBe(
+      "@agentclientprotocol/claude-agent-acp",
+    );
+    expect(runtimeAgentPackage("terminal")).toBeNull();
+  });
+});
+
+/**
+ * The progress bar's denominator used to be a side table
+ * keyed by agent id with a bare 345 MB fallback, so a third agent would have
+ * rendered Claude's bar. It is now a field on the package entry itself.
+ */
+describe("estimatedInstallBytes lives on every RuntimeAgentPackage", () => {
+  it("is a positive byte count for each registered package", () => {
+    for (const pkg of RUNTIME_AGENT_PACKAGES) {
+      expect(pkg.estimatedInstallBytes, pkg.agentId).toBeGreaterThan(0);
+    }
   });
 });

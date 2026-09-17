@@ -5,6 +5,10 @@ skills: [ugc-product-video, ai-asset-generation, ai-video-models, voiceover-prod
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
+# 900, not the 300 s default: the storyboard-spine route (schematic → spec → take →
+# select → Stage 4.5 frame validation) needs ~5-8 min even for one 12 s clip; an earlier
+# delivery run was cut at Stage 4.5 with both hard invariants already satisfied.
+timeoutSec: 900
 covers: [native-audio, seedance-2.0, no-kokoro, voiceover-ask]
 ---
 

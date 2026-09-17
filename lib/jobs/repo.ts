@@ -138,6 +138,21 @@ export async function updateProgress(id: string, p: ProgressUpdate): Promise<voi
   db.update(jobs).set(patch).where(eq(jobs.id, id)).run();
 }
 
+/**
+ * Move ONLY `lastProgressAt` — the no-progress watchdog's baseline — without
+ * touching the reported counters.
+ *
+ * Used when the watchdog is re-armed after a legitimately silent phase
+ * (`JobContext.pauseWatchdog`): the job has not progressed, so inventing a
+ * `updateProgress` tick would lie to the ETA and the chat row, but leaving the
+ * baseline at its pre-pause value would trip the watchdog on the very next
+ * poll for time the job was excused from reporting.
+ */
+export async function touchProgress(id: string): Promise<void> {
+  const db = getDb();
+  db.update(jobs).set({ lastProgressAt: new Date() }).where(eq(jobs.id, id)).run();
+}
+
 export async function updatePartialPath(id: string, path: string): Promise<void> {
   const db = getDb();
   db.update(jobs).set({ partialPath: path }).where(eq(jobs.id, id)).run();

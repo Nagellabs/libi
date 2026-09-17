@@ -1,16 +1,17 @@
 // Every bundled MCP must name a command libi can actually spawn.
 //
-// `elevenlabs` shipped with `command: "uvx"` while its own uv dependency
-// extracts only `uv` out of the archive. `uvx` lives in that same archive and
-// was never copied, so `spawn("uvx", …)` could not resolve out of
-// `~/.libi/bin` — the server could not start on macOS, Linux or Windows.
-// It went unnoticed because anyone with Homebrew's uv on PATH sees it work,
-// and it was only found when a Windows audit went looking for something else.
+// The ElevenLabs def (since deleted) once shipped with `command: "uvx"`
+// while its own uv dependency extracted only `uv` out of the archive. `uvx`
+// lives in that same archive and was never copied, so `spawn("uvx", …)` could
+// not resolve out of `~/.libi/bin` — the server could not start on macOS,
+// Linux or Windows. It went unnoticed because anyone with Homebrew's uv on
+// PATH sees it work, and it was only found when a Windows audit went looking
+// for something else.
 //
 // A def is spawnable when ONE of these is true, and this test says which:
 //
-//  * it has no command at all (HTTP servers, and the defs that stand in for
-//    libi's own server),
+//  * it has no command at all (the core row, and `noServer` extensions whose
+//    work runs inside libi's own server),
 //  * `inRepoEntry` makes `resolveBundledSpawn` build the entry point from the
 //    source tree, and the def's `command` is a documented dead fallback,
 //  * `npmPackage` + `pinnedVersion` make the resolver prefer the bin shim
@@ -28,8 +29,9 @@ describe("every bundled MCP names a spawnable command", () => {
   for (const def of BUNDLED_MCP_SERVERS) {
     it(`${def.id}: ${def.command || "(no command)"}`, () => {
       if (!def.command) {
-        // HTTP transports and libi's own servers carry no spawn command.
-        expect(def.type === "http" || def.args?.length === 0 || !def.args).toBe(true);
+        // The core row and noServer extensions carry no spawn command.
+        expect(def.core === true || def.noServer === true).toBe(true);
+        expect(def.args).toEqual([]);
         return;
       }
 
@@ -56,23 +58,4 @@ describe("every bundled MCP names a spawnable command", () => {
       ).toContain(def.command);
     });
   }
-});
-
-describe("elevenlabs specifically", () => {
-  const def = BUNDLED_MCP_SERVERS.find((d) => d.id === "elevenlabs")!;
-
-  it("runs the MCP through uv, the binary its dependency actually extracts", () => {
-    expect(def.command).toBe("uv");
-    expect(def.args).toEqual(["tool", "run", "elevenlabs-mcp"]);
-  });
-
-  // The regression in one line: `uvx` is in the uv archive, and the archive
-  // extraction below is the exhaustive list of what comes out of it.
-  it("does not reach for a second binary the uv dependency leaves behind", () => {
-    const uv = def.dependencies?.find((d) => d.binary === "uv");
-    expect(uv).toBeDefined();
-    const extracted = JSON.stringify(uv!.archive?.binaryPathInArchive ?? {});
-    expect(extracted).not.toContain("uvx");
-    expect(def.command).not.toBe("uvx");
-  });
 });

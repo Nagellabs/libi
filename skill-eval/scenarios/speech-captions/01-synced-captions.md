@@ -5,6 +5,11 @@ skills: [speech-captions, audio-analysis]
 mcps: []
 agent: claude-code
 runs: 1
+# Same route as the sibling 02 — transcribe, then build one text overlay per cue —
+# over the WHOLE clip rather than one sentence, so strictly more work. 02 was cut at the
+# 300 s default mid-flow (2026-09-10 QA); this is the caption-family tier used by
+# `captions-text/01` and `file-based-overlays/01`.
+timeoutSec: 1200
 covers: [captions, transcript, element-local-timing, readability, caption-width-fit, caption-covers-full-phrase]
 ---
 

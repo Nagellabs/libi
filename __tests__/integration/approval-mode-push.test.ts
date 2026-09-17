@@ -4,8 +4,13 @@
 // `session/set_mode` after newSession, and on user-driven mode changes
 // through `applyApprovalModeToActiveSessions`. Mapping is PER-AGENT
 // (`lib/sessions/approval-mode-map.ts#acpModeFor`):
-//   claude-code:  ask → "default",  auto / auto-with-generations → "bypassPermissions"
-//   codex:        ask → "auto",     auto / auto-with-generations → "full-access"
+//   claude-code:  ask / auto → "default",  auto-with-generations → "bypassPermissions"
+//   codex:        ask → "read-only", auto → "agent", auto-with-generations → "agent-full-access"
+// (`auto` deliberately stays in the agent's permission-routing mode — bypass
+// would skip libi's canUseTool handler and with it the extension approval gate.
+// codex `read-only` is reviewer=user with a workspace-write sandbox, so "Ask
+// each time" really asks; the extension gate itself never reaches codex — see
+// lib/sessions/approval-mode-map.ts.)
 //
 // Behaviour matrix (the post-Task-4.3 contract — the -32602 fix):
 //   - `setSessionMode` is ONLY called with a mode id the agent actually
@@ -45,6 +50,7 @@ vi.mock("@/lib/mcp-config", () => ({
 import { getApprovalMode } from "@/lib/approval/settings";
 import { serverLogger } from "@/lib/logger";
 import { SessionManager } from "@/lib/sessions/session-manager";
+import { captureStandbyFreshness } from "@/lib/sessions/standby-freshness";
 import type { SessionEntry } from "@/lib/sessions/types";
 import type { ApprovalMode } from "@/lib/approval/mode";
 import type { ClientSideConnection } from "@agentclientprotocol/sdk";
@@ -59,7 +65,11 @@ const CLAUDE_MODES = [
   { id: "acceptEdits" },
   { id: "bypassPermissions" },
 ];
-const CODEX_MODES = [{ id: "read-only" }, { id: "auto" }, { id: "full-access" }];
+const CODEX_MODES = [
+  { id: "read-only" },
+  { id: "agent" },
+  { id: "agent-full-access" },
+];
 
 function makeEntry(
   sessionId: string,
@@ -139,7 +149,7 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
   describe("per-agent mode mapping (claude-code vocabulary)", () => {
     it.each<[ApprovalMode, string]>([
       ["ask", "default"],
-      ["auto", "bypassPermissions"],
+      ["auto", "default"],
       ["auto-with-generations", "bypassPermissions"],
     ])("maps %s → %s when advertised", async (mode, expectedAcpMode) => {
       vi.mocked(getApprovalMode).mockReturnValue(mode);
@@ -156,9 +166,9 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
 
   describe("per-agent mode mapping (codex vocabulary)", () => {
     it.each<[ApprovalMode, string]>([
-      ["ask", "auto"],
-      ["auto", "full-access"],
-      ["auto-with-generations", "full-access"],
+      ["ask", "read-only"],
+      ["auto", "agent"],
+      ["auto-with-generations", "agent-full-access"],
     ])("maps %s → %s when advertised", async (mode, expectedAcpMode) => {
       vi.mocked(getApprovalMode).mockReturnValue(mode);
 
@@ -175,7 +185,7 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
   it("skips the call (logs warn) when target mode is NOT in availableModes", async () => {
     vi.mocked(getApprovalMode).mockReturnValue("auto");
 
-    // Codex only advertises read-only — full-access isn't supported.
+    // Codex only advertises read-only — agent isn't supported.
     await callPush(sm, "s1", "codex", [{ id: "read-only" }]);
 
     expect(setSessionMode).not.toHaveBeenCalled();
@@ -206,7 +216,7 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
     expect(setSessionMode).toHaveBeenCalledTimes(1);
     expect(setSessionMode).toHaveBeenCalledWith({
       sessionId: "s1",
-      modeId: "bypassPermissions",
+      modeId: "default",
     });
   });
 
@@ -226,7 +236,7 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
     expect(setSessionMode).toHaveBeenCalledTimes(1);
     expect(setSessionMode).toHaveBeenCalledWith({
       sessionId: "cached-1",
-      modeId: "bypassPermissions",
+      modeId: "default",
     });
   });
 
@@ -309,7 +319,7 @@ describe("SessionManager.applyApprovalModeToActiveSessions", () => {
     expect(setSessionMode).toHaveBeenCalledTimes(1);
     expect(setSessionMode).toHaveBeenCalledWith({
       sessionId: "c-active",
-      modeId: "bypassPermissions",
+      modeId: "default",
     });
 
     // The codex broadcast pushes codex's OWN mapped id — never claude's.
@@ -318,7 +328,7 @@ describe("SessionManager.applyApprovalModeToActiveSessions", () => {
     expect(setSessionMode).toHaveBeenCalledTimes(2);
     expect(setSessionMode).toHaveBeenLastCalledWith({
       sessionId: "x-active",
-      modeId: "full-access",
+      modeId: "agent",
     });
   });
 
@@ -374,9 +384,9 @@ describe("SessionManager.applyApprovalModeToActiveSessions", () => {
     const calls = setSessionMode.mock.calls.map((c) => c[0]);
     expect(calls).toEqual(
       expect.arrayContaining([
-        { sessionId: "a", modeId: "bypassPermissions" },
-        { sessionId: "b", modeId: "bypassPermissions" },
-        { sessionId: "c", modeId: "bypassPermissions" },
+        { sessionId: "a", modeId: "default" },
+        { sessionId: "b", modeId: "default" },
+        { sessionId: "c", modeId: "default" },
       ]),
     );
   });
@@ -436,6 +446,8 @@ describe("SessionManager — push on standby-claim and reactivation", () => {
       configOptions: [],
       availableCommands: [],
       availableModes: CLAUDE_MODES,
+      // Taken now, so nothing it reads has changed by the claim: this standby is current.
+      freshness: captureStandbyFreshness("claude-code"),
     };
 
     const sessionId = await sm.createSession();
@@ -445,7 +457,7 @@ describe("SessionManager — push on standby-claim and reactivation", () => {
     const calls = setSessionMode.mock.calls.map((c) => c[0]);
     expect(calls).toContainEqual({
       sessionId: "standby-1",
-      modeId: "bypassPermissions",
+      modeId: "default",
     });
 
     // The advertised set was carried onto the claimed entry (later broadcasts
@@ -469,7 +481,7 @@ describe("SessionManager — push on standby-claim and reactivation", () => {
     expect(loadSession).toHaveBeenCalledTimes(1);
     expect(setSessionMode).toHaveBeenCalledWith({
       sessionId: "loaded-1",
-      modeId: "bypassPermissions",
+      modeId: "default",
     });
 
     // And the entry is now active (sanity check that activation finished).

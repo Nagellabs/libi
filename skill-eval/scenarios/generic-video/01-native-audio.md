@@ -5,6 +5,8 @@ skills: [generic-video, ai-asset-generation, ai-video-models, voiceover-producti
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
+# Routed through the storyboard by default; the flow legitimately takes >300 s.
+timeoutSec: 900
 covers: [native-audio, no-kokoro, voiceover-production, generic-video]
 ---
 

@@ -11,6 +11,7 @@ import {
 import { LIBI_FILE_MIME, decodeFileDrag } from "@/lib/preview/drag-payload";
 import { seekFrameFromClick } from "@/lib/preview/timeline-seek";
 import { resolveDrop } from "@/lib/preview/timeline-drop";
+import { kindFromContentType } from "@/lib/preview/timeline-drop-target";
 import type { MediaPaint } from "@/lib/preview/timeline-media";
 import type { SelectionModifiers } from "@/lib/preview/selection-logic";
 
@@ -52,6 +53,11 @@ interface TimelineOverlayRowProps {
     file: File,
     resolved: { kind: "image" | "video"; startTime: number; z: number; group?: string },
   ) => void;
+  /** Audio dropped on this lane → a standalone audio clip, NOT an overlay.
+   *  Audio has no lane/z of its own, so only the start time crosses over; the
+   *  host owns the over-length prompt. Without this the lane had nowhere to
+   *  send audio and it was written as an image overlay on the mp3. */
+  onDropAudio?: (args: { fileId?: string; file?: File; startTime: number }) => void;
   /** Called with the target frame when a bar is clicked (no-move). */
   onSeekFrame?: (frame: number) => void;
   /** Right-click an overlay bar — opens the timeline clip menu. */
@@ -83,10 +89,6 @@ interface TimelineOverlayRowProps {
  *  DEFAULT_OVERLAY_DURATION in lib/overlays/new-overlay-defaults.ts. */
 const GHOST_BAR_SECONDS = 3;
 
-function kindFromContentType(contentType: string): "image" | "video" {
-  return contentType.startsWith("video") ? "video" : "image";
-}
-
 /** Just the lane for one overlay group. The rail (label + collapse toggle) is
  *  rendered by the parent Timeline alongside this. */
 export function TimelineOverlayRow({
@@ -108,6 +110,7 @@ export function TimelineOverlayRow({
   rowZ = 0,
   onDropCreate,
   onDropFiles,
+  onDropAudio,
   onSeekFrame,
   onOverlayContextMenu,
   labelById,
@@ -123,7 +126,7 @@ export function TimelineOverlayRow({
   const laneRef = useRef<HTMLDivElement>(null);
   const [ghostX, setGhostX] = useState<number | null>(null);
   const [ghostLaneW, setGhostLaneW] = useState(0);
-  const droppable = Boolean(onDropCreate || onDropFiles);
+  const droppable = Boolean(onDropCreate || onDropFiles || onDropAudio);
   // Ghost bar width = the default new-overlay duration mapped to this lane's px.
   const ghostBarW =
     durationSec > 0 && ghostLaneW > 0
@@ -185,7 +188,8 @@ export function TimelineOverlayRow({
       if (payload) {
         const kind = kindFromContentType(payload.contentType);
         const r = resolveDrop({ clientX: e.clientX, laneRect, durationSec, rowGroup, rowZ });
-        onDropCreate?.({ kind, fileId: payload.fileId, startTime: r.startTime, z: r.z, group: r.group });
+        if (kind === "audio") onDropAudio?.({ fileId: payload.fileId, startTime: r.startTime });
+        else if (kind) onDropCreate?.({ kind, fileId: payload.fileId, startTime: r.startTime, z: r.z, group: r.group });
       }
       e.preventDefault();
       return;
@@ -196,7 +200,8 @@ export function TimelineOverlayRow({
       const file = files[0];
       const kind = kindFromContentType(file.type);
       const r = resolveDrop({ clientX: e.clientX, laneRect, durationSec, rowGroup, rowZ });
-      onDropFiles?.(file, { kind, startTime: r.startTime, z: r.z, group: r.group });
+      if (kind === "audio") onDropAudio?.({ file, startTime: r.startTime });
+      else if (kind) onDropFiles?.(file, { kind, startTime: r.startTime, z: r.z, group: r.group });
     }
     e.preventDefault();
   };

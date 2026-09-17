@@ -4,7 +4,7 @@ import { normalizeTrack } from "@/lib/tracking/segments";
 import type { Track } from "@/lib/tracking/types";
 
 const track: Track = normalizeTrack({
-  id: "trk", fileId: "f", method: "sam2-fal", framerate: 1, durationSec: 4,
+  id: "trk", fileId: "f", method: "yoloe+botsort", framerate: 1, durationSec: 4,
   samples: [
     { t: 0, x: 0, y: 0, w: 607, h: 1079, confidence: 1, visible: true },
     { t: 1, x: 10, y: 10, w: 20, h: 20, confidence: 0.9, visible: true },

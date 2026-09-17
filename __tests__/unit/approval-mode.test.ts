@@ -1,24 +1,14 @@
 import { describe, it, expect } from "vitest";
-import {
-  shouldPromptForAcp,
-  shouldPromptForGeneration,
-  isApprovalMode,
-} from "@/lib/approval/mode";
+import { shouldPromptForAcp, isApprovalMode } from "@/lib/approval/mode";
 
 describe("approval-mode predicates", () => {
-  it("ask: prompts for both ACP and generation", () => {
+  it("ask: prompts for ACP", () => {
     expect(shouldPromptForAcp("ask")).toBe(true);
-    expect(shouldPromptForGeneration("ask")).toBe(true);
   });
 
-  it("auto: skips ACP, prompts for generation", () => {
+  it("auto and auto-with-generations: skip ACP prompts", () => {
     expect(shouldPromptForAcp("auto")).toBe(false);
-    expect(shouldPromptForGeneration("auto")).toBe(true);
-  });
-
-  it("auto-with-generations: skips both", () => {
     expect(shouldPromptForAcp("auto-with-generations")).toBe(false);
-    expect(shouldPromptForGeneration("auto-with-generations")).toBe(false);
   });
 
   it("isApprovalMode validates mode strings", () => {

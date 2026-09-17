@@ -18,8 +18,8 @@ plan's own steps — shell commands, or a dedicated install tool like
    "tier-2"` and `installPlanPath: "mcp/bundled-mcps/plans/<id>.md"`.
 3. **Tell the agent when to use it.** Add a one-line trigger to
    `mcp/instructions.ts` ("If the user asks to X, the bundled MCP `<id>`
-   handles it"). The agent will check `libi.list_bundled_mcps`, see it
-   isn't installed, and install on demand.
+   handles it"). The agent will see on Agents → Libi MCP
+   that it isn't installed, and install on demand.
 
 That's it. No install code lives in this directory — the agent owns the
 install loop. Your job is to author clear instructions for the agent. When

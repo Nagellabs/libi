@@ -8,12 +8,6 @@ interface EditorLayoutProps {
   chatPanel: ReactNode;
   editorPanel: ReactNode;
   resourcesPanel: ReactNode;
-  /** When set, replaces the editor+resources area with this node (a "takeover" panel). */
-  rightTakeover?: ReactNode;
-  /** When true (with rightTakeover set), the takeover fills the ENTIRE area and the
-   *  chat panel is hidden — used by first-run onboarding so only the connect screen
-   *  shows. When false, the takeover sits beside the chat (e.g. inline API config). */
-  rightTakeoverFull?: boolean;
 }
 
 function computeLayout(
@@ -40,8 +34,6 @@ export default function EditorLayout({
   chatPanel,
   editorPanel,
   resourcesPanel,
-  rightTakeover,
-  rightTakeoverFull = false,
 }: EditorLayoutProps) {
   const { chatVisible, resourcesVisible, panelSizes, setPanelSizes } = useEditorState();
   const groupRef = useGroupRef();
@@ -108,45 +100,6 @@ export default function EditorLayout({
     },
     [setPanelSizes],
   );
-
-  if (rightTakeover && rightTakeoverFull) {
-    // Full-screen takeover (onboarding): the connect screen owns the whole area
-    // and the chat panel is hidden, so a first-run user sees nothing but it.
-    return <div className="h-full flex-1 overflow-hidden">{rightTakeover}</div>;
-  }
-
-  if (rightTakeover) {
-    // Independent 2-panel layout: do NOT share groupRef/onLayoutChanged with the
-    // normal 3-panel path, or the takeover's chat/editor split would be persisted
-    // back into panelSizes and the 3-panel setLayout effects would target the
-    // wrong panel count.
-    const takeoverChat = chatVisible
-      ? Math.round((panelSizes.chat / (panelSizes.chat + panelSizes.editor)) * 100)
-      : 0;
-    return (
-      <Group
-        orientation="horizontal"
-        defaultLayout={{ chat: takeoverChat, editor: 100 - takeoverChat }}
-        className="flex-1"
-      >
-        <Panel id="chat" minSize={chatVisible ? 20 : 0} collapsible collapsedSize={0}>
-          {chatVisible && <div className="h-full overflow-hidden">{chatPanel}</div>}
-        </Panel>
-
-        {chatVisible ? (
-          <Separator className="group relative w-px bg-border transition-colors hover:bg-primary/60 data-[active]:bg-primary">
-            <div className="absolute inset-y-0 -left-1 -right-1 z-10 group-hover:cursor-col-resize" />
-          </Separator>
-        ) : (
-          <Separator className="w-0" />
-        )}
-
-        <Panel id="editor" minSize={30}>
-          <div className="h-full overflow-hidden">{rightTakeover}</div>
-        </Panel>
-      </Group>
-    );
-  }
 
   return (
     <Group

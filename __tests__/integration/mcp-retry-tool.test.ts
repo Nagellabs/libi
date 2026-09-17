@@ -73,7 +73,6 @@ function seedRow(overrides: {
     type: "stdio",
     command: overrides.command ?? "node",
     args: JSON.stringify(overrides.args ?? []),
-    enabled: true,
     requireApproval: false,
     bundled: overrides.bundled ?? true,
     installStatus: overrides.installStatus ?? "installed",

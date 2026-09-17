@@ -829,6 +829,9 @@ export interface UseAgentChat {
   statusError: string | null;
   isLoading: boolean;
   sessionReady: boolean;
+  /** False when this session's agent process started before the desktop app loaded the user's
+   *  shell environment. True until the server has answered. */
+  shellEnvLoaded: boolean;
 }
 
 /** SSE event types that affect the assembled messages and therefore run
@@ -840,6 +843,7 @@ const CHAT_STREAM_EVENT_TYPES = new Set([
   "agent-tool-call",
   "agent-tool-progress",
   "agent-tool-status",
+  "agent-tool-args",
   "agent-subagent-refine",
   "agent-tool-result",
   "agent-permission-request",
@@ -867,6 +871,12 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
   // alongside the status so a consumer can show it without re-deriving it from
   // the message list.
   const [statusError, setStatusError] = useState<string | null>(null);
+
+  // Did this session's agent process start with the user's shell environment? The desktop app
+  // loads it in the background, so an early chat can miss it. Keyed by session so a switch never
+  // shows the previous chat's answer; unknown (history not answered yet) reads as loaded.
+  const [shellEnv, setShellEnv] = useState<{ sessionId: string; loaded: boolean } | null>(null);
+  const shellEnvLoaded = shellEnv !== null && shellEnv.sessionId === sessionId ? shellEnv.loaded : true;
 
   const [status, setStatusRaw] = useState<AgentChatStatus>(
     sessionId ? (_cachedStatusMap.get(sessionId) ?? "idle") : "idle",
@@ -1137,11 +1147,13 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
   // renders as ONE message instead of splitting in two.
   useEffect(() => {
     if (!sessionId) return;
+    const forSession = sessionId;
     let cancelled = false;
     fetch(`/api/agent/messages?sessionId=${sessionId}`)
       .then((r) => r.json())
-      .then((data: { messages?: AgentMessage[] }) => {
+      .then((data: { messages?: AgentMessage[]; shellEnvLoaded?: boolean }) => {
         if (cancelled) return;
+        setShellEnv({ sessionId: forSession, loaded: data.shellEnvLoaded !== false });
         stateRef.current = applyHistory(stateRef.current, data.messages ?? []);
         publish();
         // Transition optimistic "connecting" → "connected" once history
@@ -1157,7 +1169,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
     return () => { cancelled = true; };
   }, [sessionId, publish]);
 
-  return { messages, sendMessage, retryMessage, cancelMessage, status, statusError, isLoading: status === "thinking" || status === "streaming", sessionReady };
+  return { messages, sendMessage, retryMessage, cancelMessage, status, statusError, isLoading: status === "thinking" || status === "streaming", sessionReady, shellEnvLoaded };
 }
 
 // ── Tool events helper ──────────────────────────────────────────────

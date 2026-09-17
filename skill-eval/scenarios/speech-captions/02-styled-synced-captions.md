@@ -5,6 +5,12 @@ skills: [speech-captions, audio-analysis]
 mcps: []
 agent: claude-code
 runs: 1
+# Was the 300 s default and TIMED OUT there on 2026-09-10 with 152 KB of coherent,
+# non-looping transcript — upload -> dimensions -> transcribe -> install plan ->
+# whisper_download_model -> update_dep_status, still progressing when the axe fell. The
+# transcription leg alone is a model-install path; 1200 s is the tier `captions-text/01`
+# and `file-based-overlays/01` already carry for structurally comparable caption work.
+timeoutSec: 1200
 covers: [captions, transcript, word-timings, caption-style, free-stt-first]
 ---
 

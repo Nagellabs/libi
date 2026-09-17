@@ -1,5 +1,5 @@
 <!-- Adapted from krusemediallc/arcads-claude-code (MIT, © Caleb Kruse / Kruse Media LLC).
-     Reworked for libi tooling (ai-asset-generation flow, fal-ai model ids, libi.upload_file). -->
+     Reworked for libi tooling (ai-asset-generation flow, provider model ids, libi.upload_file). -->
 
 # Dialogue confirmation gate
 

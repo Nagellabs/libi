@@ -3,38 +3,38 @@ import {
   buildSafeServerEnv,
   requiredEnvVarsForServer,
 } from "@/lib/mcp/safe-env";
+import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 
 afterEach(() => vi.unstubAllEnvs());
 
 describe("requiredEnvVarsForServer", () => {
-  it("returns a bundled MCP's declared required env vars", () => {
-    expect(requiredEnvVarsForServer("ElevenLabs")).toEqual(["ELEVENLABS_API_KEY"]);
-    expect(requiredEnvVarsForServer("fal-ai")).toEqual(["FAL_KEY"]);
+  it("returns [] for every libi row — libi holds no provider key", () => {
+    for (const def of BUNDLED_MCP_SERVERS) {
+      expect(requiredEnvVarsForServer(def.name), def.id).toEqual([]);
+    }
   });
 
-  it("returns [] for MCPs that need no secret", () => {
-    expect(requiredEnvVarsForServer("YouTube Downloader")).toEqual([]);
-  });
-
-  it("returns [] for an unknown / custom server name", () => {
+  it("returns [] for an unknown / foreign server name", () => {
     expect(requiredEnvVarsForServer("Some Custom MCP")).toEqual([]);
+    expect(requiredEnvVarsForServer("ElevenLabs")).toEqual([]);
   });
 });
 
 describe("buildSafeServerEnv", () => {
-  it("keeps a server's OWN required key but drops OTHER inherited secrets", () => {
-    // These secrets are all present in the process env (libi injects them
-    // there), so the filter must recognize them as inherited.
+  it("drops every inherited secret and keeps only operational vars", () => {
+    // These secrets are all present in the process env (a user exported
+    // them for their own MCPs), so the filter must recognize them as
+    // inherited and drop them — no libi row is entitled to any of them.
     vi.stubEnv("ELEVENLABS_API_KEY", "sk-elevenlabs");
     vi.stubEnv("FAL_KEY", "sk-fal");
     vi.stubEnv("git_token", "ghp_xxx");
 
     const env = buildSafeServerEnv(
-      "ElevenLabs",
+      "Libi Tracking",
       {
-        ELEVENLABS_API_KEY: "sk-elevenlabs", // its own required key — KEPT
-        FAL_KEY: "sk-fal", // another service's secret — DROPPED
-        git_token: "ghp_xxx", // unrelated inherited secret — DROPPED
+        ELEVENLABS_API_KEY: "sk-elevenlabs", // inherited secret — DROPPED
+        FAL_KEY: "sk-fal", // inherited secret — DROPPED
+        git_token: "ghp_xxx", // inherited secret — DROPPED
         PATH: "/libi/bin:/usr/bin", // operational — KEPT
         HOME: "/Users/me", // operational — KEPT
       },
@@ -42,28 +42,14 @@ describe("buildSafeServerEnv", () => {
     );
 
     expect(env).toEqual({
-      ELEVENLABS_API_KEY: "sk-elevenlabs",
       PATH: "/libi/bin:/usr/bin",
       HOME: "/Users/me",
       LIBI_HOME: "/home/x",
     });
-    expect(env).not.toHaveProperty("FAL_KEY");
-    expect(env).not.toHaveProperty("git_token");
-  });
-
-  it("drops a secret from a server that does NOT require it", () => {
-    vi.stubEnv("ELEVENLABS_API_KEY", "sk-elevenlabs");
-    const env = buildSafeServerEnv(
-      "YouTube Downloader", // requiredEnvVars: []
-      { ELEVENLABS_API_KEY: "sk-elevenlabs", PATH: "/p" },
-      { libiHome: "/h" },
-    );
-    expect(env).toEqual({ PATH: "/p", LIBI_HOME: "/h" });
-    expect(env).not.toHaveProperty("ELEVENLABS_API_KEY");
   });
 
   it("keeps a var the entry declares that isn't an inherited process-env key", () => {
-    // A custom MCP's DB-configured secret lives on the entry, not process.env.
+    // A foreign MCP's configured secret lives on the entry, not process.env.
     const env = buildSafeServerEnv(
       "Some Custom MCP",
       { MY_CUSTOM_TOKEN: "abc", PATH: "/p" },

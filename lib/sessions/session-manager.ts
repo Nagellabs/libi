@@ -6,16 +6,28 @@ import type {
 import type { AgentEvent } from "@/lib/agents/types";
 import type { AgentMessage } from "@/lib/agents/message-types";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
-import { isAuthRequiredError } from "@/lib/agents/agent-readiness";
-import type { TerminalRemedy } from "@/lib/agents/terminal-remedy";
-import { resolveSignInRemedy } from "@/lib/agents/acp/sign-in-remedy";
+import { ACP_AUTH_REQUIRED_CODE, isAuthRequiredError } from "@/lib/agents/agent-readiness";
+import { clearSignInConfirmation } from "@/lib/agents/sign-in-confirmation";
+import { getAgentSetup, isSetupAgentId } from "@/lib/agents/setup/registry";
+import { AgentSpawnRefusedError } from "@/lib/agents/spawn-refused-error";
+import { isShellEnvLoaded, readShellEnvState } from "@/lib/runtime/shell-env-state";
+import { captureStandbyFreshness, staleStandbyReason, type StandbyFreshness } from "@/lib/sessions/standby-freshness";
+import { onSetupTerminalsSettled, setupActivity } from "@/lib/terminal/setup-activity";
 import type { SessionEntry, GlobalSessionEventListener, SystemEvent } from "./types";
 import { SessionEventHandler } from "@/lib/agents/session-event-handler";
 import { MAX_ACTIVE_SESSIONS } from "./types";
 import { getLibiAgentDir } from "@/lib/libi-home";
-import { getMcpServersForAcp, onMcpConfigInvalidated } from "@/lib/mcp-config";
+import {
+  getMcpServersForAcp,
+  getMcpServersForAcpFallback,
+  onMcpConfigInvalidated,
+} from "@/lib/mcp-config";
+import { isLibiMcpEntryConfigError } from "@/lib/mcp/agent-surface";
+import { readLibiCodexEntryShape } from "@/lib/agents/libi-registration";
+import { resolveCodexHome } from "@/lib/codex-config/canonical";
 import { serverLogger as logger } from "@/lib/logger";
 import { getProcessManager } from "@/lib/agents/process-manager";
+import { ACP_INIT_TIMEOUT_MS } from "@/lib/agents/managed-types";
 import { applyAttachmentParsing } from "@/lib/agents/parse-attachments";
 import { getApprovalMode } from "@/lib/approval/settings";
 import { acpModeFor } from "@/lib/sessions/approval-mode-map";
@@ -64,35 +76,6 @@ export function markAgentConnected(): void {
 }
 
 /**
- * The Terminal command that fixes "this agent isn't signed in", or null when
- * we have nothing honest to offer.
- *
- * Resolution is a lookup into `lib/agents/acp/sign-in-remedy.ts`, which
- * mirrors — rather than reaches into — the agent registry (it keeps its
- * resolved bins private) and knows, per agent, which real binary on this
- * machine performs the sign-in. That module's own comments explain WHY each
- * agent's remedy looks the way it does; this function only has to look it up.
- *
- * Exported for unit tests; there is no other caller.
- *
- * Never throws: this runs inside a failure path that is already reporting bad
- * news, and a filesystem hiccup while looking for a nicety must not replace an
- * accurate `needs-auth` with an unhandled rejection. `null` means "no button",
- * which every consumer already has to handle.
- */
-export function signInRemedyFor(agentId: string): TerminalRemedy | null {
-  try {
-    return resolveSignInRemedy(agentId);
-  } catch (err) {
-    logger.warn(
-      { tag: "session-manager", op: "sign_in_remedy_failed", agentId, err },
-      "Could not resolve a sign-in remedy; reporting the problem without one",
-    );
-    return null;
-  }
-}
-
-/**
  * A timeout that never keeps the process (or a vitest worker) alive on its own.
  */
 function delay(ms: number): Promise<void> {
@@ -101,6 +84,14 @@ function delay(ms: number): Promise<void> {
     t.unref?.();
   });
 }
+
+/** How often the session manager re-reads the shell→runtime environment seam while it says
+ *  `pending` (`lib/runtime/shell-env-state.ts`). */
+const SHELL_ENV_WATCH_INTERVAL_MS = 1_000;
+/** How long the background start after a failed restart waits on a resume's history load before it
+ *  creates the standby anyway. A load on a live adapter has no timeout of its own; this reuses the
+ *  bound the adapter already gets to answer `initialize`. */
+const REWARM_RESUME_WAIT_MS = ACP_INIT_TIMEOUT_MS;
 
 /** Structural equality, so a repeated identical outcome doesn't re-broadcast. */
 function sameReadiness(a: AgentReadiness, b: AgentReadiness): boolean {
@@ -172,9 +163,16 @@ export class SessionManager {
         configOptions: SessionConfigOption[];
         availableCommands: AvailableCommandInfo[];
         availableModes?: { id: string }[];
+        /** Whether its agent process was spawned with the user's shell environment. */
+        shellEnvLoaded: boolean;
+        /** What its MCP servers were read from, just before it was created (`discardStaleStandby`). */
+        freshness: StandbyFreshness;
       }
     | null = null;
   private standbyCreating = false;
+
+  /** The shell-environment seam watcher; null when not watching. */
+  private shellEnvWatch: ReturnType<typeof setInterval> | null = null;
 
   /** System-level (sessionless) listeners — e.g. standby-ready broadcasts. */
   private systemListeners = new Set<
@@ -197,8 +195,20 @@ export class SessionManager {
    */
   private activatingSessions = new Map<string, Promise<AgentMessage[]>>();
 
+  /**
+   * agentId -> how many chats are being opened on that agent's process right now (a
+   * `createSession` or an `activateSession` in progress). Such a chat is not `active` yet, but
+   * killing its process would still break it, so the shell-environment refresh counts it as running.
+   */
+  private openingSessions = new Map<string, number>();
+
   /** The currently active agent ID (set by switchAgent / startup) */
   private _activeAgentId: string | null = null;
+
+  /** Bumped when a shell-environment restart begins and when an agent is picked. The one background
+   *  start after a failed restart goes ahead only while this still holds the value that restart
+   *  took, so it never acts on behalf of a restart or pick that has since superseded it. */
+  private agentStartEpoch = 0;
 
   /** Monotonic counter for unique message IDs — shared with SessionEventHandler */
   private msgCounter = 0;
@@ -216,6 +226,11 @@ export class SessionManager {
     getCapabilitiesForAgent(agentId: string): { canListSessions: boolean };
     registerSessionId(agentId: string, sessionId: string): void;
     unregisterSessionId(agentId: string, sessionId: string): void;
+    /** Absent (a test double) ⇒ loaded / no restart. */
+    spawnedWithShellEnv?(agentId: string): boolean;
+    restartProcess?(agentId: string): Promise<void>;
+    /** The in-progress restart of `agentId`, settling (never rejecting) once it is over; null when none. */
+    pendingRestart?(agentId: string): Promise<void> | null;
   } | null = null;
 
   // -------------------------------------------------------------------------
@@ -245,6 +260,11 @@ export class SessionManager {
     getCapabilitiesForAgent(agentId: string): { canListSessions: boolean };
     registerSessionId(agentId: string, sessionId: string): void;
     unregisterSessionId(agentId: string, sessionId: string): void;
+    /** Absent (a test double) ⇒ loaded / no restart. */
+    spawnedWithShellEnv?(agentId: string): boolean;
+    restartProcess?(agentId: string): Promise<void>;
+    /** The in-progress restart of `agentId`, settling (never rejecting) once it is over; null when none. */
+    pendingRestart?(agentId: string): Promise<void> | null;
   }): void {
     this.pm = pm;
   }
@@ -428,6 +448,11 @@ export class SessionManager {
   // 5. createSession()
   // -------------------------------------------------------------------------
 
+  /** Whether a session running on `agentId`'s process right now has the user's shell environment. */
+  private shellEnvLoadedFor(agentId: string): boolean {
+    return this.pm?.spawnedWithShellEnv?.(agentId) ?? true;
+  }
+
   /**
    * Build a fresh active SessionEntry and register it with the process manager.
    * Also drains any pending listeners and emits an initial "connected" event.
@@ -438,6 +463,7 @@ export class SessionManager {
     agentId: string,
     configOptions: SessionConfigOption[] = [],
     availableCommands: AvailableCommandInfo[] = [],
+    shellEnvLoaded: boolean = this.shellEnvLoadedFor(agentId),
   ): SessionEntry {
     const entry: SessionEntry = {
       sessionId,
@@ -457,6 +483,7 @@ export class SessionManager {
       configOptions,
       latestUsage: null,
       availableCommands,
+      shellEnvLoaded,
     };
     this.sessions.set(sessionId, entry);
     this.pm?.registerSessionId(agentId, sessionId);
@@ -470,6 +497,120 @@ export class SessionManager {
   }
 
   /**
+   * `conn.newSession(...)`, with a ONE-SHOT recovery for the single failure
+   * that libi's own entry name can cause.
+   *
+   * libi names its ACP MCP entry `libi` on purpose, so that on a machine which
+   * has run `libi connect` the entry REPLACES the config one instead of
+   * mounting libi twice (`lib/mcp/agent-surface.ts#LIBI_MCP_ENTRY_NAME`). On
+   * Codex the replacement is a field-by-field merge, so a user whose
+   * `[mcp_servers.libi]` is a hand-written STDIO entry ends up with a table
+   * holding both `command` and `url`, and codex refuses the entire config —
+   * the in-app chat cannot start at all. That shape is reachable in the wild
+   * without anyone hand-editing anything: older libi versions wrote stdio
+   * entries, so a machine that ran `libi connect` once long ago and never
+   * re-ran it has exactly it.
+   *
+   * A dead session is worse than a duplicated tool surface, so this retries
+   * once under `LIBI_MCP_FALLBACK_ENTRY_NAME`, which no longer collides. The
+   * chat then carries libi twice — knowingly, for that session only.
+   *
+   * THREE THINGS THIS DELIBERATELY DOES NOT DO:
+   *
+   *  - It does not pre-detect. `isLibiMcpEntryConfigError` reads the rejection
+   *    codex actually returned; nothing here parses the user's `config.toml`,
+   *    which is the heuristic `LIBI_MCP_ENTRY_NAME` argues against.
+   *  - It does not widen. Only that error retries. An auth rejection, a missing
+   *    binary, a crashed adapter and the user's own unrelated config mistakes
+   *    all propagate as themselves — see the measured non-matches on
+   *    `isLibiMcpEntryConfigError`.
+   *  - It does not loop. The retry calls `conn.newSession` directly, so there
+   *    is exactly one extra attempt no matter what it does; and if the retry
+   *    fails too, the ORIGINAL error is what propagates, because it is the one
+   *    naming `mcp_servers.libi` — the thing the user has to fix.
+   */
+  private async newAcpSession(
+    conn: ClientSideConnection,
+    agentId: string,
+    reason: "fresh" | "standby",
+  ): Promise<Awaited<ReturnType<ClientSideConnection["newSession"]>>> {
+    const params = { cwd: this.getAgentDir(), _meta: sessionMetaFor(agentId) };
+    try {
+      return await conn.newSession({ ...params, mcpServers: getMcpServersForAcp(agentId) });
+    } catch (err) {
+      if (!isLibiMcpEntryConfigError(err)) throw err;
+      const mcpServers = getMcpServersForAcpFallback(agentId);
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "mcp_entry_collision_retry",
+          agentId,
+          reason,
+          fallbackNames: mcpServers.map((m) => m.name),
+          err,
+        },
+        `${agentId} rejected the session config because libi's MCP entry collided with an incompatible [mcp_servers.libi] in the user's own config — retrying once under a non-colliding name. libi's tools will appear twice in this session.`,
+      );
+      try {
+        return await conn.newSession({ ...params, mcpServers });
+      } catch (retryErr) {
+        logger.error(
+          {
+            tag: "session-manager",
+            op: "mcp_entry_collision_retry_failed",
+            agentId,
+            reason,
+            err: retryErr,
+          },
+          `Retry under a non-colliding MCP entry name also failed for ${agentId} — surfacing the original config error`,
+        );
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * Put a CAUSE in the log for the silent half of the Codex edge.
+   *
+   * `enabled = false` on the user's `[mcp_servers.libi]` survives the merge, so
+   * the in-app session starts perfectly and simply has no libi tools — nothing
+   * throws, nothing is missing from libi's point of view, and the user
+   * experiences it as the app quietly not working. There is no rejection to
+   * react to, so the only honest move is to say so once, next to the
+   * `new_session_done` line that would otherwise look like success.
+   *
+   * Best-effort and non-blocking on purpose: it asks codex's OWN reader, not a
+   * TOML parse (see `libiCodexEntryShape`), through the listing libi's other
+   * Codex readers share (`readLibiCodexEntryShape`). A memoised or recent last
+   * good listing answers at no cost; otherwise it joins or starts that one run,
+   * under its 15 s bound, rather than a 2 s spawn of its own that an
+   * unauthenticated HTTP entry's OAuth discovery always outlasted. It is fired
+   * and forgotten rather than added to session-creation latency, runs only on
+   * the codex lane, and every failure is swallowed. Nothing branches on the
+   * result.
+   */
+  private async logCodexEntryShape(agentId: string, sessionId: string): Promise<void> {
+    if (agentId !== "codex") return;
+    try {
+      const shape = await readLibiCodexEntryShape();
+      if (shape !== "disabled") return;
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "libi_mcp_entry_disabled",
+          agentId,
+          sessionId,
+          codexHome: resolveCodexHome(),
+        },
+        "This Codex session has NO libi tools: the user's own [mcp_servers.libi] is disabled (enabled = false), and codex keeps that flag when it merges libi's session entry over it. Re-enable that entry (or delete it and re-run `libi connect`) to restore libi's tools.",
+      );
+    } catch {
+      // A diagnostic that cannot answer says nothing. Never let it affect the
+      // session it is describing.
+    }
+  }
+
+  /**
    * Create a new session. Claims the standby if available, otherwise creates
    * fresh via ACP newSession(). Returns the sessionId.
    */
@@ -478,6 +619,34 @@ export class SessionManager {
     if (!agentId || !this.pm) {
       throw new Error("No active agent — call switchAgent() first");
     }
+    const done = this.beginOpening(agentId);
+    try {
+      return await this.openNewSession(agentId);
+    } finally {
+      done();
+    }
+  }
+
+  /** Count a chat being opened on `agentId`'s process; call the returned function once it settles. */
+  private beginOpening(agentId: string): () => void {
+    this.openingSessions.set(agentId, (this.openingSessions.get(agentId) ?? 0) + 1);
+    let settled = false;
+    return () => {
+      if (settled) return;
+      settled = true;
+      const left = (this.openingSessions.get(agentId) ?? 1) - 1;
+      if (left > 0) this.openingSessions.set(agentId, left);
+      else this.openingSessions.delete(agentId);
+    };
+  }
+
+  private async openNewSession(agentId: string): Promise<string> {
+    if (!this.pm) throw new Error("No process manager set");
+    // A new chat that lands while the process restarts waits for the new connection. Awaited only
+    // when there is a restart: an unconditional await would let an in-flight standby land first and
+    // change which path this chat takes.
+    const restart = this.pm.pendingRestart?.(agentId);
+    if (restart) await restart;
 
     // Try to claim standby — zero-latency new chat. If the standby was
     // spawned with a cold MCP cache (Category B prewarm still running),
@@ -486,9 +655,12 @@ export class SessionManager {
     // a warm cache. The user therefore gets an instant "New chat" the
     // moment the UI opens, at the cost of one refresh per active session
     // when Category B finishes (see session 6823b191 investigation).
+    this.discardStaleStandby(agentId);
     const standbyConfigOptions = this.standbySession?.configOptions ?? [];
     const standbyCommands = this.standbySession?.availableCommands ?? [];
     const standbyModes = this.standbySession?.availableModes;
+    // A claimed chat keeps the standby's spawn-time answer.
+    const standbyShellEnvLoaded = this.standbySession?.shellEnvLoaded ?? true;
     const standbyId = this.claimStandbySession(agentId);
     if (standbyId) {
       const claimedEntry = this.registerActiveSession(
@@ -496,6 +668,7 @@ export class SessionManager {
         agentId,
         standbyConfigOptions,
         standbyCommands,
+        standbyShellEnvLoaded,
       );
       // Carry the advertised mode vocabulary captured at standby creation onto
       // the claimed entry so this (and later) mode pushes gate on the real
@@ -509,9 +682,21 @@ export class SessionManager {
       return standbyId;
     }
 
-    // Create fresh via ACP
-    const conn = this.pm.getConnection(agentId);
-    if (!conn) throw new Error(`No connection for agent ${agentId}`);
+    // Create fresh via ACP. No process at all (a restart that failed, say) is started again here
+    // rather than failing the chat, and the standby comes back once the chat is open.
+    let conn = this.pm.getConnection(agentId);
+    let warmed = false;
+    if (!conn) {
+      try {
+        await this.pm.warmProcess(agentId);
+      } catch (err) {
+        this.markAgentSpawnRefused(agentId, err);
+        throw err;
+      }
+      conn = this.pm.getConnection(agentId);
+      if (!conn) throw new Error(`No connection for agent ${agentId}`);
+      warmed = true;
+    }
 
     await this.evictIfNeeded();
 
@@ -535,16 +720,13 @@ export class SessionManager {
     // `POST /api/sessions` still fails loudly.
     let result: Awaited<ReturnType<typeof conn.newSession>>;
     try {
-      result = await conn.newSession({
-        cwd: this.getAgentDir(),
-        mcpServers,
-        _meta: sessionMetaFor(agentId),
-      });
-      this.markAgentReady(agentId);
+      result = await this.newAcpSession(conn, agentId, "fresh");
+      this.markAgentReady(agentId, "session-new");
     } catch (err) {
       this.markAgentAuthFailure(agentId, err);
       throw err;
     }
+    void this.logCodexEntryShape(agentId, result.sessionId);
     logger.info(
       {
         tag: "session-manager",
@@ -576,6 +758,7 @@ export class SessionManager {
       agentId,
       result.configOptions ?? [],
     );
+    if (warmed) this.createStandbySession().catch(() => {});
     return result.sessionId;
   }
 
@@ -609,6 +792,7 @@ export class SessionManager {
     // Already fully loaded — return the warm cache immediately.
     if (entry.active) return entry.messageCache;
 
+    const opened = this.beginOpening(entry.agentId);
     const promise = this.performActivation(sessionId, entry);
     this.activatingSessions.set(sessionId, promise);
     try {
@@ -626,6 +810,7 @@ export class SessionManager {
       throw err;
     } finally {
       this.activatingSessions.delete(sessionId);
+      opened();
     }
   }
 
@@ -665,8 +850,26 @@ export class SessionManager {
     const agentId = entry.agentId;
     if (!this.pm) throw new Error("No process manager set");
 
-    const conn = this.pm.getConnection(agentId);
-    if (!conn) throw new Error(`No connection for agent ${agentId}`);
+    // A resume that lands while the process restarts waits for the new connection; otherwise it
+    // would fail on the missing one and the chat would render with no history.
+    const restart = this.pm.pendingRestart?.(agentId);
+    if (restart) await restart;
+    // No process at all (a restart that failed, an adapter that crashed) is started again here, the
+    // same as for a new chat, rather than failing the resume and rendering the chat empty. A spawn
+    // refused for a missing or outdated CLI is recorded as readiness, then thrown.
+    let conn = this.pm.getConnection(agentId);
+    let warmed = false;
+    if (!conn) {
+      try {
+        await this.pm.warmProcess(agentId);
+      } catch (err) {
+        this.markAgentSpawnRefused(agentId, err);
+        throw err;
+      }
+      conn = this.pm.getConnection(agentId);
+      if (!conn) throw new Error(`No connection for agent ${agentId}`);
+      warmed = true;
+    }
 
     await this.evictIfNeeded(sessionId);
 
@@ -677,6 +880,8 @@ export class SessionManager {
     entry.lastUsed = Date.now();
 
     this.pm.registerSessionId(agentId, sessionId);
+    // A resumed session runs on the process it is activated on.
+    entry.shellEnvLoaded = this.shellEnvLoadedFor(agentId);
     this.drainPendingListeners(sessionId);
     this.emitForSession(sessionId, {
       type: "agent-status",
@@ -745,6 +950,10 @@ export class SessionManager {
     } finally {
       const e = this.sessions.get(sessionId);
       if (e) e.isReplaying = false;
+      // The standby went with the old process, and "New chat" stays disabled until one is ready.
+      // Started once the replay is over, so its `session/new` never competes with the load on a
+      // process that has only just come up — and started even when the replay failed.
+      if (warmed) this.createStandbySession().catch(() => {});
     }
 
     // Clean dangling user message after replay.
@@ -985,11 +1194,18 @@ export class SessionManager {
     });
 
     try {
+      this.authRejectedByTextTurn.delete(sessionId);
       const result = await conn.prompt({
         sessionId,
         prompt: [{ type: "text", text }],
       });
       entry.currentAgentMessage = null;
+      // A turn that came back is proof the agent is signed in. A cancelled turn
+      // may never have reached the model, so it proves nothing — and neither does
+      // a turn that opened with Claude's auth-failure text.
+      if (!this.authRejectedByTextTurn.delete(sessionId) && result.stopReason !== "cancelled") {
+        this.markAgentReady(entry.agentId, "prompt");
+      }
       this.emitForSession(sessionId, {
         type: "agent-complete",
         stopReason: result.stopReason,
@@ -1011,6 +1227,7 @@ export class SessionManager {
         }
       }
     } catch (err) {
+      this.authRejectedByTextTurn.delete(sessionId);
       entry.currentAgentMessage = null;
       this.emitForSession(sessionId, {
         type: "agent-status",
@@ -1082,7 +1299,8 @@ export class SessionManager {
    * Push the saved approval mode for `agentId` to the given session via ACP
    * `session/set_mode`, using the PER-AGENT mode vocabulary (`acpModeFor`).
    * Each ACP adapter advertises a different mode-id set — pushing Claude's
-   * `bypassPermissions` to codex (which advertises `read-only|auto|full-access`)
+   * `bypassPermissions` to codex (codex-acp 1.10.0 advertises
+   * `read-only|agent|agent-full-access`; ≤ 1.6.x `read-only|auto|full-access`)
    * yields ACP -32602 `approval.mode.set_failed`. `acpModeFor` maps + gates on
    * the advertised set, returning `null` when the target isn't advertised.
    *
@@ -1367,6 +1585,8 @@ export class SessionManager {
 
     const conn = this.pm.getConnection(agentId);
     if (!conn) return;
+    const shellEnvLoaded = this.shellEnvLoadedFor(agentId);
+    const freshness = captureStandbyFreshness(agentId);
 
     this.standbyCreating = true;
     const start = Date.now();
@@ -1383,18 +1603,17 @@ export class SessionManager {
       `Creating standby session for ${agentId} with ${mcpServers.length} MCP server(s)`,
     );
     try {
-      const result = await conn.newSession({
-        cwd: this.getAgentDir(),
-        mcpServers,
-        _meta: sessionMetaFor(agentId),
-      });
-      this.markAgentReady(agentId);
+      const result = await this.newAcpSession(conn, agentId, "standby");
+      this.markAgentReady(agentId, "session-new");
+      void this.logCodexEntryShape(agentId, result.sessionId);
       this.standbySession = {
         agentId,
         sessionId: result.sessionId,
         configOptions: result.configOptions ?? [],
         availableCommands: [],
         availableModes: result.modes?.availableModes,
+        shellEnvLoaded,
+        freshness,
       };
       // Route ACP notifications for the standby NOW — claude-agent-acp sends
       // available_commands_update right after newSession() returns, and the
@@ -1444,11 +1663,35 @@ export class SessionManager {
       );
     } finally {
       this.standbyCreating = false;
-      this.emitSystemEvent({
-        type: "standby-ready",
-        ready: this.isStandbyReady(),
-      });
+      const ready = this.standbySession;
+      // The environment loaded while this standby was being created on a process that predates
+      // it — replace it now rather than hand it to the next chat.
+      const shellEnvRefresh = ready?.shellEnvLoaded === false && isShellEnvLoaded();
+      if (
+        ready &&
+        !shellEnvRefresh &&
+        this.setupOverlappedAndSettled(ready.freshness) &&
+        staleStandbyReason(ready.agentId, ready.freshness) !== null
+      ) {
+        // A setup terminal overlapped this standby's creation and closed before it was ready, so the settle found
+        // nothing to replace (`refreshStaleStandby` skips a standby being created) — whether its command changed the
+        // config mid-creation or not. Replace it now, before it is announced ready, or the next chat would discard it
+        // and start slow. The replacement is taken with none open, so only another setup terminal can repeat this.
+        this.discardStaleStandby(ready.agentId);
+      } else {
+        this.emitSystemEvent({
+          type: "standby-ready",
+          ready: this.isStandbyReady(),
+        });
+        if (shellEnvRefresh) void this.refreshStandbyForShellEnv();
+      }
     }
+  }
+
+  /** Whether a setup terminal overlapped the creation of a standby taken with `freshness`, and none is open now. */
+  private setupOverlappedAndSettled(freshness: StandbyFreshness): boolean {
+    const setup = setupActivity();
+    return setup.live === 0 && (freshness.setupLive || freshness.setupEpoch !== setup.epoch);
   }
 
   /** Discard current standby and create a new one (e.g. on MCP config change). */
@@ -1471,11 +1714,206 @@ export class SessionManager {
   }
 
   /**
+   * A standby's MCP servers are fixed when its session is created, so one created before the user added a provider
+   * (the Providers tab's Add, or their own `claude mcp add`) would open a chat without it, while the tab tells them a
+   * new chat has it. A ready standby of `agentId` whose MCP config changed since it was created, or that overlapped a
+   * setup terminal (`staleStandbyReason`), is closed here, and a replacement is started at once. A chat about to
+   * claim it starts fresh instead, which costs it the standby's head start and nothing else.
+   */
+  private discardStaleStandby(agentId: string): void {
+    const standby = this.standbySession;
+    if (!standby || this.standbyCreating || standby.agentId !== agentId) return;
+    const reason = staleStandbyReason(agentId, standby.freshness);
+    if (!reason) return;
+    this.standbySession = null;
+    this.emitSystemEvent({ type: "standby-ready", ready: false });
+    this.pm?.getConnection(agentId)?.closeSession({ sessionId: standby.sessionId }).catch(() => {});
+    this.pm?.unregisterSessionId(agentId, standby.sessionId);
+    logger.info(
+      { tag: "session-manager", op: "standby_stale_discarded", agentId, sessionId: standby.sessionId, reason },
+      "The standby chat's MCP servers may be out of date; discarding it and starting a replacement",
+    );
+    this.createStandbySession().catch(() => {});
+  }
+
+  /** Replace the unclaimed standby if it went stale — called once the last setup terminal closed. */
+  refreshStaleStandby(): void {
+    if (this.standbySession) this.discardStaleStandby(this.standbySession.agentId);
+  }
+
+  /**
+   * Standby refresh. The desktop app loads the user's shell environment in the background, so an
+   * agent process can start before it arrives. Once it has loaded, an unclaimed standby whose
+   * agent process was spawned before that is discarded, so the next chat starts WITH the
+   * environment. A child's environment is fixed when it spawns, so a replacement standby on the
+   * same process would inherit the same gap: the process is restarted first — only while no
+   * in-app chat runs on it. A running chat is NEVER killed: with one running — or one still being
+   * opened (created, or resumed and replaying its history) — nothing is restarted or closed, that
+   * chat keeps its warning, and the standby is kept (the chat it later becomes shows the warning
+   * too). A chat opened while the restart is under way waits for the new process. A restart that
+   * fails for any reason but a refusal is followed by one background start of the agent, so "New
+   * chat" does not stay disabled with nothing under way.
+   */
+  async refreshStandbyForShellEnv(): Promise<void> {
+    const standby = this.standbySession;
+    if (!standby || standby.shellEnvLoaded || !isShellEnvLoaded() || !this.pm?.restartProcess) return;
+    const { agentId, sessionId } = standby;
+    const busy = this.chatOnProcess(agentId);
+    if (busy) {
+      logger.info(
+        { tag: "session-manager", op: "shell_env_standby_kept", agentId, reason: busy },
+        "Shell environment loaded, but a chat is running on this agent's process; keeping its standby",
+      );
+      // Kept for the environment, but not if its MCP servers are out of date: that check still applies.
+      this.refreshStaleStandby();
+      return;
+    }
+    this.standbySession = null;
+    this.emitSystemEvent({ type: "standby-ready", ready: false });
+    this.pm.getConnection(agentId)?.closeSession({ sessionId }).catch(() => {});
+    this.pm.unregisterSessionId(agentId, sessionId);
+    logger.info(
+      { tag: "session-manager", op: "shell_env_standby_discarded", agentId, sessionId },
+      "Shell environment loaded after this standby's agent started; restarting the idle agent and replacing the standby",
+    );
+    const epoch = ++this.agentStartEpoch;
+    try {
+      await this.pm.restartProcess(agentId);
+    } catch (err) {
+      // A typed refusal is an observed answer about the agent: readiness records it, and its remedy
+      // (install or update the CLI) is the user's to act on, so nothing is started again. Any other
+      // failure (an ACP initialize timeout, say) says nothing about the agent, so readiness is left
+      // alone. Either way no process is left, and the standby was already discarded above.
+      this.markAgentSpawnRefused(agentId, err);
+      logger.warn(
+        { tag: "session-manager", op: "shell_env_standby_refresh_failed", agentId, err },
+        "Could not restart the agent after the shell environment loaded",
+      );
+      if (!(err instanceof AgentSpawnRefusedError)) this.startAgainAfterFailedRestart(agentId, epoch);
+      return;
+    }
+    await this.createStandbySession();
+  }
+
+  /**
+   * One background start of `agentId` after its shell-environment restart failed for a reason other
+   * than a refusal. That restart left no process and no standby, and nothing else starts one until
+   * the user opens a chat or picks the agent again — meanwhile "New chat" stays disabled on
+   * "Preparing a new chat session…", a state that would never finish.
+   *
+   * One attempt, never a loop: if this start fails too, that is logged and the next chat or agent
+   * pick starts the agent. Once the agent is up it waits, for at most `REWARM_RESUME_WAIT_MS`, for
+   * the resumes of this agent already under way to finish loading, then creates the standby. It
+   * stands down when it has been superseded — another agent was picked, this one was picked
+   * again, or another restart began — because whatever superseded it starts the agent and sets
+   * the standby up itself. It never kills anything: `warmProcess` only spawns (and joins a spawn
+   * already under way), and `createStandbySession` does nothing while a standby exists or is
+   * being created. The new process spawns with the environment, so its standby cannot send the
+   * refresh round again.
+   */
+  private startAgainAfterFailedRestart(agentId: string, epoch: number): void {
+    const pm = this.pm;
+    const superseded = (): boolean =>
+      this.pm !== pm ||
+      this._activeAgentId !== agentId ||
+      this.agentStartEpoch !== epoch ||
+      !!pm?.pendingRestart?.(agentId);
+    if (!pm || superseded()) return;
+    logger.warn(
+      { tag: "session-manager", op: "shell_env_restart_rewarm", agentId },
+      "Starting the agent again once, in the background, after its restart failed",
+    );
+    void (async () => {
+      try {
+        await pm.warmProcess(agentId);
+      } catch (err) {
+        this.markAgentSpawnRefused(agentId, err);
+        logger.warn(
+          { tag: "session-manager", op: "shell_env_restart_rewarm_failed", agentId, err },
+          "Could not start the agent again after its restart failed; the next chat or agent pick starts it",
+        );
+        return;
+      }
+      // A resume that joined this spawn is still loading its history on a process that has only
+      // just come up. The standby's `session/new` waits for it, the same ordering a resume that
+      // warmed the agent itself keeps. It waits rather than standing down: a chat opened on a
+      // process that was already up does not bring the standby back itself. The wait is capped, and
+      // the standby is created after it either way, so a resume that never answers cannot keep
+      // "New chat" on "Preparing…".
+      await this.activationsSettled(agentId, REWARM_RESUME_WAIT_MS);
+      if (superseded()) {
+        logger.info(
+          { tag: "session-manager", op: "shell_env_restart_rewarm_superseded", agentId },
+          "The agent was picked or restarted again meanwhile; leaving the standby to that",
+        );
+        return;
+      }
+      await this.createStandbySession();
+    })().catch(() => {});
+  }
+
+  /** Settles once the resumes of `agentId` in flight when it is called have finished loading, or
+   *  after `capMs`, whichever comes first. A resume that begins afterwards is not waited on: it
+   *  found the process already up, so its `loadSession` does not compete with a fresh start, and
+   *  back-to-back resumes would otherwise keep extending the wait. Never rejects: a resume that
+   *  fails has still stopped loading. */
+  private async activationsSettled(agentId: string, capMs: number): Promise<void> {
+    const inflight = [...this.activatingSessions]
+      .filter(([sessionId]) => this.sessions.get(sessionId)?.agentId === agentId)
+      .map(([, activation]) => activation);
+    if (inflight.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const capped = new Promise<"capped">((resolve) => {
+      timer = setTimeout(() => resolve("capped"), capMs);
+      timer.unref?.();
+    });
+    const outcome = await Promise.race([Promise.allSettled(inflight).then(() => "settled" as const), capped]);
+    clearTimeout(timer);
+    if (outcome === "capped") {
+      logger.warn(
+        { tag: "session-manager", op: "shell_env_restart_rewarm_resume_wait_capped", agentId, capMs },
+        "A resume on the agent is still loading its history; creating the standby anyway",
+      );
+    }
+  }
+
+  /** Why a chat other than the unclaimed standby is on `agentId`'s process right now, or null when
+   *  none is: an active chat, or one still being opened. */
+  private chatOnProcess(agentId: string): "active_sessions" | "opening_sessions" | null {
+    if (this.getActiveSessions().some((s) => s.agentId === agentId)) return "active_sessions";
+    if (this.openingSessions.has(agentId)) return "opening_sessions";
+    return null;
+  }
+
+  /**
+   * Poll the shell→runtime environment seam while it says `pending` (the desktop probe settles
+   * within ~30 s: 5 attempts of 2 s plus 1+2+4+8 s of backoff), then refresh the standby once.
+   * A no-op under npx, dev and Windows (the variable is absent) and once the state is final.
+   */
+  watchShellEnvState(intervalMs: number = SHELL_ENV_WATCH_INTERVAL_MS): void {
+    if (this.shellEnvWatch || readShellEnvState() !== "pending") return;
+    const timer = setInterval(() => {
+      const state = readShellEnvState();
+      if (state === "pending") return;
+      clearInterval(timer);
+      this.shellEnvWatch = null;
+      logger.info({ tag: "session-manager", op: "shell_env_settled", state }, `Shell environment ${state}`);
+      if (state === "loaded") void this.refreshStandbyForShellEnv();
+    }, intervalMs);
+    timer.unref?.();
+    this.shellEnvWatch = timer;
+  }
+
+  /**
    * Claim the standby session for a new chat.
    * Returns sessionId if available and matching the requested agent, else null.
    */
   private claimStandbySession(agentId: string): string | null {
-    if (!this.standbySession || this.standbySession.agentId !== agentId) {
+    // Only a READY standby (the same condition `isStandbyReady` reports). One still being set up
+    // already has its id, but claiming it then would skip the replenish below — `createStandbySession`
+    // returns early while one is in progress — and leave "New chat" disabled for good. A chat that
+    // waited out a restart resumes exactly while the refresh sets the next standby up.
+    if (!this.standbySession || this.standbyCreating || this.standbySession.agentId !== agentId) {
       return null;
     }
 
@@ -1710,10 +2148,23 @@ export class SessionManager {
   }
 
   /**
-   * A `session/new` (or a prompt) came back clean — that IS the proof of
-   * readiness, and the only proof we accept.
+   * Proof of readiness — the only proof we accept:
+   *  - a prompt turn that came back (any stop reason except `cancelled`), for every agent;
+   *  - a clean `session/new` — EXCEPT that it never overwrites an observed `needs-auth`
+   *    for an agent that rejects auth only at `session/prompt` (declared as
+   *    `signIn.rejectedAt: "prompt"` — today Claude Code, whose `session/new` succeeds
+   *    unauthenticated). A standby created after a rejected prompt is no evidence of
+   *    sign-in — live, that standby flipped readiness back to ready 100–200 ms after the
+   *    rejection. Codex rejects AT `session/new`, so a clean one IS proof there.
    */
-  private markAgentReady(agentId: string): void {
+  private markAgentReady(agentId: string, via: "session-new" | "prompt"): void {
+    if (
+      via === "session-new" &&
+      getAgentSetup(agentId)?.signIn.rejectedAt === "prompt" &&
+      this.readiness.get(agentId)?.state === "needs-auth"
+    ) {
+      return;
+    }
     this.setReadiness(agentId, { state: "ready" });
   }
 
@@ -1740,12 +2191,81 @@ export class SessionManager {
     const message =
       promptErrorNote(err, agentId, context) ??
       `${agentId} needs to be signed in before it can start a chat.`;
+    // The wizard's confirmation is a UI gate, and this is the one observation
+    // that proves it wrong. Only the wizard's agents have one.
+    if (isSetupAgentId(agentId)) {
+      try {
+        clearSignInConfirmation(agentId);
+      } catch (clearErr) {
+        logger.warn(
+          { tag: "session-manager", op: "clear_sign_in_confirmation_failed", agentId, err: clearErr },
+          "could not clear the sign-in confirmation",
+        );
+      }
+    }
     this.setReadiness(agentId, {
       state: "needs-auth",
       agentId,
       message,
-      remedy: signInRemedyFor(agentId),
     });
+  }
+
+  /** Sessions whose CURRENT turn opened with Claude's auth-failure text. */
+  private readonly authRejectedByTextTurn = new Set<string>();
+
+  /**
+   * Claude reported a failed sign-in (an expired OAuth session) as its REPLY TEXT in
+   * a turn that otherwise succeeds — no ACP error, so `isAuthRequiredError` never
+   * sees it. The event handler calls this only when a live claude-code turn OPENS
+   * with CLAUDE_AUTH_FAILURE_TEXT_PREFIX. It is the same observed rejection as a
+   * −32000, so it goes through `markAgentAuthFailure`: needs-auth, and the wizard's
+   * sign-in confirmation cleared.
+   */
+  private markAgentAuthRejectedByText(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return;
+    this.authRejectedByTextTurn.add(sessionId);
+    const err = Object.assign(new Error("Authentication required"), { code: ACP_AUTH_REQUIRED_CODE });
+    this.markAgentAuthFailure(entry.agentId, err, "prompt");
+  }
+
+  /**
+   * The process manager REFUSED to spawn (no usable CLI, or no adapter). That
+   * refusal is itself the readiness answer — the same `not-installed` the start
+   * route reports. Recognised by type only: any other failure, whatever its
+   * message says, leaves readiness alone. Only a spawn can be refused, so this
+   * belongs around `warmProcess`, never around `session/new`.
+   */
+  private markAgentSpawnRefused(agentId: string, err: unknown): void {
+    if (err instanceof AgentSpawnRefusedError) {
+      this.setReadiness(agentId, { state: "not-installed", reason: err.reason.message });
+    }
+  }
+
+  /**
+   * A later user action supersedes an observed auth rejection: the user
+   * confirmed they signed in, or picked the agent again. Readiness goes back to
+   * `unknown` — never `ready`, because nothing here observed the agent working.
+   * From there readiness is observed again: the next clean `session/new` (the
+   * standby that replenishes, say) or returned prompt records `ready`, and a
+   * prompt rejection records `needs-auth` again. Without this, an agent that
+   * rejects auth only at `session/prompt`
+   * has no `session/new` that can undo the observation, and every surface keeps
+   * sending the user back to the sign-in terminal until libi restarts.
+   *
+   * Only the setup wizard's agents; a no-op unless the agent is in `needs-auth`.
+   */
+  forgetObservedAuthFailure(
+    agentId: string,
+    reason: "sign-in-confirmed" | "agent-reselected" = "sign-in-confirmed",
+  ): void {
+    if (!isSetupAgentId(agentId)) return;
+    if (this.readiness.get(agentId)?.state !== "needs-auth") return;
+    logger.info(
+      { tag: "session-manager", op: "forget_observed_auth_failure", agentId, reason },
+      `Forgetting ${agentId}'s observed auth rejection (${reason})`,
+    );
+    this.setReadiness(agentId, { state: "unknown" });
   }
 
   // -------------------------------------------------------------------------
@@ -1821,6 +2341,8 @@ export class SessionManager {
     opts: { awaitStandbyMs?: number } = {},
   ): Promise<AgentReadiness> {
     if (!this.pm) throw new Error("No process manager set");
+    // Picking an agent starts it and sets its standby up, superseding a pending background start.
+    this.agentStartEpoch++;
 
     // Close all active sessions
     const deactivations = this.getActiveSessions().map((s) =>
@@ -1847,8 +2369,24 @@ export class SessionManager {
     // warm — which is what let the sidebar's status dot go green for an agent
     // whose subprocess never came up. It is now set only once we have a
     // process, so the dot can never claim more than we know.
-    await this.pm.warmProcess(agentId);
+    try {
+      await this.pm.warmProcess(agentId);
+    } catch (err) {
+      this.markAgentSpawnRefused(agentId, err);
+      throw err;
+    }
     this._activeAgentId = agentId;
+
+    // Picking the agent again is how the sign-in instructions tell the user to
+    // come back. For an agent that rejects auth only at `session/prompt`, a
+    // `session/new` never clears a `needs-auth` it holds, so forget it here,
+    // before the session work starts: the standby's clean `session/new` below
+    // then records `ready`, and only a prompt can record `needs-auth` again. An
+    // agent that rejects AT `session/new` keeps its state: the standby below
+    // re-tests it.
+    if (getAgentSetup(agentId)?.signIn.rejectedAt === "prompt") {
+      this.forgetObservedAuthFailure(agentId, "agent-reselected");
+    }
 
     // Load sessions from the new agent
     await this.loadInitialSessions(agentId);
@@ -1908,6 +2446,10 @@ export class SessionManager {
 
   /** Gracefully shut down all sessions. */
   async shutdown(): Promise<void> {
+    if (this.shellEnvWatch) {
+      clearInterval(this.shellEnvWatch);
+      this.shellEnvWatch = null;
+    }
     const deactivations = this.getActiveSessions().map((s) =>
       this.deactivateSession(s.sessionId)
     );
@@ -1983,6 +2525,7 @@ export class SessionManager {
             this.standbySession.configOptions = configOptions;
           }
         },
+        (sessionId) => this.markAgentAuthRejectedByText(sessionId),
       );
       this.eventHandler.attachJobProgressBridge(
         (toolCallId) => this.findSessionByToolCallId(toolCallId),
@@ -2058,7 +2601,18 @@ export class SessionManager {
 // than keeping an old instance with stale behaviour.
 // ---------------------------------------------------------------------------
 
-const SM_GLOBAL_KEY = "__sessionManager_v2";
+/**
+ * A setup terminal's command may have changed an agent's MCP servers or signed a provider in: once the last one
+ * closed, the session manager `get` returns replaces a stale unclaimed standby, so the next chat is both instant and
+ * current. Returns the unsubscribe.
+ */
+export function refreshStandbyWhenSetupSettles(get: () => Pick<SessionManager, "refreshStaleStandby"> | undefined): () => void {
+  return onSetupTerminalsSettled(() => {
+    get()?.refreshStaleStandby();
+  });
+}
+
+const SM_GLOBAL_KEY = "__sessionManager_v3";
 
 const globalForSM = globalThis as unknown as {
   [SM_GLOBAL_KEY]?: SessionManager;
@@ -2079,6 +2633,8 @@ export function getSessionManager(): SessionManager {
       void reason;
       inst.invalidateStandbySession();
     });
+
+    refreshStandbyWhenSetupSettles(() => globalForSM[SM_GLOBAL_KEY]);
 
     // Wire AgentProcessManager <-> SessionManager via injection to avoid circular imports.
     // AgentProcessManager never imports session-manager; it only calls through these hooks.
@@ -2102,7 +2658,12 @@ export function getSessionManager(): SessionManager {
         pm.registerSessionId(agentId, sessionId),
       unregisterSessionId: (agentId, sessionId) =>
         pm.unregisterSessionId(agentId, sessionId),
+      spawnedWithShellEnv: (agentId) => pm.spawnedWithShellEnv(agentId),
+      restartProcess: (agentId) => pm.restartProcess(agentId),
+      pendingRestart: (agentId) => pm.pendingRestart(agentId),
     });
+    // The desktop app may still be loading the user's shell environment.
+    smRef.watchShellEnvState();
   }
   return sm;
 }

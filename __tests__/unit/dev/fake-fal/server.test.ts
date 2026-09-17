@@ -10,7 +10,7 @@ describe("createFakeFalMcpServer", () => {
   it("registers the mirrored fal tool names", async () => {
     const server = createFakeFalMcpServer();
     const names = registeredToolNames(server);
-    for (const t of ["recommend_model", "get_model_schema", "get_pricing", "run_model", "submit_job", "check_job", "get_job_result", "search_docs"]) {
+    for (const t of ["recommend_model", "get_model_schema", "get_pricing", "run_model", "submit_job", "check_job", "get_job_result", "search_docs", "upload_file"]) {
       expect(names).toContain(t);
     }
   });

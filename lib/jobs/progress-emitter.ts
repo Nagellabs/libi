@@ -26,6 +26,9 @@ export interface JobProgressPayload {
   toolName?: string;
   toolArgs?: unknown;
   progressLabel?: string;
+  /** A NON-job tool's own progress line (`mcp/tools/tool-progress.ts`), shown
+   *  verbatim. Set only on ticks whose `jobId` is "" — there is no job. */
+  message?: string;
 }
 
 class JobProgressEmitter extends EventEmitter {}

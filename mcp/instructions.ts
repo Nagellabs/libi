@@ -1,4 +1,3 @@
-import fs from "fs";
 import { serverLogger as logger } from "@/lib/logger";
 import { isTestMode } from "@/lib/test-mode";
 import { loadBundledTemplate } from "@/lib/instructions/bundled-template";
@@ -11,7 +10,10 @@ const END_MARKER = "<!-- libi-instructions-end -->";
 const MEMORIES_START = "<!-- libi-memories-start -->";
 const MEMORIES_END = "<!-- libi-memories-end -->";
 
-const TEST_MODE_BANNER = `
+/**
+ * The full test-mode banner, injected into the FULL manual (`getInstructions`).
+ */
+export const TEST_MODE_BANNER = `
 > 🧪 **TEST MODE ACTIVE** — \`LIBI_TEST_MODE=1\` is set. The \`fal-ai\` MCP
 > is present but runs as a sandboxed fake: it exposes the real fal tool surface
 > (\`recommend_model\`, \`run_model\`, \`submit_job\`, etc.) but returns
@@ -24,6 +26,45 @@ const TEST_MODE_BANNER = `
 > would in production; the placeholder outputs confirm the pipeline end-to-end
 > without spending credits.
 `;
+
+/**
+ * Claude Code truncates a server's `instructions` at this many characters.
+ * Everything `renderInstructionsCore` returns has to fit inside it.
+ */
+export const INSTRUCTIONS_CORE_CAP = 2048;
+
+/**
+ * How much of that cap must stay unspent, asserted by
+ * `__tests__/unit/mcp/instructions-core.test.ts`.
+ *
+ * The point is that the budget is visible BEFORE it is blown. The core plus
+ * the test-mode banner used to leave 68 characters — one added sentence from
+ * silent truncation, with nothing failing until it happened. 150 is the floor;
+ * the actual slack today is comfortably above it, which is the state to keep.
+ */
+export const INSTRUCTIONS_CORE_MIN_SLACK = 150;
+
+/**
+ * The same fact as `TEST_MODE_BANNER`, condensed for the TIERED instructions
+ * core (`renderInstructionsCore`) — the full 818-character version does not
+ * fit in what is left of `INSTRUCTIONS_CORE_CAP`. It carries the one thing the
+ * agent must not get wrong (the output is a placeholder, not real AI) and
+ * defers the detail to `libi.read_manual`.
+ *
+ * Built from the fakes ACTUALLY attached, and `null` when there are none: a
+ * skill-eval scenario with `mcps: []` gets no fake fal and no fake ElevenLabs
+ * (`POST /api/skill-eval/configure`), and announcing tools the agent does not
+ * have is precisely what the `_meta/no-provider` scenario exists to catch.
+ */
+export function testModeCoreBanner(fakeNames: readonly string[]): string | null {
+  if (fakeNames.length === 0) return null;
+  const names = fakeNames.map((n) => `\`${n}\``).join(" and ");
+  const verb = fakeNames.length === 1 ? "is a sandboxed fake" : "are sandboxed fakes";
+  return (
+    `> 🧪 **TEST MODE** — ${names} ${verb}: the real tool surface, ` +
+    `placeholder media, zero cost. Use them as in production; never promise real AI output.`
+  );
+}
 
 /** Active template: the user's override when present, else the bundled one. */
 function resolveTemplate(): string {
@@ -88,31 +129,4 @@ export function getInstructionContent(): string {
     return lines.slice(startLine + 1, endLine).join("\n").trim();
   }
   return full;
-}
-
-export function parseInstructionVersion(content: string): string | null {
-  const match = content.match(/<!-- libi-instructions-start v([\d.]+) -->/);
-  return match ? match[1] : null;
-}
-
-export function upsertInstructions(filePath: string): void {
-  const instructions = getInstructions();
-
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, instructions);
-    return;
-  }
-
-  const existing = fs.readFileSync(filePath, "utf-8");
-  const startIdx = existing.indexOf(START_MARKER);
-  const endIdx = existing.indexOf(END_MARKER);
-
-  if (startIdx !== -1 && endIdx !== -1) {
-    const before = existing.slice(0, startIdx);
-    const after = existing.slice(endIdx + END_MARKER.length);
-    const combined = (before + instructions + after).replace(/\n*$/, "\n");
-    fs.writeFileSync(filePath, combined);
-  } else {
-    fs.appendFileSync(filePath, "\n\n---\n\n" + instructions);
-  }
 }

@@ -14,7 +14,8 @@ interface ForwardOptions {
     params: {
       progressToken: string | number;
       progress: number;
-      total: number;
+      /** Omitted for an indeterminate job — see the note in the handler. */
+      total?: number;
       message?: string;
     };
   }) => Promise<void>;
@@ -40,13 +41,19 @@ export function forwardJobProgressViaMcp(opts: ForwardOptions): () => void {
 
   const handler = (p: { jobId: string; done: number; total: number; unit: string }) => {
     if (p.jobId !== jobId) return;
-    const message = `${p.done}/${p.total} ${p.unit}`;
+    // `total: 0` is how a job says "size unknown" (a yt-dlp stream with no
+    // Content-Length, JobManager's own 0/0 baseline stamp). The MCP progress
+    // notification represents that by OMITTING `total`, so the client renders
+    // an indeterminate bar. Clamping it to 1 instead told the agent "43/1
+    // bytes" and climbing, which it faithfully relayed to the user.
+    const indeterminate = p.total <= 0;
+    const message = indeterminate ? `${p.done} ${p.unit}` : `${p.done}/${p.total} ${p.unit}`;
     void sendNotification({
       method: "notifications/progress",
       params: {
         progressToken,
         progress: p.done,
-        total: Math.max(p.total, 1),
+        ...(indeterminate ? {} : { total: p.total }),
         message,
       },
     }).catch((err) => {

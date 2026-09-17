@@ -46,8 +46,6 @@ export interface OpenDecisionInput {
   env?: Record<string, string | undefined>;
   /** Dev checkouts default to OFF — see the header. */
   isDevCheckout: boolean;
-  /** `--connect-agent` serves headless for someone else's CLI. */
-  connectAgent?: boolean;
 }
 
 /**
@@ -59,9 +57,8 @@ export function shouldOpenBrowser({
   flag,
   env = process.env,
   isDevCheckout,
-  connectAgent = false,
 }: OpenDecisionInput): boolean {
-  // An explicit flag wins over everything below it, including connect-agent.
+  // An explicit flag wins over everything below it.
   if (typeof flag === "boolean") return flag;
 
   const configured = env.LIBI_OPEN?.trim().toLowerCase();
@@ -69,9 +66,6 @@ export function shouldOpenBrowser({
     if (TRUTHY.has(configured)) return true;
     if (FALSY.has(configured)) return false;
   }
-
-  // Headless by definition: the user is driving their own CLI elsewhere.
-  if (connectAgent) return false;
 
   // CI runners have no desktop session; on some Linux images `xdg-open` hangs
   // rather than failing, which would burn the launch timeout on every job.

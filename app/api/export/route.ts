@@ -9,6 +9,7 @@ import { resolveExportSettings } from "@/lib/export/quality";
 import { resolveExportFolder, getExportDefaults } from "@/lib/db/settings";
 import { isFolderWritable, ensureFolderExists } from "@/lib/export/folder";
 import { exportLogger } from "@/lib/logger";
+import { chromiumInstalled, CHROMIUM_DOWNLOAD_MB } from "@/lib/export/ensure-chromium";
 
 /** Body accepted by POST /api/export. All fields except pieceId are optional —
  *  defaults come from the export-defaults settings + the piece's composition. */
@@ -113,6 +114,15 @@ export async function POST(req: Request): Promise<Response> {
   // collision-suffix logic so concurrent exports never overwrite each other.
   const filename = (body.filename?.trim() || piece.name).trim();
 
+  // Tell the caller, at enqueue time, whether this export may begin with a
+  // ~173 MB download. The MCP tool relays it as a progress notification before
+  // it starts waiting, so the agent can say so to the user rather than
+  // discovering it in a job that has already begun. The route does not
+  // classify — that needs the loaded composition, which the runner does —
+  // so "Chromium is absent" is the honest, cheap answer: it can over-warn for
+  // an ffmpeg-only export, never under-warn.
+  const chromiumDownloadMb = (await chromiumInstalled()) ? null : CHROMIUM_DOWNLOAD_MB;
+
   const mgr = getJobManager();
   const enq = await mgr.enqueue(
     "export",
@@ -173,6 +183,7 @@ export async function POST(req: Request): Promise<Response> {
     jobId: enq.jobId,
     destFolder,
     filename,
+    chromiumDownloadMb,
     settings: {
       format: settings.format,
       width: settings.width,

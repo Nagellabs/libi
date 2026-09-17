@@ -73,13 +73,15 @@ files:
   # ~/.libi/node_modules (bundled MCPs) and NOT ~/.libi/agent (the agent
   # workspace), both of which exist and are one glance away from a misdiagnosis.
   #
-  # NB: @agentclientprotocol/codex-acp is Apache-2.0 and stays bundled — inside
-  # the runtime snapshot, where it is a production dependency. It shares the
-  # @agentclientprotocol scope with the EXCLUDED claude adapter, which is why
-  # the exclusion below names `claude-agent-acp` explicitly rather than the
-  # scope: widening it to `@agentclientprotocol/**` would silently unship Codex.
-  # Its engine (@openai/codex + @openai/codex-<platform>-<arch>) is Apache-2.0
-  # too, so the whole codex chain is redistributable.
+  # NB: @agentclientprotocol/codex-acp is Apache-2.0 and was bundled until
+  # 2026-09-08. It is now a devDependency installed at runtime into
+  # ~/.libi/agents/node_modules alongside the Claude adapter — not for licence
+  # reasons (its engine, @openai/codex + @openai/codex-<platform>-<arch>, is
+  # Apache-2.0 and freely redistributable) but for SIZE: the platform binary is
+  # ~258 MB that every user paid for whether or not they chose Codex. The
+  # exclusion below still names `claude-agent-acp` explicitly rather than the
+  # scope, because widening it to `@agentclientprotocol/**` would be a licence
+  # statement about a package that is not proprietary.
   #
   # The runtime snapshot enforces the same invariant STRUCTURALLY rather than by
   # glob: it is an `npm install --omit=dev`, so the adapter is excluded by the

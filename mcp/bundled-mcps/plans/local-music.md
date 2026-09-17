@@ -30,10 +30,20 @@ Wait for explicit approval before any download step.
 
 ## 2. Confirm `uv` is present
 
-Local music runs ACE-Step through the bundled `uv`. Call
-`libi.list_bundled_mcps` and check the `local-music` row's dependencies —
-`uv` should be `installed` (tier-1, installed at boot). If not, something
-is wrong with the base install; tell the user.
+Local music runs ACE-Step through libi's own `uv`. It is a dependency of this
+extension (not part of the base install), so it may not be on disk yet. The
+`libi.get_install_plan({ mcpId: "local-music" })` result that gave you this plan
+carries a `dependencies` array — find the entry with `binary: "uv"`:
+
+- `installed: true` — carry on to step 3.
+- `installed: false` — libi downloads it from the Agents → Libi MCP
+  tab: call `libi.show_extension({ extensionId: "local-music" })` and ask the user to
+  press **Download** next to `uv` on that card, then re-run
+  `libi.get_install_plan` to confirm before continuing. Do not try to install
+  `uv` yourself, and do not go on to step 3 without it — the model download
+  runs through `uv` and fails without it.
+- `dependenciesError` set — the readout itself failed; tell the user what it
+  says rather than guessing.
 
 ## 3. Download the model
 
@@ -98,10 +108,10 @@ is a stored audio file — add it to the composition with
 
 ## 7. Model updates
 
-If `libi.list_bundled_mcps` later shows the `ace-step` model dep as not
-installed even though it was (a newer pinned model version shipped in a
-libi update), tell the user a newer model is available (~8.3 GB) and, on
-approval, re-run `libi.music_download_model()`.
+If the Agents → Libi MCP tab later shows the `ace-step`
+model dep as not installed even though it was (a newer pinned model
+version shipped in a libi update), tell the user a newer model is
+available (~8.3 GB) and, on approval, re-run `libi.music_download_model()`.
 
 ## Paid / licensed music
 

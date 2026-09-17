@@ -5,7 +5,7 @@ import { isWindows } from "@/lib/platform";
 
 /**
  * All MCP child spawns must build env via this function — both probe
- * (`server-prober.ts`) and live (`lib/mcp-config.ts:buildMcpServers`).
+ * (`server-prober.ts`) and live (`lib/mcp-config.ts`'s entry builders).
  *
  * Build the spawn env for an MCP child process.
  *

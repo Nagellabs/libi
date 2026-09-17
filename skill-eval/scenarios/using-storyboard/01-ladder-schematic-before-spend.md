@@ -29,7 +29,8 @@ assertions:
   - { endpoint_id: "bytedance/seedance-2.0/image-to-video*", expect: present }
   - { endpoint_id: "bytedance/seedance-2.0/text-to-video*", expect: absent }
   # Two scenes were requested — must not balloon into many extra generations.
-  - { endpoint_id: "bytedance/seedance-2.0/*", count: "<=4" }
+  - { tool: submit_job, endpoint_id: "bytedance/seedance-2.0/*", count: "<=2" }
+  - { tool: run_model, endpoint_id: "bytedance/seedance-2.0/*", count: "<=2" }
 ```
 
 ## Behavioral expectations

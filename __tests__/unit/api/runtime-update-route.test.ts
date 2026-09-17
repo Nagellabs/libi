@@ -74,7 +74,10 @@ vi.mock("@/lib/runtime/shell-update", () => ({
 }));
 
 let updateStatus: UpdateStatus;
-vi.mock("@/lib/runtime/update-check", () => ({
+// Keep the real isNewer/compareVersions — the route's version-scoping of
+// latestInstallJob relies on them — and mock only the network-hitting check.
+vi.mock("@/lib/runtime/update-check", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
   checkForRuntimeUpdate: vi.fn(async () => updateStatus),
 }));
 
@@ -105,6 +108,16 @@ async function loadRoute() {
 }
 
 const GET_URL = "http://x/api/runtime/update";
+
+/** Fresh route module, GET it, and parse the DTO. Used by the `latestInstallJob`
+ *  version-scoping tests below, which only care about the response body. */
+async function getDto() {
+  const { GET } = await loadRoute();
+  const res = await GET(new Request(GET_URL));
+  return (await res.json()) as {
+    install: { status: string; version: string | null } | null;
+  };
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -195,6 +208,29 @@ describe("GET auto-download", () => {
       { forceNew: true },
     );
     expect(manager.runToCompletion).toHaveBeenCalledWith("job-retry");
+  });
+});
+
+describe("latestInstallJob version scoping", () => {
+  it("reports no install for a job whose version is already running", async () => {
+    currentRuntime = { ...packaged(), version: "0.1.13" };
+    latestJobRow = { status: "running", version: "0.1.13" };
+    const dto = await getDto();
+    expect(dto.install).toBeNull();
+  });
+
+  it("reports no install for a FAILED job at the version now running", async () => {
+    currentRuntime = { ...packaged(), version: "0.1.13" };
+    latestJobRow = { status: "failed", version: "0.1.13" };
+    const dto = await getDto();
+    expect(dto.install).toBeNull();
+  });
+
+  it("still reports an install for a newer version", async () => {
+    currentRuntime = { ...packaged(), version: "0.1.12" };
+    latestJobRow = { status: "running", version: "0.1.13" };
+    const dto = await getDto();
+    expect(dto.install?.version).toBe("0.1.13");
   });
 });
 

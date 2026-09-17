@@ -33,18 +33,11 @@ export function useTerminalSessions(enabled = true) {
 export function useCreateTerminal() {
   const queryClient = useQueryClient();
   return useMutation({
-    // Accepts either a bare cliId (the common case) or `{ cliId, initialInput }`
-    // when the caller wants a command waiting at the prompt — see the sign-in
-    // remedies in lib/agents/terminal-remedy.ts. `initialInput` is typed but
-    // NOT run.
-    mutationFn: async (
-      arg: string | { cliId: string; initialInput?: string },
-    ): Promise<TerminalSessionMeta> => {
-      const payload = typeof arg === "string" ? { cliId: arg } : arg;
+    mutationFn: async (cliId: string): Promise<TerminalSessionMeta> => {
       const res = await fetch("/api/terminal/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ cliId }),
       });
       if (!res.ok) {
         const body = (await res.json().catch(() => ({}))) as { error?: string };

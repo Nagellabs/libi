@@ -16,19 +16,15 @@ export function shouldPromptForAcp(mode: ApprovalMode): boolean {
   return mode === "ask";
 }
 
-export function shouldPromptForGeneration(mode: ApprovalMode): boolean {
-  return mode === "ask" || mode === "auto";
-}
-
 export const APPROVAL_MODE_LABELS: Record<ApprovalMode, string> = {
   ask: "Ask each time",
   auto: "Auto",
-  "auto-with-generations": "Auto + generations",
+  "auto-with-generations": "Auto, no extension prompts",
 };
 
 export const APPROVAL_MODE_DESCRIPTIONS: Record<ApprovalMode, string> = {
   ask: "Approve every tool call before it runs.",
-  auto: "Run tools automatically. Generation tools (ElevenLabs, fal.ai) still need approval.",
+  auto: "Run tools automatically. libi extensions marked “requires approval” still ask first.",
   "auto-with-generations":
-    "Run everything automatically — including paid generation tools that spend credits.",
+    "Run everything automatically — including extensions marked “requires approval”. Your provider MCPs keep their own approval behaviour.",
 };

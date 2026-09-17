@@ -9,6 +9,8 @@ const baseDef: BundledMcpDef = {
   id: "test-pkg",
   name: "Test",
   description: "",
+  kind: "extension",
+  toolPrefixes: [],
   npmUrl: null,
   type: "stdio",
   command: "npx",

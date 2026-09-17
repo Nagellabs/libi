@@ -29,7 +29,7 @@ import { serverLogger as logger } from "@/lib/logger";
 import { describeCurrentRuntime } from "@/lib/runtime/current-runtime";
 import { pendingRuntimeVersion } from "@/lib/runtime/installed-runtimes";
 import { getShellUpdater, type ShellUpdateStatus } from "@/lib/runtime/shell-update";
-import { checkForRuntimeUpdate, type UpdateStatus } from "@/lib/runtime/update-check";
+import { checkForRuntimeUpdate, isNewer, type UpdateStatus } from "@/lib/runtime/update-check";
 
 const LOG_TAG = "runtime-update";
 export const RUNTIME_UPDATE_JOB_KIND = "runtime_update";
@@ -56,8 +56,19 @@ export interface RuntimeUpdateDto {
   shell: ShellUpdateStatus | null;
 }
 
-/** Latest `runtime_update` row, with the version pulled out of its params. */
-function latestInstallJob(): (JobStatusSnapshot & { version: string | null }) | null {
+/** Latest `runtime_update` row, with the version pulled out of its params.
+ *
+ *  Scoped to jobs about a version NEWER than what is running. A row for the version
+ *  already loaded is history: the UI renders `install` in the present tense, so an old
+ *  row becomes "Downloading Libi 0.1.13" on a machine already running 0.1.13, or — when
+ *  boot recovery marked a finished-but-unrecorded install `failed` — "the update didn't
+ *  download, so Libi is still running 0.1.13" about the version it did install.
+ *
+ *  A null `currentVersion` means we could not read what is running; the row is then the
+ *  only information there is, so it is reported unfiltered. */
+function latestInstallJob(
+  currentVersion: string | null,
+): (JobStatusSnapshot & { version: string | null }) | null {
   try {
     const db = getDb();
     const [row] = db
@@ -75,6 +86,7 @@ function latestInstallJob(): (JobStatusSnapshot & { version: string | null }) | 
     } catch {
       /* a row we cannot parse still has a useful status */
     }
+    if (currentVersion && version && !isNewer(version, currentVersion)) return null;
     return { ...snapshotFromRow(row), version };
   } catch (err) {
     // A degraded DB (libi has a documented migration-failed mode) must not
@@ -136,7 +148,7 @@ export async function GET(req: Request): Promise<Response> {
   const pendingVersion = current.updatesSupported
     ? pendingRuntimeVersion(current.version)
     : null;
-  let install = current.updatesSupported ? latestInstallJob() : null;
+  let install = current.updatesSupported ? latestInstallJob(current.version) : null;
 
   // ── Auto-download ─────────────────────────────────────────────────────
   // The check just said an installable update exists; start fetching it.
@@ -161,7 +173,7 @@ export async function GET(req: Request): Promise<Response> {
       );
       // Reflect the download this response just started, so the client's
       // first poll already renders "downloading" instead of a stale offer.
-      install = latestInstallJob();
+      install = latestInstallJob(current.version);
     } catch (err) {
       logger.warn(
         { tag: LOG_TAG, op: "auto_install_failed", version: update.latestVersion, err: String(err) },

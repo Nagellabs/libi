@@ -54,25 +54,3 @@ export async function checkBinary(name: string): Promise<AuxResult> {
     return { name, ok: false, detail: `${name} failed: ${e.message}` };
   }
 }
-
-/**
- * Check whether an env var is present in the row's `envVars` JSON.
- * Reports ok / not-ok WITHOUT leaking the value — critical for API keys.
- */
-export function checkEnvVar(
-  row: { envVars: string | null | undefined },
-  key: string,
-): AuxResult {
-  if (!row.envVars) return { name: key, ok: false, detail: "missing from row.envVars" };
-  let parsed: Record<string, string>;
-  try {
-    parsed = JSON.parse(row.envVars);
-  } catch {
-    return { name: key, ok: false, detail: "row.envVars is malformed JSON" };
-  }
-  const value = parsed[key];
-  if (!value || value === "") {
-    return { name: key, ok: false, detail: "missing — ask user to provide" };
-  }
-  return { name: key, ok: true, detail: "set" };
-}

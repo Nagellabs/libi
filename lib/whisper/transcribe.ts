@@ -4,7 +4,7 @@ import { spawn } from "child_process";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
 import { resolveWhisperModel, whisperModelsDir } from "@/lib/whisper/models";
-import type { ElevenLabsTranscription } from "@/lib/elevenlabs/transcribe";
+import type { SttTranscription } from "@/lib/analysis/types";
 import { hashSpec } from "@/lib/uv-env/hash-spec";
 import { isTokenCurrent, writeInstallToken } from "@/lib/uv-env/install-token";
 import { packageRoot } from "@/lib/runtime/package-root";
@@ -46,7 +46,7 @@ export class WhisperTranscribeError extends Error {
 
 function whisperScriptPath(): string {
   // cwd is the package root under `npx libi`, but the *user's* project dir
-  // under `npx libi --connect-agent` — so fall back to a __dirname-relative
+  // under `npx @nagellabs/libi` — so fall back to a __dirname-relative
   // path (this file lives at <pkg>/lib/whisper/, script at <pkg>/mcp/whisper/).
   const candidates = [
     path.join(process.cwd(), "mcp/whisper/transcribe.py"),
@@ -89,7 +89,7 @@ export function buildWhisperArgs(opts: {
   return args;
 }
 
-export function parseWhisperStdout(stdout: string): ElevenLabsTranscription {
+export function parseWhisperStdout(stdout: string): SttTranscription {
   const trimmed = stdout.trim();
   if (!trimmed)
     throw new WhisperTranscribeError("whisper produced empty stdout");
@@ -110,7 +110,7 @@ export function parseWhisperStdout(stdout: string): ElevenLabsTranscription {
       `whisper JSON missing 'text': ${JSON.stringify(json).slice(0, 200)}`,
     );
   }
-  const typed = json as ElevenLabsTranscription;
+  const typed = json as SttTranscription;
   if (!Array.isArray(typed.words)) typed.words = [];
   return typed;
 }
@@ -170,7 +170,7 @@ export async function transcribeAudio(opts: {
   audioPath: string;
   model?: string;
   languageCode?: string;
-}): Promise<ElevenLabsTranscription> {
+}): Promise<SttTranscription> {
   const model = resolveWhisperModel(opts.model);
   const args = buildWhisperArgs({
     scriptPath: whisperScriptPath(),

@@ -44,6 +44,27 @@ describe("NoPieceEmptyState", () => {
     expect(props.onToggleChat).toHaveBeenCalledTimes(1);
   });
 
+  it("says why the agent can't chat yet, in one line, with a Set up an agent link to its setup", () => {
+    renderState({
+      setupAgent: {
+        message: "Codex isn't set up yet — open Agents to install it.",
+        href: "/agents?tab=agents&agent=codex",
+      },
+    });
+    expect(screen.getByText("Codex isn't set up yet — open Agents to install it.")).toBeInTheDocument();
+    const link = screen.getByRole("link", { name: /set up an agent/i });
+    expect(link).toHaveAttribute("href", "/agents?tab=agents&agent=codex");
+    expect(link.className).toContain("cursor-pointer");
+    // Pieces are still reachable — the notice is an answer, not a wall.
+    expect(screen.getByRole("button", { name: /new piece/i })).toBeInTheDocument();
+  });
+
+  it("renders no setup notice when the agent can chat", () => {
+    renderState();
+    expect(screen.queryByTestId("setup-agent-notice")).toBeNull();
+    expect(screen.queryByRole("link", { name: /set up an agent/i })).toBeNull();
+  });
+
   it("omits toggles when no handlers are provided", () => {
     renderState({ onToggleChat: undefined, onToggleResources: undefined });
     expect(screen.queryByTitle(/chat/i)).not.toBeInTheDocument();

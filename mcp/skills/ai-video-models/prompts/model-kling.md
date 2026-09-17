@@ -1,3 +1,8 @@
+---
+prompt_kind: model-guide
+model: Kling
+---
+
 # Model — Kling
 
 Alternative model — used when the user overrides the Seedance 2.0 default. See
@@ -6,9 +11,9 @@ SKILL.md model-selection policy.
 Kling is the Tier-1 pick for fine manipulation and close-ups: it has the best
 2026 hands/close-up fidelity and the strongest object permanence, so it's the
 model to escalate to when a beat keeps morphing or losing the product mid-motion.
-Verify capabilities + pricing at runtime via fal `recommend_model` /
-`get_model_schema` / `get_pricing` — never trust a hardcoded model id; better
-models ship every few weeks.
+Endpoint ids and the tools to confirm them are in
+[references/providers/fal.md](../references/providers/fal.md) — verify capabilities and
+pricing at runtime; never trust a hardcoded model id, better models ship every few weeks.
 
 Banned tokens (script + visual layers): see the `forbidden-words.md` prompt in the
 `ugc-product-video` skill. Paraphrase any banned token in the brief before composing.
@@ -17,13 +22,14 @@ Banned tokens (script + visual layers): see the `forbidden-words.md` prompt in t
 
 For a manipulation beat, pinning the END state is the structural fix for "object
 disappears mid-motion" — Kling is forced to arrive at the final state instead of
-improvising. Endpoint: `fal-ai/kling-video/o1/image-to-video`, where:
+improvising. On fal this is the `o1/image-to-video` endpoint (see
+[references/providers/fal.md](../references/providers/fal.md)), where:
 
 - `@Image1` = the **start** frame (first image)
 - `@Image2` = the **end** frame (last image)
 
-Kling 2.5 Turbo also exposes start/end inputs — confirm the exact field shape via
-`get_model_schema` before assuming. Generate clean start + end keyframes, then
+Kling 2.5 Turbo also exposes start/end inputs — confirm the exact field shape with
+your provider's schema tool before assuming. Generate clean start + end keyframes, then
 **Vision-Read both** and confirm anatomy + product geometry BEFORE spending video
 credits — the output is only as stable as the keyframes; flaws compound.
 

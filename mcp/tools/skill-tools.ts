@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
-import { skills as skillsTable, mcpServers } from "@/lib/db/schema";
+import { skills as skillsTable } from "@/lib/db/schema";
 import { getLibiSkillsDir, getBundledSkillsDir } from "@/lib/libi-home";
 import { mcpLogger as logger } from "@/lib/logger";
 import { parseSkillBody } from "@/mcp/skills/frontmatter";
@@ -28,7 +28,6 @@ import type {
   UpdateSkillParams,
   RemoveSkillParams,
   SetSkillEnabledParams,
-  ListMcpServersParams,
   ListSkillPromptsParams,
   AddSkillPromptParams,
   UpdateSkillPromptParams,
@@ -263,25 +262,6 @@ export async function setSkillEnabled(
     .run();
   await syncSkillsToWorkspace();
   return ok({ id: row.id, enabled: params.enabled });
-}
-
-export async function listMcpServersTool(
-  _ctx: ToolContext,
-  _params: ListMcpServersParams,
-): Promise<SkillToolResult> {
-  const rows = getDb().select().from(mcpServers).all();
-  return ok({
-    servers: rows
-      .filter((r) => r.enabled)
-      .map((r) => ({
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        type: r.type,
-        installStatus: r.installStatus,
-        bundled: r.bundled,
-      })),
-  });
 }
 
 // ---------------------------------------------------------------------------

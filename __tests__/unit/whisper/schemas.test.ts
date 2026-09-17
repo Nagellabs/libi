@@ -6,19 +6,13 @@ import {
 } from "@/mcp/tools/schemas";
 
 describe("whisper schemas", () => {
-  it("analysisTranscribeAudioSchema accepts provider+model", () => {
+  it("analysisTranscribeAudioSchema accepts model and has no provider field", () => {
     const p = analysisTranscribeAudioSchema.parse({
       fileId: "x",
-      provider: "whisper",
       model: "small",
     });
-    expect(p.provider).toBe("whisper");
     expect(p.model).toBe("small");
-  });
-  it("analysisTranscribeAudioSchema rejects bad provider", () => {
-    expect(() =>
-      analysisTranscribeAudioSchema.parse({ fileId: "x", provider: "nope" }),
-    ).toThrow();
+    expect("provider" in analysisTranscribeAudioSchema.shape).toBe(false);
   });
   it("whisperListModelsSchema is empty object", () => {
     expect(whisperListModelsSchema.parse({})).toEqual({});

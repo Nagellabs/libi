@@ -7,11 +7,9 @@ import {
   registerBuiltinRunners,
   getRunner,
 } from "@/lib/jobs/runners/registry";
-import { trackingProviderRunner } from "@/lib/jobs/runners/tracking-provider";
 import { trackingRunner } from "@/lib/jobs/runners/tracking";
 import type { TrackingParams } from "@/lib/jobs/runners/tracking";
 import type { JobContext } from "@/lib/jobs/types";
-import type { TrackingProviderParams } from "@/lib/jobs/runners/tracking-provider";
 
 vi.mock("@/lib/tracking/not-installed", () => ({
   trackingEngineInstalled: () => true,
@@ -277,67 +275,5 @@ describe("trackingRunner — http(s) fileUrl SSRF guard (engine http-to-tempfile
     // `dispatcher` from the fetch() call entirely (I1's proof case) makes
     // this `undefined` and fails here.
     expect(dispatcherArg).toBe(pinnedDispatcher);
-  });
-});
-
-describe("trackingProviderRunner registration", () => {
-  beforeEach(() => __resetRunnerRegistryForTests());
-
-  it("registers under kind=\"tracking_provider\" with maxConcurrent=2", () => {
-    registerBuiltinRunners();
-    const r = getRunner("tracking_provider");
-    expect(r).toBeTruthy();
-    expect(r!.kind).toBe("tracking_provider");
-    expect(r!.maxConcurrent).toBe(2);
-    expect(r!.resumable).toBe(true);
-  });
-
-  it("tracking and tracking_provider are independently registered", () => {
-    registerBuiltinRunners();
-    expect(getRunner("tracking")).toBeTruthy();
-    expect(getRunner("tracking_provider")).toBeTruthy();
-    expect(getRunner("tracking")!.kind).not.toBe(getRunner("tracking_provider")!.kind);
-  });
-});
-
-describe("trackingProviderRunner — test-mode gate (Fix A)", () => {
-  afterEach(() => {
-    vi.unstubAllEnvs();
-  });
-
-  it("throws providers_disabled_in_test_mode when LIBI_TEST_MODE=1", async () => {
-    vi.stubEnv("LIBI_TEST_MODE", "1");
-
-    const ctx = {
-      jobId: "test-job",
-      params: {} as TrackingProviderParams,
-      resumeState: undefined,
-      reportProgress: vi.fn(),
-      checkpoint: vi.fn(),
-      shouldCancel: vi.fn().mockReturnValue(false),
-    } satisfies JobContext<TrackingProviderParams>;
-
-    await expect(trackingProviderRunner.run(ctx)).rejects.toThrow(
-      "providers_disabled_in_test_mode",
-    );
-  });
-
-  it("does not throw the test-mode error when LIBI_TEST_MODE is unset", async () => {
-    vi.stubEnv("LIBI_TEST_MODE", "");
-
-    const ctx = {
-      jobId: "test-job",
-      params: {} as TrackingProviderParams,
-      resumeState: undefined,
-      reportProgress: vi.fn(),
-      checkpoint: vi.fn(),
-      shouldCancel: vi.fn().mockReturnValue(false),
-    } satisfies JobContext<TrackingProviderParams>;
-
-    // Will fail further down (unknown provider / backend error) — that's fine.
-    // We're only asserting the test-mode gate is not triggered.
-    await expect(trackingProviderRunner.run(ctx)).rejects.not.toThrow(
-      "providers_disabled_in_test_mode",
-    );
   });
 });

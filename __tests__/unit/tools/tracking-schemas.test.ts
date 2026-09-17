@@ -12,12 +12,12 @@ import { createLibiMcpServer } from "@/mcp/server";
 import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
 
 describe("tracking tool schemas — MCP surface", () => {
-  it("all 12 tracking tools are registered on the libi-tracking MCP", () => {
+  it("all 10 tracking tools are registered on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("all 12 tracking tools appear on the core libi MCP (always-on)", () => {
+  it("all 10 tracking tools appear on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });

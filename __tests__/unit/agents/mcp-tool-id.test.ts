@@ -3,6 +3,7 @@ import {
   makeMcpToolId,
   parseMcpToolId,
   fromAnyToolName,
+  fromCodexToolCall,
   type McpToolId,
 } from "@/lib/agents/mcp-tool-id";
 
@@ -82,11 +83,16 @@ describe("fromAnyToolName", () => {
   // with spaces flattened to underscores. Canonicalization must bridge the
   // two so bundled servers always resolve to their bundled id.
   it("resolves a bundled server registered under its display name", () => {
-    expect(fromAnyToolName("mcp__YouTube_Downloader__ytdlp_search_videos")).toBe(
-      "youtube-downloader:ytdlp_search_videos",
+    expect(fromAnyToolName("mcp__Whisper_(local_STT)__whisper_transcribe")).toBe(
+      "whisper:whisper_transcribe",
     );
+    expect(fromAnyToolName("mcp__Local_TTS_(Kokoro)__tts_list_voices")).toBe(
+      "local-tts:tts_list_voices",
+    );
+    // A user's own provider MCP is not a bundled def: its segment passes
+    // through untouched (libi bundles no third-party MCP).
     expect(fromAnyToolName("mcp__ElevenLabs__text_to_speech")).toBe(
-      "elevenlabs:text_to_speech",
+      "ElevenLabs:text_to_speech",
     );
     expect(fromAnyToolName("mcp__fal-ai__generate_image")).toBe(
       "fal-ai:generate_image",
@@ -112,5 +118,64 @@ describe("fromAnyToolName", () => {
     expect(fromAnyToolName("mcp__solo")).toBeNull();
     expect(fromAnyToolName("mcp__")).toBeNull();
     expect(fromAnyToolName("mcp__server__")).toBeNull();
+  });
+});
+
+// The in-app ACP entry is registered as `libi-app` (lib/mcp-config.ts
+// #IN_APP_MCP_NAME) so it can never collide with the `[mcp_servers.libi]`
+// that `libi connect` writes into the user's codex config. Both agents
+// prefix wire names with that entry name, so the segment must resolve back
+// to the ONE canonical server id (`libi`) — every id-keyed check downstream
+// (the jobs progress bridge, tool labels, the approval gate) compares
+// against ids declared as makeMcpToolId("libi", …).
+describe("the in-app server alias", () => {
+  it("canonicalizes the libi-app wire name to the libi server id", () => {
+    expect(fromAnyToolName("mcp__libi-app__libi_generate_music")).toBe("libi:libi.generate_music");
+    expect(fromAnyToolName("mcp__libi_app__libi_show_in_chat")).toBe("libi:libi.show_in_chat");
+  });
+
+  it("keeps a dotted tool half intact under the alias", () => {
+    expect(fromAnyToolName("mcp__libi-app__libi.get_composition")).toBe("libi:libi.get_composition");
+  });
+
+  // The shape codex-acp 1.10.0 ACTUALLY emits — `mcp.<entry>.<tool>` — and the
+  // older adapter's `<entry>/<tool>`. Both must land on the SAME id the claude
+  // wire name above produces, because that id is what the jobs progress
+  // bridge, the approval gate and the tool labels all key on.
+  //
+  // These two cases used to read `Tool: libi-app/libi-app.libi.list_pieces`
+  // and `libi-app/libi.list_pieces`: an invented doubled-entry title, and a
+  // shape no adapter has emitted. They passed while every real codex MCP call
+  // canonicalized to null. Never assert a wire shape that was not captured.
+  it("canonicalizes the codex title forms too", () => {
+    expect(fromAnyToolName("mcp.libi-app.libi.list_pieces")).toBe("libi:libi.list_pieces");
+    expect(fromAnyToolName("mcp.libi.libi.list_pieces")).toBe("libi:libi.list_pieces");
+    expect(fromAnyToolName("Tool: libi-app/libi.list_pieces")).toBe("libi:libi.list_pieces");
+  });
+
+  // …and the structured payload beside that title, which is the path the
+  // ingest actually takes (`toolIdForCall`).
+  it("canonicalizes the codex structured payload to the same id", () => {
+    expect(
+      fromCodexToolCall({ server: "libi-app", tool: "libi.list_pieces", arguments: {} }),
+    ).toBe("libi:libi.list_pieces");
+    expect(
+      fromCodexToolCall({ server: "libi", tool: "libi.list_pieces", arguments: {} }),
+    ).toBe("libi:libi.list_pieces");
+  });
+
+  it("still canonicalizes the connect name", () => {
+    expect(fromAnyToolName("mcp__libi__libi_list_pieces")).toBe("libi:libi.list_pieces");
+  });
+
+  it("does not alias servers that merely start with libi", () => {
+    expect(fromAnyToolName("mcp__libi-application__do_thing")).toBe("libi-application:do_thing");
+  });
+
+  it("never resolves an alias through Object.prototype", () => {
+    // A user could name an MCP `constructor`; a bare index into the alias
+    // map would hand back Object's constructor function as the server id.
+    expect(fromAnyToolName("mcp__constructor__do_thing")).toBe("constructor:do_thing");
+    expect(fromAnyToolName("mcp__toString__do_thing")).toBe("toString:do_thing");
   });
 });

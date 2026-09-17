@@ -34,7 +34,6 @@ describe("GET /api/sessions", () => {
       state: "needs-auth",
       agentId: "codex",
       message: "codex needs to be signed in before it can run that message.",
-      remedy: null,
     });
 
     const body = await (await GET()).json();

@@ -1,41 +1,56 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink, MoreVertical, Settings as SettingsIcon, Loader2 } from "lucide-react";
+import { ExternalLink, Loader2 } from "lucide-react";
+import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
+import { useEditorState } from "@/lib/editor-state-context";
 import type { McpServerUI } from "@/lib/queries/mcp-servers";
 import {
   useUpdateMcpServer,
-  useDeleteMcpServer,
   useMcpServerDependencies,
   useRetryMcpServer,
   useRetryDependency,
+  useRemoveExtension,
 } from "@/lib/queries/mcp-servers";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Button } from "@/components/ui/button";
+import { isRemovableExtension } from "@/lib/settings/removable-extensions";
 import { DependencyChip, DependencyChipSkeleton } from "./dependency-chip";
-import { McpEnvVarsDialog } from "./mcp-env-vars-dialog";
 import { McpSetupDialog } from "./mcp-setup-dialog";
-import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
+import { EXTENSION_MCP_SERVERS } from "@/mcp/registry/bundled";
+import { PROVIDER_CATALOG } from "@/lib/providers/catalog";
 import { deriveAggregateStatus } from "@/lib/settings/aggregate-status";
 import { hasInstallFailure } from "@/lib/settings/install-failure";
+import { useMcpHealth } from "@/lib/queries/mcp-health";
 
 const CORE_IDS = new Set(["libi"]);
+
+/** Bytes as a short human string, for the "freed N" toast. */
+function formatBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
+  if (bytes >= 1e6) return `${Math.round(bytes / 1e6)} MB`;
+  if (bytes >= 1e3) return `${Math.round(bytes / 1e3)} KB`;
+  return `${bytes} B`;
+}
 
 function InstallStatusBadge({
   status,
@@ -167,8 +182,8 @@ function InstallStatusBadge({
   return null;
 }
 
-function DependencyChips({ id }: { id: string }) {
-  const { data: deps, isLoading } = useMcpServerDependencies(id);
+function DependencyChips({ id, enabled }: { id: string; enabled: boolean }) {
+  const { data: deps, isLoading } = useMcpServerDependencies(id, { enabled });
   const retryDep = useRetryDependency(id);
   if (isLoading || !deps) {
     return (
@@ -192,43 +207,25 @@ function DependencyChips({ id }: { id: string }) {
   );
 }
 
-interface McpServerCardProps {
-  server: McpServerUI;
-  onEdit?: (server: McpServerUI) => void;
-}
-
-export function McpServerCard({ server, onEdit }: McpServerCardProps) {
-  const updateMcp = useUpdateMcpServer();
-  const deleteMcp = useDeleteMcpServer();
-  const retryMutation = useRetryMcpServer();
-
-  const isCore = CORE_IDS.has(server.id);
-
-  const [envDialogOpen, setEnvDialogOpen] = useState(false);
-  const [setupDialogOpen, setSetupDialogOpen] = useState(false);
-
-  const def = BUNDLED_MCP_SERVERS.find((d) => d.id === server.id);
-  const requiredEnvVars = def?.requiredEnvVars ?? [];
-  const showConfigureButton = server.bundled && requiredEnvVars.length > 0;
-  const isPrimaryConfigure = server.installStatus === "needs_config";
-  const isTier2 = (def?.installFlow ?? "tier-1") === "tier-2";
-
-  const { data: depsForBadge } = useMcpServerDependencies(server.id);
-  // Trust server.installStatus for terminal states the dep-aggregate can't
-  // see (needs_config: env var missing; failed: install attempt errored).
-  // Otherwise roll up live per-dep status so mid-flight transitions (chip
-  // changes from pending → installing → installed) update the badge in
-  // real time without waiting on the row-level settle to run.
+/**
+ * The install state a row shows, rolled up from its live dependency
+ * statuses. Trust `server.installStatus` for the terminal states the
+ * dep-aggregate can't see (needs_config: env var missing; failed: the install
+ * attempt errored); otherwise derive from the per-dep statuses so mid-flight
+ * transitions (pending → installing → installed) move the badge in real time
+ * without waiting on the row-level settle. Shared by the core card and every
+ * nested extension row. `enabled: false` stops the poll while the tab is off
+ * screen — the row is still mounted, the fetch is what has to stop.
+ */
+function useInstallState(server: McpServerUI, enabled: boolean) {
+  const { data: deps } = useMcpServerDependencies(server.id, { enabled });
   const aggregateStatus =
     server.installStatus === "needs_config" || server.installStatus === "failed"
       ? server.installStatus
-      : depsForBadge && depsForBadge.length > 0
-        ? deriveAggregateStatus(depsForBadge)
+      : deps && deps.length > 0
+        ? deriveAggregateStatus(deps)
         : server.installStatus;
-
-  const failureDetected =
-    server.bundled && hasInstallFailure(server, depsForBadge);
-
+  const failureDetected = server.bundled && hasInstallFailure(server, deps);
   const setupAction: "install" | "repair" | null = !server.bundled
     ? null
     : failureDetected || aggregateStatus === "failed"
@@ -236,6 +233,282 @@ export function McpServerCard({ server, onEdit }: McpServerCardProps) {
       : aggregateStatus === "pending"
         ? "install"
         : null;
+  return { deps, aggregateStatus, setupAction };
+}
+
+/**
+ * "Server: up/down" + Retry + last error, for a row that spawns a server.
+ * Hidden when the install isn't ready — a probe never ran, so "unknown" or a
+ * stale "down" carries no information and the badge already says the row
+ * needs config / install. Retry shows for every down server: the old
+ * `!isTier2` gate dated from when tier-2 meant "libi tracks nothing".
+ */
+function ServerStatusLine({
+  server,
+  aggregateStatus,
+}: {
+  server: McpServerUI;
+  aggregateStatus: string;
+}) {
+  const retryMutation = useRetryMcpServer();
+  if (server.noServer) return null;
+  if (aggregateStatus !== "installed" && aggregateStatus !== "not_required") return null;
+  return (
+    <>
+      <div className="mt-2 flex items-center gap-2 text-xs">
+        <span className="text-muted-foreground">Server:</span>
+        <span
+          className={cn(
+            "rounded px-1.5 py-0.5 font-medium",
+            server.serverStatus === "up" && "bg-green-500/15 text-green-400",
+            server.serverStatus === "down" && "bg-destructive/15 text-destructive",
+            (server.serverStatus === "unknown" || server.serverStatus === "starting") &&
+              "bg-muted text-muted-foreground",
+          )}
+        >
+          {server.serverStatus}
+        </span>
+        {server.serverStatus === "down" && (
+          <button
+            type="button"
+            onClick={() => retryMutation.mutate(server.id)}
+            disabled={retryMutation.isPending}
+            className="cursor-pointer rounded border border-border px-2 py-0.5 hover:bg-muted disabled:opacity-50"
+          >
+            {retryMutation.isPending ? "Retrying…" : "Retry"}
+          </button>
+        )}
+      </div>
+      {server.serverError && (
+        <details className="mt-1 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">Last error</summary>
+          <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted/40 p-2 text-[11px]">
+            {server.serverError}
+          </pre>
+        </details>
+      )}
+    </>
+  );
+}
+
+/**
+ * One libi extension, nested inside the core card: install
+ * badge, size, dependency chips with progress, server line when it has one,
+ * and the approval switch. There is deliberately NO enable switch — an
+ * extension's tools are always listed and its `enabled` column is ignored
+ * (dropped by the migration); `requireApproval` is what the permission gate
+ * enforces by tool prefix. Keeps its own `#mcp-<id>` anchor so
+ * `libi.show_extension({ extensionId })` scrolls to the nested row.
+ *
+ * The approval switch is annotated when Codex is the active agent, because
+ * there the gate is NOT IMPLEMENTED (`lib/approval/extensions.ts` LIMITATIONS
+ * — buildable, since the nameless codex approval correlates by `toolCallId`,
+ * but not built). QA watched a Codex session install 121 MB and synthesize
+ * speech with `requireApproval` on and no prompt at all, narrating "the plan
+ * asks for approval… I'm proceeding". Rendering the identical control for both
+ * agents made it a claim the product could not keep; the annotation is the
+ * smallest change that stops the claim, and it goes away on its own when the
+ * gate ships.
+ *
+ * Annotated rather than disabled, and keyed on Codex specifically rather than
+ * on "not Claude": the stored preference is per-extension, not per-agent, so it
+ * is still the user's real setting for their next Claude session — disabling
+ * the switch would block them from expressing it. `null` (no agent resolved
+ * yet) and `terminal` (no agent at all, so no MCP tool calls to gate) say
+ * nothing, and must not flash a warning.
+ */
+function ExtensionSettingsRow({ row, polling }: { row: McpServerUI; polling: boolean }) {
+  const { activeProviderId } = useEditorState();
+  const enforcedHere = activeProviderId !== "codex";
+  const updateMcp = useUpdateMcpServer();
+  const removeExtension = useRemoveExtension(row.id);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [setupDialogOpen, setSetupDialogOpen] = useState(false);
+  const { deps, aggregateStatus, setupAction } = useInstallState(row, polling);
+  const def = EXTENSION_MCP_SERVERS.find((d) => d.id === row.id);
+  const sizeNote = PROVIDER_CATALOG.find((p) => p.extensionId === row.id)?.sizeNote;
+  return (
+    <>
+      <div
+        id={`mcp-${row.id}`}
+        data-testid={`extension-row-${row.id}`}
+        className="space-y-2 rounded-lg border border-border p-3"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="truncate text-sm font-medium">{row.name}</span>
+              <InstallStatusBadge
+                status={aggregateStatus}
+                error={row.installError}
+                setupAction={setupAction}
+                onSetupClick={setupAction ? () => setSetupDialogOpen(true) : undefined}
+              />
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {def?.description ?? row.description}
+            </p>
+            {sizeNote ? (
+              <p className="text-[11px] text-muted-foreground">{sizeNote}</p>
+            ) : null}
+          </div>
+          <label className="flex shrink-0 cursor-pointer items-center gap-2 text-[11px]">
+            {enforcedHere ? null : (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span className="cursor-help rounded-full border border-yellow-600/40 bg-yellow-500/10 px-2 py-0.5 text-[10px] font-medium text-yellow-600" />
+                    }
+                  >
+                    not enforced on Codex
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-xs text-xs">
+                    libi enforces this gate for Claude Code only — on Codex it is not
+                    implemented yet. With Codex active the switch asks the agent to
+                    confirm in its plan; it cannot stop a tool call, and an agent can
+                    decide it already has your go-ahead. Your choice is remembered and
+                    takes effect on Claude Code.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger render={<span className="cursor-help" />}>
+                  Require approval
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs">
+                  The agent asks before calling this extension&rsquo;s tools. Turn it on when
+                  they take meaningful time or download something.
+                  {enforcedHere ? null : " libi enforces this for Claude Code only."}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+            <Switch
+              aria-label={`Require approval for ${row.name}`}
+              className="cursor-pointer"
+              size="sm"
+              checked={row.requireApproval}
+              onCheckedChange={(requireApproval) =>
+                // `checked` is the server's value, so a failed PATCH leaves the
+                // switch where it was — the toast is what says why.
+                updateMcp.mutate(
+                  { id: row.id, requireApproval },
+                  {
+                    onError: (err: unknown) => {
+                      toast.error(
+                        err instanceof Error
+                          ? err.message
+                          : `Couldn't update approval for ${row.name}.`,
+                      );
+                    },
+                  },
+                )
+              }
+            />
+          </label>
+        </div>
+        <DependencyChips id={row.id} enabled={polling} />
+        <ServerStatusLine server={row} aggregateStatus={aggregateStatus} />
+        {/* Remove is offered ONLY once there is something to reclaim. On a
+            never-installed extension it would be a button that deletes nothing,
+            and on a shared-only extension (see lib/settings/removable-extensions.ts)
+            it cannot be offered at all. */}
+        {isRemovableExtension(row.id) && aggregateStatus === "installed" ? (
+          <div className="flex justify-end">
+            <Button
+              size="sm"
+              variant="ghost"
+              className="cursor-pointer text-xs text-muted-foreground hover:text-destructive"
+              disabled={removeExtension.isPending}
+              onClick={() => setConfirmingRemove(true)}
+            >
+              Remove
+            </Button>
+          </div>
+        ) : null}
+      </div>
+      {/* Deleting gigabytes off the user's disk is irreversible and takes a
+          re-download to undo, so it confirms — the same shape and the same
+          destructive styling as the connected-provider Remove. */}
+      <AlertDialog open={confirmingRemove} onOpenChange={setConfirmingRemove}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove {row.name}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Deletes the files {row.name} downloaded to this machine
+              {/* sizeNote is a full sentence of its own ("~121 MB model,
+                  downloaded once, then free and offline."); its full stop
+                  inside the parenthesis reads as a typo. */}
+              {sizeNote ? ` (${sizeNote.replace(/\.$/, "")})` : ""}. libi will download them again the
+              next time a tool needs them. Your pieces and settings are untouched.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="cursor-pointer bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => {
+                setConfirmingRemove(false);
+                void removeExtension
+                  .mutateAsync()
+                  .then(({ freedBytes }) => {
+                    toast.success(
+                      freedBytes > 0
+                        ? `Removed ${row.name} — freed ${formatBytes(freedBytes)}.`
+                        : `Removed ${row.name}.`,
+                    );
+                  })
+                  .catch((err: unknown) => {
+                    toast.error(
+                      err instanceof Error ? err.message : `Couldn't remove ${row.name}.`,
+                    );
+                  });
+              }}
+            >
+              Remove
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {setupAction && (
+        <McpSetupDialog
+          open={setupDialogOpen}
+          onOpenChange={setSetupDialogOpen}
+          server={row}
+          deps={deps}
+          action={setupAction}
+        />
+      )}
+    </>
+  );
+}
+
+interface McpServerCardProps {
+  server: McpServerUI;
+  /** libi's extensions, rendered as rows nested inside this card. */
+  extensions?: McpServerUI[];
+  /**
+   * False while the card is mounted but off screen (another tab, hidden
+   * document): every dependency poll on the card and its rows stops.
+   */
+  polling?: boolean;
+}
+
+/**
+ * libi's own card. Its one production caller (`McpServersView`) passes the
+ * core row; the extensions are the rows nested inside it, so there is no
+ * standalone non-core layout here any more.
+ */
+export function McpServerCard({ server, extensions, polling = true }: McpServerCardProps) {
+  const isCore = CORE_IDS.has(server.id);
+  // Only libi's own card shows the aggregator, so only it polls for it.
+  const { data: mcpHealth } = useMcpHealth({ enabled: isCore });
+  const aggregatorDown = mcpHealth ? !mcpHealth.ok : false;
+
+  const [setupDialogOpen, setSetupDialogOpen] = useState(false);
+  const { deps: depsForBadge, aggregateStatus, setupAction } = useInstallState(server, polling);
 
   return (
     <>
@@ -253,22 +526,28 @@ export function McpServerCard({ server, onEdit }: McpServerCardProps) {
               setupAction={setupAction}
               onSetupClick={setupAction ? () => setSetupDialogOpen(true) : undefined}
             />
-            {server.type === "http" && (
+            {/* libi's own card carries the aggregator's health: every tool on
+                this page — HTTP upstreams included — is served through that one
+                endpoint, so when it is down "Installed" is true and useless.
+                (The chip this replaced said "BYO-CLI only", which described a
+                per-folder stdio setup that no longer exists.) */}
+            {isCore && aggregatorDown ? (
               <TooltipProvider>
                 <Tooltip>
                   <TooltipTrigger render={<span className="inline-flex" />}>
-                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-300">
-                      BYO-CLI only
+                    <span className="inline-flex items-center gap-1 rounded-full border border-red-500/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-400">
+                      aggregator down
                     </span>
                   </TooltipTrigger>
                   <TooltipContent>
                     <p className="max-w-xs">
-                      HTTP MCPs run via <code>npx @nagellabs/libi --connect-agent</code> + Claude Code; in-app ACP sessions skip them until upstream support lands.
+                      {mcpHealth?.error ??
+                        "libi's MCP endpoint is not answering — agents have no tools until it comes back."}
                     </p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
-            )}
+            ) : null}
             {server.npmUrl && (
               <a
                 href={server.npmUrl}
@@ -283,154 +562,33 @@ export function McpServerCard({ server, onEdit }: McpServerCardProps) {
           {server.description && (
             <p className="text-sm text-muted-foreground">{server.description}</p>
           )}
-          {/* Tier-2 MCPs are agent-managed end-to-end — per-binary chips would
-              require libi to track each binary's status the way Category A does,
-              which it doesn't for tier-2 (the agent uses uv/npm/etc and doesn't
-              write libi's install-token markers). Tier-1 MCPs (libi core) still
-              show chips because their deps ARE libi-managed. */}
-          {server.bundled && !isTier2 && <DependencyChips id={server.id} />}
-          {!server.bundled && server.type === "stdio" && server.command && (
-            <p className="text-xs text-muted-foreground font-mono">
-              {server.command} {server.args ? JSON.parse(server.args).join(" ") : ""}
-            </p>
-          )}
-          {!server.bundled && server.type === "http" && server.url && (
-            <p className="text-xs text-muted-foreground font-mono">{server.url}</p>
-          )}
-          {/* Hide the "Server: …" line when there's no spawnable server
-              (whisper/local-tts/local-music — `uv run` libraries) or when
-              the install isn't ready (a probe never ran, so "unknown" or
-              a stale "down" carries no information — the badge already
-              tells the user the row needs config / install). */}
-          {!isCore && !server.noServer &&
-            (aggregateStatus === "installed" || aggregateStatus === "not_required") && (
-            <div className="mt-2 flex items-center gap-2 text-xs">
-              <span className="text-muted-foreground">Server:</span>
-              <span
-                className={cn(
-                  "rounded px-1.5 py-0.5 font-medium",
-                  server.serverStatus === "up" && "bg-green-500/15 text-green-400",
-                  server.serverStatus === "down" && "bg-destructive/15 text-destructive",
-                  (server.serverStatus === "unknown" || server.serverStatus === "starting") &&
-                    "bg-muted text-muted-foreground",
-                )}
-              >
-                {server.serverStatus}
-              </span>
-              {server.serverStatus === "down" && !isTier2 && (
-                <button
-                  type="button"
-                  onClick={() => retryMutation.mutate(server.id)}
-                  disabled={retryMutation.isPending}
-                  className="cursor-pointer rounded border border-border px-2 py-0.5 hover:bg-muted disabled:opacity-50"
-                >
-                  {retryMutation.isPending ? "Retrying…" : "Retry"}
-                </button>
-              )}
+          {/* Chips render for every bundled row. The old `!isTier2` gate was
+              written when tier-2 meant "the agent installs this with its own
+              Bash/uv/npm and libi tracks nothing" — true for the MCP packages,
+              false for their BINARY deps, which have always gone through
+              DependencyManager and always written install-token markers. Since
+              2026-09-08 libi installs chromium and mediapipe-vision itself on
+              tier-2 defs, so hiding their state was hiding libi's own work. */}
+          {server.bundled && <DependencyChips id={server.id} enabled={polling} />}
+          {extensions ? (
+            <div className="mt-3 space-y-2 border-t border-border pt-3" data-testid="extension-rows">
+              <h4 className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                Extensions
+              </h4>
+              <p className="text-[11px] text-muted-foreground">
+                Optional pieces libi installs on your machine when a tool first needs them — or
+                ahead of time from here. Free, on-device.
+              </p>
+              {extensions.map((row) => (
+                <ExtensionSettingsRow key={row.id} row={row} polling={polling} />
+              ))}
             </div>
-          )}
-          {!isCore && !server.noServer &&
-            (aggregateStatus === "installed" || aggregateStatus === "not_required") &&
-            server.serverError && (
-            <details className="mt-1 text-xs text-muted-foreground">
-              <summary className="cursor-pointer">Last error</summary>
-              <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted/40 p-2 text-[11px]">
-                {server.serverError}
-              </pre>
-            </details>
-          )}
+          ) : null}
         </div>
-
-        {!isCore && (
-          <div className="flex flex-col items-end gap-3 shrink-0">
-            {showConfigureButton && (
-              <Button
-                variant={isPrimaryConfigure ? "default" : "outline"}
-                size="sm"
-                className={`cursor-pointer ${isPrimaryConfigure ? "ring-2 ring-yellow-500/40" : ""}`}
-                onClick={() => setEnvDialogOpen(true)}
-              >
-                <SettingsIcon className="size-3.5 mr-1.5" />
-                {isPrimaryConfigure ? "Configure API Keys" : "API Keys"}
-              </Button>
-            )}
-            <div className="flex items-center gap-2">
-              <Label htmlFor={`enabled-${server.id}`} className="text-xs">Enable</Label>
-              <Switch
-                id={`enabled-${server.id}`}
-                checked={server.enabled}
-                onCheckedChange={(enabled) => updateMcp.mutate({ id: server.id, enabled })}
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Label htmlFor={`approval-${server.id}`} className="text-xs cursor-help">
-                        Require approval
-                      </Label>
-                    }
-                  />
-                  <TooltipContent className="max-w-xs text-xs">
-                    Agent asks before calling this server&rsquo;s tools. Enable this if those tools involve extra cost or take meaningful time.
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-              <Switch
-                id={`approval-${server.id}`}
-                checked={server.requireApproval}
-                onCheckedChange={(requireApproval) =>
-                  updateMcp.mutate({ id: server.id, requireApproval })
-                }
-              />
-            </div>
-            {!server.bundled && onEdit && (
-              <DropdownMenu>
-                <DropdownMenuTrigger
-                  render={
-                    <button
-                      type="button"
-                      aria-label={`Actions for ${server.name}`}
-                      className="cursor-pointer inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    />
-                  }
-                >
-                  <MoreVertical className="size-3.5" />
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" sideOffset={4}>
-                  <DropdownMenuItem
-                    className="cursor-pointer"
-                    onClick={() => onEdit(server)}
-                  >
-                    Edit
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    variant="destructive"
-                    className="cursor-pointer"
-                    onClick={() => {
-                      if (confirm(`Delete MCP server "${server.name}"?`)) {
-                        deleteMcp.mutate(server.id);
-                      }
-                    }}
-                  >
-                    Delete
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </div>
-        )}
+        {/* The core row has no controls of its own — the approval
+            switches live on the nested extension rows. */}
       </CardContent>
     </Card>
-      {showConfigureButton && (
-        <McpEnvVarsDialog
-          open={envDialogOpen}
-          onOpenChange={setEnvDialogOpen}
-          server={server}
-          requiredEnvVars={requiredEnvVars}
-        />
-      )}
       {setupAction && (
         <McpSetupDialog
           open={setupDialogOpen}

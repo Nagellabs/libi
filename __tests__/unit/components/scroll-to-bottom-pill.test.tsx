@@ -145,9 +145,6 @@ vi.mock("@/lib/queries/session-model", () => ({
 vi.mock("@/lib/queries/plan-usage", () => ({
   usePlanUsage: () => ({ data: null }),
 }));
-vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
-  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
-}));
 
 /** jsdom does no layout: supply the metrics the scroll hook reads. */
 function instrument(el: HTMLElement) {

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_SETUPS, getAgentSetup, listAgentSetups } from "@/lib/agents/setup/registry";
+import {
+  AGENT_SETUPS,
+  agentSetupHref,
+  getAgentSetup,
+  isSetupAgentId,
+  listAgentSetups,
+} from "@/lib/agents/setup/registry";
 
 describe("agent setup registry", () => {
   it("knows the two ACP agents and not the terminal pseudo-provider", () => {
@@ -10,11 +16,17 @@ describe("agent setup registry", () => {
     expect(getAgentSetup("nope")).toBeNull();
   });
 
-  it("declares an install for Claude Code and none for Codex", () => {
-    expect(getAgentSetup("claude-code")!.install).not.toBeNull();
-    // libi SHIPS the codex engine. Offering an install here is what told users
-    // to install something they already had.
-    expect(getAgentSetup("codex")!.install).toBeNull();
+  it("declares a download for both agents — each downloads on selection", () => {
+    for (const a of AGENT_SETUPS) {
+      expect(a.install, a.id).toBe(true);
+    }
+  });
+
+  it("declares data only — no install command, no size or wording, no manual steps; download copy lives in adapter-copy.ts, commands in commands.ts", () => {
+    for (const a of AGENT_SETUPS) {
+      expect(JSON.stringify(a), a.id).not.toMatch(/\bMB\b|sizeLabel|command"/);
+      expect(a.signIn, a.id).not.toHaveProperty("manual");
+    }
   });
 
   it("gives every agent a sign-in route — no agent is exempt", () => {
@@ -23,42 +35,10 @@ describe("agent setup registry", () => {
     }
   });
 
-  it("uses exactly three manual steps everywhere, so the card is one shape", () => {
-    for (const a of AGENT_SETUPS) {
-      expect(a.signIn.manual).toHaveLength(3);
-      if (a.install) expect(a.install.manual).toHaveLength(3);
-    }
-  });
-
-  it("keeps the three beats aligned across agents", () => {
-    const claude = getAgentSetup("claude-code")!.signIn.manual;
-    const codex = getAgentSetup("codex")!.signIn.manual;
-    // Beat 1 and beat 3 are IDENTICAL between agents — only the command and
-    // the provider-specific middle sentence differ. If these drift, the two
-    // cards have stopped being one design.
-    expect(claude[0].text).toBe(codex[0].text);
-    expect(claude[2].text).toBe(codex[2].text);
-    expect(claude[1].text).not.toBe(codex[1].text);
-  });
-
-  it("puts the command in the command field, not inline in the prose", () => {
-    for (const a of AGENT_SETUPS) {
-      const steps = [...a.signIn.manual, ...(a.install?.manual ?? [])];
-      for (const s of steps) {
-        if (s.text.includes("{cmd}")) expect(s.command).toBeTruthy();
-        if (s.command) expect(s.text).toContain("{cmd}");
-      }
-    }
-  });
-
-  it("keeps every manual step to one sentence", () => {
-    for (const a of AGENT_SETUPS) {
-      for (const s of [...a.signIn.manual, ...(a.install?.manual ?? [])]) {
-        // "More clear and long, but not too long": one sentence, under 160
-        // chars. Long enough to say what happens, short enough to be read.
-        expect(s.text.length).toBeLessThanOrEqual(160);
-      }
-    }
+  it("declares where each agent rejects auth — readiness depends on it", () => {
+    // Claude Code's session/new succeeds signed out; only its prompt is refused.
+    expect(getAgentSetup("claude-code")!.signIn.rejectedAt).toBe("prompt");
+    expect(getAgentSetup("codex")!.signIn.rejectedAt).toBe("session-new");
   });
 
   it("never names a version — versions go stale in copy nobody re-reads", () => {
@@ -66,41 +46,50 @@ describe("agent setup registry", () => {
       expect(JSON.stringify(a)).not.toMatch(/\d+\.\d+\.\d+/);
     }
   });
+
+  it("never tells anyone to restart libi, and never mentions an engine", () => {
+    for (const a of AGENT_SETUPS) {
+      expect(JSON.stringify(a)).not.toMatch(/restart libi|engine/i);
+    }
+  });
+
+  it("the guard rejects an id with no declaration, terminal included", () => {
+    expect(isSetupAgentId("claude-code")).toBe(true);
+    expect(isSetupAgentId("codex")).toBe(true);
+    expect(isSetupAgentId("terminal")).toBe(false);
+    expect(isSetupAgentId("some-future-agent")).toBe(false);
+  });
+});
+
+describe("agentSetupHref — where a not-ready surface sends the user", () => {
+  it("opens the Agents tab on a declared agent's setup", () => {
+    expect(agentSetupHref("claude-code")).toBe("/agents?tab=agents&agent=claude-code");
+    expect(agentSetupHref("codex")).toBe("/agents?tab=agents&agent=codex");
+  });
+
+  it("opens the Agents tab itself for no agent, the terminal, or an undeclared id", () => {
+    expect(agentSetupHref(null)).toBe("/agents?tab=agents");
+    expect(agentSetupHref(undefined)).toBe("/agents?tab=agents");
+    expect(agentSetupHref("terminal")).toBe("/agents?tab=agents");
+    expect(agentSetupHref("some-future-agent")).toBe("/agents?tab=agents");
+  });
 });
 
 /**
- * Finding 7: adding an agent takes three entries in three files, and nothing
- * asserted they agree.
+ * Adding an agent takes an entry in two places, and nothing else asserts they
+ * agree.
  *
  * The split is deliberate and stays: `lib/agents/setup/registry.ts` is pure
  * and imported by React components, so it must never reach the filesystem,
- * while the detection table and the sign-in resolvers must. What was missing
- * is the loop being closed — a registry entry with no detection entry is an
- * agent the app offers to set up and can never see, and one with no sign-in
- * resolver is a "Sign in" button that resolves to null.
+ * while the detection table must. A registry entry with no detection entry is
+ * an agent the app offers to set up and can never see.
  */
-describe("the three agent registries agree", () => {
+describe("the two agent registries agree", () => {
   it("gives every declared agent a detection-table entry", async () => {
     const { knownAgentIds } = await import("@/lib/agents/acp/agent-registry");
     const detected = new Set(knownAgentIds());
     for (const a of AGENT_SETUPS) {
       expect(detected, `${a.id} is declared but never detected`).toContain(a.id);
-    }
-  });
-
-  it("gives every declared agent a sign-in resolver", async () => {
-    const { signInResolverIds } = await import("@/lib/agents/acp/sign-in-remedy");
-    const resolvers = new Set(signInResolverIds());
-    for (const a of AGENT_SETUPS) {
-      expect(resolvers, `${a.id} declares a sign-in with no resolver`).toContain(a.id);
-    }
-  });
-
-  it("has no resolver or detection entry for an agent nobody declared", async () => {
-    const { signInResolverIds } = await import("@/lib/agents/acp/sign-in-remedy");
-    const declared = new Set(AGENT_SETUPS.map((a) => a.id));
-    for (const id of signInResolverIds()) {
-      expect(declared, `${id} has a sign-in resolver but no setup declaration`).toContain(id);
     }
   });
 });

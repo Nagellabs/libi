@@ -34,6 +34,15 @@ const { waitForServer } = require("./lib/wait-for-server");
 const ROOT = path.resolve(__dirname, "..");
 const MAIN = path.join(ROOT, "dist-electron", "electron", "main.js");
 
+// Grace window between the SIGTERM we send `next` and the SIGKILL escalation
+// below. `next dev` waits NEXT_EXIT_TIMEOUT_MS (5s unless exported; the CLI
+// passes an exported value through, lib/cli/studio.ts) before killing its own
+// server, and libi's graceful stop (retiring agent processes, stopping the MCP
+// endpoint, removing port files) is bounded at ~3s and runs within that wait.
+// So this window stays a second above that wait, and never below 6s, or we
+// force-kill the server mid-shutdown.
+const SHUTDOWN_ESCALATION_MS = Math.max(6000, (Number(process.env.NEXT_EXIT_TIMEOUT_MS) || 5000) + 1000);
+
 // Durable breadcrumb for HOW the dev stack came down. The `[dev-electron]`
 // console lines only reach the preview/launcher's stdout buffer, which is
 // discarded the instant the process tree dies — so a child exit code or an
@@ -304,7 +313,7 @@ function startCdpBridge(fromPort, toPort) {
   // cheap no-op (env already populated) but Category A still runs.
   //
   // `detached: true` makes `next` its own process-GROUP leader. bin/libi.js
-  // spawns a deep descendant tree — `npx next dev` → a `next-server` worker
+  // spawns a deep descendant tree — `next dev` → a `next-server` worker
   // that binds the port, plus the libi server warms `claude` agent procs. A
   // plain `child.kill()` signals only the DIRECT child, so the grandchildren
   // reparent to launchd and keep the port bound. Signalling the whole group
@@ -358,7 +367,7 @@ function startCdpBridge(fromPort, toPort) {
       signalGroup(electronChild, "SIGKILL");
       signalGroup(next, "SIGKILL");
       process.exit(code);
-    }, 2000).unref();
+    }, SHUTDOWN_ESCALATION_MS).unref();
   };
   process.on("SIGINT", () => {
     durableLog(`received SIGINT → shutdown — ${describeParent()}`);

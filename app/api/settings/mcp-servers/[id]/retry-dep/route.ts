@@ -9,6 +9,10 @@ import {
   markInstalling,
   clearInstalling,
 } from "@/lib/mcp-virtual-deps/in-flight";
+import {
+  markDepInstalling,
+  clearDepInstalling,
+} from "@/mcp/registry/dep-in-flight";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -48,12 +52,23 @@ export async function POST(req: Request, { params }: RouteParams): Promise<NextR
   // Fall through to the existing binary-dep retry path. retryDep already
   // persists "failed" state to the DB before it rethrows, so swallowing
   // here just prevents an unhandled rejection.
+  //
+  // Marked in-flight BEFORE the (fire-and-forget) call and cleared in a
+  // `finally`, the same shape as the virtual-dep branch above. Without it the
+  // chip's poll still reports `pending` for everything between this response
+  // and the moment the install path announces itself — long enough on the
+  // chromium dep for the Download button to come back and a second click to
+  // queue a second 173 MB download.
   const manager = new DependencyManager();
-  manager.retryDep(id, binary).catch((err) => {
-    logger.warn(
-      { mcpId: id, binary, err: err instanceof Error ? err.message : String(err) },
-      "retryDep failed (state persisted)",
-    );
-  });
+  markDepInstalling(id, binary);
+  manager
+    .retryDep(id, binary)
+    .catch((err) => {
+      logger.warn(
+        { mcpId: id, binary, err: err instanceof Error ? err.message : String(err) },
+        "retryDep failed (state persisted)",
+      );
+    })
+    .finally(() => clearDepInstalling(id, binary));
   return NextResponse.json({ accepted: true, kind: "binary" });
 }

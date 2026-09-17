@@ -14,6 +14,12 @@ a video the same way it writes software. You describe what you want in chat; the
 builds the scenes, generates or imports the assets, adds voiceover and music, and you watch
 it come together in a live preview.
 
+Everything libi can do is one local MCP endpoint (`http://127.0.0.1:3457/mcp`) — its own
+tools plus every generation MCP you enable — so the in-app agent and your own CLI see
+exactly the same tools. libi uses port 3457 when free (falling back to the studio port + 1,
+then any free port); the live port is in `<LIBI_HOME>/mcp-port` and on the Settings card,
+and if it ever moves, re-run `libi connect` to update the registration.
+
 - **Chat with Claude Code or Codex.** libi drives them over ACP and hands them video tools over MCP.
 - **Canvas scenes + layered overlays** — text, images, video, code and 3D, each with its own timing, position and z-order.
 - **Real editing tools** — timeline, audio mixer with ducking, object tracking, background removal, video analysis.
@@ -73,7 +79,7 @@ Useful flags and environment variables:
 | | |
 |---|---|
 | `npx @nagellabs/libi --port 4000` | Serve on a different port (default `3456`) |
-| `npx @nagellabs/libi --connect-agent [dir]` | **Bring your own CLI.** Serves headless and syncs agent config (instructions, MCP servers, skills) into that directory, so a Claude Code or Codex session started there gets libi's tools. Defaults to the directory you ran it from. |
+| `npx @nagellabs/libi connect [dir] [--global]` | **Use libi from your own CLI.** Registers libi's MCP endpoint with Claude Code (for that folder, or `--global`) and Codex, and copies libi's skills there. Codex is found on your PATH or, on macOS, inside the ChatGPT / Codex desktop app — the app's own MCP list picks it up after a restart. libi must be running — any way you run it, including the desktop app. Re-run it after upgrading libi (`npx @nagellabs/libi@latest`) to refresh the skills. |
 | `npx @nagellabs/libi --no-open` | Don't launch a browser — just print the URL (also `LIBI_OPEN=0`) |
 | `LIBI_HOME=/path/to/dir` | Move the data directory somewhere other than `~/.libi` |
 | `LIBI_DEBUG=1` | Verbose MCP transport logging |

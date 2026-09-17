@@ -5,8 +5,7 @@ import {
   navigationEmitter,
   type NavigateEvent,
   type RefreshQueryEvent,
-  type RightRegionEvent,
-  type NavigateSettingsEvent,
+  type NavigateAgentsEvent,
   type OverlayErrorEvent,
   type HighlightEvent,
   type HighlightEffectEvent,
@@ -24,8 +23,7 @@ export async function GET(req: Request) {
   let navHandlerRef: ((event: NavigateEvent) => void) | null = null;
   let refreshHandlerRef: ((event: RefreshQueryEvent) => void) | null = null;
   let systemHandlerRef: ((event: SystemEvent) => void) | null = null;
-  let rightRegionHandlerRef: ((e: RightRegionEvent) => void) | null = null;
-  let navSettingsHandlerRef: ((e: NavigateSettingsEvent) => void) | null = null;
+  let navAgentsHandlerRef: ((e: NavigateAgentsEvent) => void) | null = null;
   let overlayErrorHandlerRef: ((e: OverlayErrorEvent) => void) | null = null;
   let highlightHandlerRef: ((e: HighlightEvent) => void) | null = null;
   let highlightEffectHandlerRef: ((e: HighlightEffectEvent) => void) | null = null;
@@ -44,9 +42,7 @@ export async function GET(req: Request) {
     if (refreshHandlerRef)
       navigationEmitter.off("refresh_query", refreshHandlerRef);
     if (systemHandlerRef) sm.offSystemEvent(systemHandlerRef);
-    if (rightRegionHandlerRef) navigationEmitter.off("right_region", rightRegionHandlerRef);
-    if (navSettingsHandlerRef)
-      navigationEmitter.off("navigate_settings", navSettingsHandlerRef);
+    if (navAgentsHandlerRef) navigationEmitter.off("navigate_agents", navAgentsHandlerRef);
     if (overlayErrorHandlerRef)
       navigationEmitter.off("overlay_error", overlayErrorHandlerRef);
     if (highlightHandlerRef) navigationEmitter.off("highlight", highlightHandlerRef);
@@ -116,33 +112,19 @@ export async function GET(req: Request) {
       refreshHandlerRef = refreshHandler;
       navigationEmitter.on("refresh_query", refreshHandler);
 
-      const rightRegionHandler = (event: RightRegionEvent) => {
+      const navAgentsHandler = (event: NavigateAgentsEvent) => {
         try {
           controller.enqueue(
             encoder.encode(
-              `data: ${JSON.stringify({ type: "right_region", ...event })}\n\n`,
+              `data: ${JSON.stringify({ type: "navigate_agents", ...event })}\n\n`,
             ),
           );
         } catch {
-          navigationEmitter.off("right_region", rightRegionHandler);
+          navigationEmitter.off("navigate_agents", navAgentsHandler);
         }
       };
-      rightRegionHandlerRef = rightRegionHandler;
-      navigationEmitter.on("right_region", rightRegionHandler);
-
-      const navSettingsHandler = (event: NavigateSettingsEvent) => {
-        try {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ type: "navigate_settings", ...event })}\n\n`,
-            ),
-          );
-        } catch {
-          navigationEmitter.off("navigate_settings", navSettingsHandler);
-        }
-      };
-      navSettingsHandlerRef = navSettingsHandler;
-      navigationEmitter.on("navigate_settings", navSettingsHandler);
+      navAgentsHandlerRef = navAgentsHandler;
+      navigationEmitter.on("navigate_agents", navAgentsHandler);
 
       const overlayErrorHandler = (event: OverlayErrorEvent) => {
         try {

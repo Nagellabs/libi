@@ -131,6 +131,7 @@
     .item.running { color: var(--fg); }
     .item.done    { color: var(--fg); }
     .item.failed  { color: var(--danger); }
+    .item.warning { color: var(--fg); }
 
     .dot { width: 14px; height: 14px; display: grid; place-items: center; }
     .item.pending .dot::before {
@@ -159,6 +160,9 @@
     .item.skipped .dot::before {
       content: ""; width: 12px; height: 2px; background: var(--muted); border-radius: 1px;
     }
+    .item.warning .dot::before {
+      content: "!"; color: var(--warn); font-size: 13px; font-weight: 700; line-height: 1;
+    }
 
     .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .meta {
@@ -167,6 +171,7 @@
     }
     .item.done .meta    { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
     .item.running .meta { color: var(--primary); }
+    .item.warning .meta { color: var(--warn); }
 
     .error {
       width: 100%; max-width: 440px;
@@ -214,6 +219,7 @@
   <div class="controls">
     <button onclick="runHappyPath()">▶ Happy path</button>
     <button onclick="runFailurePath()">⚠ Failure path</button>
+    <button onclick="runWarningPath()">! Boot warning</button>
     <button onclick="resetAll()">↻ Reset</button>
   </div>
 
@@ -239,10 +245,6 @@
         <div class="items" id="installs"></div>
       </div>
       <div class="section">
-        <div class="section-title">Verify</div>
-        <div class="items" id="probes"></div>
-      </div>
-      <div class="section">
         <div class="section-title">Boot</div>
         <div class="items" id="boot"></div>
       </div>
@@ -256,7 +258,13 @@
 
   <script>
     function fmtBytes(b) {
-      if (!b) return "";
+      // 0 renders as "0 B", not "": the FIRST progress tick of every
+      // download carries 0 bytes, and an empty string there produced a meta
+      // column reading " / 165.0 MB · 0%" — a leading space where the count
+      // should be. Non-numeric / missing stays "" so a caller with no byte
+      // fields at all still renders nothing.
+      if (typeof b !== "number" || !Number.isFinite(b)) return "";
+      if (b === 0) return "0 B";
       if (b > 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + " MB";
       if (b > 1024) return (b / 1024).toFixed(1) + " KB";
       return b + " B";
@@ -282,6 +290,12 @@
       if (el && text) el.textContent = text;
     }
 
+    // Boot steps that reported a warning, and the latest warning's message —
+    // mirrors electron/splash.html so a warned row keeps its state through
+    // the step's own "done" instead of flipping back to a green tick.
+    const warnedSteps = new Set();
+    let bootWarning = null;
+
     function handleLifecycle(e) {
       if (e.kind === "category-a-install-start") {
         upsertItem("installs", "i:" + e.item.id, e.item.label, "running", "downloading…");
@@ -294,19 +308,14 @@
         const state = e.result === "skipped" ? "skipped" : "done";
         upsertItem("installs", "i:" + e.item.id, e.item.label, state,
           e.result === "skipped" ? (e.reason || "already installed") : "ready");
-      } else if (e.kind === "category-a-probe-start") {
-        upsertItem("probes", "p:" + e.mcpId, e.label, "running", "probing…");
-        setSubtitle("Verifying " + e.label + "…");
-      } else if (e.kind === "category-a-probe-done") {
-        const state = e.status === "down" ? "failed"
-                    : e.status === "skipped" ? "skipped"
-                    : "done";
-        upsertItem("probes", "p:" + e.mcpId, e.label, state,
-          e.status === "skipped" ? (e.reason || "skipped")
-          : e.durationMs != null ? e.durationMs + "ms" : "");
+      } else if (e.kind === "warning") {
+        warnedSteps.add(e.step);
+        bootWarning = e.message;
+        upsertItem("boot", "b:" + e.step, e.step, "warning", "unavailable");
+        setSubtitle(e.message);
       } else if (e.kind === "category-b-step") {
-        upsertItem("boot", "b:" + e.step, e.step, e.status, "");
-        if (e.status === "running") setSubtitle("Starting libi…");
+        if (!warnedSteps.has(e.step)) upsertItem("boot", "b:" + e.step, e.step, e.status, "");
+        if (e.status === "running" && bootWarning === null) setSubtitle("Starting libi…");
       } else if (e.kind === "fatal") {
         document.getElementById("frame").classList.add("is-failed");
         document.getElementById("title").textContent = "Something went wrong";
@@ -319,12 +328,14 @@
     }
 
     function resetAll() {
-      ["installs", "probes", "boot"].forEach((id) => document.getElementById(id).innerHTML = "");
+      ["installs", "boot"].forEach((id) => document.getElementById(id).innerHTML = "");
       document.getElementById("error").hidden = true;
       document.getElementById("quit").hidden = true;
       document.getElementById("title").textContent = "Setting up your studio";
       document.getElementById("subtitle").textContent = "Launching the bundled tools libi needs to run.";
       document.getElementById("frame").classList.remove("is-failed", "is-done");
+      warnedSteps.clear();
+      bootWarning = null;
     }
 
     async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -353,22 +364,6 @@
           });
         }
         handleLifecycle({ kind: "category-a-install-done", item: { id: it.id, label: it.label, kind: "binary" }, result: "installed" });
-      }
-
-      const probes = [
-        { id: "youtube-downloader", label: "YouTube Downloader", ms: 320 },
-        { id: "fake-ai-assets",     label: "fake-ai-assets",     ms: 180 },
-        { id: "fal-ai",             label: "fal.ai",             skipped: true, reason: "needs config" },
-      ];
-
-      for (const p of probes) {
-        if (p.skipped) {
-          handleLifecycle({ kind: "category-a-probe-done", mcpId: p.id, label: p.label, status: "skipped", reason: p.reason });
-        } else {
-          handleLifecycle({ kind: "category-a-probe-start", mcpId: p.id, label: p.label });
-          await sleep(p.ms);
-          handleLifecycle({ kind: "category-a-probe-done", mcpId: p.id, label: p.label, status: "up", durationMs: p.ms });
-        }
       }
 
       const bootSteps = ["db-migrate", "jobs-recover", "agent-warm", "workspace-prep", "standby-session"];
@@ -400,6 +395,33 @@
         error: "Failed to install Playwright Chromium: network timed out after 60s",
         hint: "Check your network connection and try again. If the problem persists, the download URL may be temporarily unreachable.",
       });
+    }
+
+    async function runWarningPath() {
+      resetAll();
+      handleLifecycle({ kind: "category-a-install-start", item: { id: "ffmpeg", label: "ffmpeg", kind: "binary" } });
+      await sleep(400);
+      handleLifecycle({ kind: "category-a-install-done", item: { id: "ffmpeg", label: "ffmpeg", kind: "binary" }, result: "installed" });
+
+      // Boot carries on without libi's tools when the MCP endpoint never came
+      // up — not a fatal boot error, so the frame still reaches "done", but
+      // the warned row keeps its "!" and the subtitle keeps the message.
+      const bootSteps = ["db-migrate", "mcp-http", "agent-warm", "standby-session"];
+      for (const s of bootSteps) {
+        handleLifecycle({ kind: "category-b-step", step: s, status: "running" });
+        await sleep(180);
+        if (s === "mcp-http") {
+          handleLifecycle({
+            kind: "warning",
+            phase: "category-b",
+            step: "mcp-http",
+            message: "libi's tools are unavailable — open Agents → Libi MCP and press Restart.",
+          });
+        }
+        handleLifecycle({ kind: "category-b-step", step: s, status: "done" });
+      }
+
+      document.getElementById("frame").classList.add("is-done");
     }
 
     runHappyPath();

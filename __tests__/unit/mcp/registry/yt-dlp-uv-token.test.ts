@@ -5,7 +5,9 @@ import fs from "fs";
 import {
   getCustomInstaller,
   YT_DLP_UV_TOKEN,
+  YT_DLP_UV_REQUIREMENT,
   ytDlpTokenPath,
+  ytDlpUvInstallArgs,
 } from "@/mcp/registry/installers";
 
 // The yt-dlp-uv installer's verify() reads getLibiBinDir() via a dynamic
@@ -16,6 +18,43 @@ vi.mock("@/lib/libi-home", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/libi-home")>()),
   getLibiBinDir: () => binDir,
 }));
+
+/**
+ * `libi.download_video` failed part-way through large YouTube videos
+ * ("Signature solving failed … 403"). The cause is the INSTALL, not the
+ * download argv: libi installed bare `yt-dlp`, so `yt-dlp-ejs` — the
+ * JS-challenge solver script — was absent and every `n` parameter went
+ * unsolved. YouTube throttles those URLs and 403s them on refresh, which a
+ * small clip finishes before and a 200 MB+ file does not.
+ */
+describe("yt-dlp uv install argv", () => {
+  it("installs the [default] extra, which is what carries yt-dlp-ejs", () => {
+    expect(YT_DLP_UV_REQUIREMENT).toBe("yt-dlp[default]");
+    expect(ytDlpUvInstallArgs()).toEqual([
+      "tool",
+      "install",
+      "yt-dlp[default]",
+      "--reinstall",
+      "--python",
+      "3.12",
+      "--with",
+      "certifi",
+    ]);
+  });
+
+  it("keeps --reinstall so a token bump actually replaces the existing venv", () => {
+    // Without it `uv tool install` no-ops on an existing install, and every
+    // machine that already has a bare yt-dlp keeps its solver-less one.
+    expect(ytDlpUvInstallArgs()).toContain("--reinstall");
+  });
+
+  it("bumped the token past the pre-[default] install", () => {
+    // Existing installs are bare `yt-dlp`; only a token they do not match
+    // makes verify() return null and force the repair.
+    expect(YT_DLP_UV_TOKEN).not.toBe("yt-dlp-uv@2026-07-06");
+    expect(YT_DLP_UV_TOKEN).toMatch(/^yt-dlp-uv@\d{4}-\d{2}-\d{2}$/);
+  });
+});
 
 describe("yt-dlp-uv installer verify() — token gate (force-rebuild lever)", () => {
   let tmp: string;

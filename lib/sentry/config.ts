@@ -86,6 +86,34 @@ export const SENTRY_KILL_SWITCHED =
 export const SENTRY_ENABLED =
   Boolean(SENTRY_DSN) && !SENTRY_KILL_SWITCHED && process.env.NEXT_PUBLIC_LIBI_SENTRY === "1";
 
-/** Environment tag shown in Sentry (override via NEXT_PUBLIC_LIBI_SENTRY_ENV). */
+/**
+ * Environment tag shown in Sentry.
+ *
+ * Derived from the BUILD, not from a launcher flag. A production build reports
+ * `production` — that is `npx @nagellabs/libi`, the packaged desktop app, and
+ * anything `scripts/next-build-release.js` produces. Anything running under
+ * `next dev` reports `qa`: a contributor checkout, `npm run dev:electron`, and
+ * `scripts/dev-sentry-live.js` (whose entire purpose is exercising Sentry from
+ * a checkout).
+ *
+ * WHY IT IS NOT SIMPLY `"production"`, which is what it used to be. Sentry is
+ * off in a dev checkout by default (bin/libi.js sets NEXT_PUBLIC_LIBI_SENTRY=0
+ * there), but the moment anyone turns it ON to test — which is the only reason
+ * to turn it on — their traffic filed itself next to real users' reports, and
+ * the only thing keeping the two apart was remembering to pass an override by
+ * hand. Whoever triages Sentry then cannot tell a real crash from a developer's
+ * experiment. Defaulting off the build makes the split automatic.
+ *
+ * WHY `NODE_ENV` IS THE RIGHT SIGNAL. Next sets it per build and inlines it
+ * into the client bundle, so the browser and the server agree without a
+ * launcher threading anything through — which matters because
+ * `NEXT_PUBLIC_*` is frozen at build time for a prebuilt release (see the
+ * header of this file). Unlike `process.platform`, constant-folding it is the
+ * CORRECT behaviour here: a build genuinely is one or the other.
+ *
+ * `NEXT_PUBLIC_LIBI_SENTRY_ENV` still overrides both, for a staging project or
+ * a one-off run that wants its own tag.
+ */
 export const SENTRY_ENVIRONMENT =
-  process.env.NEXT_PUBLIC_LIBI_SENTRY_ENV || "production";
+  process.env.NEXT_PUBLIC_LIBI_SENTRY_ENV ||
+  (process.env.NODE_ENV === "production" ? "production" : "qa");

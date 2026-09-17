@@ -194,24 +194,23 @@ describe("DependencyManager", () => {
     seedDatabase(db as never);
 
     const rows = db.select().from(mcpServers).all();
-    // Eight bundled entries: core libi, yt-dlp, elevenlabs, fal-ai,
-    // libi-tracking, plus the three non-spawning capability rows
-    // (whisper, local-tts, local-music).
-    expect(rows.length).toBe(8);
+    // Seven bundled entries: core libi, libi-tracking, plus the five
+    // non-spawning capability rows (libi-export, whisper, local-tts,
+    // local-music, youtube-download). No third-party row.
+    expect(rows.length).toBe(7);
     const ids = rows.map((r) => r.id).sort();
     expect(ids).toEqual([
-      "elevenlabs",
-      "fal-ai",
       "libi",
+      "libi-export",
       "libi-tracking",
       "local-music",
       "local-tts",
       "whisper",
-      "youtube-downloader",
+      "youtube-download",
     ]);
     expect(rows.every((r) => r.bundled)).toBe(true);
-    const ytdlp = rows.find((r) => r.id === "youtube-downloader")!;
-    expect(ytdlp.name).toBe("YouTube Downloader");
+    const ytdlp = rows.find((r) => r.id === "youtube-download")!;
+    expect(ytdlp.name).toBe("Video download");
   });
 
   it("marks installed when binary found on system PATH", async () => {
@@ -249,12 +248,9 @@ describe("DependencyManager", () => {
 
     const rows = db.select().from(mcpServers).all();
     for (const row of rows) {
-      // Rows with requiredEnvVars and no envVars set → needs_config.
-      // (elevenlabs requires ELEVENLABS_API_KEY; fal-ai requires FAL_KEY.)
-      // All other rows should be installed when their binaries are on PATH.
-      const expected =
-        row.id === "elevenlabs" || row.id === "fal-ai" ? "needs_config" : "installed";
-      expect(row.installStatus).toBe(expected);
+      // Every row is installed when its binaries are on PATH — no row
+      // needs configuration (libi holds no provider key).
+      expect(row.installStatus, row.id).toBe("installed");
     }
   });
 
@@ -291,10 +287,7 @@ describe("DependencyManager", () => {
 
     const rows = db.select().from(mcpServers).all();
     for (const row of rows) {
-      // Rows with requiredEnvVars and no envVars set → needs_config.
-      const expected =
-        row.id === "elevenlabs" || row.id === "fal-ai" ? "needs_config" : "installed";
-      expect(row.installStatus).toBe(expected);
+      expect(row.installStatus, row.id).toBe("installed");
     }
   });
 
@@ -330,13 +323,16 @@ describe("DependencyManager", () => {
 
     const rows = db.select().from(mcpServers).all();
     for (const row of rows) {
-      // fal-ai has no binary deps — it stays in needs_config (FAL_KEY is unset)
-      // regardless of whether other binaries failed to download.
-      if (row.id === "fal-ai") {
-        expect(row.installStatus).toBe("needs_config");
+      expect(row.installStatus, row.id).toBe("failed");
+      // libi-export's only dep is chromium, fetched by Playwright's own CLI
+      // rather than libi's fetch — with nothing on disk here, resolving that
+      // CLI is what fails, so its error is about chromium, not the network.
+      // (Chromium used to sit on the `libi` row, where ffmpeg's
+      // "network error" masked this in the aggregated message.)
+      if (row.id === "libi-export") {
+        expect(row.installError).toContain("chromium");
         continue;
       }
-      expect(row.installStatus).toBe("failed");
       expect(row.installError).toContain("network error");
     }
   });
@@ -358,10 +354,11 @@ describe("DependencyManager", () => {
     const manager = new DependencyManager();
     await manager.ensureAll();
 
-    // User disables the yt-dlp MCP (libi core is not user-toggleable).
+    // User turns the approval gate off on the yt-dlp extension (the only
+    // user-editable field on a libi-owned row since `enabled` was dropped).
     db.update(mcpServers)
-      .set({ enabled: false, requireApproval: false })
-      .where(eq(mcpServers.id, "youtube-downloader"))
+      .set({ requireApproval: false })
+      .where(eq(mcpServers.id, "youtube-download"))
       .run();
 
     // Re-seed (seedDatabase uses onConflictDoUpdate — preserves user toggles)
@@ -371,9 +368,8 @@ describe("DependencyManager", () => {
     const ytdlp = db
       .select()
       .from(mcpServers)
-      .where(eq(mcpServers.id, "youtube-downloader"))
+      .where(eq(mcpServers.id, "youtube-download"))
       .all()[0];
-    expect(ytdlp.enabled).toBe(false);
     expect(ytdlp.requireApproval).toBe(false);
     expect(ytdlp.installStatus).toBe("installed");
   });

@@ -23,16 +23,11 @@
  * Dependency-free by design: imported by the SessionManager (Node), the API
  * routes, and the browser bundle.
  */
-import type { TerminalRemedy } from "./terminal-remedy";
-
 export type AgentReadiness =
   /** A session has been created since the last failure. */
   | { state: "ready" }
-  /**
-   * The agent answered an auth challenge negatively. Observed, never inferred.
-   * `remedy` is how the user fixes it — see lib/agents/terminal-remedy.ts.
-   */
-  | { state: "needs-auth"; agentId: string; message: string; remedy: TerminalRemedy | null }
+  /** The agent answered an auth challenge negatively. Observed, never inferred. */
+  | { state: "needs-auth"; agentId: string; message: string }
   /** Not on disk. Mirrors the existing detect* `unavailableReason`. */
   | { state: "not-installed"; reason: string }
   /** Nothing has been attempted yet this process. NOT a claim of health. */

@@ -41,6 +41,23 @@ export type AgentEvent =
       runningAt: number;
     }
   | {
+      /** The tool call's real arguments, which arrive AFTER the call itself.
+       *  claude-agent-acp emits `tool_call` at content_block_start — before the
+       *  tool's input has finished streaming — so `rawInput` is empty there and
+       *  the live row rendered `{}` for the whole call. The message
+       *  cache adopts the same value (`fillToolCallArgsFromUpdate`) and
+       *  this is that patch on the wire, so the live view and a page refresh
+       *  agree.
+       *
+       *  Monotone, not fill-once: an in-flight update can carry a PARTIAL
+       *  input, so a later, fuller one replaces it — and the reducer applies
+       *  the same rule, because events can be delivered out of order after a
+       *  reconnect. Emitted only when the cache actually took the value. */
+      type: "agent-tool-args";
+      toolCallId: string;
+      args: unknown;
+    }
+  | {
       /** Subagent dispatch refinement. claude-agent-acp emits the initial
        *  `tool_call` for Task/Agent at content_block_start with empty
        *  `input`, then a `tool_call_update` with the full input once the
@@ -89,7 +106,7 @@ export type AgentEvent =
       toolCall: import("@agentclientprotocol/sdk").ToolCallUpdate;
       options: import("@agentclientprotocol/sdk").PermissionOption[];
       /** Why we surfaced the prompt — used by the UI for hint copy. */
-      reason: "acp" | "generation";
+      reason: "acp" | "extension";
     }
   | {
       type: "agent-permission-resolved";

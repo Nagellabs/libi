@@ -29,7 +29,7 @@ const read = (rel: string) => readFileSync(path.join(ROOT, rel), "utf8");
 // is exactly the kind of duty a launcher forgets. Do not "fix" Sentry to match.
 //
 // Sweep done 2026-08-28 over every env var bin/libi.js sets: LIBI_LAUNCH_CWD is
-// CLI-only (--connect-agent) and falls back to process.cwd(); LIBI_HOME and the
+// CLI-only and falls back to process.cwd(); LIBI_HOME and the
 // port are owned by the shell by design; LIBI_WORKTREE_NAME is dev-only. This
 // flag was the only real gap.
 const FLAG = "NEXT_PUBLIC_LIBI_ANALYTICS";

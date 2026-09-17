@@ -68,9 +68,22 @@ export function resolveShell(): { shell: string; args: string[] } {
   return { shell, args: ["-l"] };
 }
 
+/**
+ * Setup terminals always run a KNOWN shell, whatever `$SHELL` says: the setup
+ * commands are written as POSIX or PowerShell (a keyed provider command is the
+ * subshell `( printf …; read -rs K; echo; <add>; unset K )`), and a fish or
+ * nushell `$SHELL` would read them wrong. Login (`-l`) so profile
+ * PATH edits — which the official CLI installers append — are visible in the
+ * very next setup terminal.
+ */
+export function resolveSetupShell(): { shell: string; args: string[] } {
+  if (isWindows()) return { shell: "powershell.exe", args: [] };
+  return { shell: isMac() ? "/bin/zsh" : "/bin/bash", args: ["-l"] };
+}
+
 export const realPtyFactory: PtyFactory = (opts): PtyLike => {
   ensureSpawnHelperExecutable();
-  const { shell, args } = resolveShell();
+  const { shell, args } = opts.purpose === "setup" ? resolveSetupShell() : resolveShell();
   const pty = spawn(shell, args, {
     name: "xterm-256color",
     cwd: opts.cwd,

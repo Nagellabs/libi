@@ -1,0 +1,35 @@
+/**
+ * Cosmetic overrides for xterm.js 6's own VS Code-style scrollable element
+ * (`.xterm-scrollable-element > .scrollbar.vertical > .slider`). Scoped
+ * under `.libi-terminal` — the class on TerminalView's wrapper div — so no
+ * other scrollable element in the app is touched.
+ *
+ * Colors (rest/hover/active) are NOT set here: they come from
+ * `scrollbarSliderBackground` / `scrollbarSliderHoverBackground` /
+ * `scrollbarSliderActiveBackground` in DARK_THEME / LIGHT_THEME
+ * (terminal-view.tsx), which xterm applies via its own injected <style>.
+ * Only SHAPE lives in CSS.
+ *
+ * xterm's `AbstractScrollbar` (vendored from VS Code) writes width, left,
+ * top and height on `.slider` as INLINE styles on every render
+ * (`FastDomNode#setWidth` etc. — see @xterm/xterm/lib/xterm.js), so the
+ * shape rules below need `!important` to win over those inline styles.
+ */
+
+/* Transparent track — the slider is the only visible part. */
+.libi-terminal .xterm .xterm-scrollable-element > .scrollbar.vertical {
+  background: transparent !important;
+}
+
+/* Thin (~6px) rounded slider, inset a few px from the right edge of the
+ * scrollbar gutter so it never touches a rounded frame border. This sits
+ * INSIDE the gutter FitAddon already reserves (`overviewRuler?.width || 14`
+ * px, untouched here), so text still never renders under it — the extra
+ * space around the slider is the intentional inset, not a dead strip. */
+.libi-terminal .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider {
+  left: auto !important;
+  right: 4px !important;
+  width: 6px !important;
+  border-radius: 3px !important;
+  transition: background-color 120ms ease;
+}

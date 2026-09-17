@@ -1,7 +1,7 @@
 ---
 id: libi-core-tools
 title: Core libi tools work — create a piece, list pieces and files
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [mcp-core-tools, sqlite, storage]
 cost: subscription-tokens

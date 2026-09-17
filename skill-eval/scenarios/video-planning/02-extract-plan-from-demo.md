@@ -10,7 +10,12 @@ runs: 1
 # the senior-editor framing — describe the build as a plan of building blocks (source-vs-AI,
 # combine-vs-split, style inheritance), not a 1:1 shot dump. The point is to verify the PLANNING
 # behavior is present in the mimic path; it is judged from the transcript.
-timeoutSec: 480
+# Raised from 480 after the 2026-09-10 QA timeout. The transcript shows no loop: the agent
+# had planned, generated all three takes and was mid-`attach_storyboard_clip` at the cut, so
+# it needed a little more, not a lot. 900 s is what the comparable storyboard-spine runs
+# carry (`generic-video/02`, `ugc-product-video/04`), and stays under the sibling
+# `video-planning/01`'s 1500 s.
+timeoutSec: 900
 covers: [mimic-video, video-planning, extract-plan, build-algorithm, recreate]
 ---
 

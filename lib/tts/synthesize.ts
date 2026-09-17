@@ -339,7 +339,8 @@ export function writeTtsEnvToken(): void {
 }
 
 export async function downloadModel(onProgress?: ProgressCb): Promise<void> {
-  // The real bytes (~110 MB across 2 GitHub files) download here; the
+  // The real bytes (~121 MB across 2 GitHub files — `KOKORO_DOWNLOAD_MB`)
+  // download here; the
   // runUv step below only validates + warms the wheel cache.
   await fetchModelFiles(httpsDownload, onProgress);
   const args = buildKokoroArgs({

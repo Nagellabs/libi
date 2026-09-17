@@ -1,0 +1,1 @@
+ALTER TABLE `legacy_provider_keys` ADD `rescued_at` integer DEFAULT (unixepoch()) NOT NULL;

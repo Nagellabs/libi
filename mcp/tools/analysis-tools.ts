@@ -13,24 +13,8 @@ import {
   chunkAudio,
   saveAudioChunk,
   saveAudioChunkFromFile,
-  rowToStep,
 } from "@/lib/analysis/manager";
 import { summarizeAnalysisBundle } from "@/lib/analysis/lean-bundle";
-import { eq, and } from "drizzle-orm";
-import { getDb } from "@/lib/db/client";
-import { analysisSteps } from "@/lib/db/schema/sqlite";
-import { LibiServerUnavailableError, runJobViaServer } from "@/mcp/jobs-client";
-import { getScriptProvider, listScriptProviders } from "@/lib/analysis/script-providers/registry";
-import { registerBuiltinScriptProviders } from "@/lib/analysis/script-providers/register";
-import { parseScriptStep, buildScriptKind, buildCaptionSpecKind } from "@/lib/analysis/scripts";
-import type { AnalysisStep } from "@/lib/analysis/types";
-
-import { isTestMode } from "@/lib/test-mode";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
-import type {
-  ServerRequest,
-  ServerNotification,
-} from "@modelcontextprotocol/sdk/types";
 import type { ToolResult } from "./types";
 import type {
   AnalysisGetParams,
@@ -48,7 +32,6 @@ import type {
   AnalysisSaveAudioChunkParams,
   AnalysisSaveAudioChunkFromFileParams,
   AnalysisGetAudioChunksParams,
-  ExtraAnalysisModelParams,
 } from "./schemas";
 
 // Read --------------------------------------------------------------
@@ -189,7 +172,6 @@ export async function analysisTranscribeAudio(params: AnalysisTranscribeAudioPar
       fileId: params.fileId,
       retry: params.retry,
       chunkSeconds: params.chunkSeconds,
-      provider: params.provider,
       model: params.model,
     });
     return { success: true, data: result as unknown as Record<string, unknown> };
@@ -246,147 +228,3 @@ export async function analysisGetAudioChunks(params: AnalysisGetAudioChunksParam
   }
 }
 
-// Script generation (paid, provider-driven) -------------------------
-
-export async function extraAnalysisModel(
-  params: ExtraAnalysisModelParams,
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>,
-): Promise<ToolResult> {
-  try {
-    // Idempotent safety net — ensures built-in providers (e.g. fal-video-understanding)
-    // are registered even if the MCP process started before instrumentation ran.
-    registerBuiltinScriptProviders();
-
-    if (listScriptProviders().length === 0) {
-      return {
-        success: false,
-        error:
-          "No script providers are configured. Configure FAL_KEY in Settings → MCP Servers → fal-ai.",
-      };
-    }
-
-    const provider = getScriptProvider(params.providerId);
-    const modelId = params.modelId ?? provider.defaultModelId;
-    const focus = params.focus;
-
-    // Return cached result when present (unless the caller requested a fresh run).
-    if (!params.regenerate) {
-      const db = getDb();
-      if (focus === "captions") {
-        const kind = buildCaptionSpecKind(provider.id, modelId);
-        const existing = db
-          .select()
-          .from(analysisSteps)
-          .where(and(eq(analysisSteps.fileId, params.fileId), eq(analysisSteps.kind, kind)))
-          .limit(1)
-          .all();
-        const row = existing[0];
-        if (row && row.status === "ready" && row.content) {
-          return {
-            success: true,
-            data: { captions: row.content, cached: true },
-          };
-        }
-      } else {
-        const kind = buildScriptKind(provider.id, modelId);
-        const existing = db
-          .select()
-          .from(analysisSteps)
-          .where(and(eq(analysisSteps.fileId, params.fileId), eq(analysisSteps.kind, kind)))
-          .limit(1)
-          .all();
-        const row = existing[0];
-        if (row && row.status === "ready") {
-          const persisted = parseScriptStep(rowToStep(row));
-          if (persisted) {
-            return {
-              success: true,
-              data: { script: persisted.script as unknown as Record<string, unknown>, cached: true },
-            };
-          }
-        }
-      }
-    }
-
-    // Guard: provider must be configured (API key present, etc.).
-    // In test mode the runner short-circuits to a deterministic placeholder
-    // (no real provider call — see F6), so a configured API key isn't required;
-    // skip the gate so keyless `LIBI_TEST_MODE=1` runs still work.
-    if (!isTestMode()) {
-      const isConfigured = await provider.isConfigured();
-      if (!isConfigured) {
-        return {
-          success: false,
-          error: `Script provider "${provider.id}" is not configured. Open Settings → MCP Servers to set its credentials.`,
-        };
-      }
-    }
-
-    const resp = await runJobViaServer(
-      "extra_analysis_model",
-      {
-        fileId: params.fileId,
-        pieceId: params.pieceId ?? null,
-        providerId: provider.id,
-        modelId,
-        forceFresh: params.regenerate === true,
-        focus,
-      },
-      {
-        pieceId: params.pieceId,
-        fileId: params.fileId,
-        extra,
-      },
-    );
-
-    // Unpack result — `matching_completed` carries it in existingJob.result.
-    // Per CLAUDE.md "Long-running tool dedup", re-run silently if the existing job failed/cancelled.
-    if (resp.status === "matching_completed") {
-      if (resp.existingJob.status !== "completed") {
-        return extraAnalysisModel({ ...params, regenerate: true }, extra);
-      }
-      if (focus === "captions") {
-        const captionSpec = (resp.existingJob.result as { captionSpec?: unknown } | undefined)?.captionSpec;
-        const jobId = resp.existingJob.jobId;
-        return {
-          success: true,
-          data: { captions: captionSpec, jobId },
-        };
-      }
-      const script = (resp.existingJob.result as { script?: unknown } | undefined)?.script;
-      const jobId = resp.existingJob.jobId;
-      return {
-        success: true,
-        data: { script: script as Record<string, unknown>, jobId },
-      };
-    }
-
-    if (focus === "captions") {
-      const captionSpec = (resp.result as { captionSpec?: unknown } | undefined)?.captionSpec;
-      const jobId = resp.jobId;
-      return {
-        success: true,
-        data: { captions: captionSpec, jobId },
-      };
-    }
-
-    const script = (resp.result as { script?: unknown } | undefined)?.script;
-    const jobId = resp.jobId;
-    return {
-      success: true,
-      data: { script: script as Record<string, unknown>, jobId },
-    };
-  } catch (err) {
-    if (err instanceof LibiServerUnavailableError) {
-      return {
-        success: false,
-        error: "libi_server_unavailable",
-        data: { hint: err.hint },
-      };
-    }
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}

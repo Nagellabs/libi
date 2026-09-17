@@ -5,6 +5,35 @@ description: Use when the user asks to CHANGE, REPLACE, RE-VOICE, or DUB the voi
 
 # Voice Replacement — re-voice an existing video
 
+## Provider gate — read this first
+
+You need a **voice** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do voice, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for voice — call
+   `libi.suggest_provider({ kind: "voice" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do voice.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for voice is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
 The user has a video (one or more scenes) and wants a **different voice** on it —
 cloned from the original speaker or a brand-new voice. This is a separate flow from
 generation: by default a piece keeps its native / `@Audio1`-carried audio
@@ -31,29 +60,35 @@ For each target scene's video file, get a transcript **with word-level timing** 
 is the coverage anchor (it tells you WHO speaks, WHEN, and for HOW LONG):
 - **Reuse first:** `libi.analysis_get({ fileId })` — if a transcript already exists, use it.
 - **Else transcribe:** run the **`audio-analysis`** skill (local Whisper, free, word-level
-  timing) on each target scene's video. ElevenLabs STT only if diarization is needed.
+  timing) on each target scene's video. If diarization is needed, use a `transcription`
+  provider through the `audio-analysis` skill's Path B.
 Record, per scene: the spoken text, the speech start/end within the scene, and the
 talking **duration** (so the new segment can match it).
 
 ### 2. Choose the voice — ASK (clone vs new), and SUGGEST the provider by FORMAT
 **Ask the user:** *"Clone the existing speaker's voice, or use a new voice?"*
-- **Clone the original** → **ElevenLabs `voice_clone`** (only ElevenLabs can clone) from a
-  clean ≤15s sample (`libi.extract_audio` over a continuous, music-free stretch). Persist it
-  as a per-character voice asset (`using-character-library`) so the same clone is reusable.
-- **New voice** → recommend the provider by the video's **format/genre** (read it from the
-  piece/script or ask), and tell the user the trade-off:
-  - **UGC / influencer / talking-head testimonial / authentic social** → **ElevenLabs**
-    (expressive, authentic, "real person" delivery). Kokoro reads as flat/synthetic here.
+- **Clone the original** → you need a `voice` provider that can CLONE (libi's local Kokoro
+  cannot). Cut a clean ≤15 s sample with `libi.extract_audio` over a continuous, music-free
+  stretch and feed it to your provider's cloning tool — `references/providers/<id>.md` names
+  it. Persist the clone as a per-character voice asset (`using-character-library`) so the
+  same clone is reusable.
+- **New voice** → recommend by the video's **format/genre** (read it from the piece/script
+  or ask), and tell the user the trade-off:
+  - **UGC / influencer / talking-head testimonial / authentic social** → a **hosted
+    expressive voice provider**; `references/providers/<id>.md` under this skill covers
+    the one you have. Kokoro reads as flat/synthetic here.
   - **Narration / explainer / how-to / documentary / corporate / educational / neutral VO**
-    → **local Kokoro is a great free default** (clean, on-device, no key); offer ElevenLabs
-    as a paid quality upgrade if they want more expressive or branded delivery.
+    → **local Kokoro is a great free default** (`libi.generate_speech`, on-device, no key);
+    offer the hosted provider as a paid quality upgrade for more expressive or branded
+    delivery.
   - **Unsure / mixed** → state both and let the user pick; default to the format above.
 
-**Cost + key gating:** ElevenLabs (clone or voice) is **paid** — disclose cost and get
-approval before generating. If ElevenLabs has no key, ask the user to configure it
-(Settings → MCP Servers) OR, when Kokoro fits the format, offer Kokoro instead. Kokoro is
-free and needs no key. **Match the provider to the format — don't force ElevenLabs on a
-plain narration, and don't push Kokoro onto a UGC talking-head.**
+**Cost + provider gating:** a hosted voice (clone or new) is **paid** — disclose cost and
+get approval before generating. If you have no `voice` provider, call
+`libi.suggest_provider({ kind: "voice" })`, say what it showed, and — when Kokoro fits the
+format — offer Kokoro instead. Kokoro is free and needs no key. **Match the provider to the
+format — don't force a paid voice onto a plain narration, and don't push Kokoro onto a UGC
+talking-head.**
 
 ### 3. Classify each target section — does a character speak ON CAMERA?
 For each target scene, decide using the analysis (`FrameDescription.people[]` /
@@ -65,20 +100,22 @@ For each target scene, decide using the analysis (`FrameDescription.people[]` /
 
 ### 4. Apply, per section
 
-**4a. Talking-face → lip-sync via the fal.ai SOTA model.** Generate the new per-scene voice
-segment (cloned/new voice, sized to the transcript — step 5), then lip-sync the scene's
-video to that audio with the **best fal.ai lip-sync model**, through the **`fal-ai` MCP**
-(libi has no local lip-sync engine — the hosted model is the quality path):
-- Confirm `fal-ai` is configured (`libi.list_bundled_mcps`). If it isn't, ASK the user to add
-  a fal.ai key (Settings → MCP Servers) — lip-sync needs it. If they decline, fall back to 4b
-  (mute + new VO) for the talking section and **DISCLOSE the lips won't match the new voice**.
-- **Upload BOTH the scene's video and the new VO audio to fal** with
-  `libi.upload_file_to_fal({ fileId })` — the key stays server-side; **NEVER** read `FAL_KEY`
-  or `curl` fal storage yourself.
-- Run the **best lip-sync endpoint** via the `fal-ai` MCP (`run_model` / `submit_job`).
-  **Default to sync.so Lipsync 2 — `fal-ai/sync-lipsync/v2`** (studio-grade, frame-accurate);
-  `fal-ai/latentsync` is a cheaper open-source alternative. Pass the uploaded video URL +
-  audio URL. **PAID — disclose the cost (~$ per minute of video) and get approval first.**
+**4a. Talking-face → lip-sync on a hosted model.** Generate the new per-scene voice segment
+(cloned/new voice, sized to the transcript — step 5), then lip-sync the scene's video to
+that audio with the best lip-sync model your `video` provider has — libi has no local
+lip-sync engine, so the hosted model is the quality path:
+- Confirm a `video` provider with a lip-sync model is in your tool list. If there is none,
+  call `libi.suggest_provider({ kind: "video", reason: "lip-sync" })` and tell the user what
+  it showed. If they decline to connect one, fall back to 4b (mute + new VO) for the talking
+  section and **DISCLOSE the lips won't match the new voice**.
+- **Upload BOTH the scene's video and the new VO audio to the provider** with the
+  provider's own upload tool — **NEVER** read a provider key or `curl` provider storage
+  yourself. If a remote provider MCP cannot read the local path, say so and ask the user
+  how to proceed rather than improvising an upload.
+- Run the lip-sync endpoint your provider reference names
+  (`references/providers/<id>.md` — it also names a cheaper alternative). Pass the uploaded
+  video URL + audio URL. **PAID — disclose the cost (~$ per minute of video) and get
+  approval first.**
 - Import the returned synced video (`libi.upload_file`), add it as a **second Asset Option**
   on the scene's video asset, and `libi.set_default_option` to promote it (rewrites the draft
   `scene.fileId`) so the preview shows the matched lips. The original stays a revertible
@@ -100,13 +137,14 @@ scene's start; keep it within the scene's duration.
 ### 6. Verify before commit
 - Every target scene: original inline audio **present but `enabled:false`** (muted, toggleable).
 - Every target scene: a new voice segment that **covers its speech** (no silent talking tail).
-- Talking-face scenes: lip-synced via the fal.ai model (or the no-fal fallback disclosure was made).
+- Talking-face scenes: lip-synced on the hosted model (or the no-provider fallback disclosure was made).
 - Untouched scenes (if a subset): unchanged.
 Report the final per-scene layout (muted original + new segment start/duration, lip-synced y/n).
 
 ## What this skill does NOT own
 Generation-time audio (native audio, `@Audio1` carry) is `voiceover-production`.
-Transcription mechanics are `audio-analysis`. The lip-sync MODEL is hosted on fal.ai
-(`fal-ai/sync-lipsync/v2` etc.), reached through the `fal-ai` MCP — there is no local
-lip-sync engine. This skill owns the DECISION flow for
+Transcription mechanics are `audio-analysis`.
+The lip-sync MODEL is hosted — reached through your own provider MCP, endpoint named in
+`references/providers/<id>.md`. There is no local lip-sync engine.
+This skill owns the DECISION flow for
 re-voicing finished footage: transcribe → clone/new → lip-sync vs mute+re-voice → cover.

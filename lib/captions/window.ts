@@ -1,7 +1,7 @@
 // lib/captions/window.ts
 import type { CaptionCueWord } from "@/lib/captions/types";
 
-/** A minimal STT word (absolute seconds). Matches ElevenLabsWord structurally. */
+/** A minimal STT word (absolute seconds). Matches SttWord structurally. */
 export interface AbsoluteWord {
   text: string;
   start: number;

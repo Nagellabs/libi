@@ -23,6 +23,23 @@ vi.mock("node:child_process", async (importOriginal) => ({
   spawn: vi.fn(() => ({ on: vi.fn() })),
 }));
 
+// The dev branch resolves Next's own CLI via `createRequire(...).resolve(...)`
+// anchored at the project root — stubbed so the dev-checkout fixtures below
+// (which have no real `node_modules/next`) don't hit the resolution-failure
+// path.
+vi.mock("node:module", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:module")>()),
+  createRequire: vi.fn(() => ({
+    resolve: vi.fn(() => "/fake-project-root/node_modules/next/dist/bin/next"),
+  })),
+}));
+
+// Never `process.execPath` under Electron — see
+// `__tests__/unit/uv-env/install-path-invariants.test.ts`.
+vi.mock("@/lib/runtime/node-runtime", () => ({
+  resolveNodeCommand: () => "/fake/libi/bin/node",
+}));
+
 // A production boot that binds nothing: `next()` and the HTTP listener are the
 // only two things standing between this test and a real port.
 vi.mock("next", () => ({
@@ -82,7 +99,18 @@ describe("startStudio — the browser handoff", () => {
     }) as never);
   });
 
+  // A dev-checkout launch keeps the CLI alive through Ctrl-C with listeners on
+  // this very process; a forked test worker must not keep them.
+  const signalListenersAtStart = new Map(
+    (["SIGINT", "SIGTERM", "SIGHUP"] as const).map((s) => [s, process.listeners(s)]),
+  );
+
   afterEach(() => {
+    for (const [signal, kept] of signalListenersAtStart) {
+      for (const listener of process.listeners(signal)) {
+        if (!kept.includes(listener)) process.removeListener(signal, listener);
+      }
+    }
     writeSpy.mockRestore();
     vi.unstubAllEnvs();
     try {
@@ -93,7 +121,7 @@ describe("startStudio — the browser handoff", () => {
   });
 
   it("opens immediately after the production server is listening, and says so", async () => {
-    await startStudio("3456", undefined, { dirname: installedLayout() });
+    await startStudio("3456", { dirname: installedLayout() });
 
     expect(printed).toContain("[libi] Opening http://localhost:3456 in your browser…");
     // The fallback the user acts on when nothing appears.
@@ -103,7 +131,7 @@ describe("startStudio — the browser handoff", () => {
   });
 
   it("prints the bare URL and launches nothing under --no-open", async () => {
-    await startStudio("3456", undefined, { dirname: installedLayout(), open: false });
+    await startStudio("3456", { dirname: installedLayout(), open: false });
 
     expect(printed).toContain("[libi] Open http://localhost:3456");
     expect(printed).not.toContain("Opening http://localhost:3456");
@@ -112,7 +140,7 @@ describe("startStudio — the browser handoff", () => {
   });
 
   it("leaves a dev checkout alone by default", async () => {
-    await startStudio("3456", undefined, { dirname: devLayout() });
+    await startStudio("3456", { dirname: devLayout() });
 
     expect(printed).toContain("[libi] Open http://localhost:3456");
     expect(openStudioInBrowser).not.toHaveBeenCalled();
@@ -120,18 +148,10 @@ describe("startStudio — the browser handoff", () => {
   });
 
   it("waits for `next dev` to answer when a dev checkout opts in with --open", async () => {
-    await startStudio("3456", undefined, { dirname: devLayout(), open: true });
+    await startStudio("3456", { dirname: devLayout(), open: true });
 
     expect(openStudioWhenReady).toHaveBeenCalledWith("http://localhost:3456");
     // Never the immediate opener: the child hasn't compiled anything yet.
     expect(openStudioInBrowser).not.toHaveBeenCalled();
-  });
-
-  it("stays headless for --connect-agent, which is serving someone else's CLI", async () => {
-    await startStudio("3456", "/tmp/some-project", { dirname: installedLayout() });
-
-    expect(printed).toContain("connect-agent mode");
-    expect(openStudioInBrowser).not.toHaveBeenCalled();
-    expect(openStudioWhenReady).not.toHaveBeenCalled();
   });
 });

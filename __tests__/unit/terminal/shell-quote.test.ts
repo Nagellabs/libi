@@ -34,7 +34,7 @@ describe("quoteForShell", () => {
   it("always quotes for powershell, even an unremarkable path", () => {
     // There used to be a PowerShell "safe to leave bare" character class
     // mirroring the POSIX one (plus backslash), and this path stayed bare
-    // under it. It's gone now: `lib/agents/terminal-remedy.ts`'s own
+    // under it. It's gone now: the old sign-in remedy module's own
     // "does this path look tame?" test proved any such heuristic is a trap —
     // it accepted a plain `C:\…\claude.cmd` as tame but rejected
     // `C:\…\@nagellabslibi\…` (the `@`), so two sign-in remedies typing a
@@ -81,6 +81,27 @@ describe("quoteForShell", () => {
     // mid-token where every character in it is unconditionally safe.
     const p = "/x/@scope/pkg-1.0/a,b+c=d%e/f";
     expect(quoteForShell(p, "posix")).toBe(p);
+  });
+
+  it("doubles EVERY PowerShell single-quote character, typographic ones included", () => {
+    // PowerShell's tokenizer treats U+2018, U+2019, U+201A and U+201B as
+    // single quotes too. Doubling only the ASCII one lets a name like the
+    // first fixture close the string and run code, and breaks a path with a
+    // typographic apostrophe. Doubling any of them yields that same character.
+    expect(quoteForShell("x’; Write-Output PWNED; ’", "powershell")).toBe(
+      "'x’’; Write-Output PWNED; ’’'",
+    );
+    expect(quoteForShell("C:\\Users\\O’Neil\\.local\\bin\\codex.exe", "powershell")).toBe(
+      "'C:\\Users\\O’’Neil\\.local\\bin\\codex.exe'",
+    );
+    expect(quoteForShell("a\u2018b\u201Ac\u201Bd'e", "powershell")).toBe(
+      "'a\u2018\u2018b\u201A\u201Ac\u201B\u201Bd''e'",
+    );
+  });
+
+  it("leaves typographic quotes as they are on posix, where only the ASCII quote ends a string", () => {
+    expect(quoteForShell("/Users/O’Neil/bin/codex", "posix")).toBe("'/Users/O’Neil/bin/codex'");
+    expect(quoteForShell("x’; echo PWNED; ’", "posix")).toBe("'x’; echo PWNED; ’'");
   });
 });
 

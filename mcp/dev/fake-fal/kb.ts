@@ -99,21 +99,159 @@ const SEEDANCE_REF_SCHEMA: JsonSchemaLike = {
   required: ["prompt"],
 };
 
-const VEO_SCHEMA: JsonSchemaLike = {
+// Veo 3.1 fast — the three operations have THREE DIFFERENT input shapes, and
+// one shared `VEO_SCHEMA` used to stand in for all of them plus five unrelated
+// endpoints. That was not a rounding error: the FLF operation appeared to have
+// no way to pass a last frame at all, so the fake could not serve
+// `physical-action-video`'s headline first-last-frame technique, and
+// `fal-ai/wan-flf2v` — the other dedicated FLF endpoint — had the same hole.
+//
+// Every schema below is transcribed from fal's live OpenAPI, fetched
+// 2026-09-09 per endpoint:
+//   https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=<id>
+// Field NAMES and the `required` set are the load-bearing part — an agent that
+// reads this schema calls with exactly these keys. Note in particular that Veo
+// FLF does NOT use `image_url`/`end_image_url` (those are Seedance's i2v
+// spelling); it uses `first_frame_url`/`last_frame_url`, and both are REQUIRED
+// alongside the prompt.
+const VEO_COMMON = {
+  duration: { type: "string", description: "e.g. 4s/6s/8s", default: "8s" },
+  resolution: { type: "string", description: "720p/1080p", default: "720p" },
+  aspect_ratio: { type: "string", description: "auto/16:9/9:16", default: "auto" },
+  generate_audio: { type: "boolean", description: "Native synchronized audio", default: true },
+  negative_prompt: { type: "string", description: "What to avoid" },
+} as const;
+
+const VEO_I2V_SCHEMA: JsonSchemaLike = {
   type: "object",
   properties: {
-    prompt: { type: "string" },
-    image_url: { type: "string", description: "Optional start frame" },
-    duration: { type: "string", description: "4/6/8 seconds" },
-    generate_audio: { type: "boolean", default: true },
-    aspect_ratio: { type: "string", default: "9:16" },
+    prompt: { type: "string", description: "Motion + action prompt" },
+    image_url: { type: "string", description: "Start frame URL" },
+    ...VEO_COMMON,
   },
-  required: ["prompt"],
+  required: ["prompt", "image_url"],
+};
+
+const VEO_FLF_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "The transition between the two frames" },
+    first_frame_url: { type: "string", description: "URL of the first frame of the video" },
+    last_frame_url: { type: "string", description: "URL of the last frame of the video" },
+    ...VEO_COMMON,
+  },
+  required: ["prompt", "first_frame_url", "last_frame_url"],
+};
+
+const VEO_EXTEND_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "What happens in the continuation" },
+    video_url: { type: "string", description: "The clip to extend" },
+    ...VEO_COMMON,
+  },
+  required: ["prompt", "video_url"],
+};
+
+// Kling o1 i2v — FLF via start/end image params. NOT `@Image1` / `@Image2`:
+// those are Kling's prompt-reference tokens on other endpoints, and naming
+// them here is what sent the skill references wrong (fixed in the same change).
+const KLING_O1_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "Motion + action prompt" },
+    start_image_url: { type: "string", description: "Start frame URL" },
+    end_image_url: { type: "string", description: "Optional last frame (FLF)" },
+    duration: { type: "string", description: "seconds" },
+  },
+  required: ["prompt", "start_image_url"],
+};
+
+// Wan's dedicated first-last-frame endpoint. Both frames are required.
+const WAN_FLF_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "The transition between the two frames" },
+    start_image_url: { type: "string", description: "Start frame URL" },
+    end_image_url: { type: "string", description: "Last frame URL" },
+    resolution: { type: "string", description: "480p/580p/720p", default: "720p" },
+    aspect_ratio: { type: "string", default: "auto" },
+    negative_prompt: { type: "string", description: "What to avoid" },
+    num_frames: { type: "number", description: "81 default", default: 81 },
+    frames_per_second: { type: "number", default: 16 },
+  },
+  required: ["prompt", "start_image_url", "end_image_url"],
+};
+
+// Wan 2.2 animate/replace — swaps the subject of an EXISTING clip for the
+// person in a reference image. No prompt at all.
+const WAN_ANIMATE_REPLACE_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    video_url: { type: "string", description: "Source clip whose subject is replaced" },
+    image_url: { type: "string", description: "Reference image of the replacement subject" },
+    resolution: { type: "string", description: "480p/580p/720p", default: "720p" },
+    num_inference_steps: { type: "number", default: 20 },
+  },
+  required: ["video_url", "image_url"],
+};
+
+const WAN_V2V_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "Target style / content" },
+    video_url: { type: "string", description: "Source clip to transform" },
+    strength: { type: "number", description: "0-1, how far from the source", default: 0.85 },
+    resolution: { type: "string", default: "720p" },
+    negative_prompt: { type: "string", description: "What to avoid" },
+  },
+  required: ["prompt", "video_url"],
+};
+
+// Video understanding is an ANALYSIS endpoint, not a generator: a clip plus a
+// question in, text out.
+const VIDEO_UNDERSTANDING_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    video_url: { type: "string", description: "The clip to analyse" },
+    prompt: { type: "string", description: "The question to answer about the clip" },
+    detailed_analysis: { type: "boolean", description: "Longer, more thorough answer", default: false },
+  },
+  required: ["video_url", "prompt"],
+};
+
+// Video-to-video restyle: repaints an EXISTING clip in a new style. Input is a
+// video_url + a style prompt (no image, no duration — the source sets the length).
+const RESTYLE_V2V_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    video_url: { type: "string", description: "Source clip to restyle" },
+    prompt: { type: "string", description: "Target style" },
+    strength: { type: "number", description: "0-1, how far from the source", default: 0.7 },
+  },
+  required: ["video_url", "prompt"],
 };
 
 // Lip-sync: drives an EXISTING talking-face video's mouth to a NEW audio track.
 // Input is a video_url + audio_url (NOT a text prompt). Used by the
 // voice-replacement skill for the talking-face → lip-sync route.
+/** Text-to-music. Mirrors fal's live Stable Audio 2.5 text-to-audio input schema
+ *  (field names, types and defaults read off the model's API page on 2026-09-09), so a
+ *  skill that gets the parameter name wrong fails in test mode the way it would in
+ *  production. `seconds_total`, not `duration` — that difference is the point of
+ *  mirroring rather than inventing. */
+const MUSIC_T2A_SCHEMA: JsonSchemaLike = {
+  type: "object",
+  properties: {
+    prompt: { type: "string", description: "The prompt to generate audio from" },
+    seconds_total: { type: "integer", description: "Length of the clip in seconds", default: 190 },
+    num_inference_steps: { type: "integer", description: "Denoising steps", default: 8 },
+    guidance_scale: { type: "number", description: "Prompt adherence", default: 1 },
+    seed: { type: "integer", description: "Reproducible generation" },
+  },
+  required: ["prompt"],
+};
+
 const LIPSYNC_SCHEMA: JsonSchemaLike = {
   type: "object",
   properties: {
@@ -128,7 +266,7 @@ const LIPSYNC_SCHEMA: JsonSchemaLike = {
 // Background removal: isolate the subject, transparent background out.
 // Video → alpha WebM; image → transparent PNG. Inputs are source URLs
 // (NOT text prompts) — the removing-and-replacing-backgrounds skill sends
-// video_url / image_url from libi.upload_file_to_fal.
+// video_url / image_url the agent obtained from its fal MCP's own upload tool.
 const VIDEO_BG_REMOVAL_SCHEMA: JsonSchemaLike = {
   type: "object",
   properties: {
@@ -253,42 +391,76 @@ export const MODEL_KB: Record<string, ModelKbEntry> = {
   // The dashed `fal-ai/veo-3.1` 404s on real fal and no skill referenced it, so
   // it was removed (verified 2026-06-05). "veo" recommend tag lives on the i2v op.
   "fal-ai/veo3.1/fast/image-to-video": {
-    endpoint_id: "fal-ai/veo3.1/fast/image-to-video", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/veo3.1/fast/image-to-video", kind: "video", schema: VEO_I2V_SCHEMA,
     pricing: { amount: 0.4, currency: "USD", unit: "clip" },
     recommendFor: ["veo", "veo-fast", "veo i2v"],
   },
   "fal-ai/veo3.1/fast/first-last-frame-to-video": {
-    endpoint_id: "fal-ai/veo3.1/fast/first-last-frame-to-video", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/veo3.1/fast/first-last-frame-to-video", kind: "video", schema: VEO_FLF_SCHEMA,
     pricing: { amount: 0.45, currency: "USD", unit: "clip" },
     recommendFor: ["flf", "first-last-frame", "transition"],
   },
   "fal-ai/veo3.1/fast/extend-video": {
-    endpoint_id: "fal-ai/veo3.1/fast/extend-video", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/veo3.1/fast/extend-video", kind: "video", schema: VEO_EXTEND_SCHEMA,
     pricing: { amount: 0.45, currency: "USD", unit: "clip" },
     recommendFor: ["extend"],
   },
   "fal-ai/kling-video/o1/image-to-video": {
-    endpoint_id: "fal-ai/kling-video/o1/image-to-video", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/kling-video/o1/image-to-video", kind: "video", schema: KLING_O1_SCHEMA,
     pricing: { amount: 0.5, currency: "USD", unit: "clip" },
     recommendFor: ["kling"],
   },
   "fal-ai/wan/v2.2-14b/animate/replace": {
-    endpoint_id: "fal-ai/wan/v2.2-14b/animate/replace", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/wan/v2.2-14b/animate/replace", kind: "video", schema: WAN_ANIMATE_REPLACE_SCHEMA,
     pricing: { amount: 0.5, currency: "USD", unit: "clip" },
     recommendFor: ["wan replace", "animate"],
   },
+  // Route B (ugc-product-video) cheap restyle default. NOT a `fal-ai/*` id — the
+  // vendor prefix is `decart`, which is exactly why `ENDPOINT_VENDORS` in
+  // scripts/skill-eval/audit-endpoints.ts must list it: before it did, this id was
+  // referenced by a skill, absent from the KB, and invisible to the coverage guard,
+  // so a test-mode Path-B run returned `unknown_endpoint`.
+  //
+  // PRICE VERIFIED 2026-09-09. The $0.01/s here was originally copied from
+  // ugc-product-video's own prose, so the fake agreed with the skill whether or not the
+  // skill was right — a cost disclosure wrong in the same direction as the skill is
+  // undetectable. Checked against fal's live listing
+  // (https://fal.ai/models/decart/lucy-restyle, "$0.01 per second") and a second
+  // independent summary of the same page. Both agree with the skill; nothing to correct.
+  "decart/lucy-restyle": {
+    endpoint_id: "decart/lucy-restyle", kind: "video", schema: RESTYLE_V2V_SCHEMA,
+    pricing: { amount: 0.01, currency: "USD", unit: "second" },
+    recommendFor: ["restyle", "cheap restyle", "video-to-video restyle", "lucy"],
+  },
   "fal-ai/wan/v2.2-a14b/video-to-video": {
-    endpoint_id: "fal-ai/wan/v2.2-a14b/video-to-video", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/wan/v2.2-a14b/video-to-video", kind: "video", schema: WAN_V2V_SCHEMA,
     pricing: { amount: 0.5, currency: "USD", unit: "clip" },
     recommendFor: ["wan v2v", "video-to-video"],
   },
   "fal-ai/wan-flf2v": {
-    endpoint_id: "fal-ai/wan-flf2v", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/wan-flf2v", kind: "video", schema: WAN_FLF_SCHEMA,
     pricing: { amount: 0.45, currency: "USD", unit: "clip" },
     recommendFor: ["wan flf"],
   },
+  // The KB's FIRST audio-kind entry. Until it existed, `MODEL_KB` held image and
+  // video models only, so `music-creation`'s paid route could not be exercised by any
+  // scenario — its fal reference deliberately named no endpoint id, because naming one
+  // would have been both un-auditable (the KB could not resolve it) and unreachable (the
+  // fake could not serve it), and a guard pinned that absence so at least it was
+  // honest. An entire provider kind shipped with zero agent-level coverage.
+  //
+  // VERIFIED 2026-09-09 against fal's live listing: endpoint id and `$0.2 per audio`
+  // (per generation, NOT per second) from https://fal.ai/models/fal-ai/stable-audio-25/
+  // text-to-audio, input schema from that model's /api page. Priced per call is itself
+  // worth having in the KB — every other entry is per image / clip / second, so a skill
+  // that assumes a per-second unit for music now has something to be wrong against.
+  "fal-ai/stable-audio-25/text-to-audio": {
+    endpoint_id: "fal-ai/stable-audio-25/text-to-audio", kind: "audio", schema: MUSIC_T2A_SCHEMA,
+    pricing: { amount: 0.2, currency: "USD", unit: "generation" },
+    recommendFor: ["music", "song", "soundtrack", "background music", "audio", "stable audio"],
+  },
   "fal-ai/video-understanding": {
-    endpoint_id: "fal-ai/video-understanding", kind: "video", schema: VEO_SCHEMA,
+    endpoint_id: "fal-ai/video-understanding", kind: "video", schema: VIDEO_UNDERSTANDING_SCHEMA,
     pricing: { amount: 0.1, currency: "USD", unit: "call" },
     recommendFor: ["script", "understanding", "analysis"],
   },

@@ -1,7 +1,7 @@
 ---
 id: navigation-show-piece
 title: Agent-driven navigation — show_piece moves the editor
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [navigation-events, notify-http, sse]
 cost: subscription-tokens
@@ -25,8 +25,8 @@ cost: subscription-tokens
 - [ ] No page reload occurred (SPA navigation via SSE, not refresh).
 - [ ] `libi.log` shows the notify round-trip (`grep -i show_piece` /
       `tag: "mcp"` events around the call time).
-- [ ] Follow-up: ask the agent to `libi.show_mcp_settings` — the app
-      navigates to Settings → MCP Servers (second navigation kind works too).
+- [ ] Follow-up: ask the agent to `libi.show_extension` — the app
+      navigates to Agents → Libi MCP (second navigation kind works too).
 - [ ] Navigate back to the piece afterwards (leave editor on "Agent Eval Run"
       for scenario 04).
 

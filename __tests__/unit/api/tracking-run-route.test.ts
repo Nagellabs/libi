@@ -145,6 +145,61 @@ describe("POST /api/tracking/run", () => {
     expect(lookupMock).not.toHaveBeenCalled();
   });
 
+  it("accepts the fileUrl its own aggregator built while <LIBI_HOME>/port names another libi's server", async () => {
+    // This server booted on 55268 and published its port through Category B.
+    // Its aggregator child builds file URLs from the port it was handed; a
+    // second libi on the same home booted since and rewrote the shared file.
+    const fs = await import("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    const envNames = ["LIBI_HOME", "PORT", "LIBI_PORT", "LIBI_SERVER_PORT"] as const;
+    const savedEnv = Object.fromEntries(envNames.map((n) => [n, process.env[n]]));
+    // Category B installs exit and signal handlers; the ones it adds are removed below.
+    const emitter = process as unknown as NodeJS.EventEmitter;
+    const events = ["exit", "SIGTERM", "SIGINT", "SIGHUP"] as const;
+    const listenersBefore = new Map(events.map((e) => [e, emitter.listeners(e)]));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-tracking-route-"));
+    try {
+      process.env.LIBI_HOME = home;
+      process.env.PORT = "55268";
+      const { writePortFileAndInstallSignals } = await import("@/lib/server/lifecycle/category-b");
+      writePortFileAndInstallSignals();
+      fs.writeFileSync(path.join(home, "port"), "55303");
+
+      const db = vi.mocked(getDb)();
+      seedFixtures(db);
+      registerStubTrackingRunner();
+      installMgr();
+
+      const { POST } = await import("@/app/api/tracking/run/route");
+      const res = await POST(
+        new Request("http://x/api/tracking/run", {
+          method: "POST",
+          body: JSON.stringify({
+            ...baseBody,
+            fileUrl: "http://127.0.0.1:55268/api/files/by-id/f1/content",
+          }),
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+
+      expect(res.status).toBe(200);
+      expect(lookupMock).not.toHaveBeenCalled();
+    } finally {
+      for (const e of events) {
+        const before = listenersBefore.get(e) ?? [];
+        for (const l of emitter.listeners(e)) {
+          if (!before.includes(l)) emitter.removeListener(e, l as (...args: unknown[]) => void);
+        }
+      }
+      for (const n of envNames) {
+        if (savedEnv[n] === undefined) delete process.env[n];
+        else process.env[n] = savedEnv[n];
+      }
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a loopback url on the WRONG port (not our own app's port)", async () => {
     const db = vi.mocked(getDb)();
     seedFixtures(db);

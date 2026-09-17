@@ -60,6 +60,8 @@ function makeDef(overrides: Partial<BundledMcpDef> & { id: string }): BundledMcp
   return {
     name: overrides.id,
     description: "test stub",
+    kind: "extension",
+    toolPrefixes: [],
     npmUrl: null,
     type: "stdio",
     command: "node",
@@ -96,7 +98,6 @@ function seedRow(id: string) {
     type: "stdio",
     command: "node",
     args: JSON.stringify([]),
-    enabled: true,
     requireApproval: false,
     bundled: true,
     installStatus: "pending",

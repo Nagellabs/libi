@@ -15,9 +15,10 @@ the footage**, not just its words — so a faithful reproduction needs THREE thi
 sources, then a **render-verify loop** to prove it:
 
 1. **The exact words + timing** — authoritative from the **Whisper transcript** (`audio-analysis`).
-2. **The visual treatment + how it animates** — from a **caption-focused paid analysis**
-   (`extra_analysis_model({ focus: "captions" })`), which watches the WHOLE video so it can
-   describe motion a per-frame still can't.
+2. **The visual treatment + how it animates** — from a **caption-focused paid analysis**:
+   run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
+   with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
+   `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`. It watches the WHOLE video so it can describe motion a per-frame still can't.
 3. **The right renderer** for each caption — 3D/perspective vs flat-kinetic-2D vs plain subtitle.
 
 Then you **build → render → look at the pixels → fix** (the verify loop), because the agent
@@ -49,21 +50,26 @@ captions read wrong or animate wrong.
 ## Step 2 — Strongly suggest the caption-focused paid analysis (ask first, disclose cost)
 
 When the user wants to **mimic** captions, the caption-focused analysis is the single biggest
-quality lever — it is **strongly recommended**. It is PAID (fal credits, ~$0.002/s of source;
-a 20s reel ≈ a few cents). It is a libi-core paid tool with **no automatic approval card**, so
-you MUST disclose the cost and **ask for confirmation before calling it** (cooperative approval,
-the libi paid-tool convention):
+quality lever — it is **strongly recommended**. It is PAID (your provider's credits, ~$0.002/s
+of source; a 20s reel ≈ a few cents). It runs on YOUR provider (the video-understanding model in
+your fal MCP, `fal-ai/video-understanding`) and libi shows **no approval card** for it, so you
+MUST name the model and its approximate cost (~$0.002 per second of video) and get a yes before
+running it — even when no source file is loaded yet, say what you WOULD run and what it costs
+(cooperative approval, the libi paid-tool convention):
 
 > "To mimic these captions faithfully I'd run a caption-focused analysis — it watches the whole
 > video and returns each caption's exact motion (anchor, keyframes, orientation, reveal, color).
-> It costs about <X> in fal credits (~$0.002/s). Want me to run it? I can also try from frames
+> It costs about <X> in your provider's credits (~$0.002/s). Want me to run it? I can also try from frames
 > alone for free, but the result will be rougher."
 
-On **yes**: call
-`libi.extra_analysis_model({ fileId, focus: "captions" })`.
-The result is a per-caption spec returned as text in `data.captions` (NOT a structured Script —
-it lives under a `caption_spec:*` analysis step, separate from any production script, and never
-shows in the Script tab). It gives, per caption:
+On **yes**: run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
+with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
+`libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`.
+(`analysis_update_summary_custom` writes into the file's `summary` step, so that step must
+exist — run `video-analysis` flow (A), or save a minimal `video_v1` summary with
+`libi.analysis_save_summary`, before saving the spec.)
+The result is a per-caption spec (NOT a production script — it lives under
+`summary.custom.caption_spec`, separate from any script text). It gives, per caption:
 - `text` (use the TRANSCRIPT's words instead — see Step 1),
 - `appear_sec`/`exit_sec`,
 - `anchor`: **world** (locked in the 3D scene — drifts/recedes/grows as the camera moves) vs
@@ -176,8 +182,9 @@ it (as with a reused music bed) for the user's own / cleared content.
 
 ## Cross-skill references
 - `audio-analysis` — Whisper transcript (authoritative words + word-level timing).
-- `video-analysis` — documents `extra_analysis_model({ focus: "captions" })` (the paid
-  caption-spec mode this skill drives).
+- `video-analysis` — flow (B) documents the caption-spec path this skill drives: run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
+  with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
+  `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`.
 - `three-overlays` — real 3D / perspective captions + the build→render→inspect→fix verify loop.
 - `animated-text-overlays` — flat kinetic 2D caption effects (code overlays).
 - `speech-captions` — plain transcript-synced subtitles.

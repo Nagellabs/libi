@@ -43,7 +43,6 @@ function video(): FileRecord {
     mediaWidth: 640, mediaHeight: 360, hasAudio: true, hasAlpha: false,
     proxyFilename: null, proxyStatus: "idle", proxyGeneratedAt: null, proxyHeight: null,
     filmstripFilename: null, filmstripStatus: "idle", filmstripGeneratedAt: null, filmstripFrames: null, filmstripHeight: null,
-    falUploadedUrl: null,
     notes: null,
     aiGeneration: null,
     createdAt: new Date(),
@@ -85,15 +84,13 @@ describe("AssetPreviewPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("renders the Extra analysis (script) tab after Frames in the tab list", () => {
+  it("renders exactly Summary / Transcript / Frames / Notes — no Extra analysis (script) tab", () => {
+    // Removing libi.extra_analysis_model took the whole Script-tab subtree with it;
+    // the paid analysis now runs on the agent's own provider and lands in the
+    // Summary step, so nothing may render an "Extra analysis" tab any more.
     render(wrap(<AssetPreviewPanel asset={video()} onClose={() => {}} />));
-    const tabs = screen.getAllByRole("tab").map((t) => t.textContent ?? "");
-    // Labeled "Extra analysis" — "Script" collided with the piece-level Script tab.
-    expect(tabs).toEqual(
-      expect.arrayContaining([expect.stringMatching(/^Extra analysis/i)]),
-    );
-    const frameIdx = tabs.findIndex((t) => /^frames/i.test(t));
-    const scriptIdx = tabs.findIndex((t) => /^extra analysis/i.test(t));
-    expect(scriptIdx).toBeGreaterThan(frameIdx);
+    const tabs = screen.getAllByRole("tab").map((t) => (t.textContent ?? "").trim());
+    expect(tabs).toEqual(["Summary", "Transcript", "Frames", "Notes"]);
+    expect(tabs.some((t) => /^extra analysis|^script$/i.test(t))).toBe(false);
   });
 });

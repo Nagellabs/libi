@@ -24,15 +24,10 @@ function readBundledSkillTags(name: string): string {
  */
 export function seedDatabase(db: BetterSQLite3Database<Record<string, unknown>>): void {
   for (const def of BUNDLED_MCP_SERVERS) {
-    // For brand-new rows, choose an initial installStatus that reflects
-    // whether configuration is required. The DependencyManager re-derives
-    // status at runtime, but seeding "needs_config" up front lets the UI
-    // show the correct Configure-button styling immediately.
-    const needsConfigOnInsert =
-      !def.core &&
-      Array.isArray(def.requiredEnvVars) &&
-      def.requiredEnvVars.length > 0;
-    const initialInstallStatus = needsConfigOnInsert ? "needs_config" : "pending";
+    // Brand-new rows start "pending"; the DependencyManager re-derives the
+    // real status at runtime. No def needs configuration — libi holds no
+    // provider key — so "needs_config" is never seeded.
+    const initialInstallStatus = "pending";
 
     db.insert(mcpServers)
       .values({
@@ -43,11 +38,10 @@ export function seedDatabase(db: BetterSQLite3Database<Record<string, unknown>>)
         type: def.type,
         command: def.command,
         args: JSON.stringify(def.args),
-        url: def.url ?? null,
-        headers: def.headers ? JSON.stringify(def.headers) : null,
+        url: null,
+        headers: null,
         bundled: true,
-        // Core entries cannot be disabled — force enabled=true, requireApproval=false.
-        enabled: true,
+        // Core entries are never gated — force requireApproval=false.
         requireApproval: def.core ? false : def.requireApproval,
         installStatus: initialInstallStatus,
       })
@@ -60,14 +54,11 @@ export function seedDatabase(db: BetterSQLite3Database<Record<string, unknown>>)
           type: def.type,
           command: def.command,
           args: JSON.stringify(def.args),
-          url: def.url ?? null,
-          headers: def.headers ? JSON.stringify(def.headers) : null,
-          // On conflict we preserve the user's enabled/requireApproval choices,
-          // their installStatus (could be "installed" if they configured the
-          // row, or "needs_config" if not), and their envVars. Core rows always reset.
-          ...(def.core
-            ? { enabled: true, requireApproval: false }
-            : {}),
+          url: null,
+          headers: null,
+          // On conflict we preserve the user's requireApproval choice, their
+          // installStatus and their envVars. Core rows always reset.
+          ...(def.core ? { requireApproval: false } : {}),
           updatedAt: new Date(),
         },
       })

@@ -19,8 +19,8 @@ you are not building anything here.
 
 2. **Build it:** `libi.build_onboarding_piece({})` — no arguments. That single call
    downloads the media, verifies it, and assembles the whole composition. It returns a
-   `pieceId` and a `description` of the film. Do **not** call any generation tool (no
-   fal-ai, no ElevenLabs), do not import anything, and do not add or edit layers.
+   `pieceId` and a `description` of the film. Do **not** call any generation tool at all —
+   no provider, no libi generation tool — do not import anything, and do not add or edit layers.
 
    If the result comes back `reused: true` / `bytes: 0`, this machine had already built
    the film and **nothing was downloaded on this call** — don't tell them it was.

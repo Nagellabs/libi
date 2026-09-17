@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { buildCaptionCues } from "@/lib/captions/cues";
-import type { ElevenLabsWord } from "@/lib/elevenlabs/transcribe";
+import type { SttWord } from "@/lib/analysis/types";
 
-const w = (text: string, start: number, end: number): ElevenLabsWord => ({ text, start, end, type: "word" });
+const w = (text: string, start: number, end: number): SttWord => ({ text, start, end, type: "word" });
 
 describe("buildCaptionCues", () => {
   it("splits on the char budget and times with lead/hold", () => {
@@ -17,7 +17,7 @@ describe("buildCaptionCues", () => {
     for (let i = 1; i < cues.length; i++) expect(cues[i].start).toBeGreaterThanOrEqual(cues[i - 1].end);
   });
   it("ignores non-word tokens", () => {
-    const words = [w("hi", 0, 0.4), { text: " ", start: 0.4, end: 0.5, type: "spacing" } as ElevenLabsWord];
+    const words = [w("hi", 0, 0.4), { text: " ", start: 0.4, end: 0.5, type: "spacing" } as SttWord];
     expect(buildCaptionCues(words)).toHaveLength(1);
   });
 });

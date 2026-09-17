@@ -10,12 +10,11 @@
  * `SessionManager#markAgentAuthFailure`, and takes an `AuthNoteContext` so the
  * wording matches where the failure actually happened.
  *
- * Claude Code availability is decided by what libi installs — the ACP adapter
- * plus the Claude CLI it execs — and deliberately NOT by whether the user is
- * signed in (`lib/agents/acp/agent-registry.ts#detectClaudeCode` explains why
- * no cheap boot-time probe can answer that honestly: credentials live in the
- * macOS Keychain, or `~/.claude/.credentials.json`, or `ANTHROPIC_API_KEY`, or
- * Bedrock/Vertex env). The cost of that choice is that an unauthenticated user
+ * Claude Code availability is decided by the ACP adapter being installed and
+ * the user's own `claude` resolving — deliberately NOT by whether the user is
+ * signed in (no cheap boot-time probe can answer that honestly: credentials
+ * live in the macOS Keychain, or `~/.claude/.credentials.json`, or
+ * `ANTHROPIC_API_KEY`, or Bedrock/Vertex env). The cost of that choice is that an unauthenticated user
  * gets through selection and fails at their FIRST message: the adapter answers
  * `initialize` and `session/new` happily, then throws ACP `-32000
  * Authentication required` from `session/prompt` (verified against
@@ -84,25 +83,18 @@ function agentLabel(agentId: string): string {
  * stay silent.
  *
  * WAS two hardcoded `if (agentId === "claude-code") … if (agentId ===
- * "codex") …` blocks; now it branches on the registry's `install` field
- * instead — an agent libi must install (Claude Code today) gets the
- * install-and-run wording, an agent libi already ships (`install: null`,
- * Codex today) gets the "nothing to install" wording. Same two outputs, but
- * derived from what the registry declares rather than from the id.
+ * "codex") …` blocks, then a branch on the registry's `install` field that
+ * told the user to INSTALL the agent and sign in. The install half is gone:
+ * an auth error only ever arrives from an installed, running agent, libi
+ * installs both adapters on selection anyway, and the command it named
+ * (`npm i -g @agentclientprotocol/codex-acp`) installs the adapter — it puts
+ * no `codex` on PATH, so the sentence could not be followed. Every registered
+ * agent now gets the same shape: sign in with the registry's
+ * `AgentSignInDeclaration.displayCommand`, nothing about installing.
  *
- * The Claude wording matches `components/onboarding/onboarding-panel.tsx`'s
- * install hint rather than inventing a second set of instructions — both name
- * a sign-in libi cannot perform on the user's behalf. The API-key alternative
- * comes from `AgentSignInDeclaration.envVar`, so widening the branch from one
- * agent id to "every agent libi installs" no longer carries Anthropic's
- * variable to agents it is wrong for; an agent that declares none simply
- * doesn't get that sentence.
- *
- * Codex gets its own wording because its remedy is genuinely different: libi
- * BUNDLES the codex engine (~271MB, verified running on a machine with no
- * `codex` on PATH), so signing in requires no installation at all. Telling a
- * codex user to `npm i -g @openai/codex` would be wrong twice over — they
- * already have it, and installing does not sign anyone in.
+ * The API-key alternative comes from `AgentSignInDeclaration.envVar`, so the
+ * one shape does not carry Anthropic's variable to agents it is wrong for; an
+ * agent that declares none simply doesn't get that sentence.
  */
 export function promptErrorNote(
   err: unknown,
@@ -117,25 +109,19 @@ export function promptErrorNote(
 
   const setup = getAgentSetup(agentId);
 
-  if (setup?.install) {
+  if (setup) {
     const retry = context === "prompt" ? " — then send it again." : ".";
     // The env-var alternative is a REGISTRY field, not a literal. It used to
     // be `ANTHROPIC_API_KEY` hardcoded inside a branch that had just been
-    // widened from `agentId === "claude-code"` to "any agent libi installs" —
+    // widened from `agentId === "claude-code"` to every registered agent —
     // so Anthropic's variable would have been recommended to the next
-    // installable agent's users. An agent that declares none loses the clause
-    // entirely rather than being handed someone else's.
+    // agent's users. An agent that declares none loses the clause entirely
+    // rather than being handed someone else's.
     const envClause = setup.signIn.envVar ? `, or set \`${setup.signIn.envVar}\`` : "";
     return (
       `${setup.name} isn't signed in on this machine, ${blocked}. ` +
-      `Sign in once — install ${setup.name} (\`${setup.install.command}\`) and run ` +
-      `\`${setup.signIn.displayCommand}\`${envClause}${retry}`
-    );
-  }
-  if (setup) {
-    return (
-      `${setup.name} isn't signed in on this machine, ${blocked}. ` +
-      `Sign in using the ${setup.name} engine libi already ships — there's nothing to install.`
+      `Sign in from Agents → ${setup.name}, or run \`${setup.signIn.displayCommand}\` in any terminal` +
+      `${envClause}${retry}`
     );
   }
   return `${agentLabel(agentId)} isn't signed in on this machine, ${blocked}.`;

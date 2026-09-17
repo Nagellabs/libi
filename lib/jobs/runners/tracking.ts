@@ -157,6 +157,9 @@ export const trackingRunner: JobRunner<TrackingParams, TrackingResult> = {
     const startFrame = prior?.framesDone ?? 0;
     const priorSamples = prior?.partialSamples ?? [];
 
+    /** Non-null while the first-use dependency install has the watchdog paused. */
+    let releaseWatchdog: (() => void) | null = null;
+
     const opts = {
       fileUrl: ctx.params.fileUrl,
       fileId: ctx.params.fileId,
@@ -168,6 +171,26 @@ export const trackingRunner: JobRunner<TrackingParams, TrackingResult> = {
       priorSamples,
       onProgress: (done: number, total: number) => {
         ctx.reportProgress(done, total, "frames");
+      },
+      // First tracker run on a machine may have to fetch Chromium;
+      // the unit travels with the event, so this reads "87/173 MB" and the
+      // frames phase starts its own count afterwards.
+      onDownloadProgress: ({ doneMb, totalMb }: { doneMb: number; totalMb: number }) => {
+        ctx.reportProgress(doneMb, totalMb, "MB");
+      },
+      // …and the ticks alone are not enough to keep the 60 s watchdog happy:
+      // the mediapipe model fetch in front of the download reports nothing at
+      // all, and Playwright emits one progress line per 10 %, which on a slow
+      // link is minutes apart. Suspend the watchdog for the install phase only
+      // — the frames phase it exists for stays covered. `release` is idempotent
+      // and the callback is always called with `false` in a `finally`.
+      onDependencyPhase: (active: boolean) => {
+        if (active) {
+          releaseWatchdog ??= ctx.pauseWatchdog?.() ?? null;
+          return;
+        }
+        releaseWatchdog?.();
+        releaseWatchdog = null;
       },
       onCheckpoint: async (state: TrackingResumeState) => {
         await ctx.checkpoint(state);

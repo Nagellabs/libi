@@ -87,7 +87,6 @@ function seedRow(): void {
       command: "",
       args: JSON.stringify([]),
       bundled: true,
-      enabled: true,
       requireApproval: false,
       installStatus: "pending",
     })

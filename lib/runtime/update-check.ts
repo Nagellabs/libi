@@ -42,6 +42,13 @@ import {
   type CurrentRuntime,
   type ShellApiRange,
 } from "@/lib/runtime/current-runtime";
+import { compareVersions, isNewer } from "@/lib/runtime/version-compare";
+
+// Re-exported: these lived here until 2026-09-18, and both halves of the app
+// import them from this path. They moved to a leaf module because a client
+// component importing one from HERE dragged the native sqlite binding into the
+// browser bundle — see `lib/runtime/version-compare.ts`.
+export { compareVersions, isNewer };
 
 const LOG_TAG = "runtime-update";
 
@@ -80,41 +87,6 @@ export interface UpdateStatus {
 export interface LatestManifest {
   version: string;
   shellApiVersion: number | null;
-}
-
-/**
- * Compare two dotted versions. Returns <0, 0, >0 like a comparator.
- *
- * Deliberately minimal — libi publishes plain `x.y.z` — with one rule beyond
- * numeric comparison: a prerelease suffix (`1.2.0-rc.1`) sorts BELOW the
- * release it precedes, matching semver, so an rc can never present itself as
- * an upgrade over the release of the same triple.
- */
-export function compareVersions(a: string, b: string): number {
-  const parse = (v: string): { nums: number[]; pre: string | null } => {
-    const [core, ...rest] = v.trim().split("-");
-    const nums = core.split(".").map((s) => {
-      const n = Number.parseInt(s, 10);
-      return Number.isFinite(n) ? n : 0;
-    });
-    while (nums.length < 3) nums.push(0);
-    return { nums, pre: rest.length > 0 ? rest.join("-") : null };
-  };
-  const pa = parse(a);
-  const pb = parse(b);
-  for (let i = 0; i < Math.max(pa.nums.length, pb.nums.length); i += 1) {
-    const d = (pa.nums[i] ?? 0) - (pb.nums[i] ?? 0);
-    if (d !== 0) return d;
-  }
-  if (pa.pre === pb.pre) return 0;
-  if (pa.pre === null) return 1; // release > prerelease
-  if (pb.pre === null) return -1;
-  return pa.pre < pb.pre ? -1 : 1;
-}
-
-/** True when `latest` is strictly newer than `current`. */
-export function isNewer(latest: string, current: string): boolean {
-  return compareVersions(latest, current) > 0;
 }
 
 /**

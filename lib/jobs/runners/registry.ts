@@ -1,7 +1,6 @@
 import type { JobRunner } from "@/lib/jobs/types";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
 import { trackingRunner } from "@/lib/jobs/runners/tracking";
-import { trackingProviderRunner } from "@/lib/jobs/runners/tracking-provider";
 import { proxyGenRunner } from "@/lib/jobs/runners/proxy-gen";
 import { filmstripGenRunner } from "@/lib/jobs/runners/filmstrip-gen";
 import { exportRenderRunner } from "@/lib/jobs/runners/export-render";
@@ -12,8 +11,8 @@ import { ttsModelDownloadRunner } from "@/lib/jobs/runners/tts-model-download";
 import { musicModelDownloadRunner } from "@/lib/jobs/runners/music-model-download";
 import { musicGenerateRunner } from "@/lib/jobs/runners/music-generate";
 import { pieceDupRunner } from "@/lib/jobs/runners/piece-dup";
-import { extraAnalysisModelRunner } from "@/lib/jobs/runners/extra-analysis-model";
 import { remoteFetchRunner } from "@/lib/jobs/runners/remote-fetch";
+import { videoDownloadRunner } from "@/lib/jobs/runners/video-download";
 import { matteGenRunner } from "@/lib/jobs/runners/matte-gen";
 import { runtimeUpdateRunner } from "@/lib/jobs/runners/runtime-update";
 import { trackingEngineInstallRunner } from "@/lib/jobs/runners/tracking-engine-install";
@@ -75,7 +74,6 @@ export function __resetRunnerRegistryForTests(): void {
 export function registerBuiltinRunners(): void {
   for (const r of [
     trackingRunner,
-    trackingProviderRunner,
     proxyGenRunner,
     filmstripGenRunner,
     exportRenderRunner,
@@ -86,8 +84,8 @@ export function registerBuiltinRunners(): void {
     musicModelDownloadRunner,
     musicGenerateRunner,
     pieceDupRunner,
-    extraAnalysisModelRunner,
     remoteFetchRunner,
+    videoDownloadRunner,
     matteGenRunner,
     runtimeUpdateRunner,
     trackingEngineInstallRunner,

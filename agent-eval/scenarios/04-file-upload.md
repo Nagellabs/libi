@@ -1,7 +1,7 @@
 ---
 id: file-upload
 title: File import via the agent — upload_file from a local path
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [upload-file, storage, proxy-gen-job, sse-refresh]
 cost: subscription-tokens

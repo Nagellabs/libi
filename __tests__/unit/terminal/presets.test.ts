@@ -17,12 +17,17 @@ describe("terminal CLI presets", () => {
     expect(shell!.command).toBeNull();
   });
 
-  it("every non-shell preset has a non-empty launch command and install hint", () => {
+  it("every non-shell preset has a non-empty launch command", () => {
     for (const p of TERMINAL_CLI_PRESETS) {
       if (p.id === "shell") continue;
       expect(p.command, p.id).toBeTruthy();
       expect(p.command!.trim().length, p.id).toBeGreaterThan(0);
-      expect(p.installHint, p.id).toBeTruthy();
+    }
+  });
+
+  it("carries no install hint — installing is the Agents page's job", () => {
+    for (const p of TERMINAL_CLI_PRESETS) {
+      expect(Object.keys(p).sort(), p.id).toEqual(["command", "id", "label"]);
     }
   });
 

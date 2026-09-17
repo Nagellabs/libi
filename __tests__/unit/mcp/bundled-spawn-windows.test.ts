@@ -23,9 +23,12 @@ const realPlatform = process.platform;
 const setPlatform = (p: NodeJS.Platform) =>
   Object.defineProperty(process, "platform", { value: p, configurable: true });
 
-const PKG = "@kevinwatt/yt-dlp-mcp";
-const BIN = "yt-dlp-mcp";
-const VERSION = "1.2.3";
+// No bundled def carries `npmPackage` + `pinnedVersion` any more (the last
+// one, the yt-dlp MCP, became the non-spawning `youtube-download` extension),
+// so the resolver is exercised against a hand-built def.
+const PKG = "fixture-mcp";
+const BIN = "fixture-mcp";
+const VERSION = "1.0.0";
 
 let home: string;
 let binDir: string;
@@ -54,18 +57,26 @@ afterEach(() => {
   vi.doUnmock("@/lib/libi-home");
 });
 
-const def = {
-  id: "youtube-downloader",
+const winFixtureDef = {
+  id: "fixture-npm-mcp",
+  name: "Fixture",
+  description: "spawn-resolution fixture",
+  npmUrl: null,
+  kind: "extension" as const,
+  toolPrefixes: [],
+  type: "stdio" as const,
   command: "npx",
-  args: ["-y", PKG],
+  args: ["-y", `${PKG}@${VERSION}`],
   npmPackage: PKG,
   pinnedVersion: VERSION,
   binName: BIN,
+  requireApproval: false,
+  dependencies: [],
 };
 
 async function resolve() {
   const { resolveBundledSpawn } = await import("@/mcp/registry/local-bin-resolver");
-  return resolveBundledSpawn(def as never);
+  return resolveBundledSpawn(winFixtureDef as never);
 }
 
 describe("resolveBundledSpawn on Windows", () => {

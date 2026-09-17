@@ -1,15 +1,12 @@
 import { NextResponse } from "next/server";
-import { refreshAgentCache } from "@/lib/agents/acp/agent-registry";
 import { getProviderInfos } from "@/lib/agents/provider-registry";
 import { getProcessManager } from "@/lib/agents/process-manager";
 
-export async function GET(request: Request) {
-  const { searchParams } = new URL(request.url);
-  if (searchParams.get("refresh") === "true") {
-    refreshAgentCache();
-  }
+// Detection is kept current by its owners — the Agents page's status route
+// and agent installs call `refreshAgentCache()` — so this is a plain read.
+export async function GET() {
   const pm = getProcessManager();
-  const infos: Array<Record<string, unknown>> = getProviderInfos().map((info) => ({
+  const infos: Array<Record<string, unknown>> = (await getProviderInfos()).map((info) => ({
     ...info,
     capabilities: pm.getCapabilitiesForAgent(info.id),
   }));

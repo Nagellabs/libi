@@ -9,6 +9,35 @@ tags:
 
 # Generic Video Creation
 
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
 Genre-agnostic AI video creation. Two entry modes: (a) `mimic-video` handed you a source +
 analysis to recreate; (b) a direct from-scratch brief. Either way: run the intake, then build.
 
@@ -20,7 +49,7 @@ analysis to recreate; (b) a direct from-scratch brief. Either way: run the intak
   multi-beat clip; do NOT fragment a short ad into many 3–6s clips)**, realism cues, negative
   lists.
 - `ai-video-models` — the per-engine prompting guide for your chosen model.
-- `ai-asset-generation` — the call + save mechanics (recommend_model / schema / pricing / polling /
+- `ai-asset-generation` — the call + save mechanics (model pick / schema / pricing / polling /
   import) and the universal video invariants (**no in-video text**; **native audio on**).
 - `realistic-image-generation` — the keyframe / portrait image craft (gpt-image-2 default).
 - `physical-action-video` — manipulation-beat craft (FLF-first, decomposition, model ladder) when
@@ -55,8 +84,9 @@ Skip any the user already answered:
 3. **Speed / pacing** — calm / normal / punchy; cut rhythm.
 4. **Target duration.**
 5. **Stitch vs fully-AI** — reuse the original's clips, or regenerate everything with AI?
-6. **Model** — recommend a default, verify via `ai-asset-generation` (`recommend_model` →
-   `get_model_schema` → `get_pricing`), then read its guide in `ai-video-models`.
+6. **Model** — recommend a default, then VERIFY it at runtime with your provider's own
+   schema and pricing tools (`references/providers/<id>.md` under this skill names them),
+   and read its prompting guide in `ai-video-models`.
 7. **Voice / audio** — default ON (native model audio, per `ai-asset-generation`); confirm.
 
 ## Step 2 — Branch on stitch-vs-fully-AI

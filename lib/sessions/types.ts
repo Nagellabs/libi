@@ -58,6 +58,10 @@ export interface SessionEntry {
    *  Date.now() would be a lie (QA 2026-07-04: bogus timers after
    *  session re-activation). */
   isReplaying?: boolean;
+  /** False when the agent process this session runs on was spawned while the desktop app had not
+   *  loaded the user's shell environment — its chat shows a warning. Set when the session becomes
+   *  active; unset on a history entry that has never been activated. */
+  shellEnvLoaded?: boolean;
 }
 
 /** A group of sessions under a day header for the sidebar UI */

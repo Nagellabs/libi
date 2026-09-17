@@ -107,6 +107,28 @@ export const PINNED_NODE_VERSION = "v24.18.0";
  */
 export const MIN_NODE_MAJOR = 22;
 
+/**
+ * `<major>.<minor>` releases we refuse to adopt, however new they are.
+ *
+ * `MIN_NODE_MAJOR` is a floor, and a floor cannot express "24 is fine but
+ * 24.16 is not". 24.16.0 hangs Playwright's zip extractor: the first Chromium
+ * install spawned with it never finishes and never errors — the export just
+ * stops, and `ensure-chromium.ts`'s timeout message names this version because
+ * it is the one known cause of that shape. Adopting such a node as
+ * `<LIBI_HOME>/bin/node` bakes the hang into every later spawn, so a
+ * known-bad candidate is skipped and the pinned build is downloaded instead.
+ *
+ * Deliberately minor-level, not patch-level: a bad minor is bad in every patch
+ * we would otherwise have to enumerate, and `PINNED_NODE_VERSION` is always the
+ * escape hatch. Add an entry only with an observed failure behind it.
+ */
+export const KNOWN_BAD_NODE_VERSIONS: ReadonlySet<string> = new Set(["24.16"]);
+
+/** Is this `<major>.<minor>` on the known-bad list? */
+export function isKnownBadNodeVersion(v: NodeVersion | null): boolean {
+  return v !== null && KNOWN_BAD_NODE_VERSIONS.has(`${v.major}.${v.minor}`);
+}
+
 /** sha256 of the official archive, keyed `<platform>-<arch>`. */
 const NODE_ARCHIVE_SHA256: Record<string, string> = {
   "darwin-arm64": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
@@ -253,10 +275,16 @@ export function versionManagerDirs(): string[] {
 }
 
 // `cachedShellPathDirs` now lives in lib/shell-path-cache.ts, shared with
-// lib/codex-config/codex-cli.ts and lib/terminal/user-cli.ts.
+// lib/codex-config/codex-cli.ts.
 
-/** Major version of a node binary, or null when it can't be run. */
-export function nodeMajorVersion(binary: string): number | null {
+/** A node release, split far enough to consult `KNOWN_BAD_NODE_VERSIONS`. */
+export interface NodeVersion {
+  major: number;
+  minor: number;
+}
+
+/** Major + minor of a node binary, or null when it can't be run. */
+export function nodeVersionOf(binary: string): NodeVersion | null {
   try {
     const out = execFileSync(binary, ["-v"], {
       windowsHide: true,
@@ -264,11 +292,17 @@ export function nodeMajorVersion(binary: string): number | null {
       timeout: 5_000,
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const m = /^v(\d+)\./.exec(out.trim());
-    return m ? Number.parseInt(m[1], 10) : null;
+    const m = /^v(\d+)\.(\d+)\./.exec(out.trim());
+    if (!m) return null;
+    return { major: Number.parseInt(m[1], 10), minor: Number.parseInt(m[2], 10) };
   } catch {
     return null;
   }
+}
+
+/** Major version of a node binary, or null when it can't be run. */
+export function nodeMajorVersion(binary: string): number | null {
+  return nodeVersionOf(binary)?.major ?? null;
 }
 
 /**
@@ -306,9 +340,13 @@ export function findSystemNode(
     // "system" find would make ensureNodeRuntime() symlink it to itself.
     if (candidate === managed) continue;
     if (!isExecutableFile(candidate)) continue;
-    const major = nodeMajorVersion(candidate);
-    if (major === null || major < MIN_NODE_MAJOR) continue;
-    if (!acceptMajor(major)) continue;
+    const version = nodeVersionOf(candidate);
+    if (version === null || version.major < MIN_NODE_MAJOR) continue;
+    // A known-bad minor is never adopted — see KNOWN_BAD_NODE_VERSIONS. The
+    // check lives here rather than in `acceptMajor` because it is a property of
+    // the release, not of the caller's sidecar question.
+    if (isKnownBadNodeVersion(version)) continue;
+    if (!acceptMajor(version.major)) continue;
     try {
       return fs.realpathSync(candidate);
     } catch {
@@ -512,15 +550,18 @@ export async function ensureNodeRuntime(
   // can actually open the database from the MCP child. Outside that layout
   // (`null`) the constraint does not apply and behaviour is unchanged.
   const covered = sidecarCoveredMajors();
-  const acceptable = (major: number | null): boolean =>
-    major != null && major >= MIN_NODE_MAJOR && (covered == null || covered.has(major));
+  const acceptable = (version: NodeVersion | null): boolean =>
+    version != null &&
+    version.major >= MIN_NODE_MAJOR &&
+    !isKnownBadNodeVersion(version) &&
+    (covered == null || covered.has(version.major));
 
   try {
-    // Re-resolve an already-managed node whose major we cannot serve — this is
-    // what heals a machine that linked an uncovered system node before this
-    // check existed, rather than leaving it broken until someone deletes
-    // `<LIBI_HOME>/bin/node` by hand.
-    if (fs.existsSync(managed) && acceptable(nodeMajorVersion(managed))) {
+    // Re-resolve an already-managed node whose major we cannot serve, or whose
+    // exact release is known-bad — this is what heals a machine that linked an
+    // uncovered (or hang-prone) system node before these checks existed, rather
+    // than leaving it broken until someone deletes `<LIBI_HOME>/bin/node` by hand.
+    if (fs.existsSync(managed) && acceptable(nodeVersionOf(managed))) {
       return { ok: true, path: managed, source: "already-managed" };
     }
     // Dangling symlink or an unrunnable leftover — clear it so the repair

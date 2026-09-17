@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import fs from "fs";
 import path from "path";
 import { createTempStorageDir, cleanupTempDir } from "../../helpers/test-storage";
-import type { ElevenLabsWord } from "@/lib/elevenlabs/transcribe";
+import type { SttWord } from "@/lib/analysis/types";
 
 describe("generateCaptions — build a caption track from word timings", () => {
   afterEach(() => cleanupTempDir());
@@ -32,7 +32,7 @@ describe("generateCaptions — build a caption track from word timings", () => {
     });
   }
 
-  const words: ElevenLabsWord[] = [
+  const words: SttWord[] = [
     { text: "Hello", start: 0.0, end: 0.4, type: "word" },
     { text: "there", start: 0.5, end: 0.9, type: "word" },
     { text: "world", start: 1.0, end: 1.5, type: "word" },

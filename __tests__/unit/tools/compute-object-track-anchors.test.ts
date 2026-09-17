@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ComputeObjectTrackSchema, ComputeObjectTrackProvidersSchema } from "@/mcp/tools/schemas";
+import { ComputeObjectTrackSchema } from "@/mcp/tools/schemas";
 import { createTestDb, resetTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { files, mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
@@ -114,7 +114,7 @@ describe("compute_object_track anchors validation", () => {
       fileId: "x",
       objectKind: "face",
       anchors: [{ fileId: "x", time: 0, bbox: [0, 0, 10, 10] }],
-      provider: "sam2-fal",
+      provider: "some-provider",
     });
     // Zod strips unknown keys by default so parse may succeed, but provider
     // must not be on the output type.
@@ -124,71 +124,22 @@ describe("compute_object_track anchors validation", () => {
   });
 });
 
-describe("ComputeObjectTrackProvidersSchema validation", () => {
-  it("requires provider field", () => {
-    const r = ComputeObjectTrackProvidersSchema.safeParse({
-      fileId: "x",
-      objectKind: "face",
-      anchors: [{ fileId: "x", time: 0, bbox: [0, 0, 10, 10] }],
-    });
-    expect(r.success).toBe(false);
-  });
-
-  it("accepts provider: sam2-fal", () => {
-    const r = ComputeObjectTrackProvidersSchema.safeParse({
-      fileId: "x",
-      objectKind: "face",
-      anchors: [{ fileId: "x", time: 0, bbox: [0, 0, 10, 10] }],
-      provider: "sam2-fal",
-    });
-    expect(r.success).toBe(true);
-    if (r.success) expect(r.data.provider).toBe("sam2-fal");
-  });
-
-  it("rejects unknown provider values", () => {
-    const r = ComputeObjectTrackProvidersSchema.safeParse({
-      fileId: "x",
-      objectKind: "face",
-      anchors: [{ fileId: "x", time: 0, bbox: [0, 0, 10, 10] }],
-      provider: "unknown-provider",
-    });
-    expect(r.success).toBe(false);
-  });
-
-  it("rejects calls without anchors or derivation params", () => {
-    const r = ComputeObjectTrackProvidersSchema.safeParse({
-      fileId: "x",
-      objectKind: "face",
-      provider: "sam2-fal",
-    });
-    expect(r.success).toBe(false);
-  });
-
-  it("accepts derivedFromSubjectName without anchors", () => {
-    const r = ComputeObjectTrackProvidersSchema.safeParse({
-      fileId: "x",
-      objectKind: "face",
-      provider: "sam2-fal",
-      derivedFromSubjectName: "Lisa",
-    });
-    expect(r.success).toBe(true);
-  });
-});
-
-describe("compute_object_track + compute_object_track_providers MCP surface", () => {
-  it("both tools are registered on the libi-tracking MCP", () => {
+describe("compute_object_track MCP surface", () => {
+  it("is registered on the libi-tracking MCP, and the removed fal SAM2 tools are not", () => {
     const names = registeredToolNames(createTrackingMcpServer());
     expect(names).toContain("libi.compute_object_track");
-    expect(names).toContain("libi.compute_object_track_providers");
+    expect(names).not.toContain("libi.compute_object_track_providers");
+    expect(names).not.toContain("libi.refine_track_with_sam2");
   });
 
-  it("both tools ARE registered on the core libi MCP (always-on)", () => {
+  it("is registered on the core libi MCP (always-on), and the removed fal SAM2 tools are not", () => {
     const names = registeredToolNames(createLibiMcpServer());
     expect(names).toContain("libi.compute_object_track");
-    expect(names).toContain("libi.compute_object_track_providers");
+    expect(names).not.toContain("libi.compute_object_track_providers");
+    expect(names).not.toContain("libi.refine_track_with_sam2");
   });
 
-  it("libi-tracking MCP registers all 12 tracking tools", () => {
+  it("libi-tracking MCP registers all 10 tracking tools", () => {
     const names = registeredToolNames(createTrackingMcpServer());
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });

@@ -31,6 +31,7 @@ import {
   markCompleted,
   markFailed,
   markRunning,
+  touchProgress,
   updatePartialPath,
   updateProgress,
 } from "@/lib/jobs/repo";
@@ -99,6 +100,11 @@ export class JobManager extends EventEmitter {
   /** Tracks jobs aborted by the no-progress watchdog so the catch path can
    *  reclassify them from "cancelled" to "failed" with a clear error. */
   private watchdogTripped = new Set<string>();
+  /** Outstanding `ctx.pauseWatchdog()` holds per job. While non-zero the
+   *  watchdog poll is a no-op — see `JobContext.pauseWatchdog`. Refcounted so
+   *  nested pauses (a dependency install inside a dependency install) do not
+   *  re-arm the watchdog early. Cleared in `runWithSlot`'s finally. */
+  private watchdogPauses = new Map<string, number>();
   /** Per-job promise chain ensures progress writes + emits stay ordered. */
   private progressChains = new Map<string, Promise<void>>();
   /** Per-job rolling-window ETA tracker. Cleared in `runWithSlot`'s finally. */
@@ -453,6 +459,10 @@ export class JobManager extends EventEmitter {
       const pollMs = Math.max(10, Math.min(5000, Math.floor(watchdogMs / 4)));
       watchdog = setInterval(() => {
         void (async () => {
+          // Paused for a phase that legitimately cannot report — a first-use
+          // dependency install in front of the runner's own work. The release
+          // stamps a fresh baseline, so the excused time is not counted.
+          if ((this.watchdogPauses.get(jobId) ?? 0) > 0) return;
           const fresh = await getJobById(jobId);
           if (!fresh) return;
           // Guard against late ticks after completion/failure — interval may have
@@ -517,6 +527,29 @@ export class JobManager extends EventEmitter {
         }
       },
       shouldCancel: () => ac.signal.aborted,
+      pauseWatchdog: () => {
+        this.watchdogPauses.set(jobId, (this.watchdogPauses.get(jobId) ?? 0) + 1);
+        let released = false;
+        return () => {
+          // Idempotent: a runner may release in a `finally` that also runs on
+          // the error path, and a double decrement would re-arm someone else's
+          // pause.
+          if (released) return;
+          released = true;
+          const left = (this.watchdogPauses.get(jobId) ?? 1) - 1;
+          if (left > 0) {
+            this.watchdogPauses.set(jobId, left);
+            return;
+          }
+          this.watchdogPauses.delete(jobId);
+          // Re-arm from NOW, not from whenever the job last really progressed.
+          // `touchProgress` moves only `lastProgressAt`, so no fake tick
+          // reaches the ETA, the chat row, or the progress event stream.
+          void touchProgress(jobId).catch((err) =>
+            logger.warn({ err, jobId }, "jobs.watchdog.rearm_touch_failed"),
+          );
+        };
+      },
       forced: this.forcedJobs.has(jobId),
       discardOutput: this.discardOutputJobs.has(jobId),
     };
@@ -585,6 +618,7 @@ export class JobManager extends EventEmitter {
     } finally {
       if (watchdog) clearInterval(watchdog);
       clearInterval(heartbeat);
+      this.watchdogPauses.delete(jobId);
       this.cancelFlags.delete(jobId);
       this.progressChains.delete(jobId);
       this.etaTrackers.delete(jobId);
@@ -612,7 +646,13 @@ export class JobManager extends EventEmitter {
     // a done > total into the DB, snapshot, or chat UI.
     done = Math.min(done, total > 0 ? total : done);
     const last = this.lastEmitAt.get(jobId) ?? 0;
-    if (now - last < PROGRESS_DEBOUNCE_MS && done < total) return;
+    // The escape hatch is "let the FINAL tick through undebounced", and a job
+    // whose size is unknown (`total <= 0`) has no final tick to recognise —
+    // `done < total` is false for every one of its ticks, so the debounce was
+    // bypassed entirely and a yt-dlp unknown-size stream wrote the DB and
+    // emitted ~10 times a second for the whole download.
+    const isFinalTick = total > 0 && done >= total;
+    if (now - last < PROGRESS_DEBOUNCE_MS && !isFinalTick) return;
     this.lastEmitAt.set(jobId, now);
 
     // Compute msPerUnit from a rolling window of recent samples (not the

@@ -17,3 +17,17 @@ export function scrubSecrets(text: string, secrets: string[]): string {
   }
   return out;
 }
+
+/**
+ * Blanket redaction for CLI output that is about to leave the server without
+ * libi knowing any secret VALUE to scrub (the `/api/providers/*` routes never
+ * hold a key). Masks the two shapes a failing `claude`/`codex` call could
+ * echo back: a bearer token (`Bearer <token>` → `Bearer ***`) and a long
+ * `=value` (16+ non-space chars, the floor of every provider key format →
+ * `=***`). Deliberately coarse — a mangled error message costs nothing, a
+ * leaked key does.
+ */
+export function redactCliOutput(text: string): string {
+  if (!text) return text;
+  return text.replace(/bearer\s+\S+/gi, "Bearer ***").replace(/=\S{16,}/g, "=***");
+}

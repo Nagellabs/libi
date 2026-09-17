@@ -1,13 +1,30 @@
 ---
 name: voiceover-production
-description: The authority on AI-video audio + voice DURING GENERATION. Native audio ON by default (generate_audio=true); multi-clip voice consistency carried via Seedance reference-to-video (@Audio1), NEVER by muting clips + layering a TTS voiceover. Replacing or changing the voice on an EXISTING video is a separate, user-triggered flow — see the `voice-replacement` skill. Loaded BY orchestration skills — not a standalone entry point.
+description: The authority on AI-video audio + voice DURING GENERATION. Native audio ON by default (generate_audio=true); multi-clip voice consistency carried via a reference-conditioned generation (@Audio1), NEVER by muting clips + layering a TTS voiceover. Replacing or changing the voice on an EXISTING video is a separate, user-triggered flow — see the `voice-replacement` skill. Loaded BY orchestration skills — not a standalone entry point.
 ---
 
 # Voiceover & Native Audio (generation-time authority)
 
+**The provider that matters here is your VIDEO one.** The voice in an AI video comes out of
+the video generation itself, so the provider that decides whether this skill can work is
+your **video** provider — specifically whether it offers a *reference-conditioned* generation
+(one that takes reference audio + image arrays), which is what carries a single voice across
+clips. A TTS tool is not a substitute: laying a synthesized track over
+generated clips is the exact regression rules 1 and 2 exist to stop. A standalone TTS
+voice belongs to the `voice-replacement` skill, after the video exists, on the user's
+explicit request. If you have no video provider at all, call
+`libi.suggest_provider({ kind: "video", reason: "reference-conditioned voice carry" })`, tell
+the user what it showed, and **stop** — a voice provider does not
+substitute for one.
+
+When you do reach a provider call, read `references/providers/<id>.md` under this skill
+first (`<id>` is your provider's catalog id) and follow it.
+
 This skill decides how an AI video gets its audio + voice **as it is generated**.
 `ugc-product-video`, `generic-video`, `mimic-video`, and `stitching-multi-clip`
-load it BY NAME — it is **not a standalone entry point**.
+load it BY NAME — it is **not a standalone entry point**. Every one of them gates on a
+`video` provider before it reaches here, and this skill calls no generation tool of its
+own, which is why it carries no provider gate.
 
 **Scope: native audio + voice CARRY only.** An AI video's audio comes from the
 generation itself (native audio) and stays consistent across clips via the
@@ -21,20 +38,23 @@ native-audio defaults lives elsewhere, that place points here.
 ## The decision tree (key on the SOURCE of the footage)
 
 1. **AI-generated clips — native audio, ALWAYS.** Set `generate_audio = true` on
-   every clip on a model with native audio (Seedance 2.0, Veo 3.1). The spoken
-   voice is baked into the generation. **Muting an AI generation is a defect**, not
-   a "clean" result — never `generate_audio = false` to "add the voice later."
+   every clip on a model with native audio (`ai-video-models` names which engines have
+   it). The spoken voice is baked into the generation. **Muting an AI generation is a
+   defect**, not a "clean" result — never `generate_audio = false` to "add the voice later."
 
-2. **Multi-clip (> ~15s) that needs ONE consistent voice — carry it via
-   `reference-to-video`. This is the STANDARD multi-clip voice path, not an
+2. **Multi-clip (> ~15s) that needs ONE consistent voice — carry it via a
+   reference-conditioned generation. This is the STANDARD multi-clip voice path, not an
    experiment, and you MUST attempt it:**
-   - Generate clip-1 on `image-to-video` (`generate_audio = true`).
-   - **Extract clip-1's audio** — `libi.extract_audio(...)`. It **defaults to MP3** (fal-safe);
-     `audio_urls` accepts MP3/WAV ONLY. Just **never pass `format: "copy"`** for an `@Audio1`
-     file — that stream-copies to `.m4a`/AAC, which Seedance **REJECTS (HTTP 422)**.
-   - Generate clip-2+ on **`reference-to-video`**, passing that MP3/WAV file in
-     `audio_urls` (cited in the prompt as `@Audio1`) + the character image in
-     `image_urls` (`@Image1`). State the invariant in words next to the token:
+   - Generate clip-1 on the standard image-to-video path (`generate_audio = true`).
+   - **Extract clip-1's audio** — `libi.extract_audio(...)`. It **defaults to MP3**;
+     reference-audio inputs accept MP3/WAV ONLY. Just **never pass `format: "copy"`** for an
+     `@Audio1` file — that stream-copies to `.m4a`/AAC, which the model **REJECTS (HTTP 422)**.
+   - Generate clip-2+ on the **reference-conditioned endpoint** — the one that takes audio
+     and image reference arrays (`references/providers/<id>.md` under this skill says which
+     kind of endpoint that is for your provider and where its id lives) — passing that
+     MP3/WAV as the audio reference (cited in the prompt as `@Audio1`) + the character
+     image as the image reference (`@Image1`). State the invariant in words next to the
+     token:
      *"keep the voice from `@Audio1`"*, *"the same woman from `@Image1`"*.
    - **Do NOT pre-emptively mute the clips and layer a separate TTS voiceover.**
      That is the exact regression this skill exists to stop.
@@ -51,8 +71,8 @@ native-audio defaults lives elsewhere, that place points here.
    that is the `voice-replacement` skill** — a separate, explicit, user-triggered
    flow that owns the mute-and-revoice + lip-sync logic.
 
-4. **Stitch voice — ALWAYS ASK first, then default to Seedance `@Audio1` sync (never ElevenLabs
-   by default).** A stitch mixes reused source beats with new AI beats; the goal is ONE consistent
+4. **Stitch voice — ALWAYS ASK first, then default to the `@Audio1` carry (never a separate
+   TTS voice by default).** A stitch mixes reused source beats with new AI beats; the goal is ONE consistent
    voice across the whole piece WITHOUT a clone. **Ask the user up front:** *"Reuse the voice from
    your source, or give the new creator a fresh voice?"* — and **explain the trade-off they can't
    see**: if a beat you plan to REUSE already carries the source creator's voiceover, that voice is
@@ -62,15 +82,16 @@ native-audio defaults lives elsewhere, that place points here.
      That source voice becomes the MAIN voice: **keep the original voiceover on the reused scenes
      (do NOT mute them)**, cut ONE clean **≤15s** sample of it (`libi.extract_audio`
      `format:"mp3"` over a continuous, music-free stretch — never `format:"copy"`, AAC is REJECTED
-     422), and generate every new AI talking-head beat on **`reference-to-video`** with that sample
-     as `@Audio1` (+ the beat's start frame as `@Image1`, `generate_audio: true`). The new beats
-     then speak in the source voice → one voice across the whole video, **no silent gaps, no
-     ElevenLabs.** (A new on-camera creator is a *visual* swap; the voice stays the source's.)
+     422), and generate every new AI talking-head beat on the **reference-conditioned endpoint**
+     (`references/providers/<id>.md`) with that sample as `@Audio1` (+ the beat's start frame as
+     `@Image1`, `generate_audio: true`). The new beats then speak in the source voice → one
+     voice across the whole video, **no silent gaps, no separate TTS voice.** (A new
+     on-camera creator is a *visual* swap; the voice stays the source's.)
    - **(B) Generate a fresh voice — when the reused beats have NO dialogue, or the user wants a new
      voice.** Generate the FIRST new AI clip with native audio (`generate_audio: true`) to
      establish the voice, extract a clean ≤15s sample → `@Audio1`, and reuse it on every other AI
-     beat (`reference-to-video`) for continuity. Dialogue-free reused scenes are left ambient (or
-     muted) under that voice.
+     beat (the reference-conditioned endpoint) for continuity. Dialogue-free reused scenes are
+     left ambient (or muted) under that voice.
    - **Always generate voice on AI clips** (`generate_audio: true`) — a silent generation is a
      defect (rule 1).
    - **Match the source speaker's DELIVERY in the clip prompt.** `@Audio1` carries the voice
@@ -80,12 +101,14 @@ native-audio defaults lives elsewhere, that place points here.
      talking-head prompt (e.g. *"speaking quickly and energetically, fast-paced casual UGC
      delivery"*) so the new creator sounds like the SAME person as the kept source-VO middle. A
      delivery-speed mismatch breaks the one-voice illusion even when the timbre matches.
-   - Local refs reach fal via **`libi.upload_file_to_fal({ fileId })`** (key server-side —
-     **never** read `FAL_KEY` or `curl` fal storage yourself). Reuse the SAME `@Audio1` on every
+   - Local refs reach the provider's CDN via the provider's own upload tool (see
+     `references/providers/<id>.md` under this skill) — **never** read a provider key or `curl`
+     provider storage yourself. Reuse the SAME `@Audio1` on every
      AI beat; persist the chosen sample as a per-character voice asset (`using-character-library`)
      so the SAME voice runs across the other variation videos. `stitching-multi-clip` owns the
      stitch step-by-step + the always-ask gate; `model-seedance-2` owns the `@Audio1`/`@Image1`
-     mechanics.
+     mechanics, and `references/providers/<id>.md` under this skill says which kind of endpoint
+     accepts them and where its id lives.
 
    **A voice CHANGE — a voice that is neither the source's nor the native AI voice (a
    specific/branded read or a clone) — is NOT done here.** It is the `voice-replacement`
@@ -108,6 +131,7 @@ swaps the voice on finished footage.
 The low-level generation CALL (`generate_audio` is a param on the video-gen tool)
 and the dialogue↔audio coherence rule ("never write spoken lines into a silenced
 clip") live in `ai-asset-generation`. The `@Image1` / `@Audio1` token *syntax* and
-per-engine specifics live in `ai-video-models` (`model-seedance-2`). **Re-voicing an
+per-engine specifics live in `ai-video-models` (`model-seedance-2`); which kind of endpoint
+accepts them, and where its id lives, is in `references/providers/<id>.md` under this skill. **Re-voicing an
 existing video (clone/new voice + lip-sync + mute) is owned by `voice-replacement`.**
 This skill owns only the generation-time DECISION (native audio vs `@Audio1` carry).

@@ -30,5 +30,15 @@
     ".next/dev/types/**/*.ts",
     "**/*.mts"
   ],
-  "exclude": ["node_modules", "electron", "dist-electron", "release"]
+  "exclude": [
+    "node_modules",
+    "electron",
+    "dist-electron",
+    "release",
+    // Gitignored working docs (AGENTS.md -> Repo etiquette). They are not part
+    // of the product and a clone never has them, but `**/*.ts` swept them in:
+    // one scratch .ts file archived here broke `next build`'s type check with
+    // 10 errors in a file nothing imports.
+    "docs-local"
+  ]
 }

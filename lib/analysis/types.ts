@@ -1,9 +1,27 @@
+/** One timed token from an STT engine, in seconds. Local Whisper emits
+ *  `type: "word"` with `speaker_id: null`; a diarizing provider saved through
+ *  Path B (analysis_save_audio_chunk) may carry `spacing` / `audio_event`
+ *  tokens and real speaker ids. Same shape as `transcriptWordSchema`. */
+export interface SttWord {
+  text: string;
+  start: number;
+  end: number;
+  type?: "word" | "spacing" | "audio_event";
+  speaker_id?: string | null;
+}
+
+/** The per-chunk result every STT path produces before it is saved. */
+export interface SttTranscription {
+  language_code: string;
+  language_probability: number;
+  text: string;
+  words: SttWord[];
+}
+
 export type AnalysisStepKind =
   | "transcript"
   | "summary"
-  | "frames"
-  | `script:${string}:${string}`
-  | `caption_spec:${string}:${string}`;
+  | "frames";
 export type AnalysisStepStatus = "not_started" | "ready" | "failed";
 
 export interface AnalysisStep {
@@ -51,7 +69,7 @@ export interface AnalysisAudioChunk {
   filePath: string | null;
   status: AnalysisStepStatus;
   text: string | null;
-  /** Stringified ElevenLabsWord[]. */
+  /** Stringified SttWord[]. */
   words: string | null;
   language: string | null;
   languageProbability: number | null;
@@ -73,8 +91,6 @@ export interface AnalysisBundle {
 export type {
   FrameDescription,
   VideoSummary,
-  Script,
-  Shot,
   TranscriptWord,
   TranscriptMetadata,
   TranscriptSentence,

@@ -7,9 +7,8 @@ import { serverLogger as logger } from "@/lib/logger";
 import { getStorage } from "@/lib/storage";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { ensureAnalysisDirs, getAudioPath, getFramesDir, getAnalysisDir } from "./storage";
-import { videoSummarySchema, scriptSchema } from "./schemas";
-import type { VideoSummary, Script, TranscriptWord } from "./schemas";
-import { buildScriptKind, buildCaptionSpecKind } from "./scripts";
+import { videoSummarySchema } from "./schemas";
+import type { VideoSummary, TranscriptWord } from "./schemas";
 import type {
   AnalysisStep,
   AnalysisStepKind,
@@ -24,12 +23,7 @@ import {
   isWhisperModelInstalled,
   resolveWhisperModel,
 } from "@/lib/whisper/models";
-
-export function resolveSttProvider(
-  provider?: string,
-): "whisper" | "elevenlabs" {
-  return provider === "elevenlabs" ? "elevenlabs" : "whisper";
-}
+import type { SttTranscription } from "./types";
 
 const log = logger.child({ tag: "analysis" });
 
@@ -261,48 +255,6 @@ export async function saveSummary(params: {
   });
 }
 
-export async function saveScript(params: {
-  fileId: string;
-  providerId: string;
-  modelId: string;
-  script: Script;
-}): Promise<AnalysisStep> {
-  const validated = scriptSchema.parse(params.script);
-  const kind = buildScriptKind(params.providerId, params.modelId);
-  return upsertStep({
-    fileId: params.fileId,
-    kind,
-    status: "ready",
-    content: JSON.stringify(validated),
-    metadata: JSON.stringify({
-      providerId: params.providerId,
-      modelId: params.modelId,
-      generatedAt: validated.provider.generatedAt,
-    }),
-  });
-}
-
-export async function saveCaptionSpec(params: {
-  fileId: string;
-  providerId: string;
-  modelId: string;
-  text: string;
-}): Promise<AnalysisStep> {
-  const kind = buildCaptionSpecKind(params.providerId, params.modelId);
-  return upsertStep({
-    fileId: params.fileId,
-    kind,
-    status: "ready",
-    content: params.text,
-    metadata: JSON.stringify({
-      providerId: params.providerId,
-      modelId: params.modelId,
-      focus: "captions",
-      generatedAt: new Date().toISOString(),
-    }),
-  });
-}
-
 export interface SaveFrameInput {
   frameIndex: number;
   timestamp: number;
@@ -426,6 +378,15 @@ export interface SaveAudioChunkInput {
   words: Array<{ text: string; start: number; end: number; type?: string; speaker_id?: string | null }>;
   language?: string;
   languageProbability?: number;
+  /**
+   * Who produced this chunk. Path B — the agent driving its own STT and
+   * saving chunks through `libi.analysis_save_audio_chunk` — cannot say, and
+   * omits it; the server-side Whisper path knows and passes it, so the
+   * aggregate is stamped correctly from the FIRST write instead of carrying
+   * `provider: "external"` until the run's final re-stamp.
+   */
+  provider?: string;
+  model?: string | null;
 }
 
 export async function saveAudioChunk(input: SaveAudioChunkInput): Promise<AnalysisAudioChunk> {
@@ -449,7 +410,10 @@ export async function saveAudioChunk(input: SaveAudioChunkInput): Promise<Analys
 
   log.info({ chunkId: input.chunkId, fileId: chunk.fileId, words: input.words.length }, "analysis.audio_chunk.save");
 
-  await aggregateTranscript(chunk.fileId);
+  await aggregateTranscript(
+    chunk.fileId,
+    input.provider ? { provider: input.provider, model: input.model ?? null } : undefined,
+  );
 
   return rowToAudioChunk(updated);
 }
@@ -512,7 +476,7 @@ export async function aggregateTranscript(
       fileId,
       kind: "transcript",
       status: "failed",
-      errorMessage: `${failed.length} of ${chunks.length} audio chunks failed (${summary}). Call libi.analysis_transcribe_audio({ fileId, retry: true }) for the ElevenLabs path, or libi.analysis_get_audio_chunks for details.`,
+      errorMessage: `${failed.length} of ${chunks.length} audio chunks failed (${summary}). Call libi.analysis_transcribe_audio({ fileId, retry: true }) to re-run them with local Whisper (or re-save them via Path B), or libi.analysis_get_audio_chunks for details.`,
     });
     return;
   }
@@ -541,9 +505,15 @@ export async function aggregateTranscript(
     if (languageProbability == null && c.languageProbability != null) languageProbability = c.languageProbability;
   }
 
+  // Path B (the agent's own STT saving chunks directly) never names its
+  // provider; label it as external rather than guessing a vendor. The
+  // server-side Whisper path passes `provider` through `saveAudioChunk`, so
+  // it is stamped correctly here on the first write — the idempotent
+  // re-aggregate at the end of `transcribeAudio` no longer has a window of
+  // wrong provenance to correct.
   const metadata = {
     schema_version: "transcript_v1",
-    provider: opts?.provider ?? "elevenlabs",
+    provider: opts?.provider ?? "external",
     model: opts?.model ?? undefined,
     language,
     languageProbability,
@@ -896,7 +866,7 @@ export async function chunkAudio(params: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// transcribeAudio — ElevenLabs server path with retry support
+// transcribeAudio — local Whisper server path with retry support
 // ──────────────────────────────────────────────────────────────────────────────
 
 export interface TranscribeAudioResult {
@@ -907,8 +877,9 @@ export interface TranscribeAudioResult {
   durationSeconds: number;
   wordCount: number;
   language: string | null;
-  /** Set on needs_install and on success — the resolved provider. */
-  provider?: "whisper" | "elevenlabs";
+  /** Set on needs_install and on success. The server-side path is
+   *  Whisper-only; the field stays so the payload shape is unchanged. */
+  provider?: "whisper";
   /** Set on needs_install. */
   hint?: string;
 }
@@ -917,28 +888,19 @@ export async function transcribeAudio(params: {
   fileId: string;
   retry?: boolean;
   chunkSeconds?: number;
-  /** Test seam — inject a mock STT for the ElevenLabs call. */
+  /** Test seam — inject a mock STT in place of local Whisper. */
   sttFn?: (audioPath: string) => Promise<{
     text: string;
     words: Array<{ text: string; start: number; end: number; type?: string; speaker_id?: string | null }>;
     language_code?: string;
     language_probability?: number;
   }>;
-  provider?: "whisper" | "elevenlabs";
   model?: string;
 }): Promise<TranscribeAudioResult> {
-  const resolvedProvider = resolveSttProvider(params.provider);
-  const resolvedModel =
-    resolvedProvider === "whisper"
-      ? resolveWhisperModel(params.model)
-      : null;
+  const resolvedModel = resolveWhisperModel(params.model);
   // An injected sttFn supplies the transcription itself, so the local
   // whisper model is irrelevant — skip the install gate in that case.
-  if (
-    resolvedProvider === "whisper" &&
-    !params.sttFn &&
-    !isWhisperModelInstalled(resolvedModel as string)
-  ) {
+  if (!params.sttFn && !isWhisperModelInstalled(resolvedModel)) {
     return {
       status: "needs_install",
       totalChunks: 0,
@@ -957,39 +919,6 @@ export async function transcribeAudio(params: {
   if (!file) throw new Error(`transcribeAudio: file ${params.fileId} not found`);
   const duration = file.mediaDuration ?? 0;
 
-  // Detect provider switch BEFORE any state mutation. chunkAudio (called next)
-  // upserts the transcript step with metadata=null, wiping prior provider
-  // metadata — so we must capture the existing provider here. If the caller
-  // explicitly requested a provider AND the existing transcript step's
-  // metadata.provider differs, we'll treat ALL ready chunks as needing
-  // reprocessing below. Otherwise we'd silently keep the cached chunks
-  // (produced by the old provider) and relabel the aggregated metadata with
-  // the new provider — that lies about the data origin.
-  let providerSwitch = false;
-  if (params.provider) {
-    const [existingStep] = db
-      .select()
-      .from(analysisSteps)
-      .where(
-        and(
-          eq(analysisSteps.fileId, params.fileId),
-          eq(analysisSteps.kind, "transcript"),
-        ),
-      )
-      .limit(1)
-      .all();
-    if (existingStep?.metadata) {
-      try {
-        const meta = JSON.parse(existingStep.metadata) as { provider?: string };
-        if (meta.provider && meta.provider !== resolvedProvider) {
-          providerSwitch = true;
-        }
-      } catch {
-        /* malformed metadata — fall through */
-      }
-    }
-  }
-
   // Plan + extract chunks (idempotent). When sttFn is injected, callers usually
   // also pre-call chunkAudio with skipExtraction; the line below is a noop in that case.
   await chunkAudio({
@@ -1006,10 +935,7 @@ export async function transcribeAudio(params: {
     .all();
 
   let toProcess: typeof allRows;
-  if (providerSwitch) {
-    // Re-run every chunk against the newly requested provider.
-    toProcess = allRows;
-  } else if (params.retry) {
+  if (params.retry) {
     // Retry only what hasn't successfully completed yet (failed + not_started).
     toProcess = allRows.filter((c) => c.status !== "ready");
   } else {
@@ -1018,34 +944,12 @@ export async function transcribeAudio(params: {
 
   const sttFn =
     params.sttFn ??
-    (resolvedProvider === "whisper"
-      ? async (audioPath: string) => {
-          const { transcribeAudio: whisperTranscribe } = await import(
-            "@/lib/whisper/transcribe"
-          );
-          const r = await whisperTranscribe({
-            audioPath,
-            model: resolvedModel ?? undefined,
-          });
-          return {
-            text: r.text,
-            words: r.words,
-            language_code: r.language_code,
-            language_probability: r.language_probability,
-          };
-        }
-      : async (audioPath: string) => {
-          const { transcribeAudio: elevenLabsTranscribe } = await import(
-            "@/lib/elevenlabs/transcribe"
-          );
-          const r = await elevenLabsTranscribe({ audioPath, diarize: true });
-          return {
-            text: r.text,
-            words: r.words,
-            language_code: r.language_code,
-            language_probability: r.language_probability,
-          };
-        });
+    (async (audioPath: string): Promise<SttTranscription> => {
+      const { transcribeAudio: whisperTranscribe } = await import(
+        "@/lib/whisper/transcribe"
+      );
+      return whisperTranscribe({ audioPath, model: resolvedModel });
+    });
 
   // Loop body persists every outcome to the DB (saveAudioChunk for success,
   // markAudioChunkFailed for the catch). The `finalRows` re-select below
@@ -1067,6 +971,11 @@ export async function transcribeAudio(params: {
         words: offsetWords,
         language: r.language_code,
         languageProbability: r.language_probability,
+        // This IS the local Whisper path. Naming it here is what keeps a
+        // transcript read mid-run from reporting an on-device transcription
+        // as `external`.
+        provider: "whisper",
+        model: resolvedModel,
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -1097,8 +1006,8 @@ export async function transcribeAudio(params: {
   // a re-call with chunks already in status="failed" from a prior attempt
   // returned `{ status: "ready", readyChunks: 0, failedChunks: [] }` —
   // a literal lie about a fully-failed transcript. Discovered during QA
-  // when the agent tried provider="elevenlabs" on a file with a stale
-  // failed chunk and got an upbeat success-shaped result.
+  // when the agent re-called the tool on a file with a stale failed chunk
+  // and got an upbeat success-shaped result.
   const failedRows = finalRows.filter((c) => c.status === "failed");
   const allFailedChunks: Array<{ chunkIndex: number; error: string }> =
     failedRows.map((c) => ({
@@ -1119,17 +1028,19 @@ export async function transcribeAudio(params: {
     status = "failed";
   }
 
-  // Re-aggregate with the real provider/model. saveAudioChunk already fired
-  // aggregateTranscript with the elevenlabs default; this idempotent call
-  // stamps the resolved provider on the transcript_v1 metadata.
+  // Re-aggregate with the real provider/model. Every chunk THIS run saved
+  // already carried `provider: "whisper"`, so this is normally a no-op re-write
+  // — it stays because a resumed run can complete a file whose earlier chunks
+  // were saved by an older build (or by path B), and the finished transcript
+  // must name the provider that actually finished it.
   await aggregateTranscript(params.fileId, {
-    provider: resolvedProvider,
+    provider: "whisper",
     model: resolvedModel,
   });
 
   return {
     status,
-    provider: resolvedProvider,
+    provider: "whisper",
     totalChunks: finalRows.length,
     readyChunks: ready.length,
     failedChunks: allFailedChunks,

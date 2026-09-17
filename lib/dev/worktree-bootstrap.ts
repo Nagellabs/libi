@@ -72,7 +72,7 @@ export function terminalWsPortForNextPort(nextPort: number): number {
  * the answer is about the *consumer's* tree, not this package: `libi`
  * installed at `<userproject>/node_modules/libi` next to a `<userproject>/.git`
  * reported `true`, and the caller (`lib/cli/studio.ts`) then spawned
- * `npx next dev` INSIDE THE USER'S PROJECT. The same is true one level out:
+ * `next dev` INSIDE THE USER'S PROJECT. The same is true one level out:
  * an extracted runtime under `~/.libi/runtime/<version>/` inherits a `true`
  * from a `~/.git` dotfiles repo. "`.git` is never present in a published
  * npm tarball" is true of the package's OWN `.git` and says nothing about an

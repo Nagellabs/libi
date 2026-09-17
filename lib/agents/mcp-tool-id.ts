@@ -1,4 +1,8 @@
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
+import {
+  LIBI_MCP_ENTRY_NAME,
+  LIBI_MCP_FALLBACK_ENTRY_NAME,
+} from "@/lib/mcp/agent-surface";
 
 /** Canonical tool ID = `<server-id>:<registered-tool-name>`. Server id is
  *  the bundled.ts MCP key; tool name is whatever was passed to
@@ -33,6 +37,12 @@ export function parseMcpToolId(id: string): { serverId: string; toolName: string
 
 const MCP_PREFIX = "mcp__";
 
+/** codex-acp 1.10.0 prefixes an MCP tool-call TITLE with this, then joins the
+ *  entry name and the registered tool name with a dot:
+ *  `mcp.libi.libi.list_pieces`. Presentation only — see
+ *  `fromCodexToolCall` for the structured payload that should be preferred. */
+const CODEX_TITLE_PREFIX = "mcp.";
+
 /** Collapse a server identifier to a comparison key: lowercase, with every
  *  run of non-alphanumerics flattened to a single underscore. Bridges the
  *  three spellings of the same server that show up in practice — the bundled
@@ -46,12 +56,44 @@ function normalizeServerKey(s: string): string {
     .replace(/^_+|_+$/g, "");
 }
 
+/**
+ * Wire segments that mean "libi's own server" but are not a bundled def name.
+ *
+ * `libi-app` reaches the wire two ways, which is why this alias is not
+ * removable:
+ *
+ *  - HISTORY. For one release the in-app ACP entry was registered under that
+ *    name so it could not collide with the `[mcp_servers.libi]` that
+ *    `libi connect` writes. The entry is called `libi` again (the collision is
+ *    now the mechanism — `lib/mcp/agent-surface.ts#LIBI_MCP_ENTRY_NAME`), but a
+ *    resumed session's replayed history and an older adapter still emit it.
+ *  - LIVE, on the Codex fallback path. When the collision is fatal rather than
+ *    replacing, the session is retried under `LIBI_MCP_FALLBACK_ENTRY_NAME` —
+ *    so every tool call in that chat arrives with this segment.
+ *
+ * A null `toolId` on either would silently blind the jobs progress bridge, the
+ * extension approval gate and the tool labels. Both names come from the
+ * constants rather than literals so the alias cannot drift away from the entry
+ * names it exists to bridge.
+ *
+ * Keys are NORMALIZED (`normalizeServerKey`), so one entry covers the raw
+ * segment (`libi-app`), Claude Code's flattened form (`libi_app`) and any
+ * casing a codex title might carry.
+ */
+const SERVER_ALIASES: Record<string, string> = {
+  [normalizeServerKey(LIBI_MCP_FALLBACK_ENTRY_NAME)]: LIBI_MCP_ENTRY_NAME,
+};
+
 /** Resolve a wire server segment to a bundled def's canonical id, matching
  *  the normalized segment against both the def id and its display name.
- *  Returns null for servers libi doesn't ship (user-installed MCPs). */
+ *  `SERVER_ALIASES` is consulted first so the in-app entry name resolves to
+ *  `libi`. Returns null for servers libi doesn't ship (user-installed MCPs). */
 function bundledIdForSegment(segment: string): string | null {
   const key = normalizeServerKey(segment);
   if (!key) return null;
+  // hasOwn, not a bare index: a user-installed server named `constructor`
+  // would otherwise read Object.prototype and come back as a function.
+  if (Object.hasOwn(SERVER_ALIASES, key)) return SERVER_ALIASES[key];
   for (const def of BUNDLED_MCP_SERVERS) {
     if (normalizeServerKey(def.id) === key || normalizeServerKey(def.name) === key) {
       return def.id;
@@ -60,31 +102,76 @@ function bundledIdForSegment(segment: string): string | null {
   return null;
 }
 
+/**
+ * Codex's structured MCP tool-call payload, canonicalized.
+ *
+ * PREFER THIS OVER THE TITLE. codex-acp's `session/update` `tool_call` for an
+ * MCP tool carries `rawInput: { server, tool, arguments }` alongside
+ * `_meta.is_mcp_tool_call: true`. `server` is the entry name from the ACP
+ * `mcpServers` list (or the user's config table) and `tool` is the name the
+ * server advertised — i.e. exactly what `server.registerTool(name, …)` was
+ * given. That is a data contract; the `title` beside it is a PRESENTATION
+ * string and has now changed shape twice (`<server>/<server>.<tool>` on the
+ * 0.4x-era adapter, `mcp.<server>.<tool>` on codex-acp 1.10.0). Parsing the
+ * title was how every codex MCP call came through with `toolId: null`.
+ *
+ * Guarded so an ordinary tool whose OWN arguments happen to include `server`
+ * and `tool` strings can't masquerade as an MCP envelope: either the codex
+ * `_meta` marker must be set, or the payload must carry the third envelope
+ * key (`arguments`).
+ *
+ * Returns null for anything that isn't that envelope — callers fall back to
+ * the title.
+ */
+export function fromCodexToolCall(rawInput: unknown, meta?: unknown): McpToolId | null {
+  if (!rawInput || typeof rawInput !== "object" || Array.isArray(rawInput)) return null;
+  const rec = rawInput as Record<string, unknown>;
+  const server = typeof rec.server === "string" ? rec.server.trim() : "";
+  const tool = typeof rec.tool === "string" ? rec.tool.trim() : "";
+  if (!server || !tool) return null;
+  // Registered tool names and MCP entry names never contain whitespace.
+  if (/\s/.test(server) || /\s/.test(tool)) return null;
+  const marked =
+    !!meta &&
+    typeof meta === "object" &&
+    (meta as Record<string, unknown>).is_mcp_tool_call === true;
+  if (!marked && !Object.hasOwn(rec, "arguments")) return null;
+  // Unknown (user-installed) servers keep their segment verbatim, exactly as
+  // the wire-form path does — the UI can still format them.
+  return makeMcpToolId(bundledIdForSegment(server) ?? server, tool);
+}
+
 /** Normalize a codex-acp tool-call title to the claude wire form
  *  `mcp__<server>__<tool>` so downstream canonicalization + display treat
  *  both agents identically.
  *
- *  Live-captured shape (the REAL one, from `/api/agent/messages` on a codex
- *  `libi.list_pieces` call):
- *    - `Tool: <server>/<server>.<tool>` — e.g. `Tool: libi/libi.list_pieces`
- *      (optional `Tool: ` prefix; the tail after `/` is the fully-qualified
- *      dotted MCP tool name, so the server name appears TWICE)
- *  Defensive variants also recognized:
- *    - `<server>/<server> <tool words>` — e.g. `libi/libi list pieces`
- *    - `<server>/<tool>` — e.g. `libi/list_pieces`
+ *  A FALLBACK ONLY — prefer `fromCodexToolCall` on the structured `rawInput`.
+ *  This exists for a title with no `rawInput` beside it (a replayed part, a
+ *  progress update that carries only a label).
  *
- *  We recognize ONLY these `<server>/…` shapes (with or without the `Tool: `
- *  prefix). Anything else — a built-in title (`Read`, `Bash`,
- *  `Tool: Read /some/path`), a plain sentence, the claude `mcp__` wire name,
- *  or an already-canonical `<server>:<tool>` id — passes through VERBATIM so
- *  a label we don't recognize is never mangled. Guards: the server segment
- *  must be a single bare token butting the slash, and the tail must be a
- *  dotted/spaced tool name, never a slashed filesystem path.
+ *  Live-captured shapes:
+ *    - `mcp.<server>.<tool>` — codex-acp **1.10.0**, e.g.
+ *      `mcp.libi-app.libi.list_pieces`. Split at the FIRST dot after `mcp.`:
+ *      entry names carry no dot, registered libi tool names do.
+ *    - `<server>/<tool>` with an optional `Tool: ` prefix — the older adapter,
+ *      e.g. `Tool: libi/libi.list_pieces`.
+ *    - `<server>/<tool words>` — spaces join to `_`.
  *
- *  Output convention: a doubled-server dotted tail drops its `<server>.`
- *  prefix (`libi/libi.list_pieces` → tool `list_pieces`); `<tool words>` →
- *  snake_case (spaces → `_`) with a duplicated leading server word dropped;
- *  the `<server>/<tool>` slug form keeps its tool verbatim. */
+ *  Anything else — a built-in title (`Read`, `Bash`, `Tool: Read /some/path`),
+ *  a plain sentence, the claude `mcp__` wire name, or an already-canonical
+ *  `<server>:<tool>` id — passes through VERBATIM so a label we don't
+ *  recognize is never mangled. Guards: the server segment must be a single
+ *  bare token butting the separator, and the tail must never be a slashed
+ *  filesystem path.
+ *
+ *  ONE output rule: everything after the server segment IS the tool name,
+ *  verbatim (spaces → `_`). Nothing is stripped from it. The previous version
+ *  special-cased a "doubled server" tail and turned `libi/libi.list_pieces`
+ *  into `libi:list_pieces` — but `libi.list_pieces` is the whole registered
+ *  name (`mcp/server.ts` registers `libi.<tool>`), so that produced an id no
+ *  runner, gate or label ever matches, and disagreed with the claude wire form
+ *  `mcp__libi__libi_list_pieces` → `libi:libi.list_pieces` for the same call.
+ */
 export function normalizeCodexToolTitle(raw: string): string {
   if (!raw) return raw;
   // Optional codex `Tool: ` / `Tool ` prefix. Strip it into a candidate; the
@@ -94,6 +181,18 @@ export function normalizeCodexToolTitle(raw: string): string {
   // Leave claude wire names and canonical ids untouched.
   if (candidate.startsWith(MCP_PREFIX)) return raw;
   if (candidate.includes(":")) return raw;
+
+  // codex-acp 1.10.0: `mcp.<server>.<tool>`.
+  if (candidate.startsWith(CODEX_TITLE_PREFIX)) {
+    const tail = candidate.slice(CODEX_TITLE_PREFIX.length);
+    const dot = tail.indexOf(".");
+    if (dot <= 0) return raw;
+    const server = tail.slice(0, dot);
+    const tool = tail.slice(dot + 1);
+    if (!server || !tool) return raw;
+    if (/\s/.test(tail) || tail.includes("/")) return raw;
+    return `${MCP_PREFIX}${server}__${tool}`;
+  }
 
   const slash = candidate.indexOf("/");
   if (slash <= 0) return raw; // no server segment — not a codex MCP title
@@ -106,20 +205,7 @@ export function normalizeCodexToolTitle(raw: string): string {
   // slashed (a multi-segment path is a path, not a tool name).
   if (/\s/.test(server) || /^\s/.test(rest) || rest.includes("/")) return raw;
 
-  let tool: string;
-  if (rest.startsWith(`${server}.`)) {
-    // The REAL doubled-server dotted form: `libi/libi.list_pieces`. The tail
-    // is the fully-qualified `<server>.<tool>` — drop the server prefix.
-    tool = rest.slice(server.length + 1);
-  } else {
-    let words = rest.split(/\s+/).filter(Boolean);
-    if (words.length === 0) return raw;
-    // Drop the duplicated leading server word (`libi/libi list pieces`).
-    if (words.length > 1 && words[0] === server) {
-      words = words.slice(1);
-    }
-    tool = words.join("_");
-  }
+  const tool = rest.split(/\s+/).filter(Boolean).join("_");
   if (!tool) return raw;
   return `${MCP_PREFIX}${server}__${tool}`;
 }
@@ -134,9 +220,11 @@ export function normalizeCodexToolTitle(raw: string): string {
  *  segment against BUNDLED_MCP_SERVERS by normalized id OR display name —
  *  the ACP mcpServers map is keyed by display name (`YouTube Downloader`),
  *  so the wire segment (`YouTube_Downloader`) rarely equals the bundled id
- *  (`youtube-downloader`). Bundled matches canonicalize to the bundled id so
- *  downstream id-keyed checks (isGenerationTool, the jobs progress bridge)
- *  stay stable. Unknown servers — users install MCPs libi has never heard
+ *  (`youtube-downloader`). The historical in-app entry name
+ *  (`libi-app`, see `SERVER_ALIASES`) resolves to `libi` the same way. Bundled matches
+ *  canonicalize to the bundled id so downstream id-keyed checks
+ *  (the extension approval gate, the jobs progress bridge) stay stable. Unknown servers
+ *  — users install MCPs libi has never heard
  *  of — split at the FIRST `__` and keep the segment verbatim, so every
  *  well-formed wire name yields a non-null id and the UI can format it.
  *
@@ -198,4 +286,24 @@ export function fromAnyToolName(raw: string): McpToolId | null {
   }
 
   return makeMcpToolId(serverId, tool);
+}
+
+/**
+ * Canonicalize one ACP tool call from everything the agent gave us.
+ *
+ * Structured first (`fromCodexToolCall` — codex-acp's `rawInput.server` /
+ * `.tool`, a data contract), then the title (`fromAnyToolName` — claude's wire
+ * name, and codex's presentation title as a fallback).
+ *
+ * This is the entry point every `tool_call` / `tool_call_update` ingest should
+ * use. Reaching for `fromAnyToolName` where a `rawInput` is in hand is how
+ * codex MCP calls came through with `toolId: null`: the jobs progress bridge,
+ * the extension approval gate and the tool labels are all keyed on this id.
+ */
+export function toolIdForCall(
+  title: string | null | undefined,
+  rawInput: unknown,
+  meta?: unknown,
+): McpToolId | null {
+  return fromCodexToolCall(rawInput, meta) ?? fromAnyToolName(title ?? "");
 }

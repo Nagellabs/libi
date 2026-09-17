@@ -2,34 +2,24 @@
  *  without using Terminal `sleep` (which can hit tool-call timeouts) or
  *  ScheduleWakeup (which can fail to re-fire). AbortSignal-aware: the
  *  agent / MCP client can cancel mid-sleep and the tool returns partial.
- *  Emits MCP `notifications/progress` every 5 s so the chat UI shows
- *  the wait in flight. */
+ *  Reports progress every 5 s — MCP `notifications/progress` plus the
+ *  studio's `job_progress` side channel (`tool-progress.ts`) — so the chat
+ *  row shows the wait on both agents. */
 
 import { serverLogger } from "@/lib/logger";
-import type { ServerNotification } from "@modelcontextprotocol/sdk/types.js";
-import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
-import type { ServerRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolResult } from "./types";
 import type { SleepParams } from "./schemas";
+import { reportToolProgress, type ToolProgressExtra } from "./tool-progress";
 
 const log = serverLogger.child({ tag: "libi-sleep" });
 const TICK_MS = 5_000;
 
-/** Subset of `RequestHandlerExtra` that `sleep` needs. Passing the full
- *  `extra` from the tool handler (typed as
- *  `RequestHandlerExtra<ServerRequest, ServerNotification>`) satisfies this
- *  interface without requiring any additional imports at the call site. */
-interface SleepExtra {
+/** Subset of `RequestHandlerExtra` that `sleep` needs; the tool handler's full `extra`
+ *  satisfies it. `_meta` carries the MCP progressToken (a notification is sent only when
+ *  the client supplied one) and, under Claude, `claudecode/toolUseId`. */
+interface SleepExtra extends ToolProgressExtra {
   /** AbortSignal from the MCP runtime — fires on tool cancellation. */
   signal?: AbortSignal;
-  /** MCP progress-notification sender. Optional; only attached when the
-   *  caller passed a progressToken in `_meta`. Typed to match the MCP SDK's
-   *  `RequestHandlerExtra.sendNotification` so server.ts can pass `extra`
-   *  directly. */
-  sendNotification?: RequestHandlerExtra<ServerRequest, ServerNotification>["sendNotification"];
-  /** Progress token from the MCP request meta — required to construct a
-   *  valid ProgressNotification. Extracted from `extra._meta?.progressToken`. */
-  progressToken?: string | number;
 }
 
 /** Sleep for `params.seconds`, ticking every 5 s. Cancellable via
@@ -85,25 +75,12 @@ export async function sleep(
     });
     elapsedMs += chunkMs;
 
-    // Emit a progress notification after each tick (when MCP wired it).
-    // progressToken is required by the MCP spec — skip when absent.
-    if (extra.sendNotification && extra.progressToken !== undefined) {
-      try {
-        await extra.sendNotification({
-          method: "notifications/progress",
-          params: {
-            progressToken: extra.progressToken,
-            progress: elapsedMs,
-            total: totalMs,
-            message: params.reason
-              ? `sleeping (${params.reason}) — ${Math.floor(elapsedMs / 1000)}/${params.seconds}s`
-              : `sleeping — ${Math.floor(elapsedMs / 1000)}/${params.seconds}s`,
-          },
-        });
-      } catch {
-        // progress emit is best-effort; never let it fail the sleep
-      }
-    }
+    // Progress after each tick: the MCP notification (when the client asked for it) AND
+    // the studio's job_progress side channel — claude-agent-acp drops MCP progress text.
+    const message = params.reason
+      ? `sleeping (${params.reason}) — ${Math.floor(elapsedMs / 1000)}/${params.seconds}s`
+      : `sleeping — ${Math.floor(elapsedMs / 1000)}/${params.seconds}s`;
+    await reportToolProgress(extra, { progress: elapsedMs, total: totalMs, message });
   }
 
   const sleptSeconds = (Date.now() - startedAt) / 1000;

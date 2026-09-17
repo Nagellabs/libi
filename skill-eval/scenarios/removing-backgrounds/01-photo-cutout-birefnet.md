@@ -33,7 +33,9 @@ assertions:
   `local_image_matting_not_supported` redirect correctly if it did.
 - Disclosed the birefnet price before running it (approval was pre-granted in
   the prompt, but the cost must still be stated).
-- Uploaded the source via `libi.upload_file_to_fal` (no hand-rolled fal uploads).
+- Uploaded the source via the fal MCP's own upload tool (no hand-rolled fal uploads, no key
+  handling). The test-mode fake fal exposes no upload tool — if none was available, said so
+  plainly instead of hand-rolling one.
 - Imported the transparent result back into the piece and composed it over a
   white background using existing scene/overlay tools — no custom compositing.
 - Appended a lineage note to the cutout file (`libi.update_file_notes`).

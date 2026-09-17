@@ -56,48 +56,11 @@ function collectRowSecrets(row: { envVars?: string | null; headers?: string | nu
 const PROBE_TIMEOUT_MS = 180_000;
 
 /**
- * Probe an MCP server without touching the DB. Used during Category A
- * (before the DB exists / is migrated).
- *
- * Reads NO user-configured envVars — the bundled spawn-env defaults are
- * sufficient for verifying a bundled MCP can start. User-config-gated
- * MCPs are skipped before this is called.
- *
- * Returns the same `ProbeResult` as `probeAndPersist` but performs no
- * `mcpServers` table writes.
- */
-export async function probeMcpInMemory(def: BundledMcpDef): Promise<ProbeResult> {
-  const userEnv: Record<string, string> = {};
-  const env = buildSpawnEnv(userEnv);
-  const resolved = resolveBundledSpawn(def);
-
-  logger.info(
-    {
-      tag: "mcp-probe",
-      op: "probe_in_memory_start",
-      mcpId: def.id,
-      command: resolved.command,
-      args: resolved.args,
-      spawnSource: resolved.source,
-      timeoutMs: PROBE_TIMEOUT_MS,
-    },
-    `Probing MCP server "${def.id}" (in-memory, ${resolved.source})`,
-  );
-
-  return probeMcpServer({
-    command: resolved.command,
-    args: resolved.args,
-    env,
-    timeoutMs: PROBE_TIMEOUT_MS,
-  });
-}
-
-/**
  * Probe an MCP server and persist the result into `mcp_servers`.
  * Owns the full lifecycle: starting → probe → done.
  *
  * Env is always built via `buildSpawnEnv` (HOME-aware) — never spawn an
- * MCP child outside this function (or `lib/mcp-config.ts:buildMcpServers`
+ * MCP child outside this function (or `lib/mcp-config.ts`'s entry builders
  * for the live ACP/settings spawn path) without going through buildSpawnEnv.
  */
 export async function probeAndPersist(def: BundledMcpDef): Promise<ProbeResult> {

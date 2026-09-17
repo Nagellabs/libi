@@ -10,12 +10,25 @@ import { BUNDLED_MCP_SERVERS } from "./bundled";
 import { probeAndPersist as proberProbeAndPersist } from "./server-prober";
 import {
   getCustomInstaller,
-  resolvePlaywrightCoreCli,
   YT_DLP_UV_TOKEN,
   ytDlpTokenPath,
-  NODE_COMMAND_SENTINEL,
+  ytDlpUvInstallArgs,
+  ENSURE_CHROMIUM_INSTALL_SENTINEL,
+  PLAYWRIGHT_CHROMIUM_INSTALLER_ID,
 } from "./installers";
-import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
+import {
+  depDbWritesSuppressed,
+  readDepTransition,
+  setDepDbWritesSuppressed,
+  writeDepTransition as persistDepTransition,
+} from "./dep-transition";
+import { depInstallAcceptedAt, isDepInstalling } from "./dep-in-flight";
+import {
+  CHROMIUM_DEP_BINARY,
+  CHROMIUM_MCP_ID,
+  chromiumInstallInFlight,
+  ensureChromium,
+} from "@/lib/export/ensure-chromium";
 import { exeSuffix, isWindows } from "@/lib/platform";
 import type {
   BundledDependency,
@@ -34,7 +47,6 @@ import {
   type DownloadRetryInfo,
 } from "@/lib/security/download-verify";
 import { resolveGlob } from "@/lib/file/glob";
-import { navigationEmitter } from "@/lib/navigation-events";
 import {
   ensureBootstrapped,
   getVirtualDepsForMcp,
@@ -68,12 +80,17 @@ interface ResolvedStatus {
   path: string | null;
   source: "system" | "bundled" | null;
   runtimeStatus: DepRuntimeStatus;
+  /** Present while an install is in flight in this process (chromium). */
+  bytesDownloaded?: number;
+  bytesTotal?: number;
+  /** Present when the last install attempt failed and nothing landed since. */
+  error?: string | null;
 }
 
 export class DependencyManager {
   /**
    * When true, every DB write in the install path (`ensureMcp`,
-   * `installSingleDep`, `writeDepTransition`, etc.) becomes a no-op.
+   * `retryDep`, `writeDepTransition`, etc.) becomes a no-op.
    *
    * Category A runs BEFORE migrations (those are owned by Category B),
    * so its DB writes would target a schemaless DB and either hang or
@@ -84,8 +101,17 @@ export class DependencyManager {
    *
    * Default `false` preserves the original behaviour for every other
    * caller (Settings UI resync, retry, etc.).
+   *
+   * Backed by the module-level flag in `./dep-transition.ts` rather than by an
+   * instance field: the leaf writer is shared with
+   * `lib/export/ensure-chromium.ts` and cannot read instance state, so a
+   * second copy of this flag would be a copy that can disagree. Process-scoped
+   * — which is what the invariant is, "this process runs before migrations" —
+   * and the reason `setSkipDbWrites` is only ever called by Category A.
    */
-  private skipDbWrites = false;
+  private get skipDbWrites(): boolean {
+    return depDbWritesSuppressed();
+  }
 
   /**
    * RC-E: binaries whose download we've already logged as "unverified" this
@@ -143,7 +169,7 @@ export class DependencyManager {
   }
 
   setSkipDbWrites(skip: boolean): void {
-    this.skipDbWrites = skip;
+    setDepDbWritesSuppressed(skip);
   }
 
   /**
@@ -213,17 +239,39 @@ export class DependencyManager {
     this.ensureBinDir();
 
     const tier = options?.tier ?? "all";
+    // A tier-1 sweep is exactly the tier-1 DEFS.
+    //
+    // There used to be a second admission rule here — a tier-2 def carrying a
+    // dep flagged `installFlow: "tier-1"` (the comment named yt-dlp under
+    // youtube-downloader) also entered the loop, and a branch below installed
+    // just those deps directly so `ensureMcp` would not flip the parent's
+    // `installStatus` to "installed". uv and yt-dlp were de-tiered on
+    // 2026-09-08 and no def has carried a tier-1-flagged dep since, so both
+    // the rule and the branch were unreachable. Rather than keep a dead
+    // install path warm, the shape is now unsupported and says so out loud:
+    // Category A must never install something it was not asked for on the
+    // strength of a flag nobody is reading. `__tests__/unit/server/lifecycle/
+    // category-a.test.ts` pins that no def carries one.
     const defs =
       tier === "tier-1"
-        ? BUNDLED_MCP_SERVERS.filter((def) => {
-            // Whole tier-1 MCP → install everything.
-            if ((def.installFlow ?? "tier-1") === "tier-1") return true;
-            // Tier-2 MCP → only relevant if at least one of its deps is
-            // flagged tier-1 (e.g. yt-dlp under youtube-downloader).
-            // The per-dep tier gate below filters down to just those deps.
-            return def.dependencies.some((d) => d.installFlow === "tier-1");
-          })
+        ? BUNDLED_MCP_SERVERS.filter((def) => (def.installFlow ?? "tier-1") === "tier-1")
         : BUNDLED_MCP_SERVERS;
+    if (tier === "tier-1") {
+      for (const def of BUNDLED_MCP_SERVERS) {
+        if ((def.installFlow ?? "tier-1") === "tier-1") continue;
+        const strays = def.dependencies.filter((d) => d.installFlow === "tier-1");
+        if (strays.length === 0) continue;
+        logger.warn(
+          {
+            tag: "lifecycle",
+            op: "tier1_dep_on_tier2_def",
+            mcpId: def.id,
+            binaries: strays.map((d) => d.binary),
+          },
+          "a tier-2 MCP declares a tier-1 dep; Category A does not install it — move the dep, or the MCP, to tier 1",
+        );
+      }
+    }
 
     DependencyManager.syncLog(`installBundledDeps: ${defs.length} defs, tier=${tier}`);
     for (const def of defs) {
@@ -237,24 +285,6 @@ export class DependencyManager {
           .limit(1)
           .all();
         if (row && row.installStatus !== "failed") continue;
-      }
-      // When invoked at Category A boot (`tier === "tier-1"`), a tier-2
-      // MCP only reaches this loop because it carries tier-1-flagged
-      // deps (e.g. yt-dlp under youtube-downloader). Install just those
-      // deps directly — do NOT route through `ensureMcp` because that
-      // would flip the parent's `installStatus` to "installed" even
-      // though its npm package is still agent-managed.
-      if (
-        tier === "tier-1" &&
-        (def.installFlow ?? "tier-1") === "tier-2"
-      ) {
-        const tier1Deps = def.dependencies.filter(
-          (d) => d.installFlow === "tier-1",
-        );
-        for (const dep of tier1Deps) {
-          await this.installSingleDep(def.id, dep, options?.onProgress);
-        }
-        continue;
       }
       await this.ensureMcp(def, options?.onProgress);
     }
@@ -476,37 +506,38 @@ export class DependencyManager {
     return DependencyManager.pickPlatformValue(dep.archive.binaryPathInArchive);
   }
 
-  /**
-   * Compute whether a bundled MCP's required env vars are satisfied.
-   * Pure function — no DB I/O.
-   */
-  static evaluateConfigStatus(input: {
-    requiredEnvVars: string[] | undefined;
-    envVarsJson: string | null;
-  }): { status: "installed" | "needs_config"; missing: string[] } {
-    const required = input.requiredEnvVars ?? [];
-    if (required.length === 0) return { status: "installed", missing: [] };
-
-    let parsed: Record<string, string> = {};
-    if (input.envVarsJson) {
-      try {
-        parsed = JSON.parse(input.envVarsJson);
-      } catch {
-        // Treat malformed JSON as empty.
-      }
-    }
-    const missing = required.filter((k) => !parsed[k] || parsed[k] === "");
-    return missing.length === 0
-      ? { status: "installed", missing: [] }
-      : { status: "needs_config", missing };
-  }
-
   /** Public API: resolve current status for each dep of an MCP without downloading. */
   async getStatuses(mcpId: string): Promise<DependencyStatus[]> {
     ensureBootstrapped();
     const def = BUNDLED_MCP_SERVERS.find((d) => d.id === mcpId);
     const binary: DependencyStatus[] = def
-      ? await Promise.all(def.dependencies.map((dep) => this.resolveStatusAsync(dep)))
+      ? await Promise.all(
+          def.dependencies.map(async (dep) => {
+            const status = await this.resolveStatusAsync(dep, mcpId);
+            // An install the retry-dep route has ACCEPTED but
+            // whose runner has not yet announced itself (ensureChromium's
+            // flight, or the first `writeDepTransition`) still resolves as
+            // `pending` here — and the chip's pending branch offers the
+            // Download button again, so a second click starts a second
+            // 173 MB download. Report the accepted install as installing;
+            // the spinner branch renders no button at all. Only ever
+            // WIDENS to installing, so a flight already reporting its bytes
+            // keeps them.
+            const shown: ResolvedStatus =
+              status.runtimeStatus !== "installing" && isDepInstalling(mcpId, dep.binary)
+                ? {
+                    binary: status.binary,
+                    installed: false,
+                    path: null,
+                    source: null,
+                    runtimeStatus: "installing",
+                  }
+                : status;
+            // Only ever added, never `manualInstall: false` — the chip and
+            // the persisted transitions treat absence as "Category A dep".
+            return dep.manualInstall ? { ...shown, manualInstall: true } : shown;
+          }),
+        )
       : [];
     const virtual = await Promise.all(
       getVirtualDepsForMcp(mcpId).map((d) =>
@@ -528,11 +559,11 @@ export class DependencyManager {
    * `installError`, `dependencyStatus`) from the current on-disk + virtual-dep
    * state — without triggering downloads or spawning the MCP. Idempotent.
    *
-   * Why this exists: `installSingleDep` (Category A's tier-1-deps-on-tier-2
-   * shortcut) returns early when a dep is already system-installed, so it
-   * never writes `dependencyStatus`. And the seed default `installStatus =
-   * "pending"` then sticks forever for MCPs whose deps were already met —
-   * the badge reads that pending and shows "Checking…" indefinitely.
+   * Why this exists: an install path can return early when a dep is already
+   * system-installed, without ever writing `dependencyStatus`. The seed
+   * default `installStatus = "pending"` then sticks forever for MCPs whose
+   * deps were already met — the badge reads that pending and shows
+   * "Checking…" indefinitely.
    *
    * Called from Category B after `installBundledDeps` so every bundled row
    * converges to a truthful install state on every boot. Skips `core` MCPs
@@ -552,27 +583,28 @@ export class DependencyManager {
       .all();
     if (!row) return null;
 
-    if (row.installStatus === "failed" || row.installStatus === "installing") {
-      return row.installStatus as InstallStatus;
-    }
+    // A row parked at `failed` is preserved: a real install attempt failed and
+    // the user should keep seeing the retry affordance until they take it.
+    //
+    // This used to read `=== "failed" || === "installing"`, behind an
+    // `as InstallStatus` cast. "installing" is not a member of
+    // `InstallStatus` and nothing in the codebase has ever written it to this
+    // column — `installing` is a per-DEP `runtimeStatus`, not an aggregate —
+    // so the second half was a guard against a value that cannot occur, and
+    // the cast is what stopped the compiler saying so. If an aggregate
+    // "installing" is ever wanted it has to be a real member of the type and
+    // it has to be reconciled against `chromiumInstallInFlight()` /
+    // `isDepInstalling`, or a crash mid-download pins the row forever.
+    if (row.installStatus === "failed") return "failed";
 
     const statuses = await this.getStatuses(mcpId);
     const allDepsInstalled = statuses.every((s) => s.installed);
 
     let aggregate: InstallStatus;
-    let installError: string | null = null;
+    // Nothing to configure once deps are on disk (libi holds no provider key).
+    const installError: string | null = null;
     if (!allDepsInstalled) {
       aggregate = "pending";
-    } else if (def.requiredEnvVars && def.requiredEnvVars.length > 0) {
-      const config = DependencyManager.evaluateConfigStatus({
-        requiredEnvVars: def.requiredEnvVars,
-        envVarsJson: row.envVars ?? null,
-      });
-      aggregate = config.status;
-      installError =
-        config.status === "needs_config"
-          ? `Missing required env vars: ${config.missing.join(", ")}`
-          : null;
     } else if (def.dependencies.length === 0 && getVirtualDepsForMcp(mcpId).length === 0) {
       aggregate = "not_required";
     } else {
@@ -628,17 +660,56 @@ export class DependencyManager {
     }
   }
 
-  /**
-   * Retry installation of a single failed dependency. Writes runtime state
-   * transitions so the Settings UI's polling sees `installing → installed`
-   * (or `installing → failed`) without waiting for the full `ensureAll`
-   * sweep.
-   */
-  async retryDep(mcpId: string, binary: string): Promise<void> {
+  private static findBundledDep(mcpId: string, binary: string): BundledDependency {
     const def = BUNDLED_MCP_SERVERS.find((d) => d.id === mcpId);
     if (!def) throw new Error(`No bundled MCP with id ${mcpId}`);
     const dep = def.dependencies.find((d) => d.binary === binary);
     if (!dep) throw new Error(`No dep ${binary} on MCP ${mcpId}`);
+    return dep;
+  }
+
+  /**
+   * Bring ONE bundled dependency onto disk if it is not there already.
+   *
+   * This is the on-demand entry point for code that needs a tier-2 dep at
+   * the moment of use (the tracker's `mediapipe-vision` before every
+   * Chromium launch; `uv` before the tracking engine's `uv sync`). When the
+   * dep is already installed — every `files[]` entry present with a
+   * matching install token, a token-matching binary in `bin/`, or a custom
+   * installer whose `verify()` reports a path — it returns at once: no
+   * download, no `runtimeStatus: "installing"` transition, nothing for the
+   * Settings chips to flicker over. Otherwise it does exactly what
+   * `retryDep` does.
+   *
+   * "Installed" is a deliberate trade, not a full verification: a
+   * multi-file dep counts as installed when every file EXISTS and the
+   * install token matches — no per-start sha256 of 33 MB of MediaPipe
+   * assets. An asset corrupted in place therefore passes here; the repair
+   * for that is `retryDep` (the Settings retry chip), which always
+   * re-downloads.
+   *
+   * `retryDep` is deliberately NOT this: it is the Settings "Retry" button
+   * and always re-runs the install. Routing the tracker through it
+   * re-downloaded all 33 MB of MediaPipe assets on every tracker start and
+   * made tracking fail offline with the assets sitting on disk.
+   */
+  async ensureDep(mcpId: string, binary: string): Promise<void> {
+    const dep = DependencyManager.findBundledDep(mcpId, binary);
+    const installed = dep.files
+      ? this.isMultiFileInstalled(dep)
+      : (await this.resolveStatusAsync(dep, mcpId)).installed;
+    if (installed) return;
+    await this.retryDep(mcpId, binary);
+  }
+
+  /**
+   * Retry installation of a single failed dependency. Writes runtime state
+   * transitions so the Settings UI's polling sees `installing → installed`
+   * (or `installing → failed`) without waiting for the full `ensureAll`
+   * sweep. Always installs — use `ensureDep` for "install only if missing".
+   */
+  async retryDep(mcpId: string, binary: string): Promise<void> {
+    const dep = DependencyManager.findBundledDep(mcpId, binary);
 
     this.ensureBinDir();
     this.writeDepTransition(mcpId, binary, {
@@ -654,7 +725,7 @@ export class DependencyManager {
         const url = DependencyManager.resolveDownloadUrl(dep);
         await this.downloadGroup(url, [dep]);
       }
-      const fresh = await this.resolveStatusAsync(dep);
+      const fresh = await this.resolveStatusAsync(dep, mcpId);
       if (!fresh.installed) {
         this.writeDepTransition(mcpId, binary, {
           runtimeStatus: "failed",
@@ -670,69 +741,6 @@ export class DependencyManager {
         "retryDep failed",
       );
       this.writeDepTransition(mcpId, binary, {
-        runtimeStatus: "failed",
-        error: message,
-      });
-      throw err;
-    }
-  }
-
-  /**
-   * Install a single binary dependency directly, without touching the
-   * parent MCP's aggregate `installStatus`. Used by Category A to bring
-   * tier-1-flagged deps on tier-2 parents (e.g. yt-dlp under
-   * youtube-downloader) onto disk at boot — the parent MCP is still
-   * agent-managed (npx) but the slow binary install is hoisted forward.
-   *
-   * Skips when the dep is already installed (token matches). Writes
-   * per-dep runtime transitions so the Settings UI's dep chips reflect
-   * progress, but does NOT alter `installStatus` / `dependencyStatus`.
-   */
-  private async installSingleDep(
-    mcpId: string,
-    dep: BundledDependency,
-    onProgress?: BinaryInstallProgressCallback,
-  ): Promise<void> {
-    this.ensureBinDir();
-
-    const existing = await this.resolveStatusAsync(dep);
-    if (existing.installed) {
-      onProgress?.({
-        binary: dep.binary,
-        mcpId,
-        status: "skipped",
-        reason: "already_installed",
-      });
-      return;
-    }
-
-    this.writeDepTransition(mcpId, dep.binary, {
-      runtimeStatus: "installing",
-      error: null,
-    });
-    onProgress?.({ binary: dep.binary, mcpId, status: "downloading" });
-
-    try {
-      if (dep.files) {
-        await this.installMultiFile(dep);
-      } else if (dep.customInstallerId) {
-        await this.runCustomInstaller(dep);
-      } else {
-        const url = DependencyManager.resolveDownloadUrl(dep);
-        await this.downloadGroup(url, [dep], onProgress
-          ? (p) => onProgress({ ...p, binary: dep.binary, mcpId })
-          : undefined);
-      }
-      const fresh = await this.resolveStatusAsync(dep);
-      this.writeDepTransition(mcpId, dep.binary, fresh);
-      onProgress?.({ binary: dep.binary, mcpId, status: "done" });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error(
-        { mcpId, binary: dep.binary, err: message },
-        "installSingleDep failed",
-      );
-      this.writeDepTransition(mcpId, dep.binary, {
         runtimeStatus: "failed",
         error: message,
       });
@@ -757,39 +765,18 @@ export class DependencyManager {
     DependencyManager.syncLog(`ensureMcp(${def.id}): deps=${def.dependencies.length}`);
 
     if (def.dependencies.length === 0) {
-      // No binary deps. Status depends on whether env vars are required:
-      //   - requiredEnvVars set & missing → needs_config
-      //   - requiredEnvVars set & all present → installed
-      //   - no requiredEnvVars → not_required (legacy behaviour for libi/core)
+      // No binary deps and nothing to configure (libi holds no provider
+      // key) → not_required.
       if (this.skipDbWrites) {
         // Category A path: don't touch DB. Category B's
-        // settleAllBundledStatuses recomputes this from disk + envVars
-        // after migrations have run.
+        // settleAllBundledStatuses recomputes this from disk after
+        // migrations have run.
         return;
-      }
-      let noDepStatus: InstallStatus = "not_required";
-      let noDepError: string | null = null;
-      if (def.requiredEnvVars && def.requiredEnvVars.length > 0) {
-        const [currentRow] = db
-          .select()
-          .from(mcpServers)
-          .where(eq(mcpServers.id, def.id))
-          .limit(1)
-          .all();
-        const config = DependencyManager.evaluateConfigStatus({
-          requiredEnvVars: def.requiredEnvVars,
-          envVarsJson: currentRow?.envVars ?? null,
-        });
-        noDepStatus = config.status;
-        noDepError =
-          config.status === "needs_config"
-            ? `Missing required env vars: ${config.missing.join(", ")}`
-            : null;
       }
       db.update(mcpServers)
         .set({
-          installStatus: noDepStatus,
-          installError: noDepError,
+          installStatus: "not_required",
+          installError: null,
           dependencyStatus: JSON.stringify([]),
           updatedAt: new Date(),
         })
@@ -817,7 +804,19 @@ export class DependencyManager {
     // state (which would otherwise render as "pending").
     const depFailures = new Map<string, string>();
 
-    // Custom-installer deps run on their own — they don't share archives.
+    // Install order is load-bearing: fileDeps → standardDeps → customDeps.
+    // A custom installer may shell out to a STANDARD dep of the same def
+    // (`yt-dlp` runs `uv tool install`; `tracking-pyenv` runs `uv sync`), so
+    // every standard dep must be on disk before any custom installer starts.
+    // Until 2026-09-08 `uv` was flagged tier-1 and Category A had already
+    // put it in bin/ by the time a tier-2 def installed on demand; that flag
+    // is gone, so both youtube-downloader and libi-tracking now declare `uv`
+    // themselves and this loop order guarantees it for everything that
+    // installs through here. It is NOT the only path, though: the
+    // tracking_engine_install job (lib/jobs/runners/tracking-engine-install.ts)
+    // calls `retryDep` on the pyenv dep directly, bypassing this loop, and
+    // so `ensureDep`s uv explicitly first. Custom-installer deps run on
+    // their own — they don't share archives.
     const fileDeps = def.dependencies.filter((d) => d.files);
     const customDeps = def.dependencies.filter((d) => d.customInstallerId && !d.files);
     const standardDeps = def.dependencies.filter((d) => !d.customInstallerId && !d.files);
@@ -833,7 +832,7 @@ export class DependencyManager {
 
     for (const dep of fileDeps) {
       if (this.isMultiFileInstalled(dep)) {
-        onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already_installed" });
+        onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already installed" });
         continue;
       }
       this.writeDepTransition(mcpId, dep.binary, {
@@ -858,38 +857,12 @@ export class DependencyManager {
       }
     }
 
-    for (const dep of customDeps) {
-      const existing = await this.resolveStatusAsync(dep);
-      if (existing.installed) {
-        onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already_installed" });
-        continue;
-      }
-      this.writeDepTransition(mcpId, dep.binary, {
-        runtimeStatus: "installing",
-        error: null,
-      });
-      onProgress?.({ binary: dep.binary, mcpId, status: "downloading" });
-      try {
-        await this.runCustomInstaller(dep);
-        onProgress?.({ binary: dep.binary, mcpId, status: "done" });
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        perBinErrors.push(`${dep.binary}: ${message}`);
-        logger.error({ binary: dep.binary, err: message }, "Custom installer failed");
-        depFailures.set(dep.binary, message);
-        this.writeDepTransition(mcpId, dep.binary, {
-          runtimeStatus: "failed",
-          error: message,
-        });
-      }
-    }
-
     for (const [url, deps] of downloadGroups) {
       // Fast-path: skip download if all deps in this group are already installed.
       const allInstalled = deps.every((d) => this.resolveStatus(d).installed);
       if (allInstalled) {
         for (const dep of deps) {
-          onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already_installed" });
+          onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already installed" });
         }
         continue;
       }
@@ -938,6 +911,32 @@ export class DependencyManager {
       }
     }
 
+    for (const dep of customDeps) {
+      const existing = await this.resolveStatusAsync(dep);
+      if (existing.installed) {
+        onProgress?.({ binary: dep.binary, mcpId, status: "skipped", reason: "already installed" });
+        continue;
+      }
+      this.writeDepTransition(mcpId, dep.binary, {
+        runtimeStatus: "installing",
+        error: null,
+      });
+      onProgress?.({ binary: dep.binary, mcpId, status: "downloading" });
+      try {
+        await this.runCustomInstaller(dep);
+        onProgress?.({ binary: dep.binary, mcpId, status: "done" });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        perBinErrors.push(`${dep.binary}: ${message}`);
+        logger.error({ binary: dep.binary, err: message }, "Custom installer failed");
+        depFailures.set(dep.binary, message);
+        this.writeDepTransition(mcpId, dep.binary, {
+          runtimeStatus: "failed",
+          error: message,
+        });
+      }
+    }
+
     // Category A path: skip the post-install DB settle entirely. Category B's
     // `settleAllBundledStatuses` recomputes this from disk after migrations
     // have run, and the resolve work below requires async disk I/O that's
@@ -965,22 +964,6 @@ export class DependencyManager {
     if (!allInstalled) {
       aggregate = "failed";
       installError = perBinErrors.join(" | ") || "unknown";
-    } else if (def.requiredEnvVars && def.requiredEnvVars.length > 0) {
-      const [currentRow] = db
-        .select()
-        .from(mcpServers)
-        .where(eq(mcpServers.id, def.id))
-        .limit(1)
-        .all();
-      const config = DependencyManager.evaluateConfigStatus({
-        requiredEnvVars: def.requiredEnvVars,
-        envVarsJson: currentRow?.envVars ?? null,
-      });
-      aggregate = config.status;
-      installError =
-        config.status === "needs_config"
-          ? `Missing required env vars: ${config.missing.join(", ")}`
-          : null;
     } else {
       aggregate = "installed";
       installError = null;
@@ -1018,56 +1001,19 @@ export class DependencyManager {
   /**
    * Patch the live `dependencyStatus` JSON for a single binary so callers (UI,
    * agent) can see in-flight transitions before `ensureMcp` finishes its
-   * aggregate refresh. Reads the row, merges the patch into the matching
-   * entry (creating one if absent), writes back.
+   * aggregate refresh. The write itself lives in `./dep-transition.ts` (a
+   * leaf) because `lib/export/ensure-chromium.ts` writes the same transitions
+   * — plus bytes — for the Chromium download, and this class now calls INTO
+   * ensure-chromium for that dep, so sharing the method would be a cycle.
+   * This wrapper only adds the Category A `skipDbWrites` guard.
    */
-  private writeDepTransition(
+  writeDepTransition(
     mcpId: string,
     binary: string,
     patch: Partial<DependencyStatus>,
   ): void {
     if (this.skipDbWrites) return;
-    const db = getDb();
-    const [row] = db
-      .select()
-      .from(mcpServers)
-      .where(eq(mcpServers.id, mcpId))
-      .limit(1)
-      .all();
-    if (!row) return;
-    let list: DependencyStatus[] = [];
-    try {
-      list = JSON.parse(row.dependencyStatus ?? "[]");
-    } catch {
-      /* ignore */
-    }
-    const idx = list.findIndex((s) => s.binary === binary);
-    if (idx === -1) {
-      list.push({
-        binary,
-        installed: false,
-        path: null,
-        source: null,
-        runtimeStatus: "pending",
-        ...patch,
-      });
-    } else {
-      list[idx] = { ...list[idx], ...patch };
-    }
-    db.update(mcpServers)
-      .set({ dependencyStatus: JSON.stringify(list), updatedAt: new Date() })
-      .where(eq(mcpServers.id, mcpId))
-      .run();
-
-    // Emit refresh_query so future Settings UI subscribers can invalidate the
-    // mcp-servers query and re-render the dep chip. Today the Settings page
-    // uses React Query polling (Task 4) and doesn't subscribe to SSE directly;
-    // this emit is preparatory wiring for a future event-driven refresh path.
-    try {
-      navigationEmitter.emit("refresh_query", { queryKey: "mcp-servers" });
-    } catch {
-      /* non-fatal — emit must not break the install loop */
-    }
+    persistDepTransition(mcpId, binary, patch);
   }
 
   private resolveStatus(dep: BundledDependency): ResolvedStatus {
@@ -1142,8 +1088,18 @@ export class DependencyManager {
    * Async status check that honors a custom installer's `verify`. Use this
    * when computing the dependency's actual current state (e.g. after install
    * or for the Settings UI). Falls back to the sync check for standard deps.
+   *
+   * `mcpId` lets the custom-installer branch merge the persisted transition
+   * (`./dep-transition.ts`) when the disk alone would say `pending`: a
+   * `failed` from the last attempt keeps its error (the chip shows Retry +
+   * the reason instead of Download as if nothing happened). A persisted
+   * `installing` is NOT trusted on its own — a crash mid-download would leave
+   * it behind forever — the in-process flight is what reports `installing`.
    */
-  private async resolveStatusAsync(dep: BundledDependency): Promise<ResolvedStatus> {
+  private async resolveStatusAsync(
+    dep: BundledDependency,
+    mcpId?: string,
+  ): Promise<ResolvedStatus> {
     if (dep.files) {
       const destRoot =
         dep.destination === "models" ? getLibiModelsDir() : getLibiBinDir();
@@ -1175,6 +1131,26 @@ export class DependencyManager {
           runtimeStatus: "pending",
         };
       }
+      // Chromium: an install running in this process (an export's, the
+      // tracker's, or a Settings click's — all one flight) is `installing`
+      // with its bytes, checked BEFORE verify() because a forced Re-download
+      // still has the old executable on disk while it runs. This is what
+      // disables the Download / Re-download button mid-flight.
+      if (dep.customInstallerId === PLAYWRIGHT_CHROMIUM_INSTALLER_ID) {
+        const flight = chromiumInstallInFlight();
+        if (flight) {
+          return {
+            binary: dep.binary,
+            installed: false,
+            path: null,
+            source: null,
+            runtimeStatus: "installing",
+            ...(flight.bytesDownloaded !== undefined
+              ? { bytesDownloaded: flight.bytesDownloaded, bytesTotal: flight.bytesTotal }
+              : {}),
+          };
+        }
+      }
       try {
         const p = await installer.verify();
         if (p) {
@@ -1192,6 +1168,17 @@ export class DependencyManager {
           "customInstaller.verify threw",
         );
       }
+      const persisted = mcpId ? readDepTransition(mcpId, dep.binary) : null;
+      if (persisted?.runtimeStatus === "failed") {
+        return {
+          binary: dep.binary,
+          installed: false,
+          path: null,
+          source: null,
+          runtimeStatus: "failed",
+          error: persisted.error ?? null,
+        };
+      }
       return {
         binary: dep.binary,
         installed: false,
@@ -1207,7 +1194,7 @@ export class DependencyManager {
     // `fs.existsSync`, so it would report a green ✔ on such a binary and the
     // install loop would skip re-fetch forever. When the dep declares a
     // `runCheck`, actually run it; a spawn failure / non-zero exit downgrades
-    // the status to "pending" so `installSingleDep` re-downloads.
+    // the status to "pending" so the next install pass re-downloads.
     if (dep.runCheck && status.installed && status.path) {
       const runnable = await DependencyManager.isBinaryRunnable(
         status.path,
@@ -1389,9 +1376,10 @@ export class DependencyManager {
   }
 
   /**
-   * Run a custom-installer dependency's install command. Resolves sentinels
-   * (`__PLAYWRIGHT_CORE_CLI__`, `__YT_DLP_UV_INSTALL__`) to real commands so
-   * the spawned process works in both dev and packaged builds.
+   * Run a custom-installer dependency's install command. Whole-command
+   * sentinels (`__ENSURE_CHROMIUM__`, `__TRACKING_PYENV_INSTALL__`,
+   * `__YT_DLP_UV_INSTALL__`) dispatch to the code that owns that install;
+   * anything else is spawned as declared.
    */
   private async runCustomInstaller(dep: BundledDependency): Promise<void> {
     if (!dep.customInstallerId) return;
@@ -1400,6 +1388,39 @@ export class DependencyManager {
       throw new Error(`Unknown customInstallerId: ${dep.customInstallerId}`);
     }
     const { command, args, timeoutMs } = installer.install;
+
+    // Whole-command sentinel: Chromium has ONE install path,
+    // `lib/export/ensure-chromium.ts` — single-flight, streamed progress,
+    // its own transitions. This is how `retryDep` (the Settings Download /
+    // Re-download button) and `ensureDep` (the tracker) reach it, so a click
+    // during an export-driven download joins that download instead of
+    // spawning a second `playwright install` behind playwright's `__dirlock`.
+    // `force` only when there is something to replace: the Re-download from
+    // `installed`. A first Download, a Retry from `failed`, and every
+    // `ensureDep` arrive with nothing on disk and must not pass `--force`.
+    if (command === ENSURE_CHROMIUM_INSTALL_SENTINEL) {
+      const force = (await installer.verify()) !== null;
+      // `force` is derived from what is on disk at THIS instant, which is not
+      // the instant the user clicked: a click made during an export-driven
+      // download becomes a forced re-download if that download finishes in
+      // between. Passing when the click was accepted lets ensureChromium drop
+      // a force that a completed install has already served.
+      await ensureChromium({
+        force,
+        requestedAt: depInstallAcceptedAt(CHROMIUM_MCP_ID, CHROMIUM_DEP_BINARY),
+      });
+      const status = await installer.verify();
+      if (!status) {
+        throw new Error(
+          `${dep.binary} install command completed but verify() still returns null`,
+        );
+      }
+      logger.info(
+        { binary: dep.binary, path: status, via: "ensure-chromium", force },
+        "Custom installer succeeded",
+      );
+      return;
+    }
 
     // Whole-command sentinel: `__TRACKING_PYENV_INSTALL__` is a multi-step
     // install (uv sync of the tracking sidecar + provisioning the ONNX
@@ -1441,25 +1462,11 @@ export class DependencyManager {
       return;
     }
 
-    const resolvedArgs = args.map((a) => {
-      if (a === "__PLAYWRIGHT_CORE_CLI__") {
-        return resolvePlaywrightCoreCli();
-      }
-      return a;
-    });
-
-    // `__NODE__` → a real Node interpreter, resolved NOW rather than at module
-    // load so it picks up `<LIBI_HOME>/bin/node` once Category A has
-    // provisioned it. Never `process.execPath` — under the packaged app that
-    // is the Electron binary and would launch a second Libi GUI.
-    const resolvedCommand =
-      command === NODE_COMMAND_SENTINEL ? resolveNodeCommand() : command;
-
     logger.info(
-      { binary: dep.binary, command: resolvedCommand, args: resolvedArgs },
+      { binary: dep.binary, command, args },
       "Running custom installer",
     );
-    await execFileAsync(resolvedCommand, resolvedArgs, {
+    await execFileAsync(command, args, {
       timeout: timeoutMs ?? 60_000,
       windowsHide: true,
       // Cap stdout/stderr — Playwright prints progress bars that can balloon.
@@ -1471,6 +1478,7 @@ export class DependencyManager {
         `${dep.binary} install command completed but verify() still returns null`,
       );
     }
+    installer.onInstalled?.(status);
     logger.info({ binary: dep.binary, path: status }, "Custom installer succeeded");
   }
 
@@ -1509,7 +1517,9 @@ export class DependencyManager {
       } catch {
         throw new Error(
           `Cannot install yt-dlp via uv: uv not found in ${this.getBinaryPath("uv")} or on PATH. ` +
-            `Expected uv to be installed earlier (tier-1 dep on the youtube-downloader def).`,
+            `ensureMcp installs a def's standard deps (uv is one, on youtube-download) ` +
+            `before its custom installers, so this means the uv download itself failed — ` +
+            `check the uv dep's own error.`,
         );
       }
     }
@@ -1529,7 +1539,10 @@ export class DependencyManager {
     // per-boot churn.
     await execFileAsync(
       uvBinary,
-      ["tool", "install", "yt-dlp", "--reinstall", "--python", "3.12", "--with", "certifi"],
+      // The requirement carries the `[default]` extra — the yt-dlp-ejs
+      // JS-challenge solver. See `YT_DLP_UV_REQUIREMENT` for what happens
+      // without it (throttled, then 403 mid-download).
+      ytDlpUvInstallArgs(),
       {
         timeout: timeoutMs ?? 5 * 60_000,
         windowsHide: true,

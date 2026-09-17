@@ -3,7 +3,7 @@ import { getAnalysis } from "@/lib/analysis/manager";
 import { buildCaptionCues } from "@/lib/captions/cues";
 import { anchorToRect } from "@/lib/captions/anchor";
 import { addOverlayToManifest, loadManifest, saveManifest } from "@/lib/composition/persistence";
-import type { ElevenLabsWord } from "@/lib/elevenlabs/transcribe";
+import type { SttWord } from "@/lib/analysis/types";
 import type { CaptionAnchor } from "@/lib/captions/types";
 import type { CaptionRevealMode } from "@/lib/engine/types";
 import { overlayLogger } from "@/lib/logger";
@@ -66,15 +66,15 @@ import type { ToolResult } from "./types";
 /** Read the file's full word-level transcript by concatenating the analysis
  *  audio chunks in order. Mirrors `analysisGetAudioChunks`'s read path
  *  (`getAnalysis({ fileId })` → `bundle.audioChunks`). Each chunk's `words` is
- *  a JSON-stringified `ElevenLabsWord[]` (or null). */
-export async function readWordsFromAnalysis(fileId: string): Promise<ElevenLabsWord[]> {
+ *  a JSON-stringified `SttWord[]` (or null). */
+export async function readWordsFromAnalysis(fileId: string): Promise<SttWord[]> {
   const bundle = await getAnalysis({ fileId });
   const chunks = [...bundle.audioChunks].sort((a, b) => a.chunkIndex - b.chunkIndex);
-  const words: ElevenLabsWord[] = [];
+  const words: SttWord[] = [];
   for (const chunk of chunks) {
     if (!chunk.words) continue;
     try {
-      const parsed = JSON.parse(chunk.words) as ElevenLabsWord[];
+      const parsed = JSON.parse(chunk.words) as SttWord[];
       if (Array.isArray(parsed)) words.push(...parsed);
     } catch {
       // Skip a chunk with malformed words JSON rather than failing the whole track.
@@ -85,7 +85,7 @@ export async function readWordsFromAnalysis(fileId: string): Promise<ElevenLabsW
 
 export interface GenerateCaptionsDeps {
   /** Injectable for tests; defaults to the real analysis-chunk read path. */
-  readWords: (fileId: string) => Promise<ElevenLabsWord[]>;
+  readWords: (fileId: string) => Promise<SttWord[]>;
 }
 
 const defaultDeps: GenerateCaptionsDeps = { readWords: readWordsFromAnalysis };

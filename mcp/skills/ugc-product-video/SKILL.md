@@ -1,6 +1,6 @@
 ---
 name: ugc-product-video
-description: Walks the user through creating a UGC-style AI product video — brief, ad format + production route, character + product references, a real scripted ad, per-clip generation on Seedance 2.0 (default), validation, audio, captions, end card. Thin router over the prompt files in `prompts/`. Use when the user wants to create a product ad, demo video, or social UGC. Default to ONE full-length multi-beat clip (15s with in-prompt jump-cut beats), not one short clip per beat.
+description: Walks the user through creating a UGC-style AI product video — brief, ad format + production route, character + product references, a real scripted ad, per-clip generation on your provider's recommended video model, validation, audio, captions, end card. Thin router over the prompt files in `prompts/`. Use when the user wants to create a product ad, demo video, or social UGC. Default to ONE full-length multi-beat clip (15s with in-prompt jump-cut beats), not one short clip per beat.
 when_to_use: Triggers on "make a UGC video", "create a product ad", "TikTok-style video", "demo video for my product", or any request to film a person showing or using a product.
 tags:
   - ugc
@@ -8,6 +8,35 @@ tags:
 ---
 
 # UGC Product Video
+
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
 
 This skill is a **thin router**. It owns the stage order and the hard gates; all
 deep craft (brief questions, ad-format beat frameworks, script tone + pacing,
@@ -50,30 +79,34 @@ storyboard / just generate" do you drop to direct generation and place clips wit
 `libi.add_overlay({ kind: "video" })`. It is never your default and never something you offer proactively.
 Either way, the hard cost / dialogue / validation / audio gates still apply.
 
-## Recommended model (maintainer-updated 2026-05-30)
+## Recommended model
+
+The one tunable default this skill has lives HERE, in `SKILL.md` — because
+`libi.update_skill` is the only write path that both exists and re-syncs the agent
+workspace (see the fork section below).
 
 ```
-RECOMMENDED_VIDEO_MODEL = bytedance/seedance-2.0
-Rationale: strongest 2026 UGC physics + native audio + image/end-image FLF.
-This is the one line you edit when you fork this skill to change your default.
+RECOMMENDED_VIDEO_MODEL = provider-default   (maintainer-updated 2026-09-09)
 ```
 
-> The value above is the model **family** — when generating, call the suffixed endpoint `bytedance/seedance-2.0/image-to-video` (default) or `bytedance/seedance-2.0/reference-to-video`; passing the bare id (no operation suffix) to run_model/submit_job 404s on fal.
+`provider-default` resolves through your provider reference: read
+`references/providers/<id>.md` under this skill before Stage 3 and use the endpoint it
+marks **RECOMMENDED**. A user's own fork may replace `provider-default` with a literal
+endpoint id — that copy is theirs; what libi *ships* names no vendor. Either way it is a
+default, not a mandate.
 
 ## Model-selection policy
 
-For **any** UGC video, SUGGEST Seedance 2.0 first, with a one-line why ("strongest
-2026 UGC physics + native audio + image/end-image first-last-frame control"). It
-is the default, not a mandate.
+For **any** UGC video, SUGGEST the recommended default above first, with a one-line why. Then:
 
-- **Honor explicit per-project overrides.** If the user says "use Kling this time"
-  or "do this one on Veo", do exactly what they ask for that project — don't
-  re-pitch Seedance. A one-off override is not a standing preference (see the fork
-  section below for standing preferences).
-- **Always verify the chosen model at runtime.** NEVER trust the hardcoded id
-  above as ground truth — model availability, schemas, and pricing drift. Before
-  generating, confirm via the fal tools: `recommend_model` (sanity-check the pick),
-  `get_model_schema` (confirm inputs/FLF support), `get_pricing` (disclose cost).
+- **Honor explicit per-project overrides.** If the user says "use Kling this time" or "do
+  this one on Veo", do exactly what they ask for that project — don't re-pitch the default.
+  A one-off override is not a standing preference (see the fork section below).
+- **Always verify the chosen model at runtime.** NEVER trust a written-down id as ground
+  truth — availability, schemas and pricing drift. Before generating, confirm with your
+  provider's own tools: sanity-check the pick, confirm inputs/FLF support against the
+  schema, and read the price so the cost gate can disclose it. Your provider reference
+  names those tools.
 - **Route to the matching model guide + use-case formula** once the model is chosen:
   - Load the engine's prompting guide from the **`ai-video-models`** skill —
     Seedance 2.0 → `model-seedance-2`, Veo 3.1 → `model-veo-3-1`, Kling → `model-kling`.
@@ -86,13 +119,19 @@ is the default, not a mandate.
 
 ## Permanent-override (fork) instruction
 
-When the user states a **standing** preference ("always use X", "make Y my default", "I never want
-Seedance"), do NOT just comply for this one project — offer forking: *"I can make that your permanent
-default by creating your own editable copy of this skill with the recommended model changed; it'll
-apply to every future UGC video (or I can write a fresh skill, or adapt one you found online)."* If
-they take it: drive `libi.fork_skill` on this skill's id, then edit the `RECOMMENDED_VIDEO_MODEL` line
-in the user copy (name-keyed lookups resolve the **user** row). Reverting = delete the user copy
-(re-tracks the bundled default).
+When the user states a **standing** preference ("always use X", "make Y my default", "I
+never want Seedance"), do NOT just comply for this one project — offer forking: *"I can make
+that your permanent default by creating your own editable copy of this skill with the
+recommended model changed; it'll apply to every future UGC video (or I can write a fresh
+skill, or adapt one you found online)."* If they take it: drive `libi.fork_skill` on this
+skill's id, then rewrite the `RECOMMENDED_VIDEO_MODEL` line in the user copy's
+**`SKILL.md`** with `libi.update_skill` (pass the whole edited body) — put the literal
+endpoint id they asked for on that line. `libi.update_skill` is the only write path that
+reaches a forked skill AND re-syncs the agent workspace, and name-keyed lookups resolve
+the **user** row. **Never hand-edit anything under `references/`**: no `libi.*` tool
+writes there (`libi.add_skill_prompt` / `libi.update_skill_prompt` are scoped to
+`prompts/`), and a raw filesystem edit triggers no workspace sync, so the agent would keep
+reading the stale copy. Reverting = delete the user copy (re-tracks the bundled default).
 
 ## Load the `ugc-craft` skill first
 
@@ -320,7 +359,7 @@ Read the composition back, then confirm — against the route you actually ran:
 
 ## The four hard gates
 
-1. **Cost disclosure** — disclose the TOTAL estimated cost via `get_pricing` before any spend; respect the approval mode + batch cap.
+1. **Cost disclosure** — disclose the TOTAL estimated cost — from your provider's pricing tool, see `references/providers/<id>.md` — before any spend; respect the approval mode + batch cap.
 2. **Dialogue confirmation** — run the [dialogue-gate](prompts/dialogue-gate.md) before any speaking clip (exact words + count + natural-pace fit; explicit `yes`). Separate from cost approval; re-run when the dialogue changes.
 3. **Stage 4.5 validation + commit refusal** — every AI clip gets a real analysis record (frame vision-Read + video-understanding for manipulation beats); `commit_draft` hard-refuses unvalidated clips. (Inline above.)
 4. **Verify-before-commit audio-shape** — the Stage 8 audio-shape + scene-count + text-overlay invariants must pass before `commit_draft`. (Inline above.)

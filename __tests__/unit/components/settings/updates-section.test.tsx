@@ -163,6 +163,91 @@ describe("UpdatesSection — auto-download and explicit restart", () => {
     expect(restartMutate).toHaveBeenCalledWith({ target: "shell", version: "0.4.0" });
   });
 
+  it("a NEW shell at update-available is NOT a silent dead zone (Downloading badge, no bare restart promise)", () => {
+    // Regression pin: an auto-download shell starts fetching the instant its
+    // feed says update-available, so this state must already read as "busy",
+    // not as a stale "Next launch" row with nothing backing it.
+    dto = {
+      ...withShell("update-available", { autoDownload: true }),
+      pendingVersion: "0.1.13",
+    };
+    render(<UpdatesSection />);
+    // The header badge: `anyInstalling` must be true here.
+    expect(screen.getByText("Downloading")).toBeInTheDocument();
+    // No restart control exists yet — the copy must not claim one does.
+    expect(screen.queryByRole("button", { name: /restart to apply/i })).not.toBeInTheDocument();
+    expect(screen.getByText("Next launch").parentElement).toHaveTextContent(
+      /applies at next launch/i,
+    );
+    expect(screen.getByText("Next launch").parentElement).not.toHaveTextContent(
+      /restart to apply/i,
+    );
+    // The "one restart will apply both" note must render for the whole
+    // window, not only once bytes are actually moving.
+    expect(screen.getByText(/one restart will apply both/i)).toBeInTheDocument();
+  });
+
+  it("names the download's subject even with no staged runtime and no runtime job", () => {
+    // Finding 2: shell update-available + autoDownload, nothing staged, no
+    // runtime install — `anyInstalling` renders the badge, but before this
+    // fix nothing else on the card said what was actually downloading (the
+    // `phase === "downloading"` paragraph didn't match "update-available",
+    // and the "one restart will apply both" note needs a `pendingVersion`
+    // that doesn't exist here).
+    dto = withShell("update-available", { autoDownload: true });
+    render(<UpdatesSection />);
+    expect(screen.getByText("Downloading")).toBeInTheDocument();
+    expect(screen.getByText(/downloading libi/i)).toBeInTheDocument();
+    expect(screen.getByText(/downloading libi/i)).toHaveTextContent("0.4.0");
+  });
+
+  it("keeps the badges mutually exclusive when an in-flight shell and a staged runtime coincide", () => {
+    // Finding 5a: a shell fetching its update plus a runtime staged for next
+    // launch used to render BOTH "Update ready" and "Downloading" at once.
+    // The in-flight state must win outright.
+    dto = {
+      ...withShell("downloading", { percent: 40, autoDownload: true }),
+      pendingVersion: "0.1.13",
+    };
+    render(<UpdatesSection />);
+    expect(screen.getByText("Downloading")).toBeInTheDocument();
+    expect(screen.queryByText("Update ready")).not.toBeInTheDocument();
+  });
+
+  it("shows the download percentage even when a runtime is also staged", () => {
+    // The combined "one restart will apply both" note replaced the plain
+    // download paragraph in that state, and carried no number — so a
+    // multi-minute 481 MB shell download reported prose and nothing else.
+    dto = {
+      ...withShell("downloading", { percent: 40, autoDownload: true }),
+      pendingVersion: "0.1.13",
+    };
+    render(<UpdatesSection />);
+    expect(screen.getByText(/one restart will apply both/i)).toHaveTextContent("40%");
+  });
+
+  it("calls a finished old-shell download Restarting, never Downloading", () => {
+    // Same collision, one phase later: an OLD shell at `ready` counts as
+    // in-flight (via `!autoDownload`) but its download has FINISHED and it is
+    // quitting into it. "Downloading" was the wrong word beside a body that
+    // already said "Restarting Libi…", and the staged runtime's restart offer
+    // sat there too, inviting a click that raced the shell's own quit.
+    dto = { ...withShell("ready", { percent: 100 }), pendingVersion: "0.1.13" };
+    render(<UpdatesSection />);
+    expect(screen.getByText("Restarting")).toBeInTheDocument();
+    expect(screen.queryByText("Downloading")).not.toBeInTheDocument();
+    expect(screen.queryByText("Update ready")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /restart to apply/i })).not.toBeInTheDocument();
+  });
+
+  it("an OLD shell's update-available does NOT read as in-flight — it is a stationary offer", () => {
+    dto = withShell("update-available"); // no autoDownload
+    render(<UpdatesSection />);
+    expect(screen.queryByText("Downloading")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /install 0\.4\.0 & restart/i })).toBeInTheDocument();
+    expect(screen.queryByText(/one restart will apply both/i)).not.toBeInTheDocument();
+  });
+
   it("an OLD shell's ready state renders as the self-restart it is", () => {
     dto = withShell("ready", { percent: 100 }); // no autoDownload
     render(<UpdatesSection />);

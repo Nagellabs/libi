@@ -1,31 +1,18 @@
-import { accessSync, constants, existsSync, mkdirSync } from "node:fs";
-import path from "node:path";
-
-import { getLibiHome } from "@/lib/libi-home";
-import { serverLogger as logger } from "@/lib/logger";
-import {
-  acquireInstallLock,
-  isLockStale,
-  lockTimingForNpmTimeout,
-  readInstalledVersion,
-  runNpmInstall,
-  writePackageJson,
-  type NpmInstallEntry,
-} from "@/lib/install/npm-root";
-import type { AgentUnavailableReason } from "./types";
-import {
-  claudeNativeBinaryMissingError,
-  claudeNativeBinaryPresent,
-} from "./claude-native-binary";
-import { CLAUDE_ADAPTER_PACKAGE, RUNTIME_AGENT_PACKAGES } from "./runtime-packages";
-import { isWindows } from "@/lib/platform";
-
 /**
- * The Claude ACP adapter is installed at RUNTIME rather than bundled, because
- * it transitively pulls @anthropic-ai/claude-agent-sdk (+ its ~306MB platform
- * binary), which is "© Anthropic PBC. All rights reserved." — libi is GPL-3.0
- * and holds no licence to redistribute it. Installing it here means the user
- * obtains it from npm, Anthropic's own channel, under their own terms.
+ * Both ACP adapters are installed at RUNTIME rather than bundled — and only
+ * their JavaScript. The chat runs the user's own CLI, so the engine each
+ * adapter lists as an optionalDependency (Claude's platform binary, Codex's
+ * Rust binary) is never downloaded: npm runs with `--omit=optional`, and the
+ * engines an older libi already downloaded are deleted at boot
+ * (`./engine-cleanup`).
+ *
+ * The Claude adapter stays out of the bundle because it transitively pulls
+ * @anthropic-ai/claude-agent-sdk, which is "© Anthropic PBC. All rights
+ * reserved." — libi is GPL-3.0 and holds no licence to redistribute it.
+ * Installing it here means the user obtains it from npm, Anthropic's own
+ * channel, under their own terms. The Codex adapter for SIZE: it was carried
+ * by every install whether or not the user ever chose Codex (see
+ * `runtime-packages.ts`).
  *
  * Agent packages get their OWN npm root (`~/.libi/agents`), separate from the
  * bundled-MCP root (`~/.libi`). `npm install` is all-or-nothing per root: if
@@ -35,117 +22,81 @@ import { isWindows } from "@/lib/platform";
  * keep each manifest self-contained, so neither prunes the other (both are
  * regenerated from scratch and installed with `--no-save`).
  *
+ * Within the agent root the two adapters SHARE a manifest, and that is the
+ * subtlety `agentManifestEntries` (`./adapter-tree`) exists for: npm reifies
+ * `node_modules` to whatever manifest it is handed, pruning what is absent, so
+ * an install scoped to one adapter must still list the other at the version it
+ * already has.
+ *
  * Keep pinnedVersion in lockstep with package.json's devDependency on the
  * same package, so dev and production run identical adapter code. It is a
  * devDependency deliberately: `npm install` in a dev checkout still installs
- * it (so `resolveRepoLocalAdapterBin` below finds it and the dev skip
- * fires — no network, no behaviour change), but `npx libi` and the packaged
- * Electron artifact do NOT get it, which is the whole point of this file.
+ * it (so `resolveRepoLocalAdapterBin` finds it and the dev skip fires — no
+ * network, no behaviour change), but `npx libi` and the packaged Electron
+ * artifact do NOT get it, which is the whole point of this file.
+ *
+ * The READ half of this subject — where the tree is, what is in it, whether
+ * it is current — lives in `./adapter-tree`. This file is
+ * the write half: the cross-process lock, `npm install`, the single-flight and
+ * the negative cache. It re-exports the read half so it stays the module
+ * callers import.
  */
-export { CLAUDE_ADAPTER_PACKAGE };
+import { mkdirSync } from "node:fs";
+
+import { serverLogger as logger } from "@/lib/logger";
+import {
+  acquireInstallLock,
+  lockTimingForNpmTimeout,
+  readInstalledVersion,
+  runNpmInstall,
+  writePackageJson,
+} from "@/lib/install/npm-root";
+import { runtimeAgentPackage, type RuntimeAgentPackage } from "./runtime-packages";
+// The read half of this subject lives in `./adapter-tree`: where the
+// tree is, what is in it, whether it is current, and what to tell
+// the user about it. Nothing there writes; everything here does.
+import {
+  adapterVersionCurrent,
+  agentInstallEntries,
+  agentManifestEntries,
+  AGENT_NPM_INSTALL_TIMEOUT_MS,
+  describeDrift,
+  driftedEntries,
+  getAgentInstallRoot,
+  LOCK_FILE,
+  pendingInstallReason,
+  resolveInstalledAdapterBin,
+  resolveRepoLocalAdapterBin,
+} from "./adapter-tree";
+
+// The whole read half, re-exported so this module stays the public face of
+// agent adapter installation and no caller (or its 1300-line test file) has to
+// move. New code should import these from `./adapter-tree` directly.
+export {
+  adapterBinFileNames,
+  adapterUnavailableReason,
+  adapterVersionCurrent,
+  AGENT_NPM_INSTALL_TIMEOUT_MS,
+  claudeAdapterInstallInProgress,
+  claudeAdapterUnavailableReason,
+  claudeAdapterVersionCurrent,
+  getAgentInstallRoot,
+  resolveBinIn,
+  resolveClaudeAdapterBin,
+  resolveInstalledAdapterBin,
+  resolveRepoLocalAdapterBin,
+} from "./adapter-tree";
+
+export { CLAUDE_ADAPTER_PACKAGE, CODEX_ADAPTER_PACKAGE } from "./runtime-packages";
 
 const LOG_TAG = "agent-install";
-const LOCK_FILE = ".agent-install.lock";
-
 /**
- * 30 min. Much larger than the bundled-MCP root's 5 min: the adapter drags
- * @anthropic-ai/claude-agent-sdk's ~306MB platform binary behind it, which on
- * a slow or throttled connection comfortably exceeds the small-package
- * ceiling that timeout was written for.
- *
- * The install lock's staleness/timeout are derived from this value (via
- * `lockTimingForNpmTimeout`, applied where `acquireInstallLock` is called
- * below) rather than hardcoded separately — raising this constant can never
- * again silently outrun the lock that's supposed to protect it. Exported so
- * tests can assert the two stay coupled.
+ * Per-agent log `op` prefix, so `claude_adapter_repair` keeps its name (it is
+ * the greppable evidence of a drift repair in ~/.libi/logs/libi.log) and Codex
+ * gets `codex_adapter_repair` alongside it rather than sharing one op.
  */
-export const AGENT_NPM_INSTALL_TIMEOUT_MS = 30 * 60 * 1000;
-
-/** npm root for runtime agent packages — separate from the bundled-MCP root. */
-export function getAgentInstallRoot(): string {
-  return path.join(getLibiHome(), "agents");
-}
-
-/**
- * File names a `node_modules/.bin` entry can take, in preference order.
- *
- * On Windows npm's cmd-shim writes THREE files for one bin: an extensionless
- * `<name>` (a **bash** script, for Git Bash / MSYS), plus `<name>.cmd` and
- * `<name>.ps1`. `spawn()` without a shell can only run the `.cmd`; handing it
- * the extensionless bash script fails with ENOEXEC. Node also maps `X_OK` to
- * `F_OK` on Windows, so an executability check cannot tell them apart — the
- * extension has to. It is deliberately NOT a fallback here: resolving to
- * something that provably cannot spawn is worse than resolving to null, which
- * surfaces honestly as "Claude Code not installed".
- */
-export function adapterBinFileNames(binName: string, platform: NodeJS.Platform): string[] {
-  return platform === "win32" ? [`${binName}.cmd`, `${binName}.exe`] : [binName];
-}
-
-/**
- * First existing bin file for `binName` in `dir`, honouring Windows' `.cmd` /
- * `.exe` shim names. Exported because the codex adapter needs exactly this
- * check and was doing `execSync('test -x …')` instead — `test` is not a cmd
- * builtin, so on Windows that command always failed and codex was reported as
- * not installed on every machine.
- */
-export function resolveBinIn(dir: string, binName: string): string | null {
-  // `process.platform` inline as an ARGUMENT, deliberately not bound to a
-  // local first: the bundler cannot fold through a parameter (adapterBinFileNames
-  // compares its own `platform` arg safely), but it does fold through a
-  // same-scope alias — see lib/platform.ts.
-  for (const file of adapterBinFileNames(binName, process.platform)) {
-    const candidate = path.join(dir, file);
-    try {
-      accessSync(candidate, isWindows() ? constants.F_OK : constants.X_OK);
-      return candidate;
-    } catch {
-      /* try the next candidate */
-    }
-  }
-  return null;
-}
-
-/** Absolute path to the runtime-installed adapter bin, or null if absent. */
-export function resolveInstalledAdapterBin(): string | null {
-  return resolveBinIn(
-    path.join(getAgentInstallRoot(), "node_modules", ".bin"),
-    CLAUDE_ADAPTER_PACKAGE.binName,
-  );
-}
-
-/**
- * Absolute path to the adapter bin inside a developer checkout's own
- * `node_modules/`, or null. In dev the package is a devDependency, so `npm
- * install` still puts it on disk and the runtime install would be a
- * redundant ~306MB download into a cold `~/.libi`. It is excluded from both
- * the packaged Electron artifact (`electron-builder.yml`) and the npm
- * artifact (`npx libi` never installs devDependencies), so in production this
- * returns null and the runtime install runs.
- */
-export function resolveRepoLocalAdapterBin(repoRoot: string): string | null {
-  return resolveBinIn(
-    path.join(repoRoot, "node_modules", ".bin"),
-    CLAUDE_ADAPTER_PACKAGE.binName,
-  );
-}
-
-/**
- * Pure resolution order, split out so it is testable without a filesystem:
- *   1. repo-local node_modules/.bin     — dev; keeps `npm run dev` offline-capable
- *   2. ~/.libi/agents/node_modules/.bin — packaged app, installed at first run
- *   3. null                             — caller surfaces an actionable error
- *
- * There is deliberately no `npx` fallback: in a packaged app that would be an
- * unpinned network fetch of an arbitrary version. Used by
- * `lib/agents/acp/agent-registry.ts` to resolve the spawn command for the
- * claude-code agent.
- */
-export function resolveClaudeAdapterBin(bins: {
-  repoLocal: string | null;
-  installed: string | null;
-}): string | null {
-  return bins.repoLocal ?? bins.installed ?? null;
+function opFor(pkg: RuntimeAgentPackage, suffix: string): string {
+  return `${pkg.agentId === "codex" ? "codex" : "claude"}_adapter_${suffix}`;
 }
 
 export interface EnsureAdapterResult {
@@ -181,6 +132,24 @@ export interface EnsureAdapterOptions {
    * a packaged install without chdir-ing the process.
    */
   repoRoot?: string;
+  /**
+   * Called once, from inside the CROSS-PROCESS install lock, at the moment
+   * this call has decided it really is going to run `npm install` — after the
+   * post-lock re-check that skips when another process installed while we
+   * waited. Not called at all when nothing is installed.
+   *
+   * It exists for progress measurement. `agent_install`'s bar is built
+   * by watching `~/.libi/agents` GROW, minus a baseline of what was already
+   * there — both adapters share that root, so a Codex install next to an
+   * installed Claude would otherwise read 275/275 MB from its first tick. The
+   * runner took that baseline before calling in, i.e. before the lock; with a
+   * second libi process holding it and installing, the tree grew by hundreds
+   * of megabytes between the measurement and the start of OUR install, and the
+   * bar was built on a baseline that no longer described the directory. Taken
+   * from here it is measured under the lock, immediately before the install
+   * that it is the baseline for.
+   */
+  onInstallStart?: () => void;
 }
 
 interface AgentInstallOutcome {
@@ -189,158 +158,23 @@ interface AgentInstallOutcome {
   error: string | null;
 }
 
-function agentInstallEntries(): NpmInstallEntry[] {
-  return RUNTIME_AGENT_PACKAGES.map((pkg) => ({
-    id: pkg.npmPackage,
-    name: pkg.npmPackage,
-    npmPackage: pkg.npmPackage,
-    pinnedVersion: pkg.pinnedVersion,
-  }));
-}
-
-/** Entries whose on-disk version doesn't match the pin (missing counts). */
-function driftedEntries(root: string, entries: NpmInstallEntry[]): NpmInstallEntry[] {
-  return entries.filter((e) => readInstalledVersion(root, e.npmPackage) !== e.pinnedVersion);
-}
-
-function describeDrift(root: string, drifted: NpmInstallEntry[]): string {
-  return drifted
-    .map(
-      (e) =>
-        `${e.npmPackage}: expected ${e.pinnedVersion}, got ${
-          readInstalledVersion(root, e.npmPackage) ?? "missing"
-        }`,
-    )
-    .join("; ");
-}
-
 /**
- * Why `root` still needs an npm install, or null when it is complete.
- *
- * Version drift is NOT sufficient on its own: the adapter is ~40KB of JS whose
- * ~306MB Claude binary rides in on an optionalDependency, and npm exits 0 when
- * an optional dependency fails. A tree can therefore match the manifest exactly
- * while being unusable. Checking the binary here — rather than only after an
- * install — is what makes a partial install self-healing instead of permanent:
- * every entry point into the install path re-derives "is this tree complete?"
- * from disk, so a later boot repairs what an interrupted one left behind.
- */
-function pendingInstallReason(root: string, entries: NpmInstallEntry[]): string | null {
-  const drifted = driftedEntries(root, entries);
-  if (drifted.length > 0) return `version drift (${describeDrift(root, drifted)})`;
-  if (!claudeNativeBinaryPresent(root)) return "native binary missing";
-  return null;
-}
-
-/**
- * The CURRENCY half of "already installed": true when every runtime agent
- * package's on-disk version matches its pin. Completeness (the native binary)
- * is `claudeNativeBinaryPresent` — kept separate so a partial tree and a
- * drifted tree stay distinguishable in logs and tests.
- *
- * Without this check on the healthy fast path, a pin bump reached NOBODY who
- * already had libi: a complete tree at yesterday's version short-circuited
- * past the drift check inside `installAgentPackages` forever, so an adapter
- * bump meant to give every user the current Claude models only ever landed on
- * fresh installs.
- *
- * A tree with no readable adapter manifest counts as NOT current, deliberately:
- * `readInstalledVersion` returns null there, and a version that cannot be read
- * is a version that cannot be vouched for. Treating "unknown" as "current"
- * would restore exactly this bug for anyone whose manifest went missing, and
- * the cost of being wrong the other way is one reinstall.
- */
-export function claudeAdapterVersionCurrent(root: string = getAgentInstallRoot()): boolean {
-  return driftedEntries(root, agentInstallEntries()).length === 0;
-}
-
-/**
- * Is an agent-package install running RIGHT NOW, in this or any other process?
- *
- * The in-memory `inflight` promise below cannot answer this for the surface
- * that needs it: Category A runs `ensureClaudeAdapterInstalled()` in the CLI
- * process (`bin/libi.js`) BEFORE Next.js is spawned, so the server process
- * that serves `/api/agent/providers` never holds that promise. The
- * cross-process install lock is the only honest signal, and it is the same one
- * `acquireInstallLock` writes — so "installing" here means exactly "some
- * process holds the agent-root install lock", never a guess.
- *
- * Staleness is judged with the SAME derived timing the acquire path uses, so
- * a long-but-live 306MB download is never mislabelled as an abandoned lock.
- * Cost is one `existsSync` on the healthy (no lock) path.
- */
-export function claudeAdapterInstallInProgress(root: string = getAgentInstallRoot()): boolean {
-  const lockPath = path.join(root, LOCK_FILE);
-  if (!existsSync(lockPath)) return false;
-  return !isLockStale(lockPath, lockTimingForNpmTimeout(AGENT_NPM_INSTALL_TIMEOUT_MS).staleMs);
-}
-
-/**
- * Why Claude Code is unavailable, in the vocabulary the install path already
- * uses. Consumed by `lib/agents/acp/agent-registry.ts` so the agent selector
- * can render a DISABLED row with an explanation instead of dropping the entry.
- *
- * `binRoot` is the root of the tree the resolved adapter bin belongs to, or
- * null when no adapter bin resolved anywhere. A non-null `binRoot` here means
- * the adapter itself is present and only its native binary is missing — the
- * partial-install trap `claude-native-binary.ts` documents — so it reports
- * that directly rather than re-deriving version drift for a tree whose
- * adapter demonstrably matches.
- *
- * Only called when Claude Code is already known to be unavailable, so the
- * filesystem probes here never run on the healthy path.
- */
-export function claudeAdapterUnavailableReason(
-  binRoot: string | null,
-  options: { agentRoot?: string } = {},
-): AgentUnavailableReason {
-  const agentRoot = options.agentRoot ?? getAgentInstallRoot();
-
-  if (claudeAdapterInstallInProgress(agentRoot)) {
-    return {
-      // ~345 MB, NOT the ~306 MB of the platform binary alone. This lock is
-      // held by the npm install of RUNTIME_AGENT_PACKAGES into `~/.libi/agents`
-      // — the whole tree — which is the same operation the boot ticker calls
-      // "downloading ~345 MB" and the setup card's bar counts to
-      // (ESTIMATED_TOTAL_BYTES). A user can see both strings in one session, so
-      // they must quote one number.
-      code: "installing",
-      message: "Installing Claude Code support (~345 MB) — this can take a few minutes.",
-    };
-  }
-
-  if (binRoot !== null) {
-    return {
-      code: "install_failed",
-      message: "Claude Code support is incomplete — restart libi to finish installing it.",
-      detail: "native binary missing",
-    };
-  }
-
-  const pending = pendingInstallReason(agentRoot, agentInstallEntries());
-  // `writePackageJson` runs immediately before npm, so a manifest in the agent
-  // root is proof an install was ATTEMPTED here — the one on-disk fact that
-  // separates "it failed" from "it never ran".
-  const attempted = existsSync(path.join(agentRoot, "package.json"));
-  return {
-    code: attempted ? "install_failed" : "not_installed",
-    message: attempted
-      ? "Claude Code support failed to install — restart libi to retry."
-      : "Claude Code support isn't installed yet — restart libi to install it.",
-    ...(pending ? { detail: pending } : {}),
-  };
-}
-
-/**
- * Reconcile `~/.libi/agents/node_modules/` with the runtime-agent manifest.
+ * Reconcile `pkg` under `~/.libi/agents/node_modules/` with its pin, leaving
+ * the other adapter's tree as it was (see `agentManifestEntries`).
  * Never throws — every failure is returned as a diagnostic string so callers
  * can report WHY (a blocked registry, a yanked version) instead of a bare
  * "not installed".
  */
-async function installAgentPackages(root: string): Promise<AgentInstallOutcome> {
-  const entries = agentInstallEntries();
-  if (pendingInstallReason(root, entries) === null) {
-    logger.info({ tag: LOG_TAG, op: "skip_all_ready", count: entries.length }, "Agent packages already match manifest");
+async function installAgentPackages(
+  root: string,
+  pkg: RuntimeAgentPackage,
+  onInstallStart?: () => void,
+): Promise<AgentInstallOutcome> {
+  if (pendingInstallReason(root, pkg) === null) {
+    logger.info(
+      { tag: LOG_TAG, op: "skip_all_ready", agentId: pkg.agentId, npmPackage: pkg.npmPackage },
+      "Agent package already matches manifest",
+    );
     return { ok: true, error: null };
   }
 
@@ -354,64 +188,62 @@ async function installAgentPackages(root: string): Promise<AgentInstallOutcome> 
     });
 
     // Re-check after the lock — another process may have installed while we waited.
-    const reason = pendingInstallReason(root, entries);
+    const reason = pendingInstallReason(root, pkg);
     if (reason === null) {
       logger.info(
-        { tag: LOG_TAG, op: "skip_after_lock", count: entries.length },
-        "Another process installed the agent packages while we waited — skipping",
+        { tag: LOG_TAG, op: "skip_after_lock", agentId: pkg.agentId, npmPackage: pkg.npmPackage },
+        "Another process installed the agent package while we waited — skipping",
       );
       return { ok: true, error: null };
     }
 
+    // Under the lock, and past every skip: from here an `npm install` really
+    // is about to run. See `EnsureAdapterOptions.onInstallStart`.
+    onInstallStart?.();
+
+    const manifest = agentManifestEntries(root, pkg);
     logger.info(
       {
         tag: LOG_TAG,
         op: "install_start",
         root,
+        agentId: pkg.agentId,
         reason,
-        pkgs: entries.map((e) => ({ npmPackage: e.npmPackage, pinned: e.pinnedVersion })),
+        pkgs: manifest.map((e) => ({ npmPackage: e.npmPackage, pinned: e.pinnedVersion })),
       },
-      `Installing runtime agent packages into ${root}`,
+      `Installing ${pkg.npmPackage}@${pkg.pinnedVersion} into ${root}`,
     );
-    writePackageJson(root, entries, {
+    writePackageJson(root, manifest, {
       name: "libi-runtime-agents",
       description: "Auto-generated by lib/agents/runtime-install.ts. Do not edit by hand.",
     });
-    await runNpmInstall(root, { timeoutMs: AGENT_NPM_INSTALL_TIMEOUT_MS, logTag: LOG_TAG });
+    // `omitOptional`: the adapters' engines are optionalDependencies, and the
+    // chat runs the user's own CLI — they are never installed.
+    await runNpmInstall(root, { timeoutMs: AGENT_NPM_INSTALL_TIMEOUT_MS, logTag: LOG_TAG, omitOptional: true });
   } catch (err) {
     logger.warn(
-      { tag: LOG_TAG, op: "install_failed", root, err },
-      "Runtime agent package install failed — Codex and Terminal remain available",
+      { tag: LOG_TAG, op: "install_failed", root, agentId: pkg.agentId, err },
+      "Runtime agent package install failed — the other agents remain available",
     );
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {
     releaseLock?.();
   }
 
-  const stillDrifted = driftedEntries(root, entries);
+  const stillDrifted = driftedEntries(root, agentInstallEntries(pkg));
   if (stillDrifted.length > 0) {
     const error = describeDrift(root, stillDrifted);
     logger.warn(
-      { tag: LOG_TAG, op: "install_verify_failed", root, error },
+      { tag: LOG_TAG, op: "install_verify_failed", root, agentId: pkg.agentId, error },
       "Runtime agent package install completed but verification failed",
     );
     return { ok: false, error };
   }
 
-  // The adapter is present and correctly versioned — which says NOTHING about
-  // the binary it must exec (see `pendingInstallReason`). Without this check a
-  // half-downloaded tree reports success, the splash goes green, and the user
-  // only discovers the truth at their first message.
-  if (!claudeNativeBinaryPresent(root)) {
-    const error = claudeNativeBinaryMissingError(root);
-    logger.warn(
-      { tag: LOG_TAG, op: "install_native_binary_missing", root, error },
-      "Runtime agent package install completed but the Claude native binary is missing",
-    );
-    return { ok: false, error };
-  }
-
-  logger.info({ tag: LOG_TAG, op: "install_done", root }, "Runtime agent packages installed");
+  logger.info(
+    { tag: LOG_TAG, op: "install_done", root, agentId: pkg.agentId },
+    "Runtime agent package installed",
+  );
   return { ok: true, error: null };
 }
 
@@ -420,8 +252,8 @@ async function installAgentPackages(root: string): Promise<AgentInstallOutcome> 
  *
  * `EnsureAdapterResult.error` (and the "cancelled" the job runner throws on
  * `ctx.shouldCancel()`) is a real diagnostic meant for the log and the
- * FailureSection card — `claudeNativeBinaryMissingError` above literally
- * interpolates `root`, an absolute filesystem path, into it. None of that
+ * FailureSection card — npm's own failures and the missing-bin message
+ * interpolate `root`, an absolute filesystem path, into it. None of that
  * may ever reach an analytics param. This classifier is the one place that
  * turns the unbounded string into a closed enum; callers pass the raw error
  * here and send ONLY the return value as the event's `reason`.
@@ -447,9 +279,10 @@ export type InstallFailureReason =
 
 export function installFailureReason(raw: string): InstallFailureReason {
   const text = raw.toLowerCase();
-  // claudeNativeBinaryMissingError()'s message — the path it embeds is
-  // discarded here, never forwarded.
-  if (text.includes("native binary")) return "native_binary_missing";
+  // An older installer's missing-engine message ("native binary" or "engine
+  // binary", usually with an absolute path in it) — the path is discarded
+  // here, never forwarded; only the bounded verdict survives.
+  if (text.includes("native binary") || text.includes("engine binary")) return "native_binary_missing";
   // pendingInstallReason()'s "version drift (...)" wording, or
   // describeDrift()'s raw "pkg: expected X, got Y" shape when it reaches
   // EnsureAdapterResult.error directly (post-install verification failure).
@@ -467,48 +300,44 @@ export function installFailureReason(raw: string): InstallFailureReason {
   return "unknown";
 }
 
-let inflight: Promise<EnsureAdapterResult> | null = null;
+/**
+ * Per-agent module state, keyed by `agentId`. These were singletons while
+ * only Claude installed at runtime; with two adapters sharing the module, a
+ * Claude failure sitting in a shared negative cache would short-circuit a
+ * Codex install that has never been tried — so each agent gets its own slot.
+ */
+const inflight = new Map<string, Promise<EnsureAdapterResult>>();
 
 /**
  * Negative cache for a failed install, scoped to this process's lifetime.
  *
  * Without this, `inflight` alone means every call after a failure re-runs a
  * full install attempt (up to the 30-min `AGENT_NPM_INSTALL_TIMEOUT_MS`
- * ceiling). The only current caller is the Category A boot phase — a single
- * call per process — but a boot-time call site on an offline/proxy-blocked
- * machine would otherwise turn a future second caller (e.g. a manual retry,
- * or a session-start path added later) into a multi-minute stall on every
- * attempt. Caching the failure for the process's lifetime (rather than a
- * short TTL) matches how every OTHER Category A failure is recovered today:
- * by restarting libi. There is no retry UI yet — when one is added, it can
- * exit the process (already the standard recovery) or explicitly clear this
- * cache before calling again.
+ * ceiling). The caller is the `agent_install` job (user-initiated from the
+ * setup card); on an offline/proxy-blocked machine every Retry would
+ * otherwise become a multi-minute stall. Caching the failure for the
+ * process's lifetime (rather than a short TTL) matches how every other
+ * install failure is recovered today: by restarting libi.
  *
  * `resolveInstalledAdapterBin()` is still checked on every call BEFORE this
  * cache, so the cache never masks the adapter becoming available on disk
  * some other way (e.g. a different tool finishing the install).
  */
-let cachedFailure: EnsureAdapterResult | null = null;
+const cachedFailure = new Map<string, EnsureAdapterResult>();
 
 /**
  * A version-drift upgrade this process already tried and could not complete.
  *
  * Unlike `cachedFailure` this is NOT a failure result: the tree we started
  * from is complete and runnable, so the user keeps the (outdated) adapter
- * they already had and Claude Code stays available.
+ * they already had and the agent stays available.
  *
  * That guarantee is real but CONDITIONAL, and the condition is the guard at
- * the branch that sets this: bin present AND native binary present. It holds
- * when npm failed without mutating the tree — offline, blocked registry, a
- * yanked version. It does NOT hold when npm reifies the upgrade and only the
- * ~306 MB platform `optionalDependency` fails: npm exits 0, the old binary is
- * gone, the new one never arrived, and the version now MATCHES the pin. Such a
- * tree fails `claudeNativeBinaryPresent`, never reaches this branch, and takes
- * the failure path below — Claude Code is unavailable for the rest of that
- * process. The next boot repairs it (`pendingInstallReason` reports the
- * missing native binary and reinstalls), so it is self-healing across a
- * restart, not across a session. Say that plainly in release notes rather
- * than promising nobody can end up worse off.
+ * the branch that sets this: the adapter bin still resolves after the failed
+ * attempt. It holds when npm failed without mutating the tree — offline,
+ * blocked registry, a yanked version. A failure that took the bin with it
+ * never reaches this branch and takes the failure path below; the next boot
+ * reinstalls (`pendingInstallReason` reports the drift).
  *
  * What must not happen is every later caller paying another npm attempt (up
  * to the 30-min `AGENT_NPM_INSTALL_TIMEOUT_MS` ceiling) for an upgrade this
@@ -522,116 +351,119 @@ let cachedFailure: EnsureAdapterResult | null = null;
  * (the agent_install job, a retry) would silently report success for exactly
  * the same tree.
  */
-let staleTreeAccepted: Pick<EnsureAdapterResult, "upgradeError" | "staleVersion"> | null = null;
+const staleTreeAccepted = new Map<string, Pick<EnsureAdapterResult, "upgradeError" | "staleVersion">>();
 
 /**
- * Install the Claude ACP adapter into `~/.libi/agents/node_modules` if it
+ * Install `agentId`'s ACP adapter into `~/.libi/agents/node_modules` if it
  * isn't already available.
  *
  * Order: a dev checkout's own `node_modules/.bin` wins FIRST — in the repo,
- * `node_modules/.bin/claude-agent-acp` must always win, so a developer whose
+ * `node_modules/.bin/<adapter>` must always win, so a developer whose
  * `~/.libi` was previously populated by a production run isn't silently
  * pinned to that installed copy instead of their checkout's; then an
- * existing agent-root bin whose native binary is also present AND whose
- * version matches the pin (skip the redundant download); then a cached
- * failure from earlier this process (skip the redundant re-attempt);
- * otherwise install.
+ * existing agent-root bin whose version matches the pin (skip the redundant
+ * download); then a cached failure from earlier this process (skip the
+ * redundant re-attempt); otherwise install.
  *
- * The dev checkout's tree is deliberately NOT native-binary-verified: it is
- * owned by `npm install` in the repo, libi's runtime install cannot repair it
- * (the adapter resolves the SDK relative to its own location), and gating on
- * it would fail a CI checkout installed with `--omit=optional`.
- *
- * NEVER throws: a Claude install failure must not block boot — Codex and
- * Terminal must stay usable. On failure it returns the real npm/verification
- * diagnostic in `error`, so a user behind a registry-blocking proxy learns
- * why instead of getting a silent `installed: false`.
+ * NEVER throws: one agent's install failure must not block boot — the other
+ * agents and Terminal must stay usable. On failure it returns the real
+ * npm/verification diagnostic in `error`, so a user behind a registry-blocking
+ * proxy learns why instead of getting a silent `installed: false`. An id with
+ * no runtime adapter (`terminal`, anything unknown) resolves the same way.
  */
-export async function ensureClaudeAdapterInstalled(
+export async function ensureAgentAdapterInstalled(
+  agentId: string,
   options: EnsureAdapterOptions = {},
 ): Promise<EnsureAdapterResult> {
+  const pkg = runtimeAgentPackage(agentId);
+  if (!pkg) {
+    return {
+      installed: false,
+      binPath: null,
+      error: `no runtime adapter package is registered for agent "${agentId}"`,
+    };
+  }
+
   const repoRoot = options.repoRoot ?? process.cwd();
-  const repoLocal = resolveRepoLocalAdapterBin(repoRoot);
+  const repoLocal = resolveRepoLocalAdapterBin(repoRoot, pkg);
   if (repoLocal) {
     logger.info(
-      { tag: LOG_TAG, op: "claude_adapter_dev_skip", binPath: repoLocal },
-      "Claude adapter present in the local checkout — skipping the runtime install",
+      { tag: LOG_TAG, op: opFor(pkg, "dev_skip"), agentId, binPath: repoLocal },
+      `${pkg.binName} present in the local checkout — skipping the runtime install`,
     );
     return { installed: true, binPath: repoLocal };
   }
 
   // An already-installed bin is only a fast path when the tree behind it is
-  // COMPLETE **and CURRENT**. A bin whose native binary is missing must fall
-  // through to the install (which repairs it) rather than short-circuit past
-  // it — otherwise every subsequent boot re-blesses the same broken tree and
-  // only `rm -rf ~/.libi/agents` ever recovers. And a complete tree at
-  // YESTERDAY'S pin must fall through too, or a pin bump never reaches a user
-  // who already has libi: the drift check lives inside `installAgentPackages`,
-  // which the old return never reached. The healthy path still costs one
-  // `accessSync` for the bin, a handful for the binary, and one package.json
-  // read (~1ms) — not a per-boot reinstall.
+  // CURRENT. A tree at YESTERDAY'S pin must fall through, or a pin bump never
+  // reaches a user who already has libi: the drift check lives inside
+  // `installAgentPackages`, which the old return never reached. The healthy
+  // path costs one `accessSync` for the bin and one package.json read (~1ms)
+  // — not a per-boot reinstall. There is no engine to check: the adapter is
+  // installed without its optional engine and the chat runs the user's CLI.
   //
   // `staleTreeAccepted` re-opens the fast path for a drifted tree only once
   // this process has already tried and failed to upgrade it (see below): the
   // user keeps a working outdated adapter instead of re-paying the npm
   // timeout on every call.
   const agentRoot = getAgentInstallRoot();
-  const existing = resolveInstalledAdapterBin();
-  if (existing && claudeNativeBinaryPresent(agentRoot)) {
-    if (claudeAdapterVersionCurrent(agentRoot)) {
+  const existing = resolveInstalledAdapterBin(pkg);
+  if (existing) {
+    if (adapterVersionCurrent(agentRoot, pkg)) {
       return { installed: true, binPath: existing };
     }
-    if (staleTreeAccepted) {
+    const stale = staleTreeAccepted.get(agentId);
+    if (stale) {
       // Same tree, same verdict, reported the same way as the call that first
       // gave up on it — a later caller must not read a failed upgrade as a
       // clean success just because this process already stopped retrying it.
-      return { installed: true, binPath: existing, ...staleTreeAccepted };
+      return { installed: true, binPath: existing, ...stale };
     }
-  }
-  if (existing) {
     logger.warn(
       {
         tag: LOG_TAG,
-        op: "claude_adapter_repair",
+        op: opFor(pkg, "repair"),
+        agentId,
         root: agentRoot,
         binPath: existing,
-        reason: pendingInstallReason(agentRoot, agentInstallEntries()),
+        reason: pendingInstallReason(agentRoot, pkg),
       },
-      "Claude adapter tree is incomplete or drifted from the pin — reinstalling",
+      `${pkg.npmPackage} tree has drifted from the pin — reinstalling`,
     );
   }
 
-  if (cachedFailure) {
+  const failure = cachedFailure.get(agentId);
+  if (failure) {
     logger.info(
-      { tag: LOG_TAG, op: "claude_adapter_negative_cache_hit", error: cachedFailure.error },
-      "Skipping the Claude adapter install — it already failed earlier this run; restart libi to retry",
+      { tag: LOG_TAG, op: opFor(pkg, "negative_cache_hit"), agentId, error: failure.error },
+      `Skipping the ${pkg.npmPackage} install — it already failed earlier this run; restart libi to retry`,
     );
-    return cachedFailure;
+    return failure;
   }
 
-  if (inflight) return inflight;
-  inflight = (async (): Promise<EnsureAdapterResult> => {
+  const running = inflight.get(agentId);
+  if (running) return running;
+  const attempt = (async (): Promise<EnsureAdapterResult> => {
     const root = getAgentInstallRoot();
-    const outcome = await installAgentPackages(root);
+    const outcome = await installAgentPackages(root, pkg, options.onInstallStart);
 
-    const binPath = resolveInstalledAdapterBin();
-    if (binPath && claudeNativeBinaryPresent(root)) {
-      if (claudeAdapterVersionCurrent(root)) {
+    const binPath = resolveInstalledAdapterBin(pkg);
+    if (binPath) {
+      if (adapterVersionCurrent(root, pkg)) {
         logger.info(
-          { tag: LOG_TAG, op: "claude_adapter_installed", binPath },
-          "Claude adapter installed",
+          { tag: LOG_TAG, op: opFor(pkg, "installed"), agentId, binPath },
+          `${pkg.npmPackage} installed`,
         );
       } else {
         // The upgrade did not land (offline, blocked registry, a yanked
-        // version) but the tree we came in with is still complete and
-        // runnable. Returning installed:false here would take Claude Code
+        // version) but the tree we came in with is still runnable. Returning installed:false here would take the agent
         // away from someone who had it working a moment ago — strictly worse
         // than the outdated version they already had, and the reason this
         // branch does not simply reuse the failure path below. So: keep it,
         // say so loudly enough to grep, stop re-attempting this run — and
         // hand every caller `upgradeError` so none of them can mistake this
         // for the install having succeeded (see `EnsureAdapterResult`).
-        const staleVersion = readInstalledVersion(root, CLAUDE_ADAPTER_PACKAGE.npmPackage);
+        const staleVersion = readInstalledVersion(root, pkg.npmPackage);
         // In practice `installAgentPackages` always fills `outcome.error`
         // when it leaves a drifted tree behind — either npm's own failure or
         // `install_verify_failed`'s drift description. The fallback is for
@@ -640,39 +472,50 @@ export async function ensureClaudeAdapterInstalled(
         // to `version_drift` instead of dumping it in "unknown".
         const upgradeError =
           outcome.error ??
-          `${CLAUDE_ADAPTER_PACKAGE.npmPackage}: expected ${CLAUDE_ADAPTER_PACKAGE.pinnedVersion}, got ${staleVersion ?? "missing"}`;
-        staleTreeAccepted = { upgradeError, staleVersion: staleVersion ?? undefined };
+          `${pkg.npmPackage}: expected ${pkg.pinnedVersion}, got ${staleVersion ?? "missing"}`;
+        const stale = { upgradeError, staleVersion: staleVersion ?? undefined };
+        staleTreeAccepted.set(agentId, stale);
         logger.warn(
           {
             tag: LOG_TAG,
-            op: "claude_adapter_upgrade_failed_stale_kept",
+            op: opFor(pkg, "upgrade_failed_stale_kept"),
+            agentId,
             root,
             binPath,
-            pinned: CLAUDE_ADAPTER_PACKAGE.pinnedVersion,
+            pinned: pkg.pinnedVersion,
             installed: staleVersion,
             error: upgradeError,
           },
-          "Claude adapter upgrade failed — keeping the installed version; restart libi to retry",
+          `${pkg.npmPackage} upgrade failed — keeping the installed version; restart libi to retry`,
         );
-        return { installed: true, binPath, ...staleTreeAccepted };
+        return { installed: true, binPath, ...stale };
       }
       return { installed: true, binPath };
     }
 
     const error =
       outcome.error ??
-      (binPath
-        ? `${CLAUDE_ADAPTER_PACKAGE.npmPackage}@${CLAUDE_ADAPTER_PACKAGE.pinnedVersion}: ${claudeNativeBinaryMissingError(root)}`
-        : `${CLAUDE_ADAPTER_PACKAGE.npmPackage}@${CLAUDE_ADAPTER_PACKAGE.pinnedVersion}: install reported success but ${CLAUDE_ADAPTER_PACKAGE.binName} is missing from ${root}`);
+      `${pkg.npmPackage}@${pkg.pinnedVersion}: install reported success but ${pkg.binName} is missing from ${root}`;
     logger.warn(
-      { tag: LOG_TAG, op: "claude_adapter_missing_after_install", root, error },
-      "Claude adapter unavailable — Codex and Terminal remain available",
+      { tag: LOG_TAG, op: opFor(pkg, "missing_after_install"), agentId, root, error },
+      `${pkg.npmPackage} unavailable — the other agents remain available`,
     );
     const result: EnsureAdapterResult = { installed: false, binPath: null, error };
-    cachedFailure = result;
+    cachedFailure.set(agentId, result);
     return result;
   })().finally(() => {
-    inflight = null;
+    inflight.delete(agentId);
   });
-  return inflight;
+  inflight.set(agentId, attempt);
+  return attempt;
+}
+
+/** Back-compat alias — Claude only. No production caller any more
+ *  (Category A no longer installs any adapter; the agent_install job calls
+ *  `ensureAgentAdapterInstalled` directly); kept for the Claude-specific
+ *  cases in runtime-install.test.ts. */
+export function ensureClaudeAdapterInstalled(
+  options: EnsureAdapterOptions = {},
+): Promise<EnsureAdapterResult> {
+  return ensureAgentAdapterInstalled("claude-code", options);
 }

@@ -6,7 +6,7 @@ mcps: [fal-ai, ElevenLabs]
 agent: claude-code
 runs: 1
 timeoutSec: 600
-covers: [stitch, variation, replace-surrounding, reuse-product-demo, partition-by-identity, no-reusable-section-gate, main-character-voice, reference-to-video, audio-reference, upload-file-to-fal, boundary-frame-verify, applied-edge-reverify, delivery-match, narrative-continuity, seam-scripting, director-review]
+covers: [stitch, variation, replace-surrounding, reuse-product-demo, partition-by-identity, no-reusable-section-gate, main-character-voice, reference-to-video, audio-reference, provider-upload-tool, boundary-frame-verify, applied-edge-reverify, delivery-match, narrative-continuity, seam-scripting, director-review]
 ---
 
 > **STATUS (2026-06-08): plan-stage behavioral scenario.** The harness starts each scenario
@@ -105,7 +105,7 @@ assertions: []
   repeated lines, mid-sentence cuts, and unmotivated time jumps and ADAPTS before commit. A plan
   that only handles the technical seam (skin tone, no face, one voice, ~70s) but never checks that
   the video reads as one genuine continuous story is incomplete.
-- If it details the generation mechanics: local refs reach fal via `libi.upload_file_to_fal`
+- If it details the generation mechanics: local refs reach fal via the fal MCP's own upload tool
   (NOT raw `FAL_KEY` / `curl`); voiced beats on `bytedance/seedance-2.0/reference-to-video` with
   `@Audio1` + `@Image1`; favors long cuts + separate per-beat scenes.
 - Did **NOT** default to ElevenLabs cloning (that's the explicit opt-in fallback).

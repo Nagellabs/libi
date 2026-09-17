@@ -4,6 +4,7 @@ import type {
   redactPaths as RedactPaths,
   registerSensitiveValues as RegisterSensitiveValues,
   scrubEvent as ScrubEvent,
+  scrubFeedback as ScrubFeedback,
   scrubLog as ScrubLog,
   scrubSpan as ScrubSpan,
   scrubTransaction as ScrubTransaction,
@@ -34,6 +35,7 @@ let redactDeep: typeof RedactDeep;
 let redactPaths: typeof RedactPaths;
 let registerSensitiveValues: typeof RegisterSensitiveValues;
 let scrubEvent: typeof ScrubEvent;
+let scrubFeedback: typeof ScrubFeedback;
 let scrubLog: typeof ScrubLog;
 let scrubSpan: typeof ScrubSpan;
 let scrubTransaction: typeof ScrubTransaction;
@@ -48,6 +50,7 @@ beforeAll(async () => {
     redactPaths,
     registerSensitiveValues,
     scrubEvent,
+    scrubFeedback,
     scrubLog,
     scrubSpan,
     scrubTransaction,
@@ -520,5 +523,157 @@ describe("scrubEvent / scrubTransaction share one identity+secret pass", () => {
       "request",
       "tags",
     ]);
+  });
+});
+
+describe("scrubFeedback", () => {
+  // `beforeSend` (scrubEvent) is STRUCTURALLY unreachable for feedback: the SDK
+  // picks its hook with `isErrorEvent(event) { return event.type === void 0; }`
+  // (@sentry/core/build/cjs/client.js:798) and a feedback event carries
+  // `type: "feedback"`. Event processors have no such branch
+  // (@sentry/core/build/cjs/utils/prepareEvent.js:47), which is why this is one.
+
+  function feedbackEvent(message: string, contactEmail?: string) {
+    return {
+      type: "feedback" as const,
+      contexts: { feedback: { message, contact_email: contactEmail } },
+    };
+  }
+
+  it("redacts a home directory path out of the typed message", () => {
+    const event = feedbackEvent(
+      "importing /Users/jane/Movies/wedding.mp4 fails every time",
+    );
+
+    scrubFeedback(event);
+
+    expect(event.contexts.feedback.message).not.toContain("jane");
+    expect(event.contexts.feedback.message).toContain("[user]");
+  });
+
+  it("keeps the contact email intact", () => {
+    // The optional email is the whole point of the field — it is how a bug
+    // report gets a reply. Redacting it would silently defeat it.
+    const event = feedbackEvent("the export button does nothing", "jane@example.com");
+
+    scrubFeedback(event);
+
+    expect(event.contexts.feedback.contact_email).toBe("jane@example.com");
+  });
+
+  it("keeps the contact email intact even when it contains the OS user name", () => {
+    // `scrubFeedback` now runs `scrubCommonEventFields`, which redacts
+    // `contexts` WHOLESALE — and `contact_email` lives inside it. `redactPaths`
+    // censors the registered OS user name as a delimited token, so on a machine
+    // whose account is `jane` this address would come back `[user]@example.com`:
+    // the reply address silently broken, which is the one thing this field must
+    // never suffer. The lift-and-restore in `scrubFeedback` is what stops it.
+    registerSensitiveValues({ userNames: ["jane"] });
+    try {
+      const event = feedbackEvent("the export button does nothing", "jane@example.com");
+
+      scrubFeedback(event);
+
+      expect(event.contexts.feedback.contact_email).toBe("jane@example.com");
+    } finally {
+      registerSensitiveValues({ paths: [], userNames: [] });
+    }
+  });
+
+  it("redacts a secret pasted into the message, not just paths", () => {
+    // The feedback box is the single field a user is most likely to paste a raw
+    // log or an API key into, so it takes `redactString` (secret VALUE patterns,
+    // then paths) — the same treatment `event.message`, `span.description` and
+    // exception values get. It used to take the weaker `redactPaths`, under
+    // which this key travelled to Sentry intact.
+    const event = feedbackEvent("my key sk-ABCDEFGHIJKLMNOPQRSTUV leaked in the log");
+
+    scrubFeedback(event);
+
+    expect(event.contexts.feedback.message).not.toContain("sk-ABCDEFGHIJKLMNOPQRSTUV");
+    expect(event.contexts.feedback.message).toContain("[redacted]");
+  });
+
+  it("strips the scope the SDK merged onto the event, not just the message", () => {
+    // THE CRITICAL CASE. By the time an event processor runs, the SDK has merged
+    // the whole scope on with no branch on `event.type` —
+    // `applyScopeDataToEvent` (@sentry/core/build/cjs/utils/applyScopeDataToEvent.js)
+    // and `httpContextIntegration.preprocessEvent`. This fixture is a real
+    // feedback envelope captured off the installed SDK. Redacting only
+    // `contexts.feedback.message` meant a user who turned crash reports OFF and
+    // then sent one message still shipped their breadcrumb trail, their
+    // User-Agent and their timezone — a privacy regression against exactly the
+    // people who asked for less.
+    const event = {
+      type: "feedback" as const,
+      user: { id: "u-1", ip_address: "203.0.113.7" },
+      request: {
+        url: "http://localhost:3111/settings?tab=general",
+        headers: { "User-Agent": "Mozilla/5.0" },
+      },
+      tags: { piece_id: "abc-123" },
+      extra: { last_export_path: "/Users/jane/Movies/out.mp4" },
+      breadcrumbs: [
+        {
+          category: "console",
+          level: "error",
+          message: "export failed: /Users/jane/Movies/wedding.mp4",
+        },
+      ],
+      contexts: { feedback: { message: "export is broken", contact_email: "j@x.com" } },
+    };
+
+    scrubFeedback(event);
+
+    // Breadcrumbs are DELETED, not redacted: on a feedback event they record
+    // whatever the user did on the way to opening Settings, minutes after the
+    // thing they are describing, and they are the highest-risk section.
+    expect(event.breadcrumbs).toBeUndefined();
+    expect(event.user).toBeUndefined();
+    expect(event.request.headers).toBeUndefined();
+    // The sections that survive are the ones an error event keeps — scrubbed.
+    expect(event.extra.last_export_path).not.toContain("jane");
+    // …and the email still gets through, which is the whole point of the field.
+    expect(event.contexts.feedback.contact_email).toBe("j@x.com");
+  });
+
+  it("redacts even when the user has opted out of crash reports", () => {
+    // Feedback SENDS while opted out (lib/sentry/gated-transport.ts), so a gate
+    // on shouldSendCrashReports() here would ship the unredacted message to
+    // exactly the users who asked for less telemetry. This is the inverse of
+    // scrubEvent, which drops outright when the gate is closed.
+    setCrashReportChoice("off");
+    const event = feedbackEvent("crash in /Users/jane/dev/thing.ts");
+
+    scrubFeedback(event);
+
+    expect(event.contexts.feedback.message).not.toContain("jane");
+    setCrashReportChoice("unset");
+  });
+
+  it("leaves a non-feedback event untouched", () => {
+    // The fixture deliberately CARRIES a populated `contexts.feedback`, which no
+    // real error event would. That is precisely what makes this test exercise
+    // the TYPE guard rather than the message guard: drop `type !== "feedback"`
+    // and this message gets redacted. A fixture without `contexts.feedback`
+    // passes either way, and so asserts nothing about how the processor decides
+    // what to touch.
+    const errorEvent = {
+      contexts: { feedback: { message: "/Users/jane/dev/x.ts blew up" } },
+    };
+
+    const result = scrubFeedback(errorEvent);
+
+    expect(result).toBe(errorEvent);
+    expect(errorEvent.contexts.feedback.message).toBe("/Users/jane/dev/x.ts blew up");
+  });
+
+  it("tolerates a feedback event with no message", () => {
+    const bare = { type: "feedback" as const };
+    const emptyContexts = { type: "feedback" as const, contexts: {} };
+
+    expect(() => scrubFeedback(bare)).not.toThrow();
+    expect(() => scrubFeedback(emptyContexts)).not.toThrow();
+    expect(() => scrubFeedback(undefined)).not.toThrow();
   });
 });

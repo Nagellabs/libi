@@ -771,6 +771,26 @@ function Timeline({
     [dropZonesEnabled, isFileDragEvent, dragActive],
   );
 
+  // `dragActive` reveals the "＋ new track" strip, and handleZoneDrop was the
+  // only thing that cleared it — so a drop on an existing LANE, or a cancel,
+  // stranded the strip on screen until the next reload.
+  //
+  // The clear must key off events that ONLY happen when a drag is genuinely
+  // over. `dragleave` is not one of them: Chromium fires it with
+  // `relatedTarget === null` while the pointer is still mid-drag inside the
+  // page (measured here — 1 dragleave, relatedTarget null, strip visible
+  // before and gone after), so treating a null relatedTarget as "left the
+  // window" tore the strip down during every drag and the timeline stopped
+  // showing as a drop target at all. `dragend` is safe: it fires once, on the
+  // source, when the drag is over — including a cancel. The drop half is
+  // handled by the stack's own onDrop below, which sees a lane's drop bubble.
+  useEffect(() => {
+    if (!dragActive) return;
+    const clear = () => setDragActive(false);
+    window.addEventListener("dragend", clear);
+    return () => window.removeEventListener("dragend", clear);
+  }, [dragActive]);
+
   // Coupled drag: the live horizontal offset (seconds) of a video+audio group
   // being dragged, so the sibling (audio strip ↔ video bar) moves WITH it during
   // the drag (not just on landing). Either one publishes; the other mirrors.
@@ -938,10 +958,25 @@ function Timeline({
             onDragLeave={
               dropZonesEnabled
                 ? (e) => {
-                    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragActive(false);
+                    // Only a dragleave that NAMES the element the pointer moved
+                    // to can say we left the timeline. Chromium also fires
+                    // dragleave with a null relatedTarget while the pointer is
+                    // still mid-drag inside the stack; treating that as "left"
+                    // hid the strip on every boundary crossing, and since the
+                    // strip's own appearance shifts the rows under the pointer
+                    // that fed straight back into more crossings. It used to be
+                    // masked by dragover re-arming it ~60x a second. A drag that
+                    // genuinely leaves is retired by drop/dragend instead.
+                    const to = e.relatedTarget as Node | null;
+                    if (to && !e.currentTarget.contains(to)) setDragActive(false);
                   }
                 : undefined
             }
+            // Any drop inside the timeline — including one a LANE handled —
+            // bubbles here, which is what retires the strip. Reading it at the
+            // stack keeps the strip's lifetime local to the timeline rather
+            // than depending on a window-level guess about the drag's state.
+            onDrop={dropZonesEnabled ? () => setDragActive(false) : undefined}
           >
             {dropY != null && (
               <div
@@ -1010,6 +1045,7 @@ function Timeline({
                         justAddedId={justAddedId}
                         onDropCreate={onDropCreate}
                         onDropFiles={onDropFiles}
+                        onDropAudio={onDropAudio}
                         onSeekFrame={onFrameChange}
                         onOverlayContextMenu={onOverlayContextMenu}
                         labelById={labelById}

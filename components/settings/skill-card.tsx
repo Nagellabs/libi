@@ -43,7 +43,7 @@ interface SkillCardProps {
 }
 
 function detailHref(name: string, edit = false): string {
-  return `/mcps-skills/skills/${encodeURIComponent(name)}${edit ? "?edit=1" : ""}`;
+  return `/agents/skills/${encodeURIComponent(name)}${edit ? "?edit=1" : ""}`;
 }
 
 export function SkillCard({ skill }: SkillCardProps) {

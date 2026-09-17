@@ -120,6 +120,15 @@ Search the INSTALLED tree, at
   `.next/static`; searching only `server` finds zero and looks like a bad build.
 - Assert absences too — a testing-only flag that should be gone, and any
   simulation module that must never ship.
+- **Match the needle to where the code actually lives.** The MCP server ships
+  as SOURCE under the package's `mcp/` folder and is never compiled by Next, so
+  a string from `mcp/server.ts`, `mcp/tools/*.ts`, `mcp/instructions-core.md`
+  or `mcp/skills/**` can never appear in `.next`. A checker that searches only
+  `.next` reports a perfectly good build as missing the fix — it happened on
+  2026-09-17 and the false negative is indistinguishable from a real one.
+- Any path filter must be relative to the PACKAGE. The package lives under
+  `node_modules`, so excluding `\node_modules\` by full path excludes
+  everything and reports zero files.
 
 ## Resetting to a first run
 
@@ -143,6 +152,18 @@ session 0, finds nowhere to render, and exits leaving no window and no logs —
 which looks exactly like a crash and is not. RDP is the only way, and it needs
 a password, so that step belongs to the operator. Say so plainly rather than
 reporting a headless check as if it were a launch.
+
+**When RDP "cannot connect", suspect the CLIENT before the box.** Windows App
+keeps saved PCs forever, so its tile routinely points at a recycled IP from a
+VM deleted weeks ago — and error `0x204` reads as "the PC is off" when it only
+means "nothing answered". Rule the box out in two commands before touching
+anything: `az network public-ip list -o table` for the real address, then an
+X.224 negotiation probe (in the runbook) — a healthy box answers `NEG_RSP
+protocol = 2`. Confirm from the other side too: with zero RdpCoreTS events
+since boot and zero 4625s, the attempt never arrived and Windows is not the
+problem. Prefer writing an `.rdp` file over editing Windows App's Core Data
+store; if you must edit it, quit the app properly first (closing the window
+does not), and keep the backup where a later copy cannot overwrite it.
 
 Server-side paths can be exercised headlessly by running the packaged runtime
 without Electron under an S4U task.

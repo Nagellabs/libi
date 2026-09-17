@@ -8,13 +8,49 @@ tags:
 
 # AI Asset Generation (produce one asset — the call + save layer)
 
+## Provider gate — read this first
+
+You need a **image** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do image, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for image — call
+   `libi.suggest_provider({ kind: "image" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do image.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for image is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
+**This skill dispatches four kinds.** Substitute the kind the current request actually
+needs before you run the gate: `image` · `video` · `music` · `voice` (and `sfx` for a
+sound effect). Speech and music have libi's own on-device extensions — Kokoro
+(`voice`) and ACE-Step (`music`) — so for those two the gate usually resolves without
+any remote provider at all; see Steps 1.6 and 1.7.
+
 This skill is the **mechanics** layer: how to actually call a generation model and save the
 result. It does NOT own the video WORKFLOW (which asset to make when, keyframe→clip sequencing) —
 that is the **`using-storyboard`** skill. It also does not own the deep craft — those live in
 focused skills the orchestration pulls:
 
-- **`realistic-image-generation`** — how to make a good realistic image / keyframe (gpt-image-2
-  picker, anti-AI-look tokens, selfie/demographic templates, anatomy plausibility + validation).
+- **`realistic-image-generation`** — how to make a good realistic image / keyframe (the realism
+  model picker — its provider reference names the model — anti-AI-look tokens,
+  selfie/demographic templates, anatomy plausibility + validation).
 - **`physical-action-video`** — how to make a hard physical-manipulation beat survive (FLF-first,
   prompt decomposition, model-escalation ladder, editorial fallback).
 
@@ -25,24 +61,22 @@ and the two **universal video invariants** (no in-video text; native audio on �
 
 Use this skill any time the user asks to generate visual, audio, or 3D content with AI. Do not call generation-MCP tools directly — work the steps below in order so the user gets a usable asset on the first or second try instead of burning credits on prompt drift.
 
-## Step 1 — Discover providers
+## Step 1 — Confirm the provider for this modality
 
-Call `libi.list_mcp_servers`. From the result, identify enabled servers that match the requested modality:
+The provider gate above already decided *which* provider you use. Confirm it can do the
+modality this request needs, and note what libi supplies on-device regardless of provider:
 
-| Modality            | Known providers                                          |
-| ------------------- | -------------------------------------------------------- |
-| image               | fal-ai                                                   |
-| video               | fal-ai                                                   |
-| audio: speech / voiceover | **local-tts (default, free, on-device)**, elevenlabs (opt-in / cloning) |
-| audio: SFX                | elevenlabs, fal-ai                                       |
-| music                     | **local-music (default, free, on-device)**, elevenlabs / licensed (opt-in) |
-| 3D                  | fal-ai                                                   |
+| Modality | Where it comes from |
+| --- | --- |
+| image | your connected `image` provider |
+| video | your connected `video` provider |
+| audio: speech / voiceover | **local Kokoro TTS (default, free, on-device — `libi.generate_speech`)**; a `voice` provider on explicit request or for cloning |
+| audio: SFX | your connected `sfx` provider |
+| music | **local ACE-Step (default, free, on-device — `libi.generate_music`)**; a `music` provider on explicit request |
+| 3D | your connected `image`/`video` provider, if it hosts a 3D model |
 
-If no provider is enabled for the requested modality, tell the user:
-
-> "I don't see a generation MCP enabled for {modality}. Open Settings → MCP Servers to enable fal.ai (you'll need a fal API key from https://fal.ai/dashboard/keys)."
-
-Then call `libi.show_mcp_settings({ mcpId: "fal-ai" })` and stop.
+If the gate sent you to `libi.suggest_provider`, you already stopped. Do not restart the
+flow by guessing a provider here.
 
 ## Step 1.6 — Separate voiceover track uses local TTS by default
 
@@ -53,9 +87,11 @@ Then call `libi.show_mcp_settings({ mcpId: "fal-ai" })` and stop.
 > toggled native audio off.
 
 For a standalone narration / voiceover track the default speech provider is local
-Kokoro TTS (free, on-device). **UGC voice + voiceover-over-the-whole-video is owned
-by the `voiceover-production` skill** (Kokoro is never the UGC voice; ElevenLabs,
-ASK if no key) — load it rather than deciding here.
+Kokoro TTS (free, on-device). **Whether a generated video should get a separate spoken
+track at all is owned by the `voiceover-production` skill** (its answer is normally no —
+an AI clip's voice comes from the generation), and deliberately re-voicing a video that
+already exists, including which voice provider suits the format, is
+**`voice-replacement`**. Load the one that fits rather than deciding here.
 
 1. Call `libi.generate_speech({ text, pieceId })`. Voice defaults to
    `af_heart`. Pass `withTimestamps: true` when you'll build caption/timeline
@@ -104,13 +140,18 @@ If multiple enabled providers support the modality, ask the user which one. If o
 
 ## Step 3 — Choose the model
 
-For fal.ai: call the provider's `recommend_model` tool with the user's intent (e.g. "photorealistic talking-head video, 9:16, 6 seconds"). Show the top 1–3 results with their cost tier and one-line summary. Let the user pick or accept the first.
+Ask your provider what it has, don't guess: read `references/providers/<id>.md` for the
+model-picking procedure, or the provider's own discovery/schema tools when this skill ships
+no reference for it. Show the user the top 1–3 candidates with a cost tier and a one-line
+summary; let them pick or accept the first.
 
-> **Exception — realism images.** For a photoreal person / creator portrait / keyframe, do NOT
-> use `recommend_model` / `search_models` to pick the model — the default is `openai/gpt-image-2`
-> and those tools downgrade it. Load **`realistic-image-generation`** for the model picker.
+> **Exception — realism images.** For a photoreal person / creator portrait / keyframe, do
+> NOT let a provider's recommendation tool choose. Load **`realistic-image-generation`** —
+> it owns the model picker, and its own `references/providers/<id>.md` names the model to
+> confirm.
 
-For ElevenLabs (audio only): the model is implicit; pick the voice instead (see ElevenLabs MCP `list_voices`).
+For a voice provider, the model is usually implicit; pick the **voice** instead (the
+provider's voice-list tool).
 
 ## Step 4 — Quantity
 
@@ -122,10 +163,10 @@ Default message:
 
 > "This will cost credits from {provider}."
 
-If the user asks for an estimate, do this in order:
-
-1. Try the provider's pricing tool (fal.ai exposes `get_pricing`). Report the per-call cost it returns.
-2. If no tool is available, fetch the provider's pricing page (`https://fal.ai/pricing` for fal). Find the per-model price; multiply by quantity. Always disclose this is an estimate.
+If the user asks for an estimate: use the provider's pricing tool first (`references/providers/<id>.md`
+names it), and its public pricing page as a fallback. Multiply by quantity and **always
+disclose that a page-derived number is an estimate.** Keep the tier label the pricing tool
+returned — Step 9 reuses it verbatim in `costEstimate.tier`.
 
 ## Step 6 — Prompt engineering
 
@@ -139,18 +180,20 @@ Ask the user only the questions you don't already have answers to from prior tur
 - **Camera** (video only) — lens (35mm / 85mm / wide), angle (eye-level / low / overhead), movement (handheld / static / dolly-in / orbit)?
 - **Mood** — energetic / calm / mysterious / playful?
 - **Aspect ratio + resolution + duration** — for video: 9:16 vertical, 1:1 square, or 16:9 landscape; resolution; clip length in seconds.
-- **Continuity references** — if the user has a character, product, or style reference image, ask them to upload it (use `libi.upload_file`). For fal models that accept image/audio inputs (`image_urls`, `audio_urls`), the model needs a fal-hosted `https` URL, so a LOCAL libi file must reach the fal CDN first.
-  - **To put a local libi file on the fal CDN, call `libi.upload_file_to_fal({ fileId })`** — it returns a fal `https://…fal.media/…` URL (cached on the file, so repeat calls are free). The FAL key is handled **server-side**; you never see or send it. Pass the returned URL as the model's `image_urls`/`audio_urls` input. This is the ONLY sanctioned way to upload a local reference.
-  - **NEVER do the fal upload yourself.** Do NOT read `FAL_KEY` (or any provider key) out of the database, env, settings, or shell; do NOT request a signed upload URL or `PUT`/`curl` bytes to fal storage; do NOT set an `Authorization` header. Provider credentials stay inside the server/MCP boundary — handling raw keys yourself is a security breach, even with good intent. The fal-ai MCP's own `upload_file` also fails on local paths (`Cannot read local files from a remote MCP server`) — use `libi.upload_file_to_fal` instead. Only fal-hosted URLs (or other public `https` URLs) work as fal inputs.
+- **Continuity references** — if the user has a character, product, or style reference image, ask them to upload it (use `libi.upload_file`). A hosted model that takes image/audio inputs (`image_urls`, `audio_urls`) needs a **public `https` URL**, so a LOCAL libi file has to reach the provider's CDN first.
+  - **Use your provider's own upload tool** (fal's `upload_file`, or whatever the provider documents) and pass the URL it returns. Your provider reference file, when this skill ships one for your provider, names the exact tool.
+  - **A REMOTE (HTTP) provider MCP cannot read a local path** — fal's hosted `upload_file` returns `Cannot read local files from a remote MCP server`. When that happens you have three honest options, in order: use a locally-running (stdio) provider MCP whose upload tool can read the path; pass a URL that is already public; or **tell the user you cannot get the local file to the provider and ask how they'd like to proceed**. Only public `https` URLs work as inputs.
+  - **NEVER do the upload yourself.** Do NOT read `FAL_KEY` (or any provider key) out of the database, env, settings, or shell; do NOT request a signed upload URL or `PUT`/`curl` bytes to provider storage; do NOT set an `Authorization` header. Provider credentials stay inside the provider's own MCP — handling raw keys yourself is a security breach, even with good intent.
 - **Negative prompts** — if the model supports them, ask what to avoid.
 
 ## Step 6.5 — Realistic images / keyframes → `realistic-image-generation`
 
 When the asset is a **realistic image** — a photoreal person, a creator portrait (mandatory for
 `ugc-product-video` Stage 1), a character/product reference, or an FLF start/end keyframe — load
-the **`realistic-image-generation`** skill and follow it. It owns the model picker (gpt-image-2
-default — do NOT let `recommend_model`/`search_models` downgrade it), the anti-"AI-look" banned
-tokens + Flux negative prompts, the UGC selfie + demographic templates, and the mandatory
+the **`realistic-image-generation`** skill and follow it. It owns the model picker (the strongest
+realism-and-anatomy model your provider has, named in its `references/providers/<id>.md` — do NOT
+let a provider's recommendation tool downgrade it), the anti-"AI-look" banned tokens + the
+negative-prompt rule, the UGC selfie + demographic templates, and the mandatory
 prompt-plausibility (anatomy) pre-check + post-generation image validation. The image is the
 foundation of the whole video (FLF / i2v only animate the still you give them), so do not wing it
 from memory here.
@@ -250,50 +293,27 @@ A good video prompt adds camera language and timing:
 
 > "Handheld 6-second clip. Subject: same woman. Action: she stops, looks up at a neon sign, then keeps walking left frame. Camera: subtle handheld bob, no cuts. Aspect: 9:16. Lighting: continues the dusk-neon palette."
 
-### Veo 3.1 fast — model-specific prompt template
-
-When the chosen model is `veo3.1-fast` / `veo3-fast` (default for UGC video as of 2026-05), use this exact 7-layer ordering. The model responds dramatically better when the layers appear in this order. Length target: **100-200 words** (Veo 3.1 prioritizes elements unpredictably above ~400 chars; under 100 chars yields generic results).
-
-Layers, in order:
-
-1. **Camera & lens** — shot type + movement + lens. Examples: "Handheld medium shot, 35mm lens, subtle bob", "Tight tracking shot, 85mm portrait lens, no cuts", "Slow dolly-in, 24mm wide".
-2. **Subject** — lock the subject at the very start of the description. Front-load identifying details (age, gender, hair, key clothing) so Veo doesn't drift on character continuity. Reference the character image if provided.
-3. **Action & physics** — ONE dominant action per clip. Veo handles "she unscrews the cap" cleanly; "she walks in, unscrews the cap, takes a sip, walks out" causes drift. Split multi-action shots into multiple clips and concat.
-4. **Environment** — location, time-of-day, weather, props in shot.
-5. **Lighting** — be specific. "Golden hour rim lighting", "soft north-window studio key", "neon-mixed sodium streetlight from frame-right".
-6. **Style & texture** — film stock or color grade. "Shot on Kodak Portra 400 film, fine grain, warm color grade." or "Crisp digital, cool color grade, slight film emulation."
-7. **Audio** — Veo 3.1 generates synchronized audio. Specify: dialogue (if any), foley (footsteps, cap-screw, liquid pour), ambient (city hum, café murmur), music tag (none / minimal pad / energetic).
-
-Example UGC body shot:
-
-> "Tight medium shot, 50mm lens, slight handheld bob. Subject: 30-year-old man with a short dark beard, white tee, light jeans (same character as reference image). Action: he picks up the AquaFlow bottle from a wooden desk and tilts it slightly toward camera — the glowing blue cap catches the light. Environment: small home office, mid-morning. Lighting: warm window light from frame-right, soft fill from a desk lamp on frame-left. Style: photorealistic, shallow depth of field, fine film grain. Audio: subtle ambient room tone, a soft click as he sets it down. 6 seconds, 9:16 vertical."
-
-Negative prompt for veo 3.1: pass things to AVOID separately when the model supports it. Common UGC negative prompts: `text overlay, illegible logos, malformed hands, extra fingers, anatomically wrong, watermark, low resolution`.
-
-Sources:
-- [Google Cloud — Ultimate prompting guide for Veo 3.1](https://cloud.google.com/blog/products/ai-machine-learning/ultimate-prompting-guide-for-veo-3-1)
-- [fal.ai — Veo3 prompt guide](https://fal.ai/learn/devs/veo3-prompt-guide-master-google-video-generation)
-- [DeepMind — Veo 3 prompt guide](https://deepmind.google/models/veo/prompt-guide/)
-
 Skip the approval gate if the user's memories opt out (a rule they saved in their memories file — shown under `## Memories` at the bottom of your instructions, editable on the Instructions page).
+
+**Model-specific prompt templates live with the model.** Per-engine grammar is in the
+**`ai-video-models`** skill; anything specific to how *your provider* frames a prompt is in
+`references/providers/<id>.md` under this skill. Read the one that applies before composing —
+never wing a prompt from memory.
 
 ## Step 8 — Run
 
-- Short jobs (image, single audio): provider's `run_model` (synchronous).
-- Long jobs (video, training, batch image): provider's `submit_job` then poll `check_job` every 5 seconds until `status === "completed"`.
-- **Endpoint ids are operation-specific.** Submit to the FULL endpoint id including its operation suffix (e.g. `bytedance/seedance-2.0/image-to-video`), never a bare model-family id — a family id without the operation suffix 404s on fal.
+- Short jobs (image, single audio) usually run synchronously.
+- Long jobs (video, training, batch image) are submit-then-poll. **Poll with `libi.sleep`**
+  (`libi.sleep({ seconds: 20, reason: "waiting for <endpoint> to finish" })`) — it is
+  server-side, AbortSignal-aware, and emits progress every 5 s. Do NOT use `Terminal sleep N`
+  (tool-call timeouts) or `ScheduleWakeup` (can fail to re-fire — that caused a 3-hour
+  ghost-wait in QA).
+- **Model ids are usually operation-specific.** Submit the FULL id including its operation
+  suffix; a bare model-family id 404s on most providers.
 
-If the job fails, show the provider's error message verbatim and ask the user how to proceed (retry, refine, or stop).
-
-### Use `libi.sleep` between polls — do NOT use Terminal sleep or ScheduleWakeup
-
-When polling a long-running provider job (e.g. fal-ai `check_job`, elevenlabs job status), wait via `libi.sleep({ seconds: 20, reason: "waiting for fal-ai/<endpoint> to finish" })` between checks. This is server-side, AbortSignal-aware, and emits progress notifications every 5 s. Do NOT use `Terminal sleep N` (can hit tool-call timeouts on long waits) or `ScheduleWakeup` (can fail to re-fire — caused the v2 round-1 3-hour ghost-wait). Recommended cadence:
-
-- First 5 polls: `libi.sleep({ seconds: 20 })` between each call (covers most veo3.1-fast jobs)
-- Polls 5-15: `libi.sleep({ seconds: 30 })`
-- Beyond: `libi.sleep({ seconds: 60 })` and consider asking the user before continuing
-
-Most fal video jobs complete in 60-150 s. If a job is still IN_QUEUE after 5 min, surface it to the user.
+Your provider's exact tool names, poll cadence and endpoint-id shape are in
+`references/providers/<id>.md`. If the job fails, show the provider's error message
+verbatim and ask the user how to proceed (retry, refine, or stop).
 
 ## Step 9 — Import the result
 
@@ -310,23 +330,23 @@ Set the `name` to something descriptive (`"ugc-hook-shot.mp4"`, not `"output.mp4
 
 `libi.upload_file` accepts an `aiGeneration` object that populates the asset preview Generation tab and enables the "Fetch actual cost" button later. **Always pass it for AI-generated files.** Skipping it means the file looks like a plain upload to the rest of the app — no Generation tab, no cost-fetch, no lineage in the UI.
 
-Shape (capture the timestamps yourself around the `submit_job` → `check_job` → `download` arc — clock starts when you submit, stops when the file is local):
+Shape (capture the timestamps yourself around the submit → poll → download arc — clock
+starts when you submit, stops when the file is local):
 
-```jsonc
-aiGeneration: {
-  provider: "fal-ai",                    // MCP id (matches mcp_servers.id)
-  model: "fal-ai/veo3.1/fast",           // exact model id you submitted
-  prompt: "<the full engineered prompt verbatim>",
-  costEstimate: { amount: 0.50, currency: "USD", tier: "veo3.1-fast/720p/9:16" },
-  startedAt: "2026-05-27T11:00:00.000Z", // ISO, before submit_job
-  completedAt: "2026-05-27T11:00:42.000Z", // ISO, after the download finishes
-  durationMs: 42000,                     // completedAt - startedAt
-  providerJobId: "req_abc123",           // fal request_id from submit_job
-  attemptNumber: 0                       // 0 = first attempt; bump on regen
-}
-```
+| field | value |
+|---|---|
+| `provider` | the provider's catalog id (`fal`, `elevenlabs`, …) |
+| `model` | the exact endpoint id you submitted |
+| `prompt` | the full engineered prompt, verbatim |
+| `costEstimate` | `{ amount, currency, tier }` — `tier` is the pricing tool's own label |
+| `startedAt` / `completedAt` | ISO, before submit / after the download finishes |
+| `durationMs` | `completedAt - startedAt` |
+| `providerJobId` | the provider's request id |
+| `attemptNumber` | 0 = first attempt; bump on regen |
 
-`costEstimate` comes from the provider's `get_pricing` tool earlier in Step 5; reuse that exact tier label. `attemptNumber` is 0 for the first attempt — increment when you regenerate the same beat with a tightened prompt.
+A filled-in example for your provider is in `references/providers/<id>.md`.
+
+`costEstimate` comes from the provider's pricing tool earlier in Step 5; reuse that exact tier label. `attemptNumber` is 0 for the first attempt — increment when you regenerate the same beat with a tightened prompt.
 
 ### Then append the notes lineage line
 
@@ -352,6 +372,6 @@ When the user's intent is "another take of the same thing" (same subject, differ
 ## Notes
 
 - Never call generation tools without going through this flow. The cost of a bad prompt is real money.
-- The skill never bakes in price tables — they go stale. Always derive from the provider's pricing tool or page.
+- The skill never bakes in price tables — they go stale. Always derive from the provider's pricing tool or page (see `references/providers/<id>.md`).
 - Approval prompts can be skipped per-step if the user's memories explicitly opt out (a saved rule in their memories file).
 - **Tracking.** To follow a moving subject in a generated video (blur, label, pin an overlay), see the `using-object-tracking` skill after importing the clip.

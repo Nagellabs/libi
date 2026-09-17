@@ -1,10 +1,11 @@
 /**
  * yt-dlp must install and verify on Windows, because failing to is fatal.
  *
- * yt-dlp is `installFlow: "tier-1"` (mcp/registry/bundled.ts). `installSingleDep`
- * RETHROWS on failure, and `category-a.ts` turns that into an
- * `InstallPhaseError("binary-install", …)` which aborts boot. So a yt-dlp
- * install bug is not "one MCP is down" — the app never starts at all.
+ * yt-dlp was `installFlow: "tier-1"` when these bugs were found, so an install
+ * failure aborted boot outright. It was de-tiered on 2026-09-08 — it now
+ * installs on first use inside `video_download` — which lowers the blast radius
+ * to "the download tool fails", not "the app never starts". The verify()
+ * contract below is unchanged either way, and it is the half that was wrong.
  *
  * Two Windows-only bugs did exactly that, and neither is reachable from macOS
  * CI, so they are pinned here with the platform stubbed:

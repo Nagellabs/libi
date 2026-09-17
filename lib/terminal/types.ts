@@ -13,6 +13,19 @@
  *  pulling server-only deps (pino, @xterm/headless) into the bundle. */
 export const MAX_TERMINAL_SESSIONS = 50;
 
+/** Chat terminals are the user's own. A setup terminal carries ONE command
+ *  printed by the Agents page for the user to submit, and is deleted when that
+ *  surface moves on to its next command. */
+export type TerminalPurpose = "chat" | "setup";
+/** The Agents-page surfaces that own a setup terminal — at most one each. */
+export type SetupSurface = "agents" | "global-setup" | "providers";
+export const SETUP_SURFACES: readonly SetupSurface[] = ["agents", "global-setup", "providers"];
+export function isSetupSurface(v: unknown): v is SetupSurface {
+  return typeof v === "string" && (SETUP_SURFACES as readonly string[]).includes(v);
+}
+/** A setup terminal nobody has been attached to for longer than this is reaped. */
+export const SETUP_TERMINAL_IDLE_MS = 10 * 60_000;
+
 export interface PtyLike {
   pid: number;
   write(data: string): void;
@@ -29,6 +42,8 @@ export interface PtySpawnOpts {
   cols: number;
   rows: number;
   env: NodeJS.ProcessEnv;
+  /** Setup terminals spawn a known shell; chat terminals spawn the user's `$SHELL`. */
+  purpose: TerminalPurpose;
 }
 
 export type PtyFactory = (opts: PtySpawnOpts) => PtyLike;
@@ -48,6 +63,9 @@ export interface TerminalSessionMeta {
   cliId: string;
   createdAt: number;
   status: "running" | "exited";
+  purpose: TerminalPurpose;
+  /** Which Agents-page surface owns it — present only on setup terminals. */
+  surface?: SetupSurface;
 }
 
 /** Client → server control messages (text frames). */

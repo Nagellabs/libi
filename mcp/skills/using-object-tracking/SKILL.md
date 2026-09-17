@@ -68,20 +68,24 @@ substitutes a degraded result the user didn't ask for and hides a broken engine.
    single-object template tracking — it bypasses the detector/associate/bind
    path entirely and locks onto the anchor region, so it often succeeds exactly
    where `yoloe+botsort` bound nothing.
-3. **If it still fails, SURFACE it.** Tell the user the local tracker could not
-   follow the subject on this clip and offer the paid SAM2 provider
-   (`refine_track_with_sam2`) or ask how they'd like to proceed. Never pretend
-   the track succeeded.
+3. **If it still fails, SURFACE it.** Tell the user the local tracker could not follow the
+   subject on this clip, say which methods you tried (`yoloe+botsort`, then `sot`), and ask
+   how they'd like to proceed — a different clip, a different segment, or manual anchors.
+   Never pretend the track succeeded, and never substitute a still overlay for a track.
 
-## Local engine is ALWAYS the default tracker
+## The local engine is the tracker
 
-`libi.compute_object_track` (local, free, runs on the user's machine) is the
-default and the right choice for essentially every request. **SAM2 via fal.ai
-is NOT a tracker and is NOT auto-selected** — it is opt-in *paid mask
-refinement* applied to an existing box track only when a pixel-precise mask is
-needed (object replacement / matting) AND the user approved the cost. Never
-route to `compute_object_track_providers` / `refine_track_with_sam2` just
-because `fal-ai` is configured.
+`libi.compute_object_track` (local, free, on the user's machine) is the tracker. There is no
+paid tracking provider in libi: mask refinement via a hosted SAM2 was removed when libi
+stopped holding provider keys. If a precise pixel MASK is what you need (object replacement,
+matting), that is the **`removing-and-replacing-backgrounds`** skill — `libi.remove_background`
+produces an alpha cutout locally and has its own paid fallback route. Tracking gives you
+boxes; matting gives you masks. Don't reach for one expecting the other.
+
+If a user ran tracking somewhere else and has per-frame BOXES, you can write them into libi's
+store with `libi.update_track_result({ fileId, method: "external-mcp:<name>", framerate, samples })`
+— `samples` are `{ t, x, y, w, h, confidence, visible }` in pixel coordinates, the same shape
+`compute_object_track` produces. It takes boxes only; libi's track store has no mask field.
 
 ## Generalized detector (arbitrary non-person objects)
 
@@ -90,8 +94,7 @@ Naming a non-person target (e.g. `classes:["backpack"]` on
 `compute_object_track`, or a non-person `compute_track_segment`) **auto-routes
 server-side to the generalized YOLOE-VP detector** — you do NOT change
 `method`; person/face stay on the fast frozen path automatically. It is still
-the local, free engine — never route to `compute_object_track_providers` /
-SAM2 for this.
+the local, free engine — there is nothing else to route to.
 
 It ships **with** the tracking engine (same `tracking-pyenv` install). If a
 tracking tool reports the engine is not installed, follow the **libi-tracking
@@ -444,12 +447,6 @@ the system (the user literally pointed at the subject).
   anchors) is the FIRST repair move — before ground_target or method switches.
 - Never clear `manualAnchors`; recompute tools merge them automatically
   (priority: stored manual > explicit params.anchors > analysis-derived).
-
-## SAM2 (paid, optional)
-
-Only for precise masks (object replacement / matting), never as the primary
-tracker. `refine_track_with_sam2({ trackId, range? })` refines an existing box
-track. Requires explicit user approval (paid, fal.ai).
 
 ## Cross-references
 

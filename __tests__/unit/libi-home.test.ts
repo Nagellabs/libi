@@ -3,9 +3,13 @@ import os from "os";
 import path from "path";
 import fs from "fs";
 import {
-  getConnectedAgentDir,
-  getAgentDirWriteTargets,
   getLibiAgentDir,
+  resolveMcpHttpPort,
+  DEFAULT_MCP_PORT,
+  getCurrentMcpPort,
+  getCurrentPort,
+  LIBI_SERVER_PORT_ENV,
+  removePortFileIfOwned,
 } from "@/lib/libi-home";
 
 describe("libi-home", () => {
@@ -180,35 +184,146 @@ describe("libi-home skills helpers", () => {
   });
 });
 
-describe("connected agent dir", () => {
-  const saved = process.env.LIBI_CONNECT_AGENT_DIR;
+describe("mcp http port", () => {
+  const savedHome = process.env.LIBI_HOME;
+
   afterEach(() => {
-    if (saved === undefined) delete process.env.LIBI_CONNECT_AGENT_DIR;
-    else process.env.LIBI_CONNECT_AGENT_DIR = saved;
+    if (savedHome === undefined) delete process.env.LIBI_HOME;
+    else process.env.LIBI_HOME = savedHome;
   });
 
-  it("getConnectedAgentDir is null when env is unset", () => {
-    delete process.env.LIBI_CONNECT_AGENT_DIR;
-    expect(getConnectedAgentDir()).toBeNull();
+  // NodeJS.ProcessEnv is augmented (by next/types/global.d.ts) to REQUIRE
+  // NODE_ENV, so a fresh literal can't satisfy the type at compile time even
+  // though it's a valid string map at runtime — same workaround as
+  // mcp/registry/server-prober.ts and lib/runtime/runtime-install.ts.
+  it("LIBI_MCP_PORT wins", () => {
+    expect(resolveMcpHttpPort({ LIBI_MCP_PORT: "4000", PORT: "3456" } as unknown as NodeJS.ProcessEnv)).toBe(4000);
+    expect(resolveMcpHttpPort({ LIBI_MCP_PORT: "4100" } as unknown as NodeJS.ProcessEnv)).toBe(4100);
+  });
+  it("defaults to DEFAULT_MCP_PORT, never a port derived from the studio's", () => {
+    // Deriving from the studio port is exactly what broke `libi connect` on
+    // the desktop build: the packaged studio binds `listen(0)`, so a derived
+    // aggregator port moved on every launch and the saved URL went stale.
+    expect(DEFAULT_MCP_PORT).toBe(3457);
+    expect(resolveMcpHttpPort({} as NodeJS.ProcessEnv)).toBe(DEFAULT_MCP_PORT);
+    expect(resolveMcpHttpPort({ PORT: "3500" } as unknown as NodeJS.ProcessEnv)).toBe(DEFAULT_MCP_PORT);
+    expect(resolveMcpHttpPort({ LIBI_PORT: "3600" } as unknown as NodeJS.ProcessEnv)).toBe(DEFAULT_MCP_PORT);
+  });
+  it("falls back to the default when LIBI_MCP_PORT is not a port number", () => {
+    // `Number.parseInt("abc")` is NaN, which used to reach `listen(NaN)` — an
+    // OS-assigned port that every other consumer of this function disagreed
+    // with, with no error anywhere.
+    for (const bad of ["abc", "70000", "0", "-1", " ", "99999999"]) {
+      expect(resolveMcpHttpPort({ LIBI_MCP_PORT: bad } as unknown as NodeJS.ProcessEnv)).toBe(
+        DEFAULT_MCP_PORT,
+      );
+    }
+  });
+  it("getCurrentMcpPort reads the mcp-port file, falling back to the resolver", () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-home-"));
+    process.env.LIBI_HOME = home;
+    expect(getCurrentMcpPort()).toBe(resolveMcpHttpPort(process.env));
+    fs.writeFileSync(path.join(home, "mcp-port"), "3999");
+    expect(getCurrentMcpPort()).toBe(3999);
+  });
+});
+
+/**
+ * `<LIBI_HOME>/port` is shared by every libi running against that home, and the
+ * last one to boot wins it. A second desktop launch on a fresh Windows install
+ * rewrote it to its own port and then died, so the FIRST window's MCP child read
+ * the dead port and every libi tool failed with "failed to reach libi server"
+ * while its own server was fine. A supervised child is handed its parent's port
+ * and must prefer it; everything with no parent server keeps reading the file.
+ */
+describe("getCurrentPort", () => {
+  const saved = {
+    LIBI_HOME: process.env.LIBI_HOME,
+    LIBI_PORT: process.env.LIBI_PORT,
+    LIBI_SERVER_PORT: process.env.LIBI_SERVER_PORT,
+  };
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-current-port-"));
+    process.env.LIBI_HOME = home;
+    delete process.env.LIBI_PORT;
+    delete process.env.LIBI_SERVER_PORT;
   });
 
-  it("getConnectedAgentDir resolves the env path to absolute", () => {
-    process.env.LIBI_CONNECT_AGENT_DIR = "/tmp/my-proj";
-    expect(getConnectedAgentDir()).toBe("/tmp/my-proj");
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
-  it("write targets are [default] without a connected dir", () => {
-    delete process.env.LIBI_CONNECT_AGENT_DIR;
-    expect(getAgentDirWriteTargets()).toEqual([getLibiAgentDir()]);
+  it("names the child's variable LIBI_SERVER_PORT", () => {
+    expect(LIBI_SERVER_PORT_ENV).toBe("LIBI_SERVER_PORT");
   });
 
-  it("write targets are [default, connected] in connect-agent mode", () => {
-    process.env.LIBI_CONNECT_AGENT_DIR = "/tmp/my-proj";
-    expect(getAgentDirWriteTargets()).toEqual([getLibiAgentDir(), "/tmp/my-proj"]);
+  it("prefers LIBI_SERVER_PORT over a port file another instance has rewritten", () => {
+    fs.writeFileSync(path.join(home, "port"), "55303");
+    process.env.LIBI_PORT = "3499";
+    process.env.LIBI_SERVER_PORT = "55268";
+    expect(getCurrentPort()).toBe(55268);
   });
 
-  it("write targets dedupe when connected equals the default", () => {
-    process.env.LIBI_CONNECT_AGENT_DIR = getLibiAgentDir();
-    expect(getAgentDirWriteTargets()).toEqual([getLibiAgentDir()]);
+  it("without LIBI_SERVER_PORT reads the port file, then LIBI_PORT, then 3456", () => {
+    expect(getCurrentPort()).toBe(3456);
+    process.env.LIBI_PORT = "3499";
+    expect(getCurrentPort()).toBe(3499);
+    fs.writeFileSync(path.join(home, "port"), "55303\n");
+    expect(getCurrentPort()).toBe(55303);
+  });
+
+  it("an empty LIBI_SERVER_PORT is treated as unset", () => {
+    fs.writeFileSync(path.join(home, "port"), "55303");
+    process.env.LIBI_SERVER_PORT = "";
+    expect(getCurrentPort()).toBe(55303);
+  });
+
+  it("still throws on an unparseable value from any source", () => {
+    process.env.LIBI_SERVER_PORT = "not-a-port";
+    expect(() => getCurrentPort()).toThrow(/could not parse port value "not-a-port"/);
+    delete process.env.LIBI_SERVER_PORT;
+    fs.writeFileSync(path.join(home, "port"), "garbage");
+    expect(() => getCurrentPort()).toThrow(/could not parse port value "garbage"/);
+    fs.rmSync(path.join(home, "port"));
+    process.env.LIBI_PORT = "nope";
+    expect(() => getCurrentPort()).toThrow(/could not parse port value "nope"/);
+  });
+});
+
+describe("removePortFileIfOwned", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-owned-port-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("removes a port file that still names the given port", () => {
+    const file = path.join(dir, "port");
+    fs.writeFileSync(file, "55268\n");
+    expect(removePortFileIfOwned(file, 55268)).toBe(true);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it("leaves a port file another instance has rewritten", () => {
+    const file = path.join(dir, "port");
+    fs.writeFileSync(file, "55303");
+    expect(removePortFileIfOwned(file, "55268")).toBe(false);
+    expect(fs.readFileSync(file, "utf-8")).toBe("55303");
+  });
+
+  it("is a no-op for a missing file or a null port", () => {
+    const file = path.join(dir, "port");
+    expect(removePortFileIfOwned(file, 55268)).toBe(false);
+    fs.writeFileSync(file, "55268");
+    expect(removePortFileIfOwned(file, null)).toBe(false);
+    expect(fs.existsSync(file)).toBe(true);
   });
 });

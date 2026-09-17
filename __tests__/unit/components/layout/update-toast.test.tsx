@@ -100,6 +100,7 @@ type ToastOpts = {
 
 const toastMock = toast as unknown as ReturnType<typeof vi.fn> & {
   loading: ReturnType<typeof vi.fn>;
+  dismiss: ReturnType<typeof vi.fn>;
 };
 
 function lastToastOpts(): ToastOpts {
@@ -112,6 +113,7 @@ beforeEach(() => {
   restartMutate.mockClear();
   toastMock.mockClear();
   toastMock.loading.mockClear();
+  toastMock.dismiss.mockClear();
   routerPush.mockClear();
   sessionStorage.clear();
 });
@@ -257,6 +259,50 @@ describe("UpdateToast", () => {
     render(<UpdateToast />);
     act(() => lastToastOpts().action.onClick());
     expect(sessionStorage.getItem(UPDATE_TOAST_DISMISS_KEY)).toBeNull();
+  });
+
+  it("a toast raised while a runtime was staged goes away once the shell enters its auto-download window", () => {
+    // 2026-09-07, reached from the toast instead of the click: a runtime
+    // stages, the toast renders "ready", then the shell's hourly check finds
+    // its own update and starts fetching — `ready` becomes null. If the
+    // toast just sat there, its onClick closure would still hold the stale
+    // runtime offer, and clicking it would discard the shell download.
+    dto = { ...baseDto(), pendingVersion: "0.1.13" };
+    const { rerender } = render(<UpdateToast />);
+    expect(toastMock).toHaveBeenCalledWith(
+      "Libi 0.1.13 is ready",
+      expect.objectContaining({ id: UPDATE_TOAST_ID }),
+    );
+
+    dto = {
+      ...baseDto(),
+      pendingVersion: "0.1.13",
+      shell: {
+        phase: "downloading",
+        currentVersion: "0.1.9",
+        latestVersion: "0.1.10",
+        percent: 10,
+        error: null,
+        checkedAt: 0,
+        autoDownload: true,
+      },
+    };
+    rerender(<UpdateToast />);
+    expect(toastMock.dismiss).toHaveBeenCalledWith(UPDATE_TOAST_ID);
+  });
+
+  it("does not dismiss a progress toast an acted-here restart is morphing", () => {
+    // The dismiss branch must never fire once the user has clicked Restart
+    // from THIS toast — `actedHere` returns before it, so a shell phase
+    // change mid-restart only ever morphs the loading copy, never wipes it.
+    dto = { ...baseDto(), pendingVersion: "0.2.0" };
+    const { rerender } = render(<UpdateToast />);
+    act(() => lastToastOpts().action.onClick());
+    toastMock.dismiss.mockClear();
+
+    dto = shellDto("downloading", { percent: 5, autoDownload: true });
+    rerender(<UpdateToast />);
+    expect(toastMock.dismiss).not.toHaveBeenCalled();
   });
 
   it("stays silent when there is nothing downloaded or offerable", () => {

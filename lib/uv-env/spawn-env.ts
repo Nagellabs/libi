@@ -134,6 +134,17 @@ export function uvEnvVars(): Record<string, string> {
 }
 
 /**
+ * Variables that select a Python interpreter or site-packages the user owns.
+ * Matched case-insensitively: Windows environment names are, so `pythonpath`
+ * there is the same variable as `PYTHONPATH`. No legitimate lower-case
+ * variant matters on posix either, so one rule serves every platform.
+ */
+function isUserPythonEnvVar(key: string): boolean {
+  const name = key.toUpperCase();
+  return name === "PYTHONHOME" || name === "PYTHONPATH" || name === "VIRTUAL_ENV" || name.startsWith("CONDA_");
+}
+
+/**
  * Build the environment for a uv subprocess.
  *
  * Inherits `process.env` (uv and the Python it spawns need HOME, TMPDIR, LANG,
@@ -160,9 +171,14 @@ export function buildUvEnv(
   const env: NodeJS.ProcessEnv = { ...process.env };
 
   // Drop non-string values so the result is a clean string map, matching what
-  // every spawn call site expects to hand to child_process.
+  // every spawn call site expects to hand to child_process — and drop the
+  // user's own Python environment on EVERY surface (desktop, npx, dev): since
+  // the desktop app imports the login shell's variables, a `PYTHONHOME` /
+  // `VIRTUAL_ENV` / `CONDA_*` from the profile would otherwise point uv's
+  // Python at an interpreter libi does not manage.
   for (const key of Object.keys(env)) {
     if (typeof env[key] !== "string") delete env[key];
+    else if (isUserPythonEnvVar(key)) delete env[key];
   }
 
   const pathSep = isWindows() ? ";" : ":";

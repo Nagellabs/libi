@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { BUNDLED_MCPS } from "./registry";
+import { resolveExtensionId } from "@/mcp/tools/schemas";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 import { getDb } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema/sqlite";
@@ -9,6 +10,8 @@ import { invalidateMcpConfig } from "@/lib/mcp-config";
 import { probeAndPersist } from "@/mcp/registry/server-prober";
 import { getSessionManager } from "@/lib/sessions/session-manager";
 import { packageRoot } from "@/lib/runtime/package-root";
+import { DependencyManager } from "@/mcp/registry/dependency-manager";
+import type { DependencyStatus } from "@/mcp/registry/types";
 
 // Repo root resolved relative to this file's location, NOT process.cwd().
 // The libi MCP child spawns with cwd=~/.libi/agent/ (the agent workspace),
@@ -29,12 +32,40 @@ import { packageRoot } from "@/lib/runtime/package-root";
 const REPO_ROOT = packageRoot();
 
 export interface GetInstallPlanInput {
-  mcpId: string;
+  /** Canonical. */
+  mcpId?: string;
+  /** Accepted alias — see `getInstallPlanSchema` for why both exist. */
+  extensionId?: string;
 }
 
 export type GetInstallPlanResult =
-  | { success: true; mcpId: string; plan: string; planPath: string }
+  | {
+      success: true;
+      mcpId: string;
+      plan: string;
+      planPath: string;
+      /** The extension's declared dependencies (uv, model files, …) with their
+       *  on-disk state, so a plan's "confirm X is present" step is something
+       *  the agent can read here instead of a settings card it cannot see.
+       *  Names and paths only — never an env value. */
+      dependencies: DependencyStatus[];
+      /** Set when the readout itself failed; `dependencies` is then empty and
+       *  says nothing about the machine. */
+      dependenciesError?: string;
+    }
   | { success: false; error: string; knownIds: string[] };
+
+/** Best-effort dependency readout for the plan result. A failure here must
+ *  not cost the agent the plan text, so it is reported alongside instead. */
+async function readDependencies(
+  mcpId: string,
+): Promise<{ dependencies: DependencyStatus[]; error?: string }> {
+  try {
+    return { dependencies: await new DependencyManager().getStatuses(mcpId) };
+  } catch (err) {
+    return { dependencies: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
 
 /**
  * Return the markdown install plan for a tier-2 bundled MCP. The agent
@@ -46,34 +77,63 @@ export type GetInstallPlanResult =
 export async function getInstallPlan(
   input: GetInstallPlanInput,
 ): Promise<GetInstallPlanResult> {
-  const def = BUNDLED_MCPS.find((d) => d.id === input.mcpId);
+  // Both spellings land here as one id. Neither given is now a real,
+  // readable error: before this the schema required `mcpId`, so an agent that
+  // guessed `extensionId` got the SDK's bare "Required" with nothing naming
+  // the key it should have used.
+  const mcpId = resolveExtensionId(input);
+  if (!mcpId) {
+    return {
+      success: false,
+      error:
+        'Pass the extension id as `mcpId` (e.g. libi.get_install_plan({ mcpId: "local-music" })). ' +
+        "`extensionId` is accepted as an alias; one of the two is required.",
+      knownIds: BUNDLED_MCPS.map((d) => d.id),
+    };
+  }
+  const def = BUNDLED_MCPS.find((d) => d.id === mcpId);
   if (!def) {
     // If it exists in the full registry but is tier-1, give a clearer message
-    const inFullRegistry = BUNDLED_MCP_SERVERS.find((d) => d.id === input.mcpId);
+    const inFullRegistry = BUNDLED_MCP_SERVERS.find((d) => d.id === mcpId);
     if (inFullRegistry) {
       return {
         success: false,
-        error: `"${input.mcpId}" is a tier-1 core dependency installed by libi at startup — there is no per-mcp install plan. If it's not installed, restart libi and check the CLI output.`,
+        error: `"${mcpId}" is a tier-1 core dependency installed by libi at startup — there is no per-mcp install plan. If it's not installed, restart libi and check the CLI output.`,
         knownIds: BUNDLED_MCPS.map((d) => d.id),
       };
     }
     return {
       success: false,
-      error: `Unknown bundled MCP id "${input.mcpId}".`,
+      error: `Unknown bundled MCP id "${mcpId}".`,
       knownIds: BUNDLED_MCPS.map((d) => d.id),
     };
   }
   if (!def.installPlanPath) {
+    // A def whose deps are all installed on demand by libi (`manualInstall`)
+    // has no plan BY DESIGN — `libi-export`'s Chromium downloads inside the
+    // first canvas export. Say so, rather than calling it a bug.
+    const libiInstalled =
+      def.dependencies.length > 0 && def.dependencies.every((d) => d.manualInstall);
     return {
       success: false,
-      error: `Bundled MCP "${input.mcpId}" has no installPlanPath set in registry.ts — this is a libi bug.`,
+      error: libiInstalled
+        ? `Bundled MCP "${mcpId}" needs no install plan: libi installs this itself — run an export that needs it, or use Agents → Libi MCP → ${def.name}.`
+        : `Bundled MCP "${mcpId}" has no installPlanPath set in registry.ts — this is a libi bug.`,
       knownIds: BUNDLED_MCPS.map((d) => d.id),
     };
   }
   const absolute = path.resolve(REPO_ROOT, def.installPlanPath);
   try {
     const plan = await fs.readFile(absolute, "utf-8");
-    return { success: true, mcpId: input.mcpId, plan, planPath: def.installPlanPath };
+    const deps = await readDependencies(mcpId);
+    return {
+      success: true,
+      mcpId,
+      plan,
+      planPath: def.installPlanPath,
+      dependencies: deps.dependencies,
+      ...(deps.error ? { dependenciesError: deps.error } : {}),
+    };
   } catch (err) {
     return {
       success: false,

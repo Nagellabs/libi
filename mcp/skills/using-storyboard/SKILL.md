@@ -6,6 +6,35 @@ tags: [storyboard, planning, video-creation]
 
 # Using the Storyboard
 
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
 The storyboard is the piece's plan: an ordered list of **cards**, one per scene. Each
 card has a free **schematic** (the blocking spec the user reviews before any spend) and a
 **generation spec** that says exactly how the AI clip is produced:
@@ -95,8 +124,9 @@ schema. This is what makes outside MCPs and brand-new models work for free.
 **The cache workflow (the gate). Always do this before setting a spec:**
 
 1. `libi.get_model_schema_cache({ apiUrl, model })` → `{ exists, stale, fetchedAt, schema }`.
-2. If `!exists` or `stale`: research the endpoint's **real API** (via the hosting MCP — e.g.
-   fal's `get_model_schema`), **normalize it to `GenFieldDef[]`**, and
+2. If `!exists` or `stale`: research the endpoint's **real API** via the hosting MCP's own
+   schema tool (your provider reference, `references/providers/<id>.md`, names it),
+   **normalize it to `GenFieldDef[]`**, and
    `libi.save_model_schema_cache({ apiUrl, model, fields, source? })`. A `GenFieldDef` is
    `{ key, type, required?, options?, min?, max?, step?, multiple?, label?, description?,
    default? }` with `type ∈ text|number|boolean|url|enum|image|video|audio|svg|pdf`.
@@ -160,7 +190,7 @@ schematic/prompt you drafted before the user touched the board. Concretely:
 
 - **Pull the live spec at spend time.** `libi.storyboard_get({ pieceId })` → take the target
   card's current `generation` spec (the `keyframe` / `clip` tier you're about to run) and use
-  exactly those `params`, `apiUrl`, and `model` for the fal/provider call. Honor every manual
+  exactly those `params`, `apiUrl`, and `model` for the provider call. Honor every manual
   edit the user made (aspect ratio, seed, duration, swapped keyframe/reference file, audio
   toggle, prompt fragment).
 - **A reconcile gap means re-read, don't override.** If the card's spec differs from what you
@@ -235,13 +265,15 @@ then read back from it when you spend.
    a different style is wanted.
    Then, **for EACH sketch**, turn it into a real image: register the slot's rendered sketch
    (on disk at `cardPaths[cardId].sketches[i].sketch`) via
-   `libi.upload_file({ pieceId, filePath: <that path> })` → `libi.upload_file_to_fal({ fileId })`
-   for a fal URL; do the same for the **character reference** image; call
-   `openai/gpt-image-2/edit` with the sketch URL as a **loose composition reference** + the
-   character URL + the card's `promptFragment`. **Tell the image step the sketch is a layout
+   `libi.upload_file({ pieceId, filePath: <that path> })`, then put it on the provider's CDN
+   with the provider's own upload tool (see `references/providers/<id>.md`); do the same for
+   the **character reference** image; call your image model's **masked-edit /
+   composition-reference** endpoint with the sketch URL as a **loose composition reference**
+   + the character URL + the card's `promptFragment` (`references/providers/<id>.md` names
+   the endpoint). **Tell the image step the sketch is a layout
    guide to improve and vary on, not a drawing to reproduce** — it owns realism, proportions,
    and detail (delegate the image craft to `ai-asset-generation` / `realistic-image-generation`
-   — `gpt-image-2` is the hardened default for realistic people / hands); upload the result as a
+   — its provider reference names the hardened realism default); upload the result as a
    libi file and set it into the clip spec at the slot's (re-keyed) `paramKey` via
    `set_storyboard_generation`. **Carry the SAME character reference across every keyframe** so
    the character stays consistent. On the card, each sketch then pairs with its generated image.
@@ -259,8 +291,10 @@ then read back from it when you spend.
    clip from the prompt (text-to-video); set only the params the model actually requires.
    **Then re-read the card with `libi.storyboard_get` and build the actual generation
    request from the card's CURRENT spec** (it may carry the user's manual inline edits — see
-   "The card is the source of truth" above). Generate the clip with Seedance image-to-video
-   from those params (delegate to `ai-video-models` / Seedance 2.0), upload, and
+   "The card is the source of truth" above). Generate the clip with your video model's
+   image-to-video endpoint from those params (delegate to `ai-video-models` for the engine's
+   prompt grammar; your provider reference names the endpoint),
+   upload, and
    `attach_storyboard_clip` — which appends a `vN` take.
 6. **Select the take → timeline.** `select_storyboard_take` places the chosen take as the
    card's video overlay, sequenced by `startTime` per the storyboard order. Generate more
@@ -313,7 +347,8 @@ DOWN into the craft / mechanics skills:
   invariants (no in-video text; native audio on). The call + save layer for both a card's
   keyframe image and its clip.
 - **`realistic-image-generation`** — the craft of making a card's KEYFRAME image good
-  (gpt-image-2 picker, anti-AI-look tokens, selfie/demographic templates, anatomy validation).
+  (the realism model picker — its provider reference names the model — anti-AI-look tokens,
+  selfie/demographic templates, anatomy validation).
 - **`physical-action-video`** — manipulation-beat craft (FLF-first, prompt decomposition,
   model-escalation ladder, editorial fallback) when a card's clip is a physical action.
 - **`ai-video-models`** — per-engine prompt grammar (Seedance / Veo / Kling): token order,
@@ -331,7 +366,7 @@ A card's keyframe + clip are *authored* on the board (`start_frame`, clip params
 - The schema-cache tools (`get_model_schema_cache` / `save_model_schema_cache` /
   `invalidate_model_schema_cache`) back the generation spec — populate before
   `set_storyboard_generation`.
-- `ai-asset-generation` — keyframe image craft (gpt-image-2 default, anatomy rules).
+- `realistic-image-generation` — keyframe image craft (the realism model picker, anatomy rules).
 - `ai-video-models` / `stitching-multi-clip` — clip generation + multi-clip consistency.
 - `using-character-library` — the character reference carried across keyframes.
 - `using-snapshot-draft` — storyboard edits land in the draft; commit/discard apply.

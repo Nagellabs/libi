@@ -6,9 +6,6 @@
  * active or preferred agent, opens a fresh session, and fires the prompt.
  * When no agent is configured (bring-your-own-CLI), it throws
  * `NoAgentConfiguredError` so callers can fall back to copy-to-clipboard.
- *
- * `handOffToAgent` (lib/install-from-url) delegates here for its MCP-install
- * opener; the only difference is the message it builds.
  */
 import { getSessionManager } from "@/lib/sessions/session-manager";
 import { getSettings } from "@/lib/db/settings";

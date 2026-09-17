@@ -62,9 +62,6 @@ vi.mock("@/lib/editor-state-context", () => ({
   }),
 }));
 
-vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
-  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
-}));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/editor",
   useRouter: () => ({ push: vi.fn() }),

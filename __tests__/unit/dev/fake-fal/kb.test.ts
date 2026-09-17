@@ -65,3 +65,65 @@ describe("fake-fal model KB", () => {
     expect(typeof getPricing("openai/gpt-image-2", null).amount).toBe("number");
   });
 });
+
+/**
+ * One shared `VEO_SCHEMA` stood in for eight endpoints with eight
+ * different input shapes. The visible cost: the dedicated FLF endpoint behind
+ * `physical-action-video`'s headline technique advertised no way to pass a last
+ * frame at all, so an agent that did the right thing — read the schema before
+ * calling — concluded the technique was unavailable, and a scenario exercising
+ * it would have failed for a reason unrelated to the skill.
+ *
+ * The follow-up asked for `end_image_url` on the Veo endpoint. fal's live
+ * OpenAPI says otherwise (fetched 2026-09-09, per endpoint via
+ * https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=<id>): Veo FLF takes
+ * `first_frame_url` + `last_frame_url`, both REQUIRED. `end_image_url` is
+ * Seedance's i2v spelling and Kling/Wan's start/end spelling — three different
+ * conventions, which is exactly why the skills now tell the agent to read the
+ * schema rather than assume one.
+ */
+describe("FLF-capable endpoints expose a real last-frame parameter", () => {
+  it("veo3.1 FLF takes first_frame_url + last_frame_url, both required", () => {
+    const s = getSchema("fal-ai/veo3.1/fast/first-last-frame-to-video", null);
+    expect(s.properties.first_frame_url).toBeDefined();
+    expect(s.properties.last_frame_url).toBeDefined();
+    expect(s.required).toEqual(
+      expect.arrayContaining(["prompt", "first_frame_url", "last_frame_url"]),
+    );
+    // Guard against reintroducing the Seedance spelling on this endpoint: it is
+    // the specific wrong guess the follow-up itself made.
+    expect(s.properties.end_image_url).toBeUndefined();
+    expect(s.properties.image_url).toBeUndefined();
+  });
+
+  it("wan-flf2v takes start_image_url + end_image_url, both required", () => {
+    const s = getSchema("fal-ai/wan-flf2v", null);
+    expect(s.required).toEqual(
+      expect.arrayContaining(["prompt", "start_image_url", "end_image_url"]),
+    );
+  });
+
+  it("kling o1 takes start_image_url + an optional end_image_url", () => {
+    const s = getSchema("fal-ai/kling-video/o1/image-to-video", null);
+    expect(s.properties.start_image_url).toBeDefined();
+    expect(s.properties.end_image_url).toBeDefined();
+    expect(s.required).toEqual(["prompt", "start_image_url"]);
+  });
+
+  it("gives the three veo3.1 operations their three different required inputs", () => {
+    expect(getSchema("fal-ai/veo3.1/fast/image-to-video", null).required).toEqual([
+      "prompt",
+      "image_url",
+    ]);
+    expect(getSchema("fal-ai/veo3.1/fast/extend-video", null).required).toEqual([
+      "prompt",
+      "video_url",
+    ]);
+    // video-understanding is an analysis endpoint, not a generator, and was
+    // wearing the Veo shape too.
+    expect(getSchema("fal-ai/video-understanding", null).required).toEqual([
+      "video_url",
+      "prompt",
+    ]);
+  });
+});

@@ -65,9 +65,9 @@ export function OverlayAgentDialog({
         },
       });
       if (r.byoCli) {
-        toast.info("No libi agent is running", {
+        toast.info("No in-app agent is configured", {
           description:
-            "You're in bring-your-own-CLI mode. Copy the prompt and paste it into your CLI.",
+            "Copy the prompt into your own CLI, or pick an agent in the sidebar.",
         });
       } else if (!r.ok) {
         toast.error("Couldn't send to the agent");

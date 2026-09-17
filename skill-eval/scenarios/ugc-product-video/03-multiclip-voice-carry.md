@@ -5,7 +5,10 @@ skills: [ugc-product-video, ai-asset-generation, ai-video-models, stitching-mult
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
-timeoutSec: 540
+# 900 not 540: the storyboard-spine route (schematic → spec → take → select) plus two
+# Seedance clips ran ~9 min end-to-end in an earlier delivery run; 540 s cut it at Stage 7
+# with every hard invariant already satisfied in the trace.
+timeoutSec: 900
 covers: [seedance-2.0, reference-to-video, voice-carry, native-audio, no-kokoro, multi-clip]
 ---
 

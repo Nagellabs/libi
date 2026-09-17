@@ -13,7 +13,6 @@ function vid(): FileRecord {
     mediaDuration: 10, mediaWidth: 640, mediaHeight: 360, hasAudio: true, hasAlpha: false,
     proxyFilename: null, proxyStatus: "idle", proxyGeneratedAt: null, proxyHeight: null,
     filmstripFilename: null, filmstripStatus: "idle", filmstripGeneratedAt: null, filmstripFrames: null, filmstripHeight: null,
-    falUploadedUrl: null,
     aiGeneration: null,
     notes: null,
     createdAt: new Date(),

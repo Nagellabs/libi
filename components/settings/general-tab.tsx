@@ -5,6 +5,7 @@ import { RotateCcw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { UpdatesSection } from "@/components/settings/updates-section";
+import { FeedbackSection } from "@/components/settings/feedback-section";
 import { useEditorState } from "@/lib/editor-state-context";
 import { ASPECT_RATIOS } from "@/lib/composition/aspect-ratio";
 import { usePieceDefaults, useUpdatePieceDefaults } from "@/lib/queries/piece-defaults";
@@ -52,6 +53,7 @@ export function GeneralTab() {
   return (
     <div className="space-y-8">
       <UpdatesSection />
+      <FeedbackSection />
 
       <div>
         <h3 className="text-sm font-semibold text-foreground">Preview quality</h3>

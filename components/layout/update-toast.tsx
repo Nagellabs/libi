@@ -125,7 +125,20 @@ export function UpdateToast() {
     }
 
     const offer = ready ?? legacyOffer;
-    if (!offer || isShellInstallInFlight(data)) return;
+    if (!offer || isShellInstallInFlight(data)) {
+      // Nothing left to offer — including the moment an offer we already
+      // rendered stops qualifying, e.g. the shell's hourly check starts its
+      // own auto-download after a runtime staged. sonner keeps a toast alive
+      // until told otherwise, and its `onClick` closure would still hold the
+      // stale offer — a click on it would restart into that staged runtime
+      // and discard the desktop download now in flight (2026-09-07: 340 MB
+      // lost this way). Dismiss so that action can't fire. `actedHere`
+      // already returned above, so this never touches a toast that is
+      // mid-restart / mid-install; and dismissing here doesn't "resurrect"
+      // anything the user closed — it only ever removes.
+      toast.dismiss(UPDATE_TOAST_ID);
+      return;
+    }
     if (readDismissedVersion() === offer.version) return;
 
     if (ready) {

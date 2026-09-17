@@ -11,6 +11,10 @@
  * inside libi: Shell, Claude Code, and Codex. Any other CLI agent is still
  * fully usable — the user picks "Shell" and runs whatever they want. We
  * don't advertise untested agents as first-class options.
+ *
+ * How to set up a missing agent is not a preset's business: in the dropdown, a
+ * preset whose agent is not ready is a link to that agent's setup on the Agents
+ * page instead of a command the shell can't run.
  */
 
 export interface TerminalCliPreset {
@@ -19,26 +23,14 @@ export interface TerminalCliPreset {
   label: string;
   /** Command typed into the shell on session start. Null = plain shell. */
   command: string | null;
-  /** Shown as a tooltip so the user knows how to install a missing CLI. */
-  installHint: string | null;
 }
 
 export const TERMINAL_CLI_PRESETS: TerminalCliPreset[] = [
   // Label is just "Shell" — the user may launch any agent manually, so
   // "(no agent)" would be misleading as the session title.
-  { id: "shell", label: "Shell", command: null, installHint: null },
-  {
-    id: "claude-code",
-    label: "Claude Code",
-    command: "claude",
-    installHint: "npm i -g @anthropic-ai/claude-code",
-  },
-  {
-    id: "codex",
-    label: "Codex",
-    command: "codex",
-    installHint: "npm i -g @openai/codex",
-  },
+  { id: "shell", label: "Shell", command: null },
+  { id: "claude-code", label: "Claude Code", command: "claude" },
+  { id: "codex", label: "Codex", command: "codex" },
 ];
 
 export const DEFAULT_TERMINAL_CLI_ID = "claude-code";

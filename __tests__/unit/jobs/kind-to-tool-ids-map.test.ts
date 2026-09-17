@@ -21,10 +21,6 @@ describe("getJobKindToToolIdsMap", () => {
       makeMcpToolId("libi", "libi.compute_object_track"),
       makeMcpToolId("libi-tracking", "libi.compute_object_track"),
     ]);
-    expect(map.get("tracking_provider")).toEqual([
-      makeMcpToolId("libi", "libi.compute_object_track_providers"),
-      makeMcpToolId("libi-tracking", "libi.compute_object_track_providers"),
-    ]);
     expect(map.get("whisper_model_download")).toEqual([
       makeMcpToolId("libi", "libi.whisper_download_model"),
     ]);
@@ -42,8 +38,9 @@ describe("getJobKindToToolIdsMap", () => {
     ]);
   });
 
-  it("excludes server-internal runners (no mcpToolId)", () => {
+  it("excludes server-internal runners (no mcpToolId) and removed kinds", () => {
     const map = getJobKindToToolIdsMap();
+    expect(map.has("tracking_provider")).toBe(false);
     expect(map.has("proxy_gen")).toBe(false);
     expect(map.has("analysis_describe_frame")).toBe(false);
     expect(map.has("export_render")).toBe(false);

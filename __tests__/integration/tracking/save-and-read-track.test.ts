@@ -40,7 +40,7 @@ describe("save+read track (normalized + sanitized + summarized)", () => {
 
   it("sanitizes degenerate samples, returns a summary, reads back normalized", async () => {
     const res = await saveTrackSamples({
-      trackId: "trk-x", fileId: "f1", framerate: 1, method: "sam2-fal",
+      trackId: "trk-x", fileId: "f1", framerate: 1, method: "yoloe+botsort",
       samples: [
         { t: 0, x: 0, y: 0, w: 607, h: 1079, confidence: 1, visible: true },
         { t: 1, x: 5, y: 5, w: 20, h: 20, confidence: 1, visible: true },

@@ -24,7 +24,8 @@ Result line:
 Seed derivation: reuses the instance masks Detector.detect_seg ALREADY
 decodes from YOLOE-11s-seg (previously discarded) — no new inference
 model for the seed. ``seedMaskPath`` (grayscale PNG, >127 = subject)
-overrides derivation entirely (the future SAM2/external-seed path).
+overrides derivation entirely — the external-seed path, for a caller that
+already has a mask from somewhere else.
 """
 import os
 import time

@@ -32,10 +32,12 @@ export interface ResolvedSpawn {
  * Falls back to the def's own `command`/`args` (e.g. `npx -y <pkg>@<ver>`)
  * when:
  *   - the def has no `npmPackage` (e.g. uvx- or HTTP-based MCPs)
- *   - the install hasn't happened yet (fresh boot before Category B's
- *     bundled-install step completes)
+ *   - no local install exists — which, since `lib/mcp/bundled-install.ts`
+ *     was deleted on 2026-09-08, is every fresh machine: nothing writes
+ *     `~/.libi/node_modules` any more, so the local path only ever hits an
+ *     install left behind by an older libi
  *   - the installed version doesn't match the pinned version (drift —
- *     bundled-install will reconcile on the next run)
+ *     nothing reconciles it now; the pinned `npx` form runs instead)
  *
  * The `binName` defaults to the last segment of `npmPackage`. The package's
  * `bin` field is consulted via the bin shim that npm/pnpm writes to

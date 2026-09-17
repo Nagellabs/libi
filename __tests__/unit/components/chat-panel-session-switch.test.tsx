@@ -100,9 +100,6 @@ vi.mock("@/lib/queries/session-model", () => ({
 vi.mock("@/lib/queries/plan-usage", () => ({
   usePlanUsage: () => ({ data: null }),
 }));
-vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
-  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
-}));
 
 const key = (sessionId: string) => `libi:chat-scroll:${sessionId}`;
 

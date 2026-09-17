@@ -5,7 +5,7 @@ import type { JobRecord } from "@/lib/db/schema/types";
 function baseRow(overrides: Partial<JobRecord> = {}): JobRecord {
   return {
     id: "job-1",
-    kind: "extra_analysis_model",
+    kind: "matte_gen",
     clientKey: "",
     pieceId: "piece-1",
     fileId: "file-1",

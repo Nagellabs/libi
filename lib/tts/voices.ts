@@ -11,6 +11,12 @@ export const KOKORO_MODEL_URL =
 export const KOKORO_VOICES_URL =
   "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin";
 
+/** How big those two files are, stated once in `lib/tts/model-size.ts` (a leaf,
+ *  because the provider catalog needs the same number in the client bundle and
+ *  this module imports `node:fs`). Re-exported here so a server caller that
+ *  already has the URLs keeps one import. */
+export { KOKORO_DOWNLOAD_MB, KOKORO_MODEL_BYTES, KOKORO_VOICES_BYTES } from "@/lib/tts/model-size";
+
 export interface VoiceDef {
   id: string;
   language: "en-US" | "en-GB";

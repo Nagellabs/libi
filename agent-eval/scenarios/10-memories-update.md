@@ -1,7 +1,7 @@
 ---
 id: memories-update
 title: Memories loop — consent-first update_memories lands in memories.md
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [instructions-memories, notify-instructions-changed, workspace-regen]
 cost: subscription-tokens

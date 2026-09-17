@@ -22,10 +22,11 @@ import {
 import { interceptCommand } from "@/lib/chat/slash-commands";
 import { trackEvent } from "@/lib/analytics/client";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
-import { AgentSetupCard, type AgentSetupMode } from "@/components/agents/agent-setup-card";
-import { getAgentSetup } from "@/lib/agents/setup/registry";
-import { useAgentSetupCardState } from "@/hooks/agents/use-agent-setup-card-state";
-import type { AgentReadiness } from "@/lib/agents/agent-readiness";
+import Link from "next/link";
+import { agentSetupHref, getAgentSetup } from "@/lib/agents/setup/registry";
+import { readinessMessage, type AgentReadiness } from "@/lib/agents/agent-readiness";
+import { useMcpHealth } from "@/lib/queries/mcp-health";
+import { useDocumentVisible } from "@/hooks/use-document-visible";
 
 const UNKNOWN_READINESS: AgentReadiness = { state: "unknown" };
 
@@ -35,13 +36,16 @@ const UNKNOWN_READINESS: AgentReadiness = { state: "unknown" };
  *  without making a genuinely stuck chat sit silent for too long. */
 const SESSION_START_GRACE_MS = 10_000;
 
-/** The COMMAND libi would actually run to sign this agent in on THIS
- *  machine — only ever populated from an OBSERVED auth rejection
- *  (`needs-auth`), never guessed. Mirrors onboarding-panel.tsx's
- *  `remedyCommand`. */
-function remedyCommand(readiness: AgentReadiness): string | undefined {
-  return readiness.state === "needs-auth" ? (readiness.remedy?.command ?? undefined) : undefined;
-}
+/** Shown at the top of a chat whose agent process started before the desktop app loaded the
+ *  user's shell environment. */
+const SHELL_ENV_WARNING =
+  "libi couldn't load your shell environment (PATH and variables from your profile), so some tools may not work. If something doesn't work, restart libi.";
+
+/** Shown at the top of the chat while libi's MCP endpoint is known not to be running. */
+const LIBI_TOOLS_UNAVAILABLE_WARNING = "libi's tools are unavailable right now.";
+/** The libi MCP tab of the Agents page, where the endpoint can be restarted. */
+const LIBI_MCP_TAB_HREF = "/agents?tab=libi-mcp";
+const CHAT_MCP_HEALTH_POLL_MS = 30_000;
 
 interface ChatPanelProps {
   sessionId: string | null;
@@ -147,6 +151,18 @@ function AgentThinkingTag() {
 function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onOpenAsset, onNewChat }: ChatPanelProps) {
   useReactRenderTelemetry("ChatPanel");
   const chat = useAgentChat(sessionId, { onToolResult, onNavigate, onSessionsChanged });
+  // Without libi's MCP endpoint the agent silently has none of libi's tools, and
+  // nothing else in the chat would say so. Only one answer counts: the supervisor
+  // gave up restarting it — the state the linked Restart can fix. "stopped" is
+  // set only while libi shuts down, where that Restart refuses; a restart in
+  // flight, a status this process cannot read ("unknown") and a health read still
+  // loading show nothing either. Polled slowly: the banner only has to notice a
+  // give-up, not report the endpoint live the way the Agents page does.
+  const mcpChildStatus = useMcpHealth({
+    enabled: useDocumentVisible(),
+    refetchInterval: CHAT_MCP_HEALTH_POLL_MS,
+  }).data?.childStatus;
+  const libiToolsUnavailable = mcpChildStatus === "gave-up";
   // Measured once per messages array and shared: the pill compares it against
   // where the user left the bottom, and the scroll hook saves it next to the
   // offset so a return to this session can tell "nothing happened while I was
@@ -216,51 +232,26 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
   // *active* agent per se, since `activeProviderId` can be an optimistic
   // target mid-switch (see editor-state-context's `pendingProviderId`).
   // `readinessFor` (not the single `.readiness`) matches how every other
-  // consumer of readiness reads it per-agent (agent-selector.tsx,
-  // onboarding-panel.tsx). Tolerate a context that predates readiness (and
-  // mocked contexts in older tests) rather than crashing the panel.
+  // consumer of readiness reads it per-agent (agent-selector.tsx). Tolerate a
+  // context that predates readiness (and mocked contexts in older tests)
+  // rather than crashing the panel.
   const readinessForFn = sessionList?.readinessFor;
   const readiness: AgentReadiness = activeProviderId
     ? (readinessForFn?.(activeProviderId) ?? UNKNOWN_READINESS)
     : UNKNOWN_READINESS;
   const agentSetup = activeProviderId ? getAgentSetup(activeProviderId) : null;
 
-  // What this agent NEEDS, from what has actually been observed about it —
-  // independent of whether the empty state is currently showing, so the
-  // install poll below has a stable mode to key off.
-  const needsInstall =
-    readiness.state === "not-installed" && agentSetup !== null && agentSetup.install !== null;
-  const setupMode: AgentSetupMode = needsInstall ? "install" : "sign-in";
+  // An OBSERVED reason this agent can't chat: say it in ONE line — the
+  // server's own words — and point at the agent's setup on the Agents page,
+  // where setup actually happens.
+  const showSetup =
+    showNoSession && (readiness.state === "needs-auth" || readiness.state === "not-installed");
 
-  // Chat's own recovery for a finished install. Every surface needs
-  // `refreshAgentProviders` + a detect invalidation (the hook does both);
-  // chat additionally derives its card from READINESS, which neither of
-  // those touches — it is written only by the `agent-readiness` SSE
-  // broadcast and the `/api/agent/start` response. Re-selecting the agent is
-  // what actually re-runs that route, so it is the recovery that matches
-  // this surface's input. Without it the completed install left the card
-  // saying "Install Claude Code" on a machine where it now was installed,
-  // and pressing it hit `matching_completed` and did nothing.
-  const handleInstallCompleted = useCallback(() => {
-    if (activeProviderId) void selectAgent(activeProviderId);
-  }, [activeProviderId, selectAgent]);
-
-  const agentSetupCard = useAgentSetupCardState(activeProviderId, setupMode, {
-    surface: "chat",
-    onInstallCompleted: handleInstallCompleted,
-    // This card is rendered BECAUSE the agent rejected on auth, so the remedy
-    // is exactly the thing its button should run.
-    remedy: readiness.state === "needs-auth" ? readiness.remedy : null,
-  });
-
-  const showSignIn = showNoSession && readiness.state === "needs-auth" && agentSetup !== null;
-  const showInstall = showNoSession && needsInstall && !agentSetupCard.installCompleted;
-
-  // After SESSION_START_GRACE_MS with no session and no sign-in/install fix
-  // to offer, the "Starting a chat session…" sentence stops being honest —
-  // it must never claim progress it cannot demonstrate. Resets whenever the
-  // wait restarts (a fresh activeProviderId, or the no-longer-waiting case).
-  const isWaitingForSession = showNoSession && !!activeProviderId && !showSignIn && !showInstall;
+  // After SESSION_START_GRACE_MS with no session and no setup to point at,
+  // the "Starting a chat session…" sentence stops being honest — it must
+  // never claim progress it cannot demonstrate. Resets whenever the wait
+  // restarts (a fresh activeProviderId, or the no-longer-waiting case).
+  const isWaitingForSession = showNoSession && !!activeProviderId && !showSetup;
   const [graceExpired, setGraceExpired] = useState(false);
   useEffect(() => {
     if (!isWaitingForSession) {
@@ -495,6 +486,33 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
 
   return (
     <div className="flex h-full min-w-0 flex-col">
+      {/* This session's agent process started before the desktop app loaded the user's shell
+          environment. In-app chats only — a terminal chat renders TerminalPanel, whose login
+          shell loads the profile itself. */}
+      {sessionId && chat.shellEnvLoaded === false && (
+        <div
+          data-testid="shell-env-warning"
+          role="status"
+          className="mx-4 mt-3 shrink-0 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200"
+        >
+          {SHELL_ENV_WARNING}
+        </div>
+      )}
+      {libiToolsUnavailable && (
+        <div
+          data-testid="libi-tools-unavailable-warning"
+          role="status"
+          className="mx-4 mt-3 flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-200"
+        >
+          <span>{LIBI_TOOLS_UNAVAILABLE_WARNING}</span>
+          <Link
+            href={LIBI_MCP_TAB_HREF}
+            className="cursor-pointer font-medium underline underline-offset-4 hover:text-amber-100"
+          >
+            Restart in Agents
+          </Link>
+        </div>
+      )}
       {/* Messages area — isolated scroll */}
       <div
         ref={containerRef}
@@ -506,19 +524,16 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
           </div>
         )}
 
-        {(showSignIn || showInstall) && activeProviderId && agentSetup && (
+        {showSetup && activeProviderId && (
           <div className="flex h-full items-center justify-center">
-            <div className="w-full max-w-sm">
-              <AgentSetupCard
-                setup={agentSetup}
-                mode={setupMode}
-                state={agentSetupCard.state}
-                surface="chat"
-                resolvedCommand={remedyCommand(readiness)}
-                onAction={agentSetupCard.onAction}
-                onRetry={agentSetupCard.onRetry}
-                onCancel={agentSetupCard.onCancel}
-              />
+            <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
+              <p className="text-sm text-muted-foreground">{readinessMessage(readiness)}</p>
+              <Link
+                href={agentSetupHref(activeProviderId)}
+                className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+              >
+                Set up an agent
+              </Link>
             </div>
           </div>
         )}

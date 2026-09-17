@@ -49,6 +49,7 @@ class FakeTerminal {
   onScroll(): { dispose(): void } {
     return { dispose() {} };
   }
+  attachCustomKeyEventHandler(): void {}
   onData(cb: OnDataHandler): { dispose(): void } {
     this.dataHandler = cb;
     return { dispose() {} };

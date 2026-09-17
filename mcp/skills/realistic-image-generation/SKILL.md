@@ -1,6 +1,6 @@
 ---
 name: realistic-image-generation
-description: "Generate realistic AI images — especially photoreal people / creator portraits and video KEYFRAMES (start/end frames). Owns the realism model picker (gpt-image-2 default, never let recommend_model downgrade it), the anti-'AI-look' banned tokens + Flux negative prompts, the UGC selfie + demographic templates, the prompt-plausibility (anatomy) pre-check, and the post-generation image-validation rubric. Loaded BY the Storyboard keyframe step / ugc-product-video / generic-video — it produces ONE good image; the board sequences keyframe→clip. NOT a standalone entry point."
+description: "Generate realistic AI images — especially photoreal people / creator portraits and video KEYFRAMES (start/end frames). Owns the realism model picker (strongest realism-and-anatomy model, never let a recommendation tool downgrade it), the anti-'AI-look' banned tokens + negative prompts (provider specifics in `references/providers/fal.md`), the UGC selfie + demographic templates, the prompt-plausibility (anatomy) pre-check, and the post-generation image-validation rubric. Loaded BY the Storyboard keyframe step / ugc-product-video / generic-video — it produces ONE good image; the board sequences keyframe→clip. NOT a standalone entry point."
 when_to_use: Loaded by a creation/storyboard flow when it needs a realistic image — a creator portrait, a character/product reference, or an FLF start/end keyframe — before animating it into a clip. Not triggered directly by user requests.
 tags:
   - generation
@@ -8,6 +8,35 @@ tags:
 ---
 
 # Realistic Image Generation (keyframe + portrait craft)
+
+## Provider gate — read this first
+
+You need a **image** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do image, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for image — call
+   `libi.suggest_provider({ kind: "image" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do image.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for image is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
 
 This is the **image-craft** layer. The Storyboard owns the *workflow* (a card's `keyframe`
 tier → its `clip` tier); `ai-asset-generation` owns the *mechanics* (call the model, save the
@@ -21,56 +50,32 @@ portrait (mandatory for `ugc-product-video` Stage 1), a character/product refere
 start/end keyframe. Phase 4 round 1 shipped a flux/dev portrait with a generic prompt and the
 user flagged it as "doesn't look real" — the fix is both the model and the template.
 
-## Model picker (image gen for realism)
+## Model picker — the rule
 
-**`openai/gpt-image-2` is the hardened default for any realism image — do NOT let
-`recommend_model` OR `search_models` downgrade it.** Image models are the foundation of the whole video
-(FLF and i2v only interpolate/animate the still you give them), so a weak or wrong
-keyframe poisons everything downstream. gpt-image-2 is the strongest at realism,
-prompt-adherence, and — critically — **correct anatomy** (hands, fingers). A weaker
-model botched the anatomy in a real run (a nail file rendered passing *through* a
-finger), which is exactly why this is not negotiable.
+**Pick the strongest realism-and-anatomy model your provider has, and
+never let a recommendation tool downgrade it.** Image models are the foundation of the
+whole video (FLF and i2v only interpolate/animate the still you give them), so a weak or
+wrong keyframe poisons everything downstream. What matters, in order: correct anatomy
+(hands, fingers), prompt-adherence, skin realism.
 
-`recommend_model` AND `search_models` optimize for "a model that can do the task" or
-"what's newest/trendy," NOT for top realism — on **live fal** both surface
-`fal-ai/nano-banana-2` (and Flux variants) at the top for a UGC portrait and never
-even mention gpt-image-2. An agent that "preferred the recommendation"/"took the top
-search hit" shipped the mangled-hand image, and a real-mode run on 2026-06-06 picked
-nano-banana-2 from `search_models` without surfacing gpt-image-2 at all. **Do NOT call
-`recommend_model` or `search_models` to CHOOSE the realism image model — you already
-know it's `openai/gpt-image-2`. Use the fal tools only to confirm gpt-image-2's live
-availability + price (`get_model_schema` / `get_pricing`), never to pick a different
-model over it.** Only fall to the alternates below if `get_model_schema` shows
-gpt-image-2 is genuinely unavailable on the account.
+- **Your provider reference names the model.** `references/providers/<id>.md` under this
+  skill, when this skill ships one for your provider. Read it — it also says which of your
+  provider's tools you may use (schema/pricing, to confirm availability) and which you may
+  not (recommendation/search, to choose).
+- **A provider's "recommend" and "search" tools optimize for capability and novelty, not
+  realism.** On a live provider they routinely put a weaker model at the top for a UGC
+  portrait. An agent that "preferred the recommendation" shipped a mangled-hand image. Use
+  those tools to CONFIRM a model's availability and price, never to pick one.
+- **Budget: surface it, don't silently downgrade.** The keyframes are the
+  highest-leverage place to spend. If the user gave a tight budget, state the trade in one
+  line ("the strong model at ~$X each, or the cheaper one to save ~$Y") and let them decide.
+  Default to the strongest when budget isn't a stated constraint.
+- **If this skill has no reference for your provider**, read its schema tool for the
+  candidate models and pick on anatomy + prompt-adherence; say which you picked and why.
 
-Order of preference (gpt-image-2 first, always):
-
-1. **`openai/gpt-image-2`** — OpenAI's GPT Image 2, **hosted on fal** (uses your
-   fal key — does NOT require a separate `OPENAI_API_KEY`). Strongest realism +
-   prompt-adherence + the only model that reliably renders correct anatomy and
-   on-image text. There's also `openai/gpt-image-2/edit` (masked inpaint/outpaint)
-   for fixing one bad region instead of re-rolling. No negative-prompt field —
-   phrase exclusions positively. **This is the default for any realism image — the
-   FIRST image-generation call in any UGC/realism flow MUST target `openai/gpt-image-2`;
-   pick it without asking `recommend_model` / `search_models` which model to use.**
-2. **`fal-ai/nano-banana-2` / `fal-ai/flux-2-pro`** — capable, but weaker prompt-adherence
-   and anatomy than gpt-image-2 (nano-banana-2 mangled a hand-with-file macro in QA;
-   flux-2-pro produced an anatomically-impossible "palms-out showing fingernails" image).
-   Use only if gpt-image-2 is unavailable.
-3. **`fal-ai/flux-pro/v1.1-ultra`** with `raw: true` — proven previous-generation
-   candid look.
-
-Do NOT use `fal-ai/flux/dev`. Do NOT silently fall back to a weaker model
-because a stronger one "might need a key" — check `list_mcp_servers` /
-`recommend_model` first; gpt-image-2 runs on the fal key you already have.
-
-**Budget vs. quality — surface it, don't silently downgrade.** The keyframes are
-the foundation (FLF/i2v only animate the still you give them), so they're the
-highest-leverage place to spend. gpt-image-2 costs more than flux-2-pro. If the
-user gave a tight budget, do NOT just quietly pick flux-2-pro — state the choice
-in one line ("I'll use gpt-image-2 for the keyframes — strongest realism, ~$X
-each; or flux-2-pro to save ~$Y if you'd rather keep it cheap") and let them
-decide. Default to gpt-image-2 when budget isn't a stated constraint.
+Do NOT silently fall back to a weaker model because a stronger one "might need a key" —
+your provider reference (`references/providers/<id>.md`) names the model to confirm, and
+your provider's own schema tool tells you whether it is available on this account.
 
 ## Banned tokens (remove from any prompt before submit)
 
@@ -84,16 +89,13 @@ studio lighting, golden hour (cliché — now triggers AI aesthetic)
 
 If the user's brief contains any of these, paraphrase before building the engineered prompt.
 
-## Negative prompts (Flux models only — supply as a separate field)
+## Negative prompts
 
-```
-plastic skin, waxy skin, airbrushed, smooth skin, symmetric face,
-perfect teeth, glossy, 3d render, cgi, illustration, painting,
-oversaturated, bokeh blur, studio backdrop, professional headshot,
-model pose, AI generated, deepfake, instagram filter, beauty filter, HDR
-```
-
-`gpt-image-2` doesn't accept negative prompts — for it, phrase every exclusion positively (e.g. "with realistic skin texture and visible pores", not "no plastic skin").
+Some image models take a separate negative-prompt field and some do not. When yours does,
+supply an anti-"AI-look" list — your provider reference has the exact one this skill ships.
+When yours does **not** (gpt-image-2 is the notable case), phrase every exclusion
+positively: "with realistic skin texture and visible pores", not "no plastic skin". A
+negative prompt pasted into a positive field makes the output worse, not better.
 
 ## UGC selfie template
 
@@ -172,10 +174,12 @@ After the image is saved, do BOTH:
    `libi.analysis_save_frames` for keyframes) — both keyed by `fileId`, no
    `analysis_start` call needed — so there's a real record, not a note. This is
    the same un-fakeable discipline as the video Stage 4.5 gate.
-3. **C = regenerate** with a corrected prompt (or use `openai/gpt-image-2/edit`
-   to fix one bad region). Loop until A/B. Counts against `batchCap`. A bad
-   keyframe is the cheapest thing to fix and the most expensive to ignore — a
-   flawed still guarantees a flawed video.
+3. **C = regenerate** with a corrected prompt — or, when the flaw is one localized
+   region and your provider has a masked-edit endpoint (see
+   `references/providers/<id>.md`), inpaint that region instead of re-rolling the
+   whole image. Loop until A/B. Counts against `batchCap`. A bad keyframe is the
+   cheapest thing to fix and the most expensive to ignore — a flawed still
+   guarantees a flawed video.
 
 ## Related
 

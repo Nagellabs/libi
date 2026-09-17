@@ -374,12 +374,14 @@ describe("process.execPath is never a spawn command", () => {
   });
 
   it("the chromium installer does not bake in process.execPath", async () => {
-    const { getCustomInstaller, NODE_COMMAND_SENTINEL } = await import(
+    const { getCustomInstaller, ENSURE_CHROMIUM_INSTALL_SENTINEL } = await import(
       "@/mcp/registry/installers"
     );
     const installer = getCustomInstaller("playwright-chromium");
     expect(installer).toBeDefined();
     expect(installer!.install.command).not.toBe(process.execPath);
-    expect(installer!.install.command).toBe(NODE_COMMAND_SENTINEL);
+    // A sentinel: the one real spawn is in lib/export/ensure-chromium.ts,
+    // which resolves the node at install time via resolveNodeCommand().
+    expect(installer!.install.command).toBe(ENSURE_CHROMIUM_INSTALL_SENTINEL);
   });
 });

@@ -79,6 +79,47 @@ describe("mcp/notify", () => {
     });
   });
 
+  it("navigateAgents({ tab, extensionId }) posts type navigate_agents and resolves true on 2xx", async () => {
+    getCurrentPortMock.mockReturnValue(19999);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(notify.navigateAgents({ tab: "libi-mcp", extensionId: "whisper" })).resolves.toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:19999/api/notify");
+    expect(JSON.parse(init?.body as string)).toEqual({
+      type: "navigate_agents",
+      tab: "libi-mcp",
+      extensionId: "whisper",
+    });
+  });
+
+  it("navigateAgents resolves false when the studio is unreachable, answers non-2xx, or has no port", async () => {
+    getCurrentPortMock.mockReturnValue(19999);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+    await expect(notify.navigateAgents({ tab: "agents" })).resolves.toBe(false);
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 400 })));
+    await expect(notify.navigateAgents({ tab: "agents" })).resolves.toBe(false);
+
+    getCurrentPortMock.mockImplementation(() => {
+      throw new Error("no port file");
+    });
+    await expect(notify.navigateAgents({ tab: "agents" })).resolves.toBe(false);
+  });
+
+  it("studioBaseUrl() is the 127.0.0.1 base, never localhost, and null without a port", async () => {
+    const { studioBaseUrl } = await import("@/mcp/notify");
+    getCurrentPortMock.mockReturnValue(3461);
+    expect(studioBaseUrl()).toBe("http://127.0.0.1:3461");
+    getCurrentPortMock.mockImplementation(() => {
+      throw new Error("no port file");
+    });
+    expect(studioBaseUrl()).toBeNull();
+  });
+
   it("refreshQuery({ queryKey: 'composition', pieceId }) posts the refresh_query payload", async () => {
     getCurrentPortMock.mockReturnValue(19999);
     const fetchMock = vi.fn().mockResolvedValue(new Response(null));

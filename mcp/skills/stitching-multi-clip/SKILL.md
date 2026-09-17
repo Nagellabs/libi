@@ -12,7 +12,7 @@ When the composition has N≥2 video overlays from independently-generated sourc
 
 This skill owns the stitch's CLIP plan (the partition below); **`voiceover-production` owns the
 stitch's VOICE plan.** Load it **before** you draft the audio for any beat — not after you present
-a plan. The default for a voiced AI beat is the main character's `reference-to-video` `@Audio1`
+a plan. The default for a voiced AI beat is the main character's reference-conditioned `@Audio1`
 carry (`generate_audio: true`), NOT laying source audio under the clip as a separate track (the
 mute-and-overlay anti-pattern). A beat/voice plan drafted without `voiceover-production` (and this
 skill) loaded is **provisional** — re-derive the audio half here before generating anything. Do not
@@ -143,8 +143,9 @@ clip the model/footage allows, and reach length through fewer, longer clips — 
 tiny ones. `ugc-craft`'s **Clip-duration methodology** (load it) is the authority and
 applies to the stitch's AI inserts exactly as it does to a full-AI ad.
 
-- **AI inserts:** each insert defaults to the **longest clip Seedance allows (≤15s)** with
-  its beats as **in-prompt jump cuts** — generate ONE longer insert with internal beats
+- **AI inserts:** each insert defaults to the **longest clip the chosen video model
+  allows** (its per-clip max — `ugc-craft` and the model's own guide give it) with its
+  beats as **in-prompt jump cuts** — generate ONE longer insert with internal beats
   rather than several 3–4s inserts. Cut an insert shorter ONLY when the script genuinely
   needs a brief connective beat (a 2–3s product macro between two talking spans).
 - **REUSE source trims:** keep them as **few and as long** as the footage supports — trim
@@ -188,7 +189,7 @@ applies to the stitch's AI inserts exactly as it does to a full-AI ad.
    Omit `rect` for a full-frame `fit:"cover"` layer; omit `duration` to auto-detect it from the file. Set each beat's `startTime` to the cumulative end of the ones before it so they play back-to-back, and give them the SAME `z` band (they never overlap in time). No `trim` unless the beat needs it.
 
 3. **Audio policy — ALWAYS ASK first: reuse the source voice or make a new one? Then default to
-   Seedance `@Audio1` sync (never ElevenLabs by default).** Load `voiceover-production` (REQUIRED
+   the `@Audio1` carry (never a separate TTS voice by default).** Load `voiceover-production` (REQUIRED
    — it is the voice authority and owns the full decision tree); this step is the **stitch
    always-ask gate** it points to.
 
@@ -203,15 +204,17 @@ applies to the stitch's AI inserts exactly as it does to a full-AI ad.
      (do NOT mute them)**, cut ONE clean **≤15s** sample of it
      (`libi.extract_audio({ fileId, format: "mp3", startSeconds, endSeconds })`, never
      `format:"copy"` → AAC is REJECTED, HTTP 422), and generate every new AI talking-head beat on
-     `bytedance/seedance-2.0/reference-to-video` with that sample as `@Audio1` (+ the beat's start
+     the **reference-conditioned endpoint** (`references/providers/<id>.md` under
+     `voiceover-production` says which kind of endpoint that is and where its id lives)
+     with that sample as `@Audio1` (+ the beat's start
      frame as `@Image1`, `generate_audio:true`). The new beats then speak in the source voice →
-     one voice across the whole video, **no silent gaps, no ElevenLabs**. A new on-camera creator
+     one voice across the whole video, **no silent gaps, no separate TTS voice**. A new on-camera creator
      is a *visual* swap; the voice stays the source's, and the bookend lines should bridge the
      kept middle VO.
    - **Fresh voice — when the reused beats have NO dialogue, or the user wants a new voice.**
      Establish it from the FIRST new AI clip's native audio (`generate_audio:true`) → sample it →
-     `@Audio1` on every other AI beat for continuity; mute (or leave ambient) the dialogue-free
-     reused scenes under that voice.
+     `@Audio1` on every other AI beat (the reference-conditioned endpoint) for continuity; mute
+     (or leave ambient) the dialogue-free reused scenes under that voice.
    - Always **generate voice on AI clips** (`generate_audio:true`) — a clip can be muted +
      replaced later, but a silent generation is a defect.
    - **Match the source's speaking DELIVERY in the AI clip prompt.** The `@Audio1` carry
@@ -237,8 +240,10 @@ applies to the stitch's AI inserts exactly as it does to a full-AI ad.
      explicitly bridges any time/topic jump ("…okay, two weeks later —"). The seam-trim choice is
      therefore TWO constraints at once: a face-free edge (Physical continuity) AND a clean
      spoken-clause edge.
-   - Put the local sample + each start frame on the fal CDN via **`libi.upload_file_to_fal({ fileId })`**
-     first — **NEVER** read `FAL_KEY` from the DB/env/shell or `PUT`/`curl` to fal storage yourself.
+   - Put the local sample + each start frame on the provider's CDN with the provider's own
+     upload tool first (see `references/providers/<id>.md` under `voiceover-production`, which
+     owns this skill's provider material) — **NEVER** read a provider key from the
+     DB/env/shell or `PUT`/`curl` bytes to provider storage yourself.
      Reuse the SAME `@Audio1` on every AI beat; persist it as a per-character voice asset
      (`using-character-library`) for the other variations.
 
@@ -301,7 +306,7 @@ At export time the composition genuinely concatenates — that is handled by the
 
 - `libi.concat_videos` `-c copy` fast path: $0 (CPU-only ffmpeg, sub-second).
 - Re-encode fallback: $0 (CPU-only ffmpeg, ~0.5 s per second of input at 720p).
-- No fal-ai calls.
+- No generation-provider calls.
 
 ## Logger tag
 

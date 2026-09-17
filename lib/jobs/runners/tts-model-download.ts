@@ -26,7 +26,8 @@ export const ttsModelDownloadRunner: JobRunner<
   paramsSchema,
   // The HF/GitHub download has no clean midpoint; restart on retry.
   resumable: false,
-  // uv wheel fetch + ~110 MB model pull runs silent for minutes.
+  // uv wheel fetch + ~121 MB model pull (`KOKORO_DOWNLOAD_MB`) runs silent
+  // for minutes.
   noProgressTimeoutMs: null,
   async run(
     ctx: JobContext<TtsModelDownloadParams>,

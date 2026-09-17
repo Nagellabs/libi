@@ -80,6 +80,25 @@ export interface JobContext<P> {
   /** True after `DELETE /api/jobs/[id]` flips status to `cancel-requested`. Runner polls
    *  this at natural boundaries and bails out cleanly. */
   shouldCancel(): boolean;
+  /**
+   * Suspend the no-progress watchdog for a phase that legitimately cannot
+   * report — and only that phase. Returns a release function; re-arming stamps
+   * a fresh baseline, so the excused time is never counted against the job.
+   * Nestable (refcounted): the watchdog resumes when the last pause is released.
+   *
+   * The case this exists for: a runner's timeout is tuned to its OWN work, and
+   * a first-use DEPENDENCY INSTALL in front of that work reports on a
+   * completely different cadence. `tracking`'s 60 s is right for per-frame
+   * ticks and wrong for a 173 MB Chromium download whose installer emits one
+   * line per 10 % — over 60 s apart on a slow link — behind a 33 MB model
+   * fetch that emits nothing at all. The watchdog then killed the tracker and
+   * reported it as a tracking failure.
+   *
+   * Never wrap the runner's actual work in this: a job that cannot go silent
+   * is the whole point of the watchdog. Optional so the many hand-built test
+   * contexts stay valid — call it as `ctx.pauseWatchdog?.()`.
+   */
+  pauseWatchdog?(): () => void;
   /** True when this row was created by an explicit `forceNew` enqueue — the
    *  caller asked to start over, so any partial OUTPUT the runner owns (not
    *  just the job's checkpoint state, which JobManager already cleared) may be

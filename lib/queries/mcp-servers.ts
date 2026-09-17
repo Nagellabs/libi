@@ -45,37 +45,6 @@ export function useMcpServers() {
   });
 }
 
-export function useCreateMcpServer() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (
-      body: {
-        name: string;
-        type: "stdio" | "http";
-        command?: string;
-        args?: string[];
-        url?: string;
-        headers?: Record<string, string>;
-        envVars?: Record<string, string>;
-        requireApproval?: boolean;
-      }
-    ): Promise<McpServerRecord> => {
-      const res = await fetch("/api/settings/mcp-servers", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) throw new Error("Failed to create MCP server");
-      const data = await res.json();
-      return data.server;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: mcpServerKeys.all });
-    },
-  });
-}
-
 export function useUpdateMcpServer() {
   const queryClient = useQueryClient();
 
@@ -83,17 +52,7 @@ export function useUpdateMcpServer() {
     mutationFn: async ({
       id,
       ...body
-    }: { id: string } & Partial<{
-      name: string;
-      type: "stdio" | "http";
-      command: string;
-      args: string[];
-      url: string;
-      headers: Record<string, string>;
-      envVars: Record<string, string>;
-      enabled: boolean;
-      requireApproval: boolean;
-    }>): Promise<McpServerRecord> => {
+    }: { id: string; requireApproval?: boolean }): Promise<McpServerRecord> => {
       const res = await fetch(`/api/settings/mcp-servers/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -102,22 +61,6 @@ export function useUpdateMcpServer() {
       if (!res.ok) throw new Error("Failed to update MCP server");
       const data = await res.json();
       return data.server;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: mcpServerKeys.all });
-    },
-  });
-}
-
-export function useDeleteMcpServer() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (id: string): Promise<void> => {
-      const res = await fetch(`/api/settings/mcp-servers/${id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error("Failed to delete MCP server");
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: mcpServerKeys.all });
@@ -159,8 +102,15 @@ export function useRetryMcpServer() {
 
 export type { DepRuntimeStatus, DependencyStatus } from "@/mcp/registry/types";
 
-export function useMcpServerDependencies(id: string) {
+export function useMcpServerDependencies(
+  id: string,
+  /** `enabled: false` stops the poll entirely — for a subscriber that is
+   *  mounted but not on screen (an extension card while the document is
+   *  hidden, say), where the 2–3 s refetch would otherwise keep going. */
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   return useQuery({
+    enabled,
     queryKey: ["mcp-server-dependencies", id],
     queryFn: async (): Promise<DependencyStatus[]> => {
       const res = await fetch(`/api/settings/mcp-servers/${id}/dependencies`);
@@ -199,6 +149,33 @@ export function useRetryDependency(mcpId: string) {
     onSuccess: () => {
       // Bump the cache so the user sees "installing" immediately and the
       // 2s poll kicks in.
+      queryClient.invalidateQueries({ queryKey: ["mcp-server-dependencies", mcpId] });
+      queryClient.invalidateQueries({ queryKey: mcpServerKeys.all });
+    },
+  });
+}
+
+/**
+ * Delete an extension's downloaded files (models, its own uv env) and return
+ * the row to `pending`. The response carries the bytes actually freed, which
+ * the caller reports — a Remove that silently frees nothing is the failure
+ * mode worth surfacing.
+ */
+export function useRemoveExtension(mcpId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (): Promise<{ freedBytes: number }> => {
+      const res = await fetch(`/api/settings/mcp-servers/${mcpId}/remove`, {
+        method: "POST",
+      });
+      const body = (await res.json().catch(() => ({}))) as {
+        error?: string;
+        freedBytes?: number;
+      };
+      if (!res.ok) throw new Error(body.error ?? "Remove failed");
+      return { freedBytes: body.freedBytes ?? 0 };
+    },
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["mcp-server-dependencies", mcpId] });
       queryClient.invalidateQueries({ queryKey: mcpServerKeys.all });
     },

@@ -1,6 +1,6 @@
 ---
 name: installing-mcps
-description: Use when the user asks you to install, set up, configure, repair, or fix an MCP server. Drives the get_install_plan → follow plan → update_dep_status → verify_install flow with appropriate progress updates.
+description: Use when the user asks you to install, set up, configure, repair, or fix a libi extension. Drives the get_install_plan → follow plan → verify → update_dep_status flow with appropriate progress updates.
 ---
 
 # Installing MCPs
@@ -25,20 +25,37 @@ The install plan is the single source of truth. This skill is the generic wrappe
 
 3. **Follow the plan step-by-step.** Use your native Bash tool for shell commands the plan asks you to run; use Read / Write for files. Some plans install through a dedicated tool instead of shell commands — e.g. `libi-tracking` installs via `libi.install_tracking_engine` — and when the plan names such a tool, call it; do not improvise the install by hand. Keep the user informed at meaningful checkpoints (e.g. "Downloading model weights (~480 MB)…", "uv sync complete"). Do not narrate every sub-step.
 
-4. **On success — mark installed and verify.**
+4. **On success — verify, then mark installed.**
+
+   **Verify with the check that belongs to THIS extension.** There is no generic
+   verify tool, and reaching for the wrong one gives you a confident answer about
+   something else:
+
+   - **`libi-tracking`** — and only this one — is verified by
+     `libi.verify_install()`, **with no arguments**. It runs the engine self-test
+     and persists the dependency row the tracking gate reads. Passing it another
+     extension's id is refused: its `missing[]` is always the tracking engine's
+     (`tracking-pyenv`, `uv`, the ONNX models), so an answer about `local-music`
+     would be a lie in the shape of a result.
+   - **Every other extension** (`whisper`, `local-tts`, `local-music`,
+     `youtube-download`, `libi-export`) has no server and no self-test. Its real
+     verification is **re-calling the tool that returned `status: "needs_install"`**
+     — `libi.generate_music`, `libi.generate_speech`,
+     `libi.analysis_transcribe_audio`, `libi.download_video`. That re-checks the
+     same gate the install had to satisfy. For a dep-by-dep readout, re-run
+     `libi.get_install_plan({ mcpId: "<id>" })` and read its `dependencies` array.
+
+   Only after that check passes:
 
    ```
    libi.update_dep_status({ mcpId: "<id>", status: "installed" })
-   libi.verify_install({ mcpId: "<id>" })
    ```
 
-   Only call `update_dep_status("installed")` after the plan's final step succeeds AND `verify_install` returns `ok: true`. Then restart the server:
+   `libi-tracking` is also the only extension that runs an MCP server, so
+   `libi.restart_mcp_server({ mcpId: "libi-tracking" })` applies to it alone —
+   do not call it for the others, which have nothing to restart.
 
-   ```
-   libi.restart_mcp_server({ mcpId: "<id>" })
-   ```
-
-   Tell the user: "✓ \<Name\> is installed and running."
+   Tell the user: "✓ \<Name\> is installed and ready."
 
 5. **On failure — mark failed with the error.**
 
@@ -50,7 +67,7 @@ The install plan is the single source of truth. This skill is the generic wrappe
 
 ## REPAIR flow
 
-Use this flow when the prompt includes "failed to install or run", "diagnose and repair", or `verify_install` returns `ok: false`.
+Use this flow when the prompt includes "failed to install or run", "diagnose and repair", or the extension's own check (step 4 above) still fails after an install.
 
 1. **Diagnose first.**
 
@@ -76,11 +93,13 @@ Use this flow when the prompt includes "failed to install or run", "diagnose and
 
 5. **Verify and close.**
 
-   ```
-   libi.verify_install({ mcpId: "<id>" })
-   ```
+   Run the same extension-specific check as step 4 of the INSTALL flow —
+   `libi.verify_install()` (no arguments) for `libi-tracking`, otherwise re-call
+   the tool that reported `needs_install`.
 
-   If `ok: true`: mark installed, restart, tell the user. If still failing: mark `failed` with the error, surface it verbatim, and ask the user how to proceed.
+   If it passes: mark installed, restart `libi-tracking` if that is the one, and
+   tell the user. If still failing: mark `failed` with the error, surface it
+   verbatim, and ask the user how to proceed.
 
 ## Consent checkpoints
 

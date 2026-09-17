@@ -13,6 +13,7 @@
 import { getCurrentPort } from "@/lib/libi-home";
 import { LibiServerUnavailableError } from "@/mcp/jobs-client";
 import { mcpLogger as logger } from "@/lib/logger";
+import { reportToolProgress } from "./tool-progress";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
 import type {
   ServerRequest,
@@ -39,12 +40,18 @@ export interface ExportVideoResult {
   height: number;
   /** Echoed back so the agent can show progress / cancellation references. */
   jobId: string;
+  /** True when this export began by downloading Chromium (first canvas
+   *  export on this machine) — so the agent can explain the extra time. */
+  chromiumDownloaded?: boolean;
 }
 
 interface ExportEnqueueResp {
   jobId: string;
   destFolder: string;
   filename: string;
+  /** Set by the route when Chromium is absent: the approximate size of the
+   *  download this export may start with. Null once it is installed. */
+  chromiumDownloadMb?: number | null;
   settings: {
     format: "mp4" | "webm";
     width: number;
@@ -129,6 +136,17 @@ export async function exportVideo(
     "export_video: job enqueued, waiting for completion",
   );
 
+  // Disclose the cost BEFORE the wait begins. `waitForJobCompletion` blocks
+  // until the job ends, so anything said afterwards is said too late.
+  // Also rides the job_progress side channel so Claude's chat row shows it.
+  if (enq.chromiumDownloadMb) {
+    await reportToolProgress(extra, {
+      progress: 0,
+      total: enq.chromiumDownloadMb,
+      message: `first canvas export downloads Chromium, ~${enq.chromiumDownloadMb} MB`,
+    });
+  }
+
   // Now attach to the running job so we forward progress. We don't re-enqueue
   // (forceNew would create a second job); instead we use runJobViaServer's
   // attach path by sending the same params again with `attachIfExists` — but
@@ -151,6 +169,7 @@ export async function exportVideo(
     data: {
       ...result.value,
       jobId: enq.jobId,
+      chromiumDownloaded: Boolean(enq.chromiumDownloadMb),
     },
   };
 }

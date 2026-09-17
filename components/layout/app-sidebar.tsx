@@ -2,16 +2,15 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { Blocks, BookOpen, Loader2, Plug, Plus, Settings } from "lucide-react";
+import { BookOpen, Bot, Loader2, Plus, Settings } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
 
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { LibiMark } from "@/components/brand/libi-mark";
 import AgentSelector from "@/components/sessions/agent-selector";
 import SidebarSessionList from "@/components/sessions/sidebar-session-list";
 import CliPresetSelector from "@/components/terminal/cli-preset-selector";
-import { CodexConnectNudge } from "@/components/sessions/codex-connect-nudge";
+import { usePresetReadiness } from "@/components/terminal/use-preset-readiness";
 import { useEditorState } from "@/lib/editor-state-context";
 import { useRuntimeInfo } from "@/lib/queries/runtime";
 import {
@@ -27,10 +26,9 @@ import {
   useTerminalSessions,
 } from "@/lib/queries/terminals";
 import { MAX_TERMINAL_SESSIONS } from "@/lib/terminal/types";
+import { getPreset } from "@/lib/terminal/presets";
 import { readinessMessage } from "@/lib/agents/agent-readiness";
-import { getAgentSetup } from "@/lib/agents/setup/registry";
-import type { TerminalRemedy } from "@/lib/agents/terminal-remedy";
-import { useRunRemedyInTerminal } from "@/hooks/agents/use-run-remedy-in-terminal";
+import { agentSetupHref } from "@/lib/agents/setup/registry";
 import { toast } from "sonner";
 import {
   Sidebar,
@@ -54,90 +52,15 @@ import {
 
 type AppSidebarProps = React.ComponentProps<typeof Sidebar>;
 
-/** How long to wait for a freshly-created terminal's xterm to mount and attach
- *  before pasting the remedy into it. The insert listener is registered in a
- *  `useEffect` keyed on the terminal id (components/terminal/terminal-view.tsx),
- *  so it cannot exist until React has committed that subtree. */
-
-
-/**
- * A way back to the connect screen, for as long as there is anything to go
- * back to.
- *
- * The connect screen is not a route — it is `rightRegionMode === "onboarding"`
- * inside `/editor`. The mode survives navigation (EditorStateProvider lives at
- * the `(app)` layout and is never unmounted), so the state was never the
- * problem. The problem was that NOTHING in this sidebar navigates to /editor:
- * the libi mark only toggles the sidebar, Instructions/MCPs/Settings are all
- * elsewhere, and a first-run user has no session to click. The one control
- * that does route there is `+`, which starts a chat session — the exact thing
- * that cannot work until an agent is connected.
- *
- * So a user who opened Settings mid-setup was stranded. This row is the way
- * back, and it stops existing the moment `agentEverConnected` flips — it is a
- * task, not a destination.
- */
-function SetUpAgentRow(): React.ReactElement | null {
-  const { sessionList } = useEditorState();
-  // Same query key as the editor page and PersonaModal — one shared fetch.
-  const { data, refetch } = useQuery<{ agentEverConnected?: boolean }>({
-    queryKey: ["onboarding-state"],
-    queryFn: async () => (await fetch("/api/onboarding/state")).json(),
-  });
-
-  // `agentEverConnected` flips server-side the first time an agent completes a
-  // session, and NOTHING invalidated this key — only the persona modal did. So
-  // the row went on offering setup to a user who had just finished it, until
-  // a reload. Readiness reaching `ready` is the client-side echo of that same
-  // event, and it is already on the context this sidebar reads.
-  // Optional chaining: several test doubles for useSessionList predate
-  // `readiness`, and an incomplete mock must read as "not ready", not throw.
-  const readinessState = sessionList?.readiness?.state;
-  React.useEffect(() => {
-    if (readinessState !== "ready") return;
-    void refetch();
-  }, [readinessState, refetch]);
-  // A ready agent IS "you have connected one", known client-side and instantly.
-  // The refetch above is the durable answer but it races the server write that
-  // flips `agentEverConnected`, so on its own the row lingered after a
-  // successful connect. This is the immediate one.
-  if (readinessState === "ready") return null;
-  // Absent data means "not loaded yet", NOT "finished" — rendering the row on
-  // a hunch would flash it at every returning user on every cold start.
-  if (!data || data.agentEverConnected) return null;
-  return (
-    <SidebarMenuItem>
-      <SidebarMenuButton
-        // The param, rather than a bare /editor link: the user may already
-        // have SELECTED an agent that turned out to be signed out, and the
-        // editor leaves onboarding as soon as one is selected. Asking for the
-        // screen explicitly is what makes the link work in that state.
-        render={<Link href="/editor?setup=agent" />}
-        tooltip="Finish connecting a coding agent"
-        className="cursor-pointer"
-      >
-        <Plug className="size-4 text-primary" />
-        <span>Connect an agent</span>
-        <span
-          aria-hidden
-          className="ml-auto size-1.5 shrink-0 rounded-full bg-primary group-data-[collapsible=icon]:hidden"
-        />
-      </SidebarMenuButton>
-    </SidebarMenuItem>
-  );
-}
-
 export function AppSidebar(props: AppSidebarProps) {
   const { toggleSidebar } = useSidebar();
   const {
     agentProviders,
     activeProviderId,
     isAgentConnecting,
-    selectAgent,
     sessionList,
     terminalCliId,
     setActiveTerminalId,
-    setRightRegionMode,
   } = useEditorState();
   const pathname = usePathname();
   const router = useRouter();
@@ -175,9 +98,16 @@ export function AppSidebar(props: AppSidebarProps) {
   const isTerminalSurface = activeProviderId === "terminal";
   const { data: terminalSessions } = useTerminalSessions(isTerminalSurface);
   const createTerminal = useCreateTerminal();
-  const runRemedyInTerminal = useRunRemedyInTerminal();
   const terminalAtCapacity =
     (terminalSessions?.length ?? 0) >= MAX_TERMINAL_SESSIONS;
+  // The "+" launches the SELECTED preset (Claude Code by default). If that
+  // preset's agent is not ready it opens the agent's setup instead of typing a
+  // command the shell can't run — the same rule the preset dropdown applies.
+  const { isNotReady: isPresetNotReady } = usePresetReadiness({
+    enabled: isTerminalSurface,
+  });
+  const terminalPresetNotReady =
+    isTerminalSurface && isPresetNotReady(terminalCliId);
 
   const activeProvider = agentProviders.find((p) => p.id === activeProviderId);
 
@@ -187,29 +117,15 @@ export function AppSidebar(props: AppSidebarProps) {
   // and are obliged to say it rather than imply progress.
   const readiness = sessionList.readiness;
   const needsAuth = readiness.state === "needs-auth";
-  const authRemedy: TerminalRemedy | null = needsAuth ? readiness.remedy : null;
-  // The OBSERVED readiness carries its own agentId — more reliable here than
-  // `activeProviderId`, which is optimistic client state. Used only to
-  // report the bounded `agent_sign_in_opened` funnel param.
-  const authAgentId: string | null = readiness.state === "needs-auth" ? readiness.agentId : null;
-  // `not-installed` used to echo the server's raw reason verbatim, which for
-  // Claude Code is the sentence Task 10 retires everywhere else — "Claude
-  // Code support failed to install — restart libi to retry." — an assertion
-  // nobody here can act on (this row has no Install button; the agent
-  // dropdown's row does, see components/sessions/agent-selector.tsx). When
-  // the not-installed agent declares an install step, point at that real
-  // action instead of repeating the dead end. An agent with no declared
-  // install step (Codex — libi ships its engine) has nothing to point at, so
-  // the server's own reason is still the honest thing to show.
-  const readinessNote = (() => {
-    if (readiness.state === "not-installed") {
-      const setup = activeProviderId ? getAgentSetup(activeProviderId) : null;
-      if (setup?.install) {
-        return `${setup.name} isn't installed yet — open the agent menu and press Install.`;
-      }
-    }
-    return readinessMessage(readiness);
-  })();
+  const readinessNote = readinessMessage(readiness);
+  // Not ready to chat for an observed reason: the sidebar says so in ONE line
+  // and links to that agent's setup on the Agents page. The OBSERVED readiness
+  // carries its own agentId; `activeProviderId` is optimistic client state, so
+  // it is only the fallback.
+  const notReady = needsAuth || readiness.state === "not-installed";
+  const setupHref = agentSetupHref(needsAuth ? readiness.agentId : activeProviderId);
+  const showSetupLine =
+    notReady && !isTerminalSurface && !isAgentConnecting && readinessNote !== null;
 
   // The dot used to go green the instant `_activeAgentId` was set, which is
   // before anything has been proven — that is how an agent that could never
@@ -238,6 +154,10 @@ export function AppSidebar(props: AppSidebarProps) {
 
   const handleNewChat = async () => {
     if (isTerminalSurface) {
+      if (terminalPresetNotReady) {
+        router.push(agentSetupHref(terminalCliId));
+        return;
+      }
       try {
         const meta = await createTerminal.mutateAsync(terminalCliId);
         setActiveTerminalId(meta.id);
@@ -250,14 +170,10 @@ export function AppSidebar(props: AppSidebarProps) {
       return;
     }
 
-    // A session cannot be created while the agent is unauthenticated, so don't
-    // fire a POST we know will 500. Do the thing that actually helps instead.
-    if (needsAuth) {
-      if (authRemedy) {
-        await runRemedyInTerminal(authRemedy, authAgentId ?? "", "sidebar");
-        return;
-      }
-      toast.error(readinessNote ?? "This agent needs to be signed in.");
+    // A session cannot be created while the agent isn't ready, so don't fire a
+    // POST we know will fail. Take the user to the agent's setup instead.
+    if (notReady) {
+      router.push(setupHref);
       return;
     }
 
@@ -266,14 +182,7 @@ export function AppSidebar(props: AppSidebarProps) {
       toast.error(error);
       return;
     }
-    if (sessionId) {
-      // Starting a chat is a way OUT of the connect takeover. Deriving this
-      // from "is a session active?" cannot work — that is equally true when
-      // the session list merely finishes loading, which slams the screen shut
-      // on a deliberate visit. The click is the unambiguous signal.
-      setRightRegionMode("editor");
-      if (pathname !== "/editor") router.push("/editor");
-    }
+    if (sessionId && pathname !== "/editor") router.push("/editor");
   };
 
   // Mid-switch, every input below still describes the PREVIOUS agent, so the
@@ -283,11 +192,13 @@ export function AppSidebar(props: AppSidebarProps) {
   const canCreate = isAgentConnecting
     ? false
     : isTerminalSurface
-      ? !createTerminal.isPending && !terminalAtCapacity
-      : // `needs-auth` deliberately ENABLES the button: it now opens the
-        // sign-in remedy. A dead control with an explanation nobody can reach
-        // is what we are removing.
-        sessionList.canCreate || needsAuth;
+      ? // A not-ready preset enables the button for the same reason a
+        // not-ready agent does: it opens that agent's setup.
+        terminalPresetNotReady || (!createTerminal.isPending && !terminalAtCapacity)
+      : // A not-ready agent deliberately ENABLES the button: it opens that
+        // agent's setup on the Agents page. A dead control with an explanation
+        // nobody can reach is what we are removing.
+        sessionList.canCreate || notReady;
   const newButtonLabel = isTerminalSurface ? "New terminal" : "New chat";
 
   /** What the tooltip says when the button can't (or shouldn't) start a chat.
@@ -302,12 +213,14 @@ export function AppSidebar(props: AppSidebarProps) {
     return "Preparing a new chat session…";
   })();
 
-  /** The tooltip actually rendered — an enabled `needs-auth` button still has
+  /** The tooltip actually rendered — an enabled not-ready button still has
    *  to explain itself, so "enabled" and "nothing to say" are not the same. */
   const newButtonTooltip = (() => {
-    if (needsAuth) {
-      const problem = readinessNote ?? "This agent needs to be signed in.";
-      return authRemedy ? `${problem} — ${authRemedy.label}` : problem;
+    if (terminalPresetNotReady) {
+      return `${getPreset(terminalCliId)?.label ?? "This CLI"} isn't ready — Set up in Agents`;
+    }
+    if (notReady) {
+      return readinessNote ? `${readinessNote} — Set up in Agents` : "Set up in Agents";
     }
     return canCreate ? newButtonLabel : newButtonBlockedLabel;
   })();
@@ -340,15 +253,6 @@ export function AppSidebar(props: AppSidebarProps) {
       </SidebarHeader>
 
       <SidebarContent className="gap-1">
-        {/* Setup first, then the selector it makes useful. In the footer this
-            row sat among Instructions / MCPs / Settings and read as one more
-            page; here it reads as the thing to press before the dropdown below
-            it can do anything. */}
-        <SidebarGroup className="pb-0">
-          <SidebarMenu>
-            <SetUpAgentRow />
-          </SidebarMenu>
-        </SidebarGroup>
         {/* Agent selector — scopes the sessions list below */}
         <SidebarGroup>
           <SidebarGroupLabel className="group-data-[collapsible=icon]:hidden">
@@ -364,9 +268,19 @@ export function AppSidebar(props: AppSidebarProps) {
               <CliPresetSelector />
             </div>
           ) : null}
-          {/* First-use nudge: only when Codex is selected (agent or terminal
-              preset) on the canonical instance; self-suppresses otherwise. */}
-          <CodexConnectNudge />
+          {/* Not ready to chat: one line — the server's own words — and the
+              way to fix it. */}
+          {showSetupLine ? (
+            <div className="flex flex-col gap-1 px-2 pb-1 group-data-[collapsible=icon]:hidden">
+              <p className="text-xs leading-snug text-muted-foreground">{readinessNote}</p>
+              <Link
+                href={setupHref}
+                className="w-fit cursor-pointer text-xs font-medium text-primary underline-offset-4 hover:underline"
+              >
+                Set up in Agents
+              </Link>
+            </div>
+          ) : null}
           {/* Icon-collapsed: colored status dot that expands the sidebar */}
           <button
             type="button"
@@ -432,13 +346,13 @@ export function AppSidebar(props: AppSidebarProps) {
           </SidebarMenuItem>
           <SidebarMenuItem>
             <SidebarMenuButton
-              render={<Link href="/mcps-skills" />}
-              tooltip="MCPs & Skills"
-              isActive={pathname.startsWith("/mcps-skills")}
+              render={<Link href="/agents" />}
+              tooltip="Agents"
+              isActive={pathname.startsWith("/agents")}
               className="cursor-pointer"
             >
-              <Blocks className="size-4" />
-              <span>MCPs & Skills</span>
+              <Bot className="size-4" />
+              <span>Agents</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

@@ -70,6 +70,16 @@ describe("parseScenario", () => {
     expect(s.prompt).toBe("Hi.");
   });
 
+  it("keeps mcps: [fal-ai] parsing to the same value — it means the test-mode fake", () => {
+    const s = parseScenario(SAMPLE, "demo.md");
+    expect(s.mcps).toEqual(["fal-ai"]);
+  });
+
+  it("accepts a libi extension id in mcps:", () => {
+    const s = parseScenario(SAMPLE.replace("mcps: [fal-ai]", "mcps: [youtube-download, fal-ai]"), "demo.md");
+    expect(s.mcps).toEqual(["youtube-download", "fal-ai"]);
+  });
+
   it("parses falStrict frontmatter (defaults false)", () => {
     const withStrict = parseScenario(
       `---\nid: x\nfalStrict: true\n---\n## Prompt\nhi\n`, "x.md",
@@ -78,5 +88,68 @@ describe("parseScenario", () => {
 
     const without = parseScenario(`---\nid: y\n---\n## Prompt\nhi\n`, "y.md");
     expect(without.falStrict).toBe(false);
+  });
+});
+
+/** Every eval prompt was suffixed with a preamble telling the agent it is
+ *  "PRE-AUTHORIZED to run the entire workflow to completion, including every paid
+ *  generation tool", which makes "prefer the free path" unassertable suite-wide — an agent
+ *  has read a provider reference, correctly stated that the paid route is opt-in only, and
+ *  then taken it anyway, citing that sentence. `preauthorize: false` is the opt-out. */
+describe("parseScenario — preauthorize", () => {
+  const withFm = (fm: string) => `---\nid: demo\n${fm}\n---\n\n## Prompt\nDo a thing.\n`;
+
+  it("defaults to true, because an unattended run must not stall on a question", () => {
+    expect(parseScenario(withFm("title: D"), "demo.md").preauthorize).toBe(true);
+  });
+
+  it("honours an explicit opt-out and an explicit opt-in", () => {
+    expect(parseScenario(withFm("preauthorize: false"), "demo.md").preauthorize).toBe(false);
+    expect(parseScenario(withFm("preauthorize: true"), "demo.md").preauthorize).toBe(true);
+  });
+
+  it("rejects a non-boolean rather than silently pre-authorizing", () => {
+    // `preauthorize: "false"` truthily read as opt-IN would spend money in a scenario
+    // written to assert it does not — the exact failure this key exists to prevent.
+    expect(() => parseScenario(withFm('preauthorize: "false"'), "demo.md")).toThrow(
+      /"preauthorize" must be a boolean/,
+    );
+  });
+});
+
+/** Before this key there was no way for a scenario to declare input media, so every
+ *  scenario that reads an existing clip was unrunnable (several carry `assertions: []`).
+ *  The allow-shape is deliberately narrow: repo-relative, no `..`, validated at parse time
+ *  so a typo fails before anything is spawned. */
+describe("parseScenario — fixtures", () => {
+  const withFm = (fm: string) => `---\nid: demo\n${fm}\n---\n\n## Prompt\nDo a thing.\n`;
+
+  it("defaults to an empty list", () => {
+    expect(parseScenario(withFm("title: D"), "demo.md").fixtures).toEqual([]);
+  });
+
+  it("accepts repo-relative paths, as a string or a list", () => {
+    expect(
+      parseScenario(withFm("fixtures: __tests__/fixtures/audio/jfk.wav"), "demo.md").fixtures,
+    ).toEqual(["__tests__/fixtures/audio/jfk.wav"]);
+    expect(
+      parseScenario(withFm("fixtures: [__tests__/fixtures/audio/jfk.wav]"), "demo.md").fixtures,
+    ).toEqual(["__tests__/fixtures/audio/jfk.wav"]);
+  });
+
+  it("rejects an absolute path", () => {
+    expect(() => parseScenario(withFm("fixtures: [/etc/passwd]"), "demo.md")).toThrow(
+      /must be repo-relative/,
+    );
+  });
+
+  it("rejects a path that climbs out of the repo", () => {
+    expect(() => parseScenario(withFm("fixtures: [../../../etc/passwd]"), "demo.md")).toThrow(
+      /may not escape the repo/,
+    );
+    // …including one that only escapes after normalisation.
+    expect(() =>
+      parseScenario(withFm("fixtures: [__tests__/../../secrets.env]"), "demo.md"),
+    ).toThrow(/may not escape the repo/);
   });
 });

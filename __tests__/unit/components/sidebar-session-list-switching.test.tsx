@@ -18,6 +18,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 let isAgentConnecting = false;
 let activeProviderId: string | null = "claude-code";
 let groups: Array<{ label: string; sessions: Array<{ sessionId: string; title: string }> }> = [];
+let readiness: { state: string; agentId?: string; message?: string; reason?: string } = { state: "ready" };
 
 vi.mock("@/lib/editor-state-context", () => ({
   useEditorState: () => ({
@@ -29,15 +30,12 @@ vi.mock("@/lib/editor-state-context", () => ({
       isLoading: false,
       activeSessionId: null,
       switchSession: vi.fn(),
-      readiness: { state: "ready" },
+      readiness,
       canListSessions: true,
     },
   }),
 }));
 
-vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
-  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
-}));
 vi.mock("@/hooks/sessions/use-agent-chat", () => ({
   usePendingApprovalCount: () => 0,
   useSessionGenerating: () => false,
@@ -78,6 +76,7 @@ beforeEach(() => {
   });
   isAgentConnecting = false;
   activeProviderId = "claude-code";
+  readiness = { state: "ready" };
   groups = [
     { label: "Today", sessions: [{ sessionId: "s1", title: "A chat with the old agent" }] },
   ];
@@ -110,5 +109,34 @@ describe("SidebarSessionList — switching agents", () => {
     const { default: List } = await import("@/components/sessions/sidebar-session-list");
     renderList(List);
     expect(screen.queryByTestId("terminal-list")).toBeNull();
+  });
+});
+
+/**
+ * An agent that can't chat yet has no sessions for a reason. The sidebar says
+ * that reason once, above this list, with its "Set up in Agents" link — so the
+ * list must neither repeat it nor say "No sessions yet", which invites the user
+ * to make a session they can't make.
+ */
+describe("SidebarSessionList — an agent that isn't ready", () => {
+  it.each([
+    [{ state: "needs-auth", agentId: "claude-code", message: "Claude Code isn't signed in on this machine." }],
+    [{ state: "not-installed", reason: "Claude Code isn't set up yet — open Agents to install it." }],
+  ])("renders nothing for an empty list under %o", async (notReady) => {
+    readiness = notReady;
+    groups = [];
+    const { default: List } = await import("@/components/sessions/sidebar-session-list");
+    const { container } = renderList(List);
+    expect(screen.queryByText(/no sessions yet/i)).toBeNull();
+    expect(screen.queryByText(/signed in|set up yet/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /sign in/i })).toBeNull();
+    expect(container.querySelector("[data-sidebar='group']")).toBeNull();
+  });
+
+  it("still lists sessions that already exist", async () => {
+    readiness = { state: "needs-auth", agentId: "claude-code", message: "Claude Code isn't signed in on this machine." };
+    const { default: List } = await import("@/components/sessions/sidebar-session-list");
+    renderList(List);
+    expect(screen.getByText("A chat with the old agent")).toBeInTheDocument();
   });
 });

@@ -1,11 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-/** The 12 core tracking tools. Hosted on BOTH the always-on core `libi`
+/** The 10 core tracking tools. Hosted on BOTH the always-on core `libi`
  *  MCP (so the agent always has them) AND the standalone libi-tracking MCP
  *  (packaging parity) via the single shared registerTrackingTools(). */
 export const TRACKING_TOOL_NAMES = [
   "libi.compute_object_track",
-  "libi.compute_object_track_providers",
   "libi.compute_track_segment",
   "libi.skip_segment",
   "libi.list_track_segments",
@@ -15,7 +14,6 @@ export const TRACKING_TOOL_NAMES = [
   "libi.add_tracked_overlay",
   "libi.update_tracked_overlay",
   "libi.update_track_result",
-  "libi.refine_track_with_sam2",
 ] as const;
 
 /** Names of tools registered on a McpServer instance. Uses the SDK's

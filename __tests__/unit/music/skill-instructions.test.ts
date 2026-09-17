@@ -27,4 +27,27 @@ describe("music skill + instruction wiring", () => {
     expect(md).toContain("libi.music_list_styles");
     expect(md).toContain("libi.music_download_model");
   });
+  /** The exhaustive pins (Stage 6 verbatim, both references, the gate) are in
+   *  `__tests__/unit/skills/recreate-skills.test.ts`; these two are the music domain's own
+   *  check that the default did not quietly become a paid provider. */
+  it("music-creation defaults to the local model and defers paid providers", () => {
+    const md = fs.readFileSync(
+      path.resolve("mcp/skills/music-creation/SKILL.md"),
+      "utf-8",
+    );
+    expect(md).toContain("libi.generate_music");
+    expect(md).toMatch(/local ACE-Step \(default, recommended\)/);
+    expect(md).not.toContain("ELEVENLABS_API_KEY");
+    expect(md).not.toContain("FAL_KEY");
+    expect(md).toContain("references/providers/");
+  });
+  it("music-creation ships references for both paid music providers", () => {
+    const dir = "mcp/skills/music-creation/references/providers";
+    expect(
+      fs.readFileSync(path.resolve(dir, "elevenlabs.md"), "utf-8"),
+    ).toContain("compose_music");
+    expect(fs.readFileSync(path.resolve(dir, "fal.md"), "utf-8")).toMatch(
+      /Stable Audio/i,
+    );
+  });
 });

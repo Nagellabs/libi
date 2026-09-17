@@ -626,3 +626,26 @@ describe("useSessionUnviewed (finished while you were elsewhere)", () => {
     expect(result.current).toBe(false);
   });
 });
+
+describe("useAgentChat — shellEnvLoaded", () => {
+  it("reads as loaded while the history has not answered", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => new Promise(() => {})));
+    const { result } = renderHook(() => useAgentChat(SESSION));
+    await act(async () => {});
+    expect(result.current.shellEnvLoaded).toBe(true);
+  });
+  it("follows the server once it answers", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({ ok: true, json: async () => ({ messages: [], shellEnvLoaded: false }) })),
+    );
+    const { result } = renderHook(() => useAgentChat(SESSION));
+    await act(async () => {});
+    expect(result.current.shellEnvLoaded).toBe(false);
+  });
+  it("a history response without the field reads as loaded", async () => {
+    const { result } = renderHook(() => useAgentChat(SESSION));
+    await act(async () => {});
+    expect(result.current.shellEnvLoaded).toBe(true);
+  });
+});

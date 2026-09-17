@@ -40,10 +40,17 @@ import {
   type SelfUpdateProbeResult,
 } from "./self-update-probe";
 
-/** First check waits for boot I/O to settle; then every 6h, matching the
- *  npm check's SUCCESS_TTL (`lib/runtime/update-check.ts`). */
-const FIRST_CHECK_DELAY_MS = 15_000;
-const RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+/** First check is deliberately early. The renderer fetches `/api/runtime/update` as the
+ *  window loads, so it will always beat this — the point is that the client's FIRST poll
+ *  (`IDLE_POLL_MS`, 30s) lands on a settled answer instead of on `phase: "idle"`. At 15s
+ *  it did not, and nothing was scheduled to correct the card: that is how a 0.1.9 found
+ *  at boot+15s went unmentioned for 41 minutes on 2026-09-07.
+ *
+ *  Then hourly rather than six-hourly, so a release that lands mid-session surfaces in
+ *  the same sitting. The feed request is a few hundred bytes, and whether anything is
+ *  DOWNLOADED is still gated by `autoDownload` + the write probe. */
+export const FIRST_CHECK_DELAY_MS = 5_000;
+export const RECHECK_INTERVAL_MS = 60 * 60 * 1000;
 /** Beat between "verified on disk" and the restart, so a 2s UI poll can
  *  show "Restarting Libi…" instead of the app just vanishing. */
 const INSTALL_DELAY_MS = 2_500;
@@ -59,7 +66,7 @@ const INSTALL_DELAY_MS = 2_500;
  *
  * Bounded on purpose. An unbounded retry against a genuinely dead connection
  * is a background process burning bandwidth on a metered link; after these,
- * the 6h re-check starts the download over on its own.
+ * the hourly re-check starts the download over on its own.
  */
 const DOWNLOAD_RETRY_DELAYS_MS = [5_000, 20_000];
 
@@ -251,7 +258,7 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
     }
   });
   autoUpdater.on("error", (err) => {
-    // A failed auto-download is status, not a dialog: the 6h re-check (or
+    // A failed auto-download is status, not a dialog: the hourly re-check (or
     // "Check again") starts it over. `error` renders as nothing, like the
     // npm check's `unknown`.
     //
@@ -306,7 +313,7 @@ export function initShellUpdater(runtime: LoadedRuntime, log: (msg: string) => v
   });
 
   /**
-   * Re-run the write probe. Called before EVERY check — boot, the 6h timer,
+   * Re-run the write probe. Called before EVERY check — boot, the hourly timer,
    * and "Check again" — so a user who drags the app into Applications while
    * Libi is open sees the block clear without restarting.
    */

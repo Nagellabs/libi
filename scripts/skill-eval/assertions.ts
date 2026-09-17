@@ -84,15 +84,62 @@ function evalCount(n: number, expr: string): boolean {
   return compare(n, target, op);
 }
 
-export function evaluate(trace: TraceCall[], matchers: Matcher[]): AssertionResult[] {
+const TRACE_SELECTORS = [
+  "tool",
+  "endpoint_id",
+  "where",
+  "provider",
+  "voice_id",
+  "model_id",
+  "unknown_endpoint",
+] as const;
+
+/** Number of non-overlapping occurrences of `needle` in `haystack`. */
+function occurrences(haystack: string, needle: string): number {
+  if (needle === "") throw new Error("transcript_contains must not be empty");
+  let n = 0;
+  let i = haystack.indexOf(needle);
+  while (i !== -1) {
+    n++;
+    i = haystack.indexOf(needle, i + needle.length);
+  }
+  return n;
+}
+
+export function evaluate(
+  trace: TraceCall[],
+  matchers: Matcher[],
+  transcript = "",
+): AssertionResult[] {
   return matchers.map((m) => {
     const hasExpect = m.expect !== undefined;
     const hasCount = m.count !== undefined;
     if (hasExpect === hasCount) {
       throw new Error(`Matcher must set exactly one of "expect" or "count": ${JSON.stringify(m)}`);
     }
-    const matched = selectCalls(trace, m);
-    const n = matched.length;
+
+    let n: number;
+    let matched: TraceCall[] = [];
+    if (m.transcript_contains !== undefined) {
+      const clash = TRACE_SELECTORS.filter((k) => m[k] !== undefined);
+      if (clash.length) {
+        throw new Error(
+          `transcript_contains cannot be combined with trace selectors (${clash.join(", ")}): ${JSON.stringify(m)}`,
+        );
+      }
+      const needles = Array.isArray(m.transcript_contains)
+        ? m.transcript_contains
+        : [m.transcript_contains];
+      if (needles.length === 0) {
+        throw new Error(`transcript_contains must not be an empty list: ${JSON.stringify(m)}`);
+      }
+      n = needles.reduce((sum, needle) => sum + occurrences(transcript, needle), 0);
+    } else {
+      matched = selectCalls(trace, m);
+      n = matched.length;
+    }
+
+    const subject = m.transcript_contains !== undefined ? "transcript occurrences" : "matching call";
 
     if (hasExpect) {
       const pass = m.expect === "present" ? n >= 1 : n === 0;
@@ -101,9 +148,11 @@ export function evaluate(trace: TraceCall[], matchers: Matcher[]): AssertionResu
         pass,
         matchedCount: n,
         offendingCalls: pass ? undefined : m.expect === "absent" ? matched : [],
-        reason: pass ? undefined : m.expect === "present"
-          ? "expected ≥1 matching call, found 0"
-          : `expected 0 matching calls, found ${n}`,
+        reason: pass
+          ? undefined
+          : m.expect === "present"
+            ? `expected ≥1 ${subject}, found 0`
+            : `expected 0 ${subject}, found ${n}`,
       };
     }
 
@@ -113,7 +162,7 @@ export function evaluate(trace: TraceCall[], matchers: Matcher[]): AssertionResu
       pass,
       matchedCount: n,
       offendingCalls: pass ? undefined : matched,
-      reason: pass ? undefined : `count ${n} does not satisfy "${m.count}"`,
+      reason: pass ? undefined : `${subject} count ${n} does not satisfy "${m.count}"`,
     };
   });
 }

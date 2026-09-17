@@ -1,64 +1,34 @@
 import type { McpServerRecord } from "@/lib/db/schema/types";
-import { BUNDLED_MCP_SERVERS } from "./bundled";
+import { EXTENSION_MCP_SERVERS } from "./bundled";
 
 /**
- * Build the "External Tools" markdown section for agent instructions.
- * Returns empty string if no external MCPs are relevant.
+ * Build the "libi extensions" markdown section for agent instructions.
+ *
+ * Extensions are libi's own on-device capabilities. Their tools are ALWAYS
+ * listed on the core server and answer `needs_install` before install, so this
+ * section never describes availability — it carries only the approval contract
+ * and each extension's own guidance. Third-party MCPs are not described at all:
+ * the agent sees them in its live tool list, and libi does not manage them.
  */
-export function buildExternalToolsSection(mcpRows: McpServerRecord[]): string {
-  const enabled = mcpRows.filter((r) => r.enabled);
-  if (enabled.length === 0) return "";
+export function buildExtensionsSection(mcpRows: McpServerRecord[]): string {
+  const byId = new Map(mcpRows.map((r) => [r.id, r]));
+  const lines: string[] = [];
 
-  const available = enabled.filter(
-    (r) => r.installStatus === "installed" || r.installStatus === "not_required"
-  );
-  const unavailable = enabled.filter(
-    (r) => r.installStatus === "failed" || r.installStatus === "pending" || r.installStatus === "checking"
-  );
-
-  if (available.length === 0 && unavailable.length === 0) return "";
-
-  const lines: string[] = ["\n## External Tools\n"];
-
-  if (available.length > 0) {
-    lines.push(
-      "The following external MCP servers are connected to this session. " +
-      "Their tools appear in your tool list alongside the built-in `libi.*` tools — " +
-      "call them directly like any other tool.\n"
-    );
-    for (const row of available) {
-      lines.push(`- **${row.name}**: ${row.description ?? "No description."}`);
-      if (row.requireApproval) {
-        lines.push(
-          `  REQUIRES APPROVAL — Before calling any ${row.name} tool, you MUST describe the action to the user and wait for explicit confirmation.`
-        );
-      }
-      const bundled = BUNDLED_MCP_SERVERS.find((b) => b.id === row.id);
-      if (bundled?.agentInstructions) {
-        lines.push(`  ${bundled.agentInstructions}`);
-      }
+  for (const def of EXTENSION_MCP_SERVERS) {
+    const row = byId.get(def.id);
+    if (!row) continue;
+    if (!row.requireApproval && !def.agentInstructions) continue;
+    if (lines.length === 0) lines.push("\n## libi extensions\n");
+    lines.push(`- **${def.name}**: ${def.description}`);
+    if (row.requireApproval) {
+      lines.push(
+        `  REQUIRES APPROVAL — before calling any of ${def.toolPrefixes.join(", ")}, describe what you are about to do and wait for explicit confirmation.`,
+      );
     }
-    lines.push("");
+    if (def.agentInstructions) lines.push(`  ${def.agentInstructions}`);
   }
 
-  if (unavailable.length > 0) {
-    lines.push("The following MCP servers are currently unavailable due to installation issues:\n");
-    for (const row of unavailable) {
-      const reason = row.installError ?? "Installation pending";
-      lines.push(`- **${row.name}**: ${reason}`);
-      const bundled = BUNDLED_MCP_SERVERS.find((b) => b.id === row.id);
-      if (bundled?.installPlanPath) {
-        lines.push(
-          `  This is an optional extended engine you can install on demand: call \`libi.get_install_plan({ id: "${row.id}" })\` to get the step-by-step install guide, then follow it.`
-        );
-      } else {
-        lines.push(
-          `  If the user asks to use ${row.name}, explain that it is not currently available and suggest they check the MCP Servers settings page.`
-        );
-      }
-    }
-    lines.push("");
-  }
-
+  if (lines.length === 0) return "";
+  lines.push("");
   return lines.join("\n");
 }

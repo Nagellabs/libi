@@ -38,7 +38,7 @@ describe("restartMcpServer", () => {
 
   it("returns success=true for a known MCP id", async () => {
     const result = await restartMcpServer(
-      { mcpId: "youtube-downloader" },
+      { mcpId: "libi-tracking" },
       { sessionId: "abc123" },
     );
     expect(result.success).toBe(true);
@@ -48,12 +48,12 @@ describe("restartMcpServer", () => {
   });
 
   it("invalidates the mcp-config cache so the reload picks up fresh state", async () => {
-    await restartMcpServer({ mcpId: "youtube-downloader" }, { sessionId: "abc123" });
+    await restartMcpServer({ mcpId: "libi-tracking" }, { sessionId: "abc123" });
     expect(invalidateMock).toHaveBeenCalled();
   });
 
   it("schedules a session reload for the current session", async () => {
-    await restartMcpServer({ mcpId: "youtube-downloader" }, { sessionId: "abc123" });
+    await restartMcpServer({ mcpId: "libi-tracking" }, { sessionId: "abc123" });
     expect(scheduleReloadMock).toHaveBeenCalledWith("abc123");
   });
 
@@ -70,7 +70,7 @@ describe("restartMcpServer", () => {
     // THIS session, but still invalidates config + rebuilds standby and returns
     // success with new-chat guidance — it does NOT hard-fail.
     const result = await restartMcpServer(
-      { mcpId: "youtube-downloader" },
+      { mcpId: "libi-tracking" },
       { sessionId: "" },
     );
     expect(result.success).toBe(true);

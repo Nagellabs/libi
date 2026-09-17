@@ -36,6 +36,11 @@ export interface CustomInstaller {
     args: string[];
     timeoutMs?: number;
   };
+  /** Runs once after `install` completed AND `verify()` confirmed it, with the
+   *  path verify returned. For post-install bookkeeping the install command
+   *  itself cannot do (the Chromium installer stamps its revision dir for the
+   *  boot prune). Must never throw — it is on the success path. */
+  onInstalled?: (installedPath: string) => void;
 }
 
 export interface FileEntry {
@@ -78,6 +83,16 @@ export interface BundledDependency {
    * the client bundle never sees `fs`/`playwright-core` imports.
    */
   customInstallerId?: string;
+  /**
+   * libi installs this dep ON DEMAND — inside the first job that needs it
+   * (`lib/export/ensure-chromium.ts` for `libi-export`'s chromium) — never at
+   * boot, and never "automatically" from the Settings page. The Settings chip
+   * reads this to offer a Download button while the dep is pending and a
+   * Re-download action once it is installed (both on the retry-dep route),
+   * instead of the Category A copy that promises an automatic download.
+   * Surfaced to the UI as `DependencyStatus.manualInstall`.
+   */
+  manualInstall?: boolean;
   /** Multi-file mode — used by model bundles. Mutually exclusive with archive/downloadUrl. */
   files?: FileEntry[];
   /**
@@ -209,17 +224,39 @@ export interface DependencyStatus {
   /** Optional progress for installs in progress. */
   bytesDownloaded?: number;
   bytesTotal?: number;
+  /** Mirrors `BundledDependency.manualInstall` — installed on demand by libi,
+   *  so the chip offers Download / Re-download instead of "will start
+   *  automatically". Present only when true. */
+  manualInstall?: boolean;
 }
 
 export interface BundledMcpDef {
-  /** Stable ID used for DB upsert (e.g., "youtube-downloader", "libi") */
+  /** Stable ID used for DB upsert (e.g., "youtube-download", "libi") */
   id: string;
   name: string;
   description: string;
+  /**
+   * "core" — the libi server itself (`core: true`). "extension" — a libi-owned
+   * on-device capability whose tools are ALWAYS listed on the core server and
+   * return `needs_install` until its deps land. There is no third kind: libi
+   * ships no third-party MCPs.
+   */
+  kind: "core" | "extension";
+  /**
+   * Tool-name prefixes this def owns, e.g. `["libi.generate_music", "libi.music_"]`.
+   * Matched with `startsWith` against the REGISTERED tool name (dotted, as passed
+   * to `server.registerTool`). Drives the extension approval gate
+   * (`lib/agents/session-event-handler.ts#decidePermissionAction`) and the
+   * Settings extension rows. Empty for the core def.
+   */
+  toolPrefixes: string[];
   /** Null when `core === true` (libi itself is not an npm package). */
   npmUrl: string | null;
-  /** Optional PyPI URL when the package is Python (e.g., elevenlabs-mcp). */
-  pypiUrl?: string | null;
+  /**
+   * Every surviving def is stdio (or `noServer`). libi holds no provider key,
+   * so there is no `url` / `headers` / `requiredEnvVars` here —
+   * a third-party HTTP def has nowhere to put its bearer token, by design.
+   */
   type: "stdio" | "http";
   /**
    * Core entries (`core: true`) are not spawned as external MCPs — they
@@ -227,37 +264,21 @@ export interface BundledMcpDef {
    */
   command: string;
   args: string[];
-  /** HTTP-only: endpoint URL. Required when `type === "http"`. */
-  url?: string;
-  /**
-   * HTTP-only: request headers. Values may reference `${VAR}` placeholders
-   * which are substituted from the row's `envVars` at config-emit time.
-   */
-  headers?: Record<string, string>;
   requireApproval: boolean;
   /** True for the libi server row — hides disable/approval/delete controls in UI. */
   core?: boolean;
   /**
-   * When true the row is seeded + surfaced (Settings, list_bundled_mcps,
-   * install plan, update_dep_status) but NEVER spawned as an MCP server.
+   * When true the row is seeded + surfaced (the Agents → Libi MCP
+   * tab, install plan, update_dep_status) but NEVER spawned as an
+   * MCP server.
    * Used for capability rows whose work runs inside libi's own MCP/tools
    * (e.g. `whisper`, whose transcription runs through analysis_transcribe_audio).
    * Filtered out of the spawn list at the same point the libi-core row is.
    */
   noServer?: boolean;
   dependencies: BundledDependency[];
-  /**
-   * Env vars that MUST be present in the row's `envVars` JSON for the MCP
-   * to register. If any are missing, installStatus becomes "needs_config".
-   * Empty/undefined = no config required.
-   */
-  requiredEnvVars?: string[];
   /** Extra instructions injected into agent context. Ignored for core entries. */
   agentInstructions?: string;
-  /** Marks an MCP whose tools spend money or produce paid generations.
-   *  Tools from generation: true MCPs require user approval in the `auto` mode
-   *  but auto-resolve in `auto-with-generations`. No effect in `ask` mode. */
-  generation?: boolean;
   /**
    * When set, libi treats this MCP as "owned": instead of spawning via
    * `npx -y <pkg>@latest` (registry roundtrip + npm-lock contention), the

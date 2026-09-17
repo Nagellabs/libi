@@ -1,8 +1,14 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { act, render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+// The modal must not navigate: it sits over the Agents tab, where setup goes on.
+// Mocked so any router use would be observable (Next's throws outside an app router).
+const push = vi.fn();
+const replace = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push, replace }) }));
+
 import { PersonaModal } from "@/components/onboarding/persona-modal";
 
 /**
@@ -24,6 +30,39 @@ function wrap(ui: React.ReactElement) {
   return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
 }
 
+/** A persona save that succeeds, and a state that reflects it. */
+function savingFetch() {
+  let saved = false;
+  return vi.fn(async (url: string) => {
+    if (url === "/api/onboarding/state") return new Response(JSON.stringify({ needsPersona: !saved }), { status: 200 });
+    if (url === "/api/onboarding/persona") {
+      saved = true;
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  });
+}
+
+const TABBABLE = 'button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * One press of Tab as a browser performs it: the key goes to the focused element,
+ * and unless a handler prevents it, focus moves to the next (or, with Shift, the
+ * previous) tabbable element in document order, wrapping around. jsdom moves no
+ * focus on a key press by itself.
+ */
+async function pressTab(shift: boolean) {
+  const active = (document.activeElement as HTMLElement | null) ?? document.body;
+  const proceed = fireEvent.keyDown(active, { key: "Tab", code: "Tab", shiftKey: shift });
+  if (!proceed) return;
+  const order = Array.from(document.querySelectorAll<HTMLElement>(TABBABLE)).filter((el) => !el.closest("[inert]"));
+  const at = order.indexOf(active);
+  const next = shift ? order[(at <= 0 ? order.length : at) - 1] : order[(at + 1) % order.length];
+  await act(async () => {
+    next.focus();
+  });
+}
+
 function stubStateFetch(needsPersona: boolean) {
   return vi.fn(async (url: string) => {
     if (url === "/api/onboarding/state") {
@@ -36,6 +75,8 @@ function stubStateFetch(needsPersona: boolean) {
 describe("PersonaModal", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    push.mockClear();
+    replace.mockClear();
   });
 
   it("does not render when the user has already picked a persona", async () => {
@@ -119,6 +160,163 @@ describe("PersonaModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /retry/i }));
 
     await waitFor(() => expect(personaCalls).toBe(2));
+  });
+
+  it("a successful pick closes the modal without navigating anywhere; a rejected save keeps it open", async () => {
+    let status = 500;
+    let personaSaved = false;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === "/api/onboarding/state") {
+        return new Response(JSON.stringify({ needsPersona: !personaSaved }), { status: 200 });
+      }
+      if (url === "/api/onboarding/persona") {
+        if (status === 200) personaSaved = true;
+        return new Response(JSON.stringify(status === 200 ? { ok: true } : { error: "boom" }), { status });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    wrap(<PersonaModal />);
+    await screen.findByText(/welcome to libi/i);
+
+    fireEvent.click(screen.getByRole("button", { name: /solo creator/i }));
+    await screen.findByText(/couldn.t save/i);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    status = 200;
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(push).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+  });
+
+  it("is a modal dialog laid over the page it is mounted on, which stays rendered beneath it", async () => {
+    vi.stubGlobal("fetch", stubStateFetch(true));
+    wrap(
+      <>
+        <div data-testid="agents-tab">the Agents tab</div>
+        <PersonaModal />
+      </>,
+    );
+    const dialog = await screen.findByRole("dialog", { name: /welcome to libi/i });
+    expect(dialog).toBeVisible();
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(screen.getByTestId("agents-tab")).toBeInTheDocument();
+  });
+
+  it("keeps keyboard focus inside the question: Tab and Shift+Tab never reach the Agents tab behind it", async () => {
+    vi.stubGlobal("fetch", stubStateFetch(true));
+    wrap(
+      <>
+        <button type="button">Agents</button>
+        <PersonaModal />
+      </>,
+    );
+    const dialog = await screen.findByRole("dialog", { name: /welcome to libi/i });
+    const behind = screen.getByText("Agents");
+    // Opening the question moves focus into it.
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+
+    for (const shift of [false, true]) {
+      for (let i = 0; i < 10; i += 1) {
+        await pressTab(shift);
+        expect(document.activeElement).not.toBe(behind);
+        await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+      }
+    }
+  });
+
+  it("can't be dismissed: Escape and a press outside it leave the question open, and the agent pick behind it out of reach", async () => {
+    vi.stubGlobal("fetch", stubStateFetch(true));
+    const pickAgent = vi.fn();
+    wrap(
+      <>
+        <button type="button" onClick={pickAgent}>
+          Claude Code
+        </button>
+        <PersonaModal />
+      </>,
+    );
+    const dialog = await screen.findByRole("dialog", { name: /welcome to libi/i });
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+    const behind = screen.getByText("Claude Code");
+    const stillOpen = async () => {
+      // Give a close a chance to land before asserting it didn't.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      expect(screen.getByRole("dialog", { name: /welcome to libi/i })).toBeVisible();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      // Hidden from assistive tech and out of the keyboard's reach while the question is up.
+      expect(screen.queryByRole("button", { name: "Claude Code" })).toBeNull();
+      expect(document.activeElement).not.toBe(behind);
+    };
+
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "Escape", code: "Escape" });
+    fireEvent.keyUp(document.activeElement as HTMLElement, { key: "Escape", code: "Escape" });
+    await stillOpen();
+
+    // A left-button press and release on the backdrop — the click base-ui treats as dismissal.
+    const backdrop = screen.getByTestId("persona-modal-backdrop");
+    for (const target of [backdrop, document.body]) {
+      fireEvent.pointerDown(target, { button: 0, pointerType: "mouse" });
+      fireEvent.mouseDown(target, { button: 0 });
+      fireEvent.pointerUp(target, { button: 0, pointerType: "mouse" });
+      fireEvent.mouseUp(target, { button: 0 });
+      fireEvent.click(target, { button: 0 });
+      await stillOpen();
+    }
+    // Nothing here actually dispatches a click through the backdrop onto the
+    // button behind it — jsdom does no hit-testing and doesn't enforce `inert`,
+    // so a click landing on `pickAgent` can't be simulated. What proves the pick
+    // is out of reach is `stillOpen()`: the button is gone from the accessibility
+    // tree and focus never lands on it.
+  });
+
+  it("after a pick, goes back to the page the question interrupted", async () => {
+    window.history.replaceState(null, "", "/agents?tab=agents&returnTo=%2Feditor%3Fpiece%3Dp1");
+    try {
+      vi.stubGlobal("fetch", savingFetch());
+      wrap(<PersonaModal />);
+      await screen.findByText(/welcome to libi/i);
+      fireEvent.click(screen.getByRole("button", { name: /developer/i }));
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/editor?piece=p1"));
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("never follows a place to go back to that is off this app: it stays on the Agents tab", async () => {
+    window.history.replaceState(null, "", "/agents?tab=agents&returnTo=https%3A%2F%2Fevil.example%2Feditor");
+    try {
+      vi.stubGlobal("fetch", savingFetch());
+      wrap(<PersonaModal />);
+      await screen.findByText(/welcome to libi/i);
+      fireEvent.click(screen.getByRole("button", { name: /developer/i }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      expect(replace).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
+  });
+
+  it("never follows a place to go back to that only reaches another site once its dot-segments are resolved", async () => {
+    // `/.//evil.example/` resolves to `//evil.example/`, which a browser takes as another host.
+    window.history.replaceState(null, "", "/agents?tab=agents&returnTo=%2F.%2F%2Fevil.example%2F");
+    try {
+      vi.stubGlobal("fetch", savingFetch());
+      wrap(<PersonaModal />);
+      await screen.findByText(/welcome to libi/i);
+      fireEvent.click(screen.getByRole("button", { name: /developer/i }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+      expect(replace).not.toHaveBeenCalled();
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      window.history.replaceState(null, "", "/");
+    }
   });
 
   it("has no skip, close, or restart-libi escape hatch", async () => {

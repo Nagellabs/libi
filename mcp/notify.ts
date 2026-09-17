@@ -2,10 +2,19 @@ import { getCurrentPort } from "@/lib/libi-home";
 
 /**
  * Lightweight HTTP client for notifying the Next.js server about UI events.
- * All calls are fire-and-forget — silently no-op if the server isn't running.
+ *
+ * Fire-and-forget by default — silently no-ops if the server isn't running.
+ * `send` reports whether the POST actually landed, which most callers ignore;
+ * the one that must not is `navigateAgents`, because `libi.show_extension` and
+ * `libi.start_onboarding` tell the agent a page is on screen and that claim has
+ * to be true.
  */
 
-function getServerUrl(): string | null {
+/** The studio's base URL — `http://127.0.0.1:<port>`, never `localhost`.
+ *  The ONE base helper: the notify POSTs and every URL handed to an agent
+ *  (`libi.suggest_provider`'s `agentsPageUrl`) are built from it. Null when no
+ *  studio port is known. */
+export function studioBaseUrl(): string | null {
   try {
     const port = getCurrentPort();
     return `http://127.0.0.1:${port}`;
@@ -14,19 +23,23 @@ function getServerUrl(): string | null {
   }
 }
 
-async function send(payload: Record<string, unknown>): Promise<void> {
-  const url = getServerUrl();
-  if (!url) return;
+/** True when the studio accepted the notification; false for every failure
+ *  (no port file, unreachable, non-2xx, timeout). Never throws. */
+async function send(payload: Record<string, unknown>): Promise<boolean> {
+  const url = studioBaseUrl();
+  if (!url) return false;
 
   try {
-    await fetch(`${url}/api/notify`, {
+    const res = await fetch(`${url}/api/notify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(3000),
     });
+    return res.ok;
   } catch {
     // Fire-and-forget — server may not be running.
+    return false;
   }
 }
 
@@ -56,16 +69,11 @@ export const notify = {
   analysisChanged(event: { fileId: string }): void {
     send({ type: "analysis_changed", ...event });
   },
-  /** Tell the server to navigate the user to Settings (optionally focusing an MCP card). */
-  navigateSettings(event: { mcpId?: string }): void {
-    send({ type: "navigate_settings", mcpId: event.mcpId });
-  },
-  /** Tell the server to open or switch the right-region panel (onboarding, api-config, etc.). */
-  rightRegion(event: {
-    mode: "editor" | "onboarding" | "api-config";
-    mcpId?: string;
-  }): void {
-    send({ type: "right_region", ...event });
+  /** Send the user to the Agents page. The ONE method that
+   *  hands its promise back: `libi.show_extension` and `libi.start_onboarding`
+   *  report "navigated" only when the POST landed. */
+  navigateAgents(event: { tab: "agents" | "libi-mcp" | "providers"; extensionId?: string; provider?: string }): Promise<boolean> {
+    return send({ type: "navigate_agents", ...event });
   },
   /** Flash an inspector field for an overlay (guided edit). */
   highlight(event: {
@@ -112,8 +120,22 @@ export const notify = {
     toolName?: string;
     toolArgs?: unknown;
     progressLabel?: string;
+    message?: string;
   }): void {
     send({ type: "job_progress", ...event });
+  },
+  /** A NON-job tool's progress line on the SAME `job_progress` pipe as
+   *  `jobProgress` — no second route. `jobId: ""` tells the session bridge there is no
+   *  job to attach (no Stop button); `message` replaces the `<kind> done/total unit` line. */
+  toolProgress(event: {
+    toolCallId?: string;
+    toolName?: string;
+    toolArgs?: unknown;
+    done: number;
+    total: number;
+    message: string;
+  }): void {
+    send({ type: "job_progress", jobId: "", kind: "", unit: "", etaMs: null, ...event });
   },
 };
 
@@ -126,8 +148,8 @@ export type Notifier = {
 let notifier: Notifier | null = null;
 
 /** Bind the runtime notifier. Called from `electron/main.ts` after window
- *  creation. In `npx libi --connect-agent` mode this is never called and
- *  `pushIfBackgrounded` silently no-ops. */
+ *  creation. Under `npx @nagellabs/libi` (no desktop shell) this is never
+ *  called and `pushIfBackgrounded` silently no-ops. */
 export function bindNotifier(n: Notifier): void {
   notifier = n;
 }

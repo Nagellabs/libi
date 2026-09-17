@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   DownloadIcon,
   ExternalLinkIcon,
@@ -12,11 +12,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
+import { compareVersions } from "@/lib/runtime/version-compare";
 import {
   blockedShellUpdate,
   isInstallInFlight,
+  isShellAutoDownloadWindow,
+  isShellSelfRestarting,
   isShellInstallInFlight,
   restartOffer,
+  SHELL_CHECK_STALE_MS,
   updateOffer,
   type BlockedShellUpdate,
   useInstallRuntimeUpdate,
@@ -165,11 +169,36 @@ function sourceLabel(source: string): string {
   return "development checkout";
 }
 
+/** The version that will be running after a restart, and why it is not running yet.
+ *  Null when what is running IS the newest thing on disk.
+ *
+ *  A staged runtime and a running download can both exist at once — 0.1.13 landed and
+ *  is waiting for a restart while 0.1.14 is already being fetched. Showing only the
+ *  staged one made the newer download invisible, so when both exist this shows
+ *  whichever version is actually NEWER (there is only ever one row here either way). */
+export function pendingRuntimeLine(
+  dto: RuntimeUpdateDto,
+): { version: string; state: "downloading" | "ready" } | null {
+  const staged = dto.pendingVersion
+    ? { version: dto.pendingVersion, state: "ready" as const }
+    : null;
+  const downloading =
+    isInstallInFlight(dto) && dto.install?.version
+      ? { version: dto.install.version, state: "downloading" as const }
+      : null;
+  if (staged && downloading) {
+    return compareVersions(downloading.version, staged.version) > 0 ? downloading : staged;
+  }
+  return staged ?? downloading;
+}
+
 function VersionLine({ dto }: { dto: RuntimeUpdateDto }) {
-  // Two labeled rows, so "which of these is the app I dragged to
-  // /Applications?" never needs a support answer. The runtime is what the
-  // user experiences; the desktop shell re-ships rarely and is expected to
-  // trail it.
+  // Three labeled rows, so "which of these is the app I dragged to
+  // /Applications?" — and "which one is actually running right now?" — never
+  // need a support answer. The runtime is what the user experiences; the
+  // desktop shell re-ships rarely and is expected to trail it; "Next launch"
+  // only appears once there is something that isn't running yet.
+  const pending = pendingRuntimeLine(dto);
   return (
     <div className="space-y-0.5">
       <div className="flex items-baseline gap-2">
@@ -186,6 +215,15 @@ function VersionLine({ dto }: { dto: RuntimeUpdateDto }) {
           <span className="w-24 text-xs text-muted-foreground">Desktop app</span>
           <span className="font-mono text-sm text-foreground">
             {dto.shell.currentVersion}
+          </span>
+        </div>
+      )}
+      {pending && (
+        <div className="flex items-baseline gap-2">
+          <span className="w-24 text-xs text-muted-foreground">Next launch</span>
+          <span className="font-mono text-sm text-foreground">{pending.version}</span>
+          <span className="text-xs text-muted-foreground">
+            {pending.state === "ready" ? "downloaded — applies at next launch" : "downloading…"}
           </span>
         </div>
       )}
@@ -225,6 +263,28 @@ export function UpdatesSection() {
   const offer = useMemo(() => updateOffer(data), [data]);
   const blocked = useMemo(() => blockedShellUpdate(data), [data]);
 
+  // Mount re-check: a card that opened on a snapshot taken before the shell's
+  // last feed check (or one that never happened) has no other way to learn
+  // about it — the poll interval only speeds up once something is ALREADY
+  // moving. `useRecheckRuntimeUpdate()` returns a new mutation object every
+  // render, so `recheck` is NOT what keeps this to one shot — the effect
+  // below re-runs on every render regardless. The `askedForCheck` ref is what
+  // makes it one forced GET per mount: it is set to true BEFORE `mutate()` is
+  // called, so a forced check that FAILS is not retried for the life of the
+  // mount. That is deliberate, not a gap to close with retry machinery — the
+  // user's "Check again" button is the retry, and a background retry loop
+  // against an unreachable feed is exactly what rule 1 above ("a failed check
+  // is invisible") exists to avoid. Also never fires when this install has no
+  // shell channel at all (a dev tree / npx install).
+  const askedForCheck = useRef(false);
+  useEffect(() => {
+    if (askedForCheck.current || !data?.shell) return;
+    const checkedAt = data.shell.checkedAt;
+    if (checkedAt !== null && Date.now() - checkedAt < SHELL_CHECK_STALE_MS) return;
+    askedForCheck.current = true;
+    recheck.mutate();
+  }, [data?.shell, recheck]);
+
   if (isLoading) {
     return (
       <div className="space-y-3">
@@ -249,6 +309,9 @@ export function UpdatesSection() {
   const shellFailed = offer?.target === "shell" && data.shell?.error != null;
   const state = data.update.state;
   const restartRequested = !restart.isIdle;
+  // An old shell at `ready` is quitting into its update on its own. It counts as
+  // in-flight, but "Downloading" is the wrong word for a download that finished.
+  const shellSelfRestarting = isShellSelfRestarting(data.shell);
 
   return (
     <div
@@ -260,14 +323,41 @@ export function UpdatesSection() {
     >
       <div className="flex items-center gap-2">
         <h3 className="text-sm font-semibold text-foreground">Version</h3>
-        {ready && !restartRequested && <Badge variant="default">Update ready</Badge>}
-        {!ready && offer && !anyInstalling && (
+        {/* Mutually exclusive: something in flight outranks a stationary offer, which
+            outranks nothing at all. An OLD shell's self-restarting "ready" plus a
+            staged runtime used to show BOTH "Update ready" and "Downloading" at once
+            while the body only ever said "Restarting Libi…" — one badge per state. */}
+        {shellSelfRestarting ? (
+          <Badge variant="secondary">Restarting</Badge>
+        ) : anyInstalling ? (
+          <Badge variant="secondary">Downloading</Badge>
+        ) : ready && !restartRequested ? (
+          <Badge variant="default">Update ready</Badge>
+        ) : offer ? (
           <Badge variant="default">Update available</Badge>
-        )}
+        ) : null}
         {blocked && <Badge variant="destructive">Can&apos;t update</Badge>}
       </div>
 
       <VersionLine dto={data} />
+
+      {/* `restartOffer` is suppressed for this whole window — an auto-download
+          shell fetching its update, or about to (it starts the instant the
+          feed says `update-available`) — so a staged runtime doesn't just
+          vanish from the story: the "Next launch" row above still shows it,
+          and this says why no restart button appeared yet. Same predicate as
+          `isShellInstallInFlight` / `restartOffer`, so this note can't fall
+          out of sync with either. */}
+      {isShellAutoDownloadWindow(data.shell) && data.pendingVersion && (
+        <p className="text-sm text-muted-foreground">
+          Libi <span className="font-mono">{data.pendingVersion}</span> is ready for the
+          next launch, and a new desktop app is downloading now
+          {data.shell?.percent !== null && data.shell?.percent !== undefined
+            ? ` — ${data.shell.percent}% — `
+            : " — "}
+          one restart will apply both.
+        </p>
+      )}
 
       {blocked && <BlockedCard blocked={blocked} />}
 
@@ -297,11 +387,23 @@ export function UpdatesSection() {
           when to restart.
         </p>
       )}
-      {data.shell?.phase === "downloading" && (
+      {/* The whole auto-download window, not just `phase === "downloading"` — an
+          auto-download shell starts fetching the instant its feed says
+          `update-available`, so that state needs the same subject as the
+          literal download, or the "Downloading" badge above points at nothing.
+          Suppressed when a runtime is ALSO staged: the "one restart will apply
+          both" note above already covers that variant by name. */}
+      {isShellAutoDownloadWindow(data.shell) && !data.pendingVersion && (
         <p className="text-sm text-muted-foreground">
-          Downloading the new Libi
-          {data.shell.percent !== null ? ` — ${data.shell.percent}%` : "…"}
-          {data.shell.autoDownload
+          Downloading Libi
+          {data.shell?.latestVersion && (
+            <>
+              {" "}
+              <span className="font-mono">{data.shell.latestVersion}</span>
+            </>
+          )}
+          {data.shell?.percent !== null ? ` — ${data.shell?.percent}%` : "…"}
+          {data.shell?.autoDownload
             ? " Libi keeps working while it runs."
             : " Libi restarts by itself when it's ready."}
         </p>

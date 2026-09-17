@@ -12,7 +12,6 @@ import {
 } from "@/lib/composition/persistence";
 import type {
   ComputeObjectTrackParams,
-  ComputeObjectTrackProvidersParams,
   DeleteTrackParams,
   ListTracksParams,
   AddTrackedOverlayParams,
@@ -24,7 +23,6 @@ import type {
   GroundTargetParams,
   ListIdentityCandidatesParams,
   PickCandidateParams,
-  RefineTrackWithSam2Params,
   VerifyInstallParams,
   InstallTrackingEngineParams,
   VerifyTrackedOverlayParams,
@@ -32,6 +30,7 @@ import type {
 import {
   refineAtLeastOneAnchorSource,
   REFINE_ANCHOR_MESSAGE,
+  resolveExtensionId,
 } from "@/mcp/tools/schemas";
 import type { TrackMethod, Anchor } from "@/lib/tracking/types";
 import { serverLogger as logger } from "@/lib/logger";
@@ -51,7 +50,7 @@ import { newTrackId, saveTrackSamples } from "@/lib/tracking/save-track";
 import { upsertSegment } from "@/lib/tracking/segment-store";
 import { summarizeTrack } from "@/lib/tracking/summary";
 import { applySegmentResult, shouldPersistLostSegment } from "@/lib/tracking/apply-segment-result";
-import { mixedBoxSemantics, dominantObjectKind } from "@/lib/tracking/segments";
+import { mixedBoxSemantics } from "@/lib/tracking/segments";
 import { overlayCodeRelPath } from "@/lib/overlays/paths";
 import { readTrack, writeTrack } from "@/lib/tracking/storage";
 import { agentAnchorId, upsertAgentAnchor } from "@/lib/tracking/manual-anchors";
@@ -103,7 +102,7 @@ export function engineMissWarning(
       "add_tracked_overlay and do NOT hand-animate a keyframe overlay as a fallback. Isolate the cause: run " +
       "ground_target at 2-3 in-clip timestamps. If it returns the subject at high confidence, this is a LOCAL " +
       "ENGINE failure on this footage — tell the user and offer method:'sot' (single-object template tracking, " +
-      "bypasses the detector/associate path) or the paid SAM2 provider (refine_track_with_sam2). See the " +
+      "bypasses the detector/associate path). See the " +
       "using-object-tracking skill's 'zero output' rule."
     );
   }
@@ -184,29 +183,27 @@ async function resolveAnchors(params: {
 }
 
 // ---------------------------------------------------------------------------
-// Shared compute helper — the common flow for both tracking variants.
+// Shared compute helper — the enqueue/persist flow for the local tracking job.
 // ---------------------------------------------------------------------------
 
 type TrackingCommonOpts = {
-  params: ComputeObjectTrackParams | ComputeObjectTrackProvidersParams;
-  runnerKind: "tracking" | "tracking_provider";
+  params: ComputeObjectTrackParams;
+  runnerKind: "tracking";
   // Build the runner-specific extra fields to merge into the job params.
   extraJobParams: Record<string, unknown>;
-  // Derive the track method from objectKind (and optionally provider).
+  // Derive the track method from objectKind.
   methodFor: (objectKind: "face" | "object") => TrackMethod;
-  // Tag for structured log calls — kept separate so local vs provider logs differ.
+  // Tag for structured log calls.
   logTag: string;
   startOp: string;
   doneOp: string;
   startMessage: string;
   doneMessage: string;
-  // Extra fields logged on start (e.g. provider name).
+  // Extra fields logged on start / done.
   startLogExtra?: Record<string, unknown>;
   doneLogExtra?: Record<string, unknown>;
   // Optional dep check — skipped when undefined.
   checkDeps?: () => { missing: MissingDep[] } | null;
-  // Optional test-mode gate — returns structured error when blocked.
-  testModeCheck?: () => ToolResult<never, { hint: string }> | null;
   extra?: RequestHandlerExtra<ServerRequest, ServerNotification>;
 };
 
@@ -239,12 +236,6 @@ async function runTrackingCommon(opts: TrackingCommonOpts): Promise<
     };
   }
 
-  // Optional test-mode gate (providers only).
-  if (opts.testModeCheck) {
-    const blocked = opts.testModeCheck();
-    if (blocked) return blocked;
-  }
-
   // Optional dep check (local MediaPipe only).
   if (opts.checkDeps) {
     const result = opts.checkDeps();
@@ -254,7 +245,7 @@ async function runTrackingCommon(opts: TrackingCommonOpts): Promise<
         error: "dependency_not_ready",
         data: {
           missing: result.missing,
-          hint: "Open Settings → MCP Servers → Libi to see status / retry.",
+          hint: "Open Agents → Libi MCP → Libi Tracking to see status / retry.",
         },
       };
     }
@@ -718,43 +709,6 @@ export async function computeObjectTrack(
   }
 }
 
-export async function computeObjectTrackProviders(
-  params: ComputeObjectTrackProvidersParams,
-  extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
-): Promise<
-  ToolResult<
-    { trackId: string; jobId: string; sampleCount: number; resumed: boolean },
-    | { hint: string }
-    | { jobId: string }
-  >
-> {
-  return runTrackingCommon({
-    params,
-    runnerKind: "tracking_provider",
-    extraJobParams: { provider: params.provider },
-    // Real provider calls must never happen in test mode — return a structured
-    // error so the agent falls back to local MediaPipe.
-    testModeCheck: () =>
-      isTestMode()
-        ? {
-            success: false,
-            error: "providers_disabled_in_test_mode",
-            data: { hint: "Use libi.compute_object_track instead, or unset LIBI_TEST_MODE." },
-          }
-        : null,
-    // Method label is the provider name — matches TrackMethod's open string union.
-    methodFor: () => params.provider,
-    logTag: "tracking-compute",
-    startOp: "tracking_provider.compute.start",
-    doneOp: "tracking_provider.compute.done",
-    startMessage: "Compute object track (provider) started",
-    doneMessage: "Compute object track (provider) done",
-    startLogExtra: { provider: params.provider },
-    doneLogExtra: { provider: params.provider },
-    extra,
-  });
-}
-
 export async function listTracks(
   params: ListTracksParams,
 ): Promise<
@@ -1215,171 +1169,6 @@ export async function updateTrackResult(
 // Stage-0 grounding (set-of-marks)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// SAM2 mask-refinement tool (opt-in, PAID via fal.ai)
-// ---------------------------------------------------------------------------
-
-/**
- * Refine an existing box track into precise SAM2 masks over an optional time
- * range.  This is NOT a tracker — it takes an already-computed box track as
- * input and uses fal.ai SAM2 to produce accurate segmentation masks for the
- * same subject.  Adds a "sam2-refine" segment to the track.
- *
- * Usage flow:
- *   1. Run libi.compute_object_track (local, free) to get a box track.
- *   2. Optionally call this tool if you need precise masks for matting /
- *      object replacement — only after the user approves the fal.ai cost.
- */
-export async function refineTrackWithSam2(
-  params: RefineTrackWithSam2Params,
-  extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
-): Promise<
-  ToolResult<
-    { trackId: string; jobId: string; segmentId: string },
-    { hint: string } | { jobId: string }
-  >
-> {
-  // Test-mode gate — same pattern as computeObjectTrackProviders.
-  if (isTestMode()) {
-    return {
-      success: false,
-      error: "providers_disabled_in_test_mode",
-      data: { hint: "Use libi.compute_object_track instead, or unset LIBI_TEST_MODE." },
-    };
-  }
-
-  const db = getDb();
-  const row = await getTrackRow(db, params.trackId);
-  if (!row) return { success: false, error: `track not found: ${params.trackId}` };
-
-  const fileRows = await db.select().from(files).where(eq(files.id, row.fileId)).limit(1);
-  const file = fileRows[0];
-  if (!file) return { success: false, error: `source file not found for track: ${params.trackId}` };
-  if (!file.pieceId) return { success: false, error: "track's source file must be assigned to a piece" };
-
-  // Load the track sidecar to derive sparse anchors from visible samples.
-  const track = await readTrack(file.pieceId, params.trackId);
-  if (!track) return { success: false, error: `track sidecar not found: ${params.trackId}` };
-
-  // Filter to visible samples within range.
-  const rangeStart = params.range?.start;
-  const rangeEnd = params.range?.end;
-  const visibleInRange = track.samples.filter((s) => {
-    if (!s.visible) return false;
-    if (rangeStart !== undefined && s.t < rangeStart) return false;
-    if (rangeEnd !== undefined && s.t > rangeEnd) return false;
-    return true;
-  });
-
-  if (visibleInRange.length === 0) {
-    return {
-      success: false,
-      error: "no_visible_samples_to_refine",
-      data: {
-        hint:
-          "No visible track samples in the requested range. Expand the range or compute the track first.",
-      },
-    };
-  }
-
-  // Derive sparse anchors (≤8) evenly spaced across the visible samples.
-  const MAX_ANCHORS = 8;
-  const step = Math.max(1, Math.floor(visibleInRange.length / MAX_ANCHORS));
-  const anchorSamples = visibleInRange.filter((_, i) => i % step === 0).slice(0, MAX_ANCHORS);
-  const anchors: { fileId: string; time: number; bbox: [number, number, number, number] }[] =
-    anchorSamples.map((s) => ({
-      fileId: file.id,
-      time: s.t,
-      bbox: [s.x, s.y, s.w, s.h] as [number, number, number, number],
-    }));
-
-  const firstVisibleT = visibleInRange[0].t;
-  const lastVisibleT = visibleInRange[visibleInRange.length - 1].t;
-
-  const fps = track.framerate ?? 30;
-  const segmentId = `seg-sam2-refine-${Math.round((rangeStart ?? firstVisibleT) * 1000)}`;
-
-  let jobId: string;
-  let out: { samples: import("@/lib/tracking/types").TrackSample[]; framerate: number };
-
-  try {
-    const resp = await runJobViaServer<{
-      samples: import("@/lib/tracking/types").TrackSample[];
-      framerate: number;
-    }>(
-      "tracking_provider",
-      {
-        fileId: file.id,
-        pieceId: file.pieceId,
-        fileUrl: fileUrlFor(file.id),
-        fps,
-        objectKind: "object" as const,
-        anchors,
-        provider: "sam2-fal",
-      },
-      {
-        extra,
-        resume: true,
-        pieceId: file.pieceId,
-        fileId: file.id,
-      },
-    );
-    const ran = legacyTripleFromRunJobResult(resp);
-    jobId = ran.jobId;
-    out = ran.result;
-  } catch (err) {
-    if (err instanceof LibiServerUnavailableError) {
-      return { success: false, error: "libi_server_unavailable", data: { hint: err.hint } };
-    }
-    if (err instanceof CancelledError) {
-      return { success: false, error: "cancelled", data: { jobId: err.jobId } };
-    }
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-      data: { jobId: "" },
-    };
-  }
-
-  // Inherit the parent track's box-semantics class so this refine segment
-  // never spuriously trips mixedBoxSemantics (e.g. refining a face track
-  // must stay "face", not silently default to "object").
-  const inheritedObjectKind = dominantObjectKind(track.segments ?? []);
-
-  await upsertSegment(params.trackId, {
-    id: segmentId,
-    startTime: rangeStart ?? firstVisibleT,
-    endTime: rangeEnd ?? lastVisibleT,
-    method: "sam2-refine",
-    status: out.samples.some((s) => s.visible) ? "ok" : "lost",
-    samples: out.samples,
-    objectKind: inheritedObjectKind,
-    // Explicitly-requested paid refinement — same authority as an agent
-    // repair: replaces the engine window it covers instead of coexisting
-    // with it (upsertSegment overlap resolution keys off provenance rank).
-    provenance: "agent",
-    createdAt: Date.now(),
-  });
-
-  logger.info(
-    {
-      tag: "tracking-compute",
-      op: "tracking.refine_sam2.done",
-      trackId: params.trackId,
-      segmentId,
-      jobId,
-      sampleCount: out.samples.length,
-    },
-    "Refine track with SAM2 done",
-  );
-
-  return { success: true, data: { trackId: params.trackId, jobId, segmentId } };
-}
-
-// ---------------------------------------------------------------------------
-// Stage-0 grounding (set-of-marks)
-// ---------------------------------------------------------------------------
-
 export async function groundTarget(
   params: GroundTargetParams,
   extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
@@ -1743,9 +1532,8 @@ export async function pickCandidate(
   // few anchors the agent supplied as-is (no sparsifier — they're just few); we
   // must derive a SPARSE set ourselves because chosen.perFrame is at video fps
   // (a per-frame write would persist ~150 anchors for a 5s window and
-  // over-constrain every later re-track). The ≤8-evenly-spaced policy here
-  // mirrors refineTrackWithSam2 (tracking-tools.ts ~lines 1045-1048) — the
-  // codebase's existing sparse-anchor convention.
+  // over-constrain every later re-track). The ≤8-evenly-spaced policy here is
+  // the codebase's existing sparse-anchor convention.
   const cur = await readTrack(pieceId, params.trackId);
   if (cur) {
     let agentAnchors = cur.agentAnchors ?? [];
@@ -1904,7 +1692,7 @@ export async function installTrackingEngine(
         hint:
           "Test mode does not fake the tracking-engine install — it is a real ~2 GB, " +
           "~10–20 minute uv sync + model download. Run it outside test mode " +
-          "(plain `npx @nagellabs/libi`), or install from Settings → MCP Servers.",
+          "(plain `npx @nagellabs/libi`), or install from Agents → Libi MCP.",
       },
     };
   }
@@ -2005,11 +1793,40 @@ export async function installTrackingEngine(
 // verify_install — check tracking engine install status via Next.js endpoint
 // ---------------------------------------------------------------------------
 
+/** The one extension this tool can speak for. */
+const TRACKING_EXTENSION_ID = "libi-tracking";
+
 export async function verifyInstall(
-  _params: VerifyInstallParams,
+  params: VerifyInstallParams,
 ): Promise<
   ToolResult<{ ok: boolean; installed: boolean; missing: string[]; versions: Record<string, string> }>
 > {
+  // This tool verifies the TRACKING engine and only that: it GETs
+  // /api/tracking/verify, whose answer is about the uv Python sidecar and the
+  // ONNX models. The schema used to be `z.object({})`, so a call written as
+  // `libi.verify_install({ mcpId: "local-music" })` — which is exactly what
+  // the installing-mcps skill told agents to write for ANY extension — had its
+  // id silently stripped and came back `missing: ["tracking-pyenv"]`. Not a
+  // wiring bug in local-music (its deps are uv + the ace-step-model virtual
+  // dep, nothing tracking-related); a tracking answer wearing the caller's
+  // question. Refuse instead, and name the thing that actually verifies.
+  const target = resolveExtensionId(params);
+  if (target && target !== TRACKING_EXTENSION_ID) {
+    return {
+      success: false,
+      error: "not_the_tracking_engine",
+      data: {
+        hint:
+          `libi.verify_install only verifies the "${TRACKING_EXTENSION_ID}" engine — it cannot say anything ` +
+          `about "${target}", and its missing[] would be the TRACKING engine's, not that extension's. ` +
+          `To check "${target}": re-call the tool that returned status:"needs_install" (it re-checks its own ` +
+          "gate and is the plan's real verification step), or read the `dependencies` array on " +
+          `libi.get_install_plan({ mcpId: "${target}" }) for the on-disk state of each dep. ` +
+          "Call this tool with no arguments when you do mean the tracking engine.",
+      } as unknown as never,
+    };
+  }
+
   let port: number;
   try {
     port = getCurrentPort();
@@ -2019,7 +1836,7 @@ export async function verifyInstall(
       success: false,
       error: "libi_server_unavailable",
       data: {
-        hint: `libi server not running (port file missing: ${msg}). Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        hint: `libi server not running (port file missing: ${msg}). Start libi (npx @nagellabs/libi or the desktop app).`,
       } as unknown as never,
     };
   }
@@ -2034,7 +1851,7 @@ export async function verifyInstall(
       success: false,
       error: "libi_server_unavailable",
       data: {
-        hint: `Could not reach libi server at port ${port}: ${msg}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        hint: `Could not reach libi server at port ${port}: ${msg}. Start libi (npx @nagellabs/libi or the desktop app).`,
       } as unknown as never,
     };
   }

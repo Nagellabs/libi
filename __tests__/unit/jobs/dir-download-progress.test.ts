@@ -157,6 +157,32 @@ describe("trackDirectoryBytes", () => {
     p.stop();
   });
 
+  it("subtracts baselineBytes, so content that predates the download reports as 0", async () => {
+    // Two adapters share ~/.libi/agents. With Claude's ~345 MB already there,
+    // a Codex install (total 275 MB) measured the whole root on its first
+    // tick, clamped to the total, and sat at 100% for the entire download.
+    // Only growth SINCE the baseline is the work being watched.
+    write("pre-existing/blob", 800);
+    const seen: number[] = [];
+    const p = trackDirectoryBytes({
+      dir: tmp,
+      totalBytes: 1000,
+      baselineBytes: 800,
+      intervalMs: 5,
+      onBytes: (done) => seen.push(done),
+    });
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+    expect(seen[0]).toBe(0);
+
+    write("new/blob", 300);
+    await vi.waitFor(() => expect(seen.at(-1)).toBe(300));
+
+    // Still clamps at the total, measured from the baseline.
+    write("new/overshoot", 5000);
+    await vi.waitFor(() => expect(seen.at(-1)).toBe(1000));
+    p.stop();
+  });
+
   it("sums an array of directories, keeping the monotonic clamp", async () => {
     // tracking-pyenv lands bytes in TWO places (the uv venv and the models
     // dir); only their sum tracks the actual work.

@@ -7,6 +7,9 @@ import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { getDb } from "@/lib/db/client";
 import { skills } from "@/lib/db/schema";
 import { getOverrideBaseDir } from "@/mcp/skills/create-override";
+import { getLibiSkillsDir } from "@/lib/libi-home";
+import { promptNameSchema } from "@/mcp/skills/prompt-files";
+import { syncSkillsToWorkspace } from "@/mcp/skills/sync-workspace";
 
 vi.mock("@/mcp/skills/sync-workspace", () => ({
   syncSkillsToWorkspace: vi.fn().mockResolvedValue(undefined),
@@ -65,6 +68,34 @@ describe("updateSkill creates an override for a bundled skill", () => {
     expect(
       fs.readFileSync(path.join(getOverrideBaseDir(NAME), "SKILL.md"), "utf-8"),
     ).toContain("Bundled body");
+  });
+
+  /** The fork mechanism `ugc-product-video`'s SKILL.md now points at.
+   *  `RECOMMENDED_VIDEO_MODEL` was moved BACK into SKILL.md because `libi.update_skill`
+   *  is the only write path that (a) exists for a forked skill's tunable default and
+   *  (b) calls `syncSkillsToWorkspace()`, so the workspace copy the agent actually reads
+   *  is not stale. Nothing writes under `references/` at all. */
+  it("fork mechanism: update_skill rewrites the tunable default on disk and re-syncs", async () => {
+    vi.mocked(syncSkillsToWorkspace).mockClear();
+    const body =
+      `---\nname: ${NAME}\ndescription: edited desc\n---\n` +
+      "## Recommended model\n\n```\nRECOMMENDED_VIDEO_MODEL = bytedance/seedance-2.0\n```\n";
+    const res = JSON.parse((await updateSkill(ctx, { name: NAME, body })).content[0].text);
+    expect(res.success).toBe(true);
+    // Landed in the USER copy's SKILL.md — the file `libi.update_skill` owns.
+    const userCopy = fs.readFileSync(
+      path.join(getLibiSkillsDir(), NAME, "SKILL.md"),
+      "utf-8",
+    );
+    expect(userCopy).toContain("RECOMMENDED_VIDEO_MODEL = bytedance/seedance-2.0");
+    // …and the agent workspace was re-synced, so the change is live, not stale.
+    expect(syncSkillsToWorkspace).toHaveBeenCalled();
+  });
+
+  it("no prompt tool can address a references/ path (why the default is not stored there)", () => {
+    expect(promptNameSchema.safeParse("references/providers/fal").success).toBe(false);
+    expect(promptNameSchema.safeParse("providers/fal").success).toBe(false);
+    expect(promptNameSchema.safeParse("production-routes").success).toBe(true);
   });
 
   it("unknown skill name still errors", async () => {

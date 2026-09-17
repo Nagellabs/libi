@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { buildExternalToolsSection } from "@/mcp/registry/instruction-builder";
+import { buildExtensionsSection } from "@/mcp/registry/instruction-builder";
+import { EXTENSION_MCP_SERVERS } from "@/mcp/registry/bundled";
 import type { McpServerRecord } from "@/lib/db/schema/types";
 
 function makeMcpRow(overrides: Partial<McpServerRecord> = {}): McpServerRecord {
@@ -14,7 +15,6 @@ function makeMcpRow(overrides: Partial<McpServerRecord> = {}): McpServerRecord {
     url: null,
     headers: null,
     envVars: null,
-    enabled: true,
     requireApproval: false,
     bundled: false,
     installStatus: "installed",
@@ -26,50 +26,60 @@ function makeMcpRow(overrides: Partial<McpServerRecord> = {}): McpServerRecord {
   };
 }
 
-describe("buildExternalToolsSection", () => {
-  it("returns empty string when no external MCPs exist", () => {
-    const result = buildExternalToolsSection([]);
+// An extension with no agentInstructions of its own, so the section's only
+// reason to mention it is the approval contract.
+const silent = EXTENSION_MCP_SERVERS.find((d) => !d.agentInstructions);
+// An extension that ships its own guidance.
+const guided = EXTENSION_MCP_SERVERS.find((d) => d.agentInstructions);
+
+describe("buildExtensionsSection", () => {
+  it("emits nothing when there are no rows", () => {
+    expect(buildExtensionsSection([])).toBe("");
+  });
+
+  it("ignores rows that are not libi extensions (third-party MCPs are never described)", () => {
+    const result = buildExtensionsSection([makeMcpRow({ requireApproval: true })]);
     expect(result).toBe("");
   });
 
-  it("lists available MCP without approval note", () => {
-    const result = buildExternalToolsSection([makeMcpRow()]);
-    expect(result).toContain("Test MCP");
-    expect(result).toContain("A test MCP server");
+  it("emits nothing for an extension that needs no approval and has no guidance", () => {
+    expect(silent, "fixture: an extension without agentInstructions").toBeDefined();
+    const result = buildExtensionsSection([
+      makeMcpRow({ id: silent!.id, name: silent!.name, bundled: true, requireApproval: false }),
+    ]);
+    expect(result).toBe("");
+  });
+
+  it("emits the REQUIRES APPROVAL line naming the tool prefixes when the row requires approval", () => {
+    expect(silent).toBeDefined();
+    const result = buildExtensionsSection([
+      makeMcpRow({ id: silent!.id, name: silent!.name, bundled: true, requireApproval: true }),
+    ]);
+    expect(result).toContain("## libi extensions");
+    expect(result).toContain(`**${silent!.name}**`);
+    expect(result).toContain("REQUIRES APPROVAL");
+    for (const prefix of silent!.toolPrefixes) expect(result).toContain(prefix);
+  });
+
+  it("emits agentInstructions verbatim", () => {
+    expect(guided, "fixture: an extension with agentInstructions").toBeDefined();
+    const result = buildExtensionsSection([
+      makeMcpRow({ id: guided!.id, name: guided!.name, bundled: true, requireApproval: false }),
+    ]);
+    expect(result).toContain(guided!.agentInstructions!);
     expect(result).not.toContain("REQUIRES APPROVAL");
   });
 
-  it("adds approval warning for requireApproval MCPs", () => {
-    const result = buildExternalToolsSection([
-      makeMcpRow({ requireApproval: true }),
+  it("never describes availability — install state does not change the output", () => {
+    expect(guided).toBeDefined();
+    const installed = buildExtensionsSection([
+      makeMcpRow({ id: guided!.id, name: guided!.name, bundled: true, installStatus: "installed" }),
     ]);
-    expect(result).toContain("REQUIRES APPROVAL");
-  });
-
-  it("lists failed MCPs in unavailable section", () => {
-    const result = buildExternalToolsSection([
-      makeMcpRow({ installStatus: "failed", installError: "binary not found", enabled: true }),
+    const pending = buildExtensionsSection([
+      makeMcpRow({ id: guided!.id, name: guided!.name, bundled: true, installStatus: "pending" }),
     ]);
-    expect(result).toContain("unavailable");
-    expect(result).toContain("binary not found");
-  });
-
-  it("skips disabled MCPs entirely", () => {
-    const result = buildExternalToolsSection([
-      makeMcpRow({ enabled: false }),
-    ]);
-    expect(result).toBe("");
-  });
-
-  it("includes agentInstructions for bundled MCPs", () => {
-    const result = buildExternalToolsSection([
-      makeMcpRow({
-        id: "youtube-downloader",
-        name: "YouTube Downloader",
-        installStatus: "installed",
-      }),
-    ]);
-    expect(result).toContain("libi.upload_file");
-    expect(result).toContain("YouTube Downloader");
+    expect(pending).toBe(installed);
+    expect(installed).not.toContain("unavailable due to installation issues");
+    expect(installed).not.toContain("Installation pending");
   });
 });

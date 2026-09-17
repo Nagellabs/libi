@@ -2,7 +2,7 @@ import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 import { getDb } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
-import { checkBinary, checkEnvVar, type AuxResult } from "./aux-checks";
+import { checkBinary, type AuxResult } from "./aux-checks";
 import { buildSpawnEnv } from "@/mcp/registry/spawn-env";
 import { resolveBundledSpawn } from "@/mcp/registry/local-bin-resolver";
 
@@ -38,7 +38,6 @@ type McpRow = {
   envVars: string | null;
   installStatus: string;
   installError: string | null;
-  enabled: boolean;
   serverStatus: string;
   serverError: string | null;
   serverLastChecked: Date | null;
@@ -48,9 +47,7 @@ const AUX_CHECKS: Record<
   string,
   (row: McpRow) => Promise<AuxResult[]>
 > = {
-  "youtube-downloader": async () => [await checkBinary("yt-dlp")],
-  "elevenlabs": async (row) => [checkEnvVar(row, "ELEVENLABS_API_KEY")],
-  "fal-ai": async (row) => [checkEnvVar(row, "FAL_KEY")],
+  "youtube-download": async () => [await checkBinary("yt-dlp")],
 };
 
 export async function diagnoseMcp(
@@ -87,17 +84,10 @@ export async function diagnoseMcp(
     transport: (def.type === "http" ? "http" : "stdio") as "stdio" | "http",
   };
 
-  const inCurrentSession =
-    row.enabled && !["needs_config", "failed"].includes(row.installStatus);
-  const whyExcluded = inCurrentSession
-    ? null
-    : !row.enabled
-      ? "disabled by user"
-      : row.installStatus === "needs_config"
-        ? `needs_config: missing env var (${(row.installError ?? "see Settings").replace(/^Missing required env vars?: /, "")})`
-        : row.installStatus === "failed"
-          ? `failed: ${row.installError ?? "unknown error"}`
-          : "unknown";
+  // There is no user toggle since migration 0051 dropped `enabled`; the only
+  // thing that keeps a libi-owned row out of a session is a failed install.
+  const inCurrentSession = row.installStatus !== "failed";
+  const whyExcluded = inCurrentSession ? null : `failed: ${row.installError ?? "unknown error"}`;
 
   const auxFn = AUX_CHECKS[input.mcpId];
   const auxiliary = auxFn ? await auxFn(row) : [];

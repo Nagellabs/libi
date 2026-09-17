@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
+import { useRouter } from "next/navigation";
 import { Plus, TerminalSquare, X, Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -12,6 +13,8 @@ import {
   useTerminalSessions,
 } from "@/lib/queries/terminals";
 import { getPreset } from "@/lib/terminal/presets";
+import { agentSetupHref } from "@/lib/agents/setup/registry";
+import { usePresetReadiness } from "./use-preset-readiness";
 import {
   ONBOARDING_DEMO_PROMPT,
   TERMINAL_INSERT_TEXT_EVENT,
@@ -46,6 +49,8 @@ export default function TerminalPanel() {
   } = useEditorState();
   const { data: sessions, isLoading, isFetching } = useTerminalSessions();
   const createTerminal = useCreateTerminal();
+  const router = useRouter();
+  const { isNotReady: isPresetNotReady } = usePresetReadiness();
   const [exited, setExited] = useState<{ id: string; exitCode: number } | null>(
     null,
   );
@@ -120,6 +125,12 @@ export default function TerminalPanel() {
   }, [activeTerminalId, exited, sessions, isLoading, isFetching, setActiveTerminalId]);
 
   const handleNewTerminal = async () => {
+    // A new terminal runs the SELECTED preset. When that preset's agent is not
+    // ready, open its setup instead of typing a command the shell can't run.
+    if (isPresetNotReady(terminalCliId)) {
+      router.push(agentSetupHref(terminalCliId));
+      return;
+    }
     try {
       const meta = await createTerminal.mutateAsync(terminalCliId);
       setExited(null);

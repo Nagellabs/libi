@@ -267,10 +267,18 @@ describe("buildCli + verifyCliBundle (real compile of the real tree)", () => {
   });
 
   it("keeps every bare package specifier external (nothing from node_modules is inlined)", () => {
+    // The stdio transport is imported by `lib/cli/serve-mcp.ts` — the ONE
+    // implementation both stdio surfaces call. It used to be asserted
+    // on `mcp/index.js`, which held a second copy of that code and is now a
+    // four-line wrapper.
+    const serveMcp = fs.readFileSync(path.join(tmpOut, "lib", "cli", "serve-mcp.js"), "utf-8");
+    expect(serveMcp).toContain('require("@modelcontextprotocol/sdk/server/stdio.js")');
+    // A per-file transpile, not a bundle: the entry stays tiny, and its own
+    // relative requires are what pull the rest in at runtime.
     const mcpEntry = fs.readFileSync(path.join(tmpOut, "mcp", "index.js"), "utf-8");
-    expect(mcpEntry).toContain('require("@modelcontextprotocol/sdk/server/stdio.js")');
-    // A per-file transpile, not a bundle: the entry stays tiny.
+    expect(mcpEntry).toContain('require("../lib/cli/serve-mcp")');
     expect(mcpEntry.length).toBeLessThan(20_000);
+    expect(serveMcp.length).toBeLessThan(20_000);
   });
 
   it("writes a stamp that verifies clean immediately after a build", () => {

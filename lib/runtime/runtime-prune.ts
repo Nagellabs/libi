@@ -26,7 +26,7 @@ import path from "node:path";
 
 import { serverLogger as logger } from "@/lib/logger";
 import { userRuntimeDir } from "@/lib/runtime/runtime-install";
-import { compareVersions } from "@/lib/runtime/update-check";
+import { compareVersions } from "@/lib/runtime/version-compare";
 
 const LOG_TAG = "runtime-update";
 

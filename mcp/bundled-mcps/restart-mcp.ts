@@ -42,8 +42,8 @@ export async function restartMcpServer(
   // BUNDLED_MCP_SERVERS is evaluated at module-load. If LIBI_TEST_MODE was
   // unset at that moment (e.g. a Next.js worker process started before the
   // env propagated), the in-memory array may not reflect the live runtime
-  // state. Fall back to the DB lookup so any MCP the agent can see via
-  // libi.list_mcp_servers is restartable.
+  // state. Fall back to the DB lookup so any extension the agent can see —
+  // `extensions` in libi.list_providers — is restartable.
   let def: { id: string; name: string } | undefined =
     BUNDLED_MCP_SERVERS.find((d) => d.id === input.mcpId);
   if (!def) {

@@ -8,6 +8,7 @@
 import * as Sentry from "@sentry/nextjs";
 
 import { SENTRY_DSN, SENTRY_ENABLED, SENTRY_ENVIRONMENT } from "./lib/sentry/config";
+import { SURFACE_TAG, detectSurface } from "./lib/sentry/surface";
 import {
   CRASH_REPORTS_STORAGE_KEY,
   readInjectedCrashReportConfig,
@@ -17,7 +18,7 @@ import {
 } from "./lib/sentry/enabled";
 import { gateTransport } from "./lib/sentry/gated-transport";
 import { reconcileCrashReportChoiceFromServer } from "./lib/sentry/reconcile-client";
-import { scrubEvent, scrubLog, scrubSpan, scrubTransaction } from "./lib/sentry/scrub";
+import { scrubEvent, scrubFeedback, scrubLog, scrubSpan, scrubTransaction } from "./lib/sentry/scrub";
 
 // Seed the crash-report gate (lib/sentry/enabled.ts) from the localStorage
 // mirror BEFORE Sentry.init, so the very first client-side event is already
@@ -49,13 +50,42 @@ Sentry.init({
   enabled: SENTRY_ENABLED,
   environment: SENTRY_ENVIRONMENT,
 
+  // Which distribution this came from — the Electron shell or `npx` in the
+  // user's own browser. Sentry's own contexts cannot tell them apart (the
+  // Electron renderer reports as Chrome on macOS, same as an npx user in
+  // Chrome), and a large class of bugs happens in only one of the two. Set as
+  // an initialScope tag so it rides EVERY event — errors, transactions, logs
+  // and user feedback alike — rather than being attached at one call site.
+  initialScope: { tags: { [SURFACE_TAG]: detectSurface() } },
+
   sendDefaultPii: false,
   tracesSampleRate: 0.1,
   enableLogs: true,
 
-  // No replayIntegration(), no feedbackIntegration() — keep telemetry
-  // pseudonymous and free of recorded user content. (Both are opt-in; the
-  // default integration set is otherwise left untouched.)
+  // Session Replay stays OUT, for the original reason: it screen-records the
+  // session continuously, and this app handles the user's own video. User
+  // feedback is a different thing wearing a similar name — the user composes a
+  // message and presses Send, and any attached images are frames they choose
+  // to attach, per message. Nothing is captured that the user did not
+  // deliberately provide.
+  //
+  // Feedback is sent through `Sentry.captureFeedback`, called directly from a
+  // native libi dialog (components/settings/feedback-dialog.tsx) — no
+  // `feedbackIntegration` / widget here at all. The widget rendered in a
+  // shadow root, which needed an entire layer of injected styles coupled to
+  // Sentry's own private class names just to look like libi, and its
+  // screen-capture control never worked in the Electron shell in the first
+  // place (`getDisplayMedia` has no handler there). A native dialog that
+  // calls `captureFeedback` directly needs none of that, and behaves
+  // identically under `npx` and inside Electron.
+  //
+  // Two things make sending work end to end, and neither is optional:
+  //   1. lib/sentry/gated-transport.ts lets a feedback envelope through even
+  //      while the user has opted out of crash reports. Without it a sent
+  //      message would silently never leave the machine.
+  //   2. `scrubFeedback` is registered as an EVENT PROCESSOR below, not as a
+  //      `beforeSend*` hook — `beforeSend` cannot see a feedback event
+  //      (@sentry/core/build/cjs/client.js:798 tests `event.type === void 0`).
 
   // THE DROP MECHANISM for the opt-out. Wraps the SDK's own default fetch
   // transport so that, per envelope, nothing is sent while the user has opted
@@ -85,6 +115,15 @@ Sentry.init({
   beforeSendTransaction: scrubTransaction,
   beforeSendSpan: scrubSpan,
 });
+
+// Redacts the message the user typed into the feedback widget. It has to be a
+// processor rather than one of the `beforeSend*` hooks above: the SDK routes by
+// event type and treats only `type === undefined` as an error event
+// (@sentry/core/build/cjs/client.js:798), so `beforeSend` never sees
+// `type: "feedback"`. `prepareEvent` runs processors for every event regardless
+// of type (@sentry/core/build/cjs/utils/prepareEvent.js:47). See
+// lib/sentry/scrub.ts#scrubFeedback for why it is deliberately ungated.
+Sentry.addEventProcessor(scrubFeedback);
 
 // RECONCILE THE SEED AGAINST THE AUTHORITATIVE VALUE — for EVERY session, not
 // just the ones that open Settings (the read query in

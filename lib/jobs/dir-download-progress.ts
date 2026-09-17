@@ -70,6 +70,15 @@ export interface DirDownloadProgress {
  * measurement (an install like tracking-pyenv lands bytes in two places — a
  * venv and a models dir — and only their sum tracks the actual work).
  *
+ * `baselineBytes` is subtracted from every measurement, for a destination
+ * that already holds bytes the download is NOT responsible for. Both ACP
+ * adapters install into one root (`~/.libi/agents`), so with Claude's ~345 MB
+ * already there a Codex install (total 275 MB) measured the whole root on its
+ * first tick, clamped to the total, and read 100% for the entire download.
+ * Measure the root once before the work starts and pass that here; leave it
+ * unset for a destination that only ever holds this download (where bytes
+ * already on disk ARE progress — the resume case).
+ *
  * `onBytes` receives a MONOTONIC, clamped byte count: never lower than a value
  * already reported, never above `totalBytes`. Both guarantees matter for the
  * ETA — a dip reads as negative progress and poisons the rolling rate, and
@@ -78,10 +87,12 @@ export interface DirDownloadProgress {
 export function trackDirectoryBytes(opts: {
   dir: string | string[];
   totalBytes: number;
+  baselineBytes?: number;
   intervalMs?: number;
   onBytes: (bytesDone: number, bytesTotal: number) => void;
 }): DirDownloadProgress {
   const { totalBytes, onBytes } = opts;
+  const baselineBytes = opts.baselineBytes ?? 0;
   const dirs = Array.isArray(opts.dir) ? opts.dir : [opts.dir];
   const intervalMs = opts.intervalMs ?? 1500;
   let highWater = 0;
@@ -104,7 +115,8 @@ export function trackDirectoryBytes(opts: {
       let seen = 0;
       for (const d of dirs) seen += await directoryBytes(d);
       if (stopped) return;
-      const clamped = Math.min(Math.max(seen, highWater), totalBytes);
+      const grown = Math.max(0, seen - baselineBytes);
+      const clamped = Math.min(Math.max(grown, highWater), totalBytes);
       if (clamped > highWater || highWater === 0) {
         highWater = clamped;
         onBytes(clamped, totalBytes);

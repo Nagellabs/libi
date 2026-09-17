@@ -72,6 +72,10 @@ export class WebAudioEngine {
   private resolveUrl: (fileId: string) => string;
   /** Memoized worklet-module load (once per context). */
   private workletReady: Promise<void> | null = null;
+  /** Set by dispose() BEFORE the context closes, so in-flight async work
+   *  (worklet load, duck rebuild) can tell a teardown race from a real
+   *  failure — same contract as `pumpAbort` on the clip scheduler. */
+  private disposed = false;
 
   constructor(resolveUrl: (fileId: string) => string, masterVolume = 1) {
     this.ctx = new AudioContext();
@@ -110,7 +114,13 @@ export class WebAudioEngine {
     // Duck graphs depend on the now-reconciled clip set (sidechain must
     // exist before we can tap it). Fire-and-forget — rebuildDuck no-ops when
     // unchanged and guards against clips that mutate while the worklet loads.
-    void this.reconcileDucks();
+    void this.reconcileDucks().catch((err) => {
+      // rebuildDuck already absorbs teardown races; anything reaching here is
+      // unexpected and worth surfacing.
+      if (!this.disposed) {
+        console.warn("[WebAudioEngine] duck reconcile failed", (err as Error)?.message);
+      }
+    });
   }
 
   private createClip(clip: AudioClip, url: string): EngineClip {
@@ -290,7 +300,14 @@ export class WebAudioEngine {
   /** Load the envelope-follower worklet module once for this context. */
   private ensureWorklet(): Promise<void> {
     if (!this.workletReady) {
-      this.workletReady = this.ctx.audioWorklet.addModule(SIDECHAIN_WORKLET_URL);
+      const load = this.ctx.audioWorklet.addModule(SIDECHAIN_WORKLET_URL);
+      this.workletReady = load;
+      // A failed load must not disable ducking for the life of the engine:
+      // drop the memo so a later reconcile retries. This handler only resets
+      // state — the rejection is still delivered to `load`'s awaiters.
+      load.catch(() => {
+        if (this.workletReady === load) this.workletReady = null;
+      });
     }
     return this.workletReady;
   }
@@ -360,7 +377,21 @@ export class WebAudioEngine {
     this.teardownDuck(ec);
     if (desired === null || !ec.clip.duck) return;
 
-    await this.ensureWorklet();
+    try {
+      await this.ensureWorklet();
+    } catch (err) {
+      // dispose() closes the context, which rejects an in-flight addModule with
+      // `AbortError: Unable to load a worklet's module`. That is a teardown
+      // race, not a fault — swallow it. Anything else is a real failure (the
+      // module 404s, or fails to parse) and leaves this clip un-ducked.
+      if (!this.disposed) {
+        console.warn("[WebAudioEngine] worklet load failed", (err as Error)?.message);
+      }
+      return;
+    }
+    // Disposed while the module loaded: the context is closed and every node
+    // constructor below would throw InvalidStateError.
+    if (this.disposed) return;
     // The clip set may have changed while the worklet loaded — re-validate.
     if (this.clips.get(ec.clip.id) !== ec) return;
     const live = this.duckSources(ec);
@@ -398,6 +429,7 @@ export class WebAudioEngine {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.playing = false;
     for (const ec of this.clips.values()) this.destroyClip(ec);
     this.clips.clear();

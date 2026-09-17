@@ -50,15 +50,15 @@ export interface OverlayErrorEvent {
   message: string;
 }
 
-export interface NavigateSettingsEvent {
-  /** Optional MCP id to focus + scroll to. */
-  mcpId?: string;
-}
-
-export interface RightRegionEvent {
-  mode: "editor" | "onboarding" | "api-config";
-  /** Set when mode === "api-config": the bundled MCP id to configure. */
-  mcpId?: string;
+/** Send the user to the Agents page (`libi.show_extension`,
+ *  `libi.start_onboarding`). The client pushes `/agents?tab=<tab>` with the
+ *  optional focus ids as `extension=` / `provider=`. */
+export interface NavigateAgentsEvent {
+  tab: "agents" | "libi-mcp" | "providers";
+  /** libi MCP tab: the extension card to scroll to. */
+  extensionId?: string;
+  /** Providers tab: the provider row to focus. */
+  provider?: string;
 }
 
 /** Guided-edit highlight: flash an inspector field for an overlay (from the

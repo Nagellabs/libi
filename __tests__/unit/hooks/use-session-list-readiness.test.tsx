@@ -133,7 +133,6 @@ describe("useSessionList — readiness", () => {
       state: "needs-auth",
       agentId: "codex",
       message: "Codex needs to be signed in.",
-      remedy: null,
     };
     vi.stubGlobal(
       "fetch",
@@ -168,11 +167,6 @@ describe("useSessionList — readiness", () => {
       state: "needs-auth",
       agentId: "codex",
       message: "Codex needs to be signed in.",
-      remedy: {
-        label: "Sign in to Codex",
-        command: "/path/to/codex login",
-        detail: "Runs the Codex engine libi already ships.",
-      },
     };
     act(() => {
       broadcastHandler!({ type: "agent-readiness", agentId: "codex", readiness });

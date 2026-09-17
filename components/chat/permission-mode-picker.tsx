@@ -121,8 +121,8 @@ export default function PermissionModePicker() {
                 </span>
                 {isDanger && (
                   <span className="text-xs leading-snug text-amber-500/80 whitespace-normal">
-                    Real money — fal.ai and ElevenLabs calls run without
-                    confirmation.
+                    Nothing asks first — an extension you marked “requires
+                    approval” runs the moment the agent calls it.
                   </span>
                 )}
               </div>

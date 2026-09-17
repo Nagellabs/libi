@@ -4,31 +4,14 @@ import {
   TerminalManager,
   TerminalCapacityError,
   MAX_TERMINAL_SESSIONS,
+  LINE_EDITOR_READY_SEQUENCE,
 } from "@/lib/terminal/manager";
+import { SETUP_TERMINAL_IDLE_MS } from "@/lib/terminal/types";
 import type {
   AttachedSocket,
   PtyLike,
   PtySpawnOpts,
 } from "@/lib/terminal/types";
-
-/**
- * Whether the USER has a given CLI on their shell PATH — stubbed, because it is
- * a real filesystem probe of the host running the tests.
- *
- * Left unstubbed, `launchLineForPreset` types `claude` on a machine that has
- * Claude Code installed and a `# ...isn't installed` hint on one that does not.
- * Both are correct behaviour; the TEST was the thing that only worked in one
- * environment. It passed on developer Macs and failed on every Linux CI runner
- * from the moment the install-hint path landed in 0.1.2 — five consecutive red
- * runs on `main`, while `npm test` stayed green locally.
- *
- * Default to "installed" so the existing expectations describe the ordinary
- * case, and drive the other branch explicitly where it is the subject.
- */
-const resolveUserCli = vi.hoisted(() => vi.fn<(command: string) => string | null>());
-vi.mock("@/lib/terminal/user-cli", () => ({
-  resolveUserCli: (command: string) => resolveUserCli(command),
-}));
 
 class FakePty implements PtyLike {
   pid = 1234;
@@ -131,12 +114,9 @@ describe("TerminalManager", () => {
   beforeEach(() => {
     refreshEvents = [];
     navigationEmitter.on("refresh_query", onRefresh);
-    // The user has the CLI unless a test says otherwise.
-    resolveUserCli.mockImplementation((command: string) => `/usr/local/bin/${command}`);
   });
   afterEach(() => {
     navigationEmitter.off("refresh_query", onRefresh);
-    resolveUserCli.mockReset();
   });
 
   it("creates a session and types the preset command into the shell", () => {
@@ -145,33 +125,6 @@ describe("TerminalManager", () => {
     expect(meta.status).toBe("running");
     expect(meta.title).toBe("Claude Code");
     expect(ptys[0].written).toEqual(["claude\r"]);
-  });
-
-  it("types an install HINT, not the command, when the user has no such CLI", () => {
-    // The other half of the same behaviour, and the half CI was accidentally
-    // exercising. A comment is inert in bash, zsh and PowerShell alike, so a
-    // wrong "missing" answer costs one scrollback line and never runs anything.
-    resolveUserCli.mockReturnValue(null);
-    const { manager, ptys } = makeManager();
-    const meta = manager.create({ cliId: "claude-code" });
-
-    expect(meta.status).toBe("running");
-    expect(ptys[0].written).toHaveLength(1);
-    const line = ptys[0].written[0];
-    expect(line.startsWith("# ")).toBe(true);
-    expect(line).toContain("Claude Code");
-    expect(line).toContain("npm i -g @anthropic-ai/claude-code");
-    expect(line.endsWith("\r")).toBe(true);
-    // It must never be the bare command — that is the `command not found`
-    // first-run this path exists to prevent.
-    expect(line).not.toBe("claude\r");
-  });
-
-  it("does not consult the user's PATH for the plain shell preset", () => {
-    const { manager, ptys } = makeManager();
-    manager.create({ cliId: "shell" });
-    expect(ptys[0].written).toEqual([]);
-    expect(resolveUserCli).not.toHaveBeenCalled();
   });
 
   it("types nothing for the plain shell preset", () => {
@@ -192,6 +145,38 @@ describe("TerminalManager", () => {
     const env = spawnOpts[0].env as Record<string, string>;
     expect(typeof env.CODEX_HOME).toBe("string");
     expect(env.CODEX_HOME.length).toBeGreaterThan(0);
+  });
+
+  it("spawns every PTY without the host Claude Code session's markers, keeping user configuration", () => {
+    vi.stubEnv("CLAUDECODE", "1");
+    vi.stubEnv("CLAUDE_CODE_CHILD_SESSION", "1");
+    vi.stubEnv("CLAUDE_CONFIG_DIR", "/keep/me");
+    try {
+      const { manager, spawnOpts } = makeManager();
+      manager.create({ cliId: "shell" });
+      const env = spawnOpts[0].env as Record<string, string>;
+      expect(env.CLAUDECODE).toBeUndefined();
+      expect(env.CLAUDE_CODE_CHILD_SESSION).toBeUndefined();
+      expect(env.CLAUDE_CONFIG_DIR).toBe("/keep/me");
+      expect(typeof env.CODEX_HOME).toBe("string");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("spawns every PTY, setup terminals included, without this server's LIBI_SERVER_PORT, so a CLI started there finds its server the way it would in any other shell", () => {
+    vi.stubEnv("LIBI_SERVER_PORT", "55268");
+    try {
+      const { manager, spawnOpts } = makeManager();
+      manager.create({ cliId: "shell" });
+      manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+      expect(spawnOpts).toHaveLength(2);
+      for (const opts of spawnOpts) {
+        expect((opts.env as Record<string, string | undefined>).LIBI_SERVER_PORT).toBeUndefined();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("falls back to plain shell for an unknown cliId", () => {
@@ -358,7 +343,12 @@ describe("TerminalManager", () => {
  * Writing it at spawn is functionally fine but looks broken: the shell echoes
  * raw bytes before its prompt exists, redraws when zle initialises, and redraws
  * again on the client's first resize — the command appeared THREE times at
- * three widths. Hence the flush-on-first-resize below.
+ * three widths. Hence it waits for the client's first resize.
+ *
+ * The first resize alone is NOT "shell up": a slow rc keeps the tty in
+ * canonical mode, where macOS keeps only 1024 bytes of a typed line. So it
+ * also waits for the line editor — the bracketed-paste-enable sequence these
+ * tests emit, or a timed fallback (manager-pending-input-readiness.test.ts).
  */
 describe("TerminalManager initialInput", () => {
   it("does not type the command at spawn, when the shell has no prompt yet", () => {
@@ -377,6 +367,7 @@ describe("TerminalManager initialInput", () => {
     await manager.attach(meta.id, socket);
 
     socket.emitMessage(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
+    ptys[0].emitData(`${LINE_EDITOR_READY_SEQUENCE}% `);
 
     expect(ptys[0].written.join("")).toContain("codex login");
   });
@@ -387,6 +378,7 @@ describe("TerminalManager initialInput", () => {
     const socket = new FakeSocket();
     await manager.attach(meta.id, socket);
     socket.emitMessage(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
+    ptys[0].emitData(LINE_EDITOR_READY_SEQUENCE);
 
     const typed = ptys[0].written.join("");
     expect(typed).toContain("codex login");
@@ -401,6 +393,7 @@ describe("TerminalManager initialInput", () => {
     const meta = manager.create({ cliId: "shell", initialInput: "codex login" });
     const socket = new FakeSocket();
     await manager.attach(meta.id, socket);
+    ptys[0].emitData(LINE_EDITOR_READY_SEQUENCE);
 
     for (const cols of [100, 120, 90]) {
       socket.emitMessage(JSON.stringify({ type: "resize", cols, rows: 30 }));
@@ -418,5 +411,226 @@ describe("TerminalManager initialInput", () => {
     socket.emitMessage(JSON.stringify({ type: "resize", cols: 100, rows: 30 }));
 
     expect(ptys[0].written.join("")).toBe("");
+  });
+});
+
+/**
+ * Setup terminals — the Agents page prints ONE command into a fresh shell for
+ * the user to submit. At most one lives per surface, they stay out of the chat
+ * terminal list while still counting toward the session cap, and one nobody
+ * is looking at is reaped after ten minutes.
+ */
+describe("setup terminals", () => {
+  function setupManager(
+    opts: {
+      onSetupTerminalOpen?: (s: "agents" | "global-setup" | "providers") => void;
+      onSetupTerminalExit?: (s: "agents" | "global-setup" | "providers") => void;
+      now?: () => number;
+    } = {},
+  ) {
+    const ptys: FakePty[] = [];
+    const spawnOpts: PtySpawnOpts[] = [];
+    const manager = new TerminalManager(
+      (o) => {
+        spawnOpts.push(o);
+        const p = new FakePty();
+        ptys.push(p);
+        return p;
+      },
+      { cwd: () => "/agent-dir", ...opts },
+    );
+    return { manager, ptys, spawnOpts };
+  }
+
+  it("defaults purpose to chat and lists only chat terminals by default", () => {
+    const { manager } = setupManager();
+    const chat = manager.create({ cliId: "shell" });
+    const setup = manager.create({ cliId: "shell", purpose: "setup", surface: "agents", initialInput: "echo hi" });
+    expect(chat.purpose).toBe("chat");
+    expect(setup.purpose).toBe("setup");
+    expect(setup.surface).toBe("agents");
+    expect(manager.list().map((m) => m.id)).toEqual([chat.id]);
+    expect(manager.list("setup").map((m) => m.id)).toEqual([setup.id]);
+  });
+
+  it("refuses a setup terminal without a surface", () => {
+    const { manager } = setupManager();
+    expect(() => manager.create({ cliId: "shell", purpose: "setup" })).toThrow(/surface/);
+  });
+
+  it("spawns the PTY with purpose so the factory can pick the known shell", () => {
+    const { manager, spawnOpts } = setupManager();
+    manager.create({ cliId: "shell", purpose: "setup", surface: "providers" });
+    expect(spawnOpts[0].purpose).toBe("setup");
+    expect(spawnOpts[0].cwd).toBe("/agent-dir");
+  });
+
+  it("creating a second setup terminal for the SAME surface closes the first", () => {
+    const { manager, ptys } = setupManager();
+    const first = manager.create({ cliId: "shell", purpose: "setup", surface: "agents", initialInput: "a" });
+    const second = manager.create({ cliId: "shell", purpose: "setup", surface: "agents", initialInput: "b" });
+    expect(ptys[0].killed).toBe(true);
+    expect(manager.list("setup").map((m) => m.id)).toEqual([second.id]);
+    expect(manager.list("setup").find((m) => m.id === first.id)).toBeUndefined();
+  });
+
+  it("replacing a surface's setup terminal is never refused for capacity", () => {
+    const { manager } = setupManager();
+    for (let i = 0; i < MAX_TERMINAL_SESSIONS - 1; i++) manager.create({ cliId: "shell" });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    const replacement = manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    expect(manager.list("setup").map((m) => m.id)).toEqual([replacement.id]);
+  });
+
+  it("keeps setup terminals on different surfaces side by side", () => {
+    const { manager } = setupManager();
+    manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "global-setup" });
+    expect(manager.list("setup")).toHaveLength(2);
+  });
+
+  it("holds initialInput until the first resize and a ready line editor, exactly like a chat terminal", async () => {
+    const { manager, ptys } = setupManager();
+    const meta = manager.create({ cliId: "shell", purpose: "setup", surface: "agents", initialInput: "claude mcp add …" });
+    expect(ptys[0].written).toEqual([]);
+    const socket = new FakeSocket();
+    await manager.attach(meta.id, socket);
+    socket.emitMessage(JSON.stringify({ type: "resize", cols: 120, rows: 40 }));
+    ptys[0].emitData(LINE_EDITOR_READY_SEQUENCE);
+    expect(ptys[0].written).toEqual(["claude mcp add …"]);
+  });
+
+  it("is the plain shell whatever preset is asked for: no launch line is typed ahead of its command", async () => {
+    const { manager, ptys } = setupManager();
+    const meta = manager.create({ cliId: "claude-code", purpose: "setup", surface: "agents", initialInput: "claude mcp add …" });
+    expect(meta.cliId).toBe("shell");
+    expect(ptys[0].written).toEqual([]);
+    const socket = new FakeSocket();
+    await manager.attach(meta.id, socket);
+    socket.emitMessage(JSON.stringify({ type: "resize", cols: 120, rows: 40 }));
+    ptys[0].emitData(LINE_EDITOR_READY_SEQUENCE);
+    expect(ptys[0].written).toEqual(["claude mcp add …"]);
+  });
+
+  it("counts toward MAX_TERMINAL_SESSIONS", () => {
+    const { manager } = setupManager();
+    for (let i = 0; i < MAX_TERMINAL_SESSIONS - 1; i++) manager.create({ cliId: "shell" });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    expect(() => manager.create({ cliId: "shell" })).toThrow(TerminalCapacityError);
+  });
+
+  it("reaps a setup terminal with no attached socket for more than 10 minutes, never a chat one", () => {
+    let clock = 1_000_000;
+    const { manager, ptys } = setupManager({ now: () => clock });
+    const chat = manager.create({ cliId: "shell" });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "providers" });
+    clock += SETUP_TERMINAL_IDLE_MS - 1;
+    expect(manager.sweepIdleSetupTerminals()).toBe(0);
+    clock += 2;
+    expect(manager.sweepIdleSetupTerminals()).toBe(1);
+    expect(ptys[1].killed).toBe(true);
+    expect(manager.list("setup")).toEqual([]);
+    expect(manager.list().map((m) => m.id)).toEqual([chat.id]);
+  });
+
+  it("an attached viewer resets the idle clock; detaching starts it again", async () => {
+    const t0 = 5_000_000;
+    let clock = t0;
+    const { manager } = setupManager({ now: () => clock });
+    const meta = manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    const socket = new FakeSocket();
+    clock = t0 + 60_000;
+    await manager.attach(meta.id, socket);
+    clock = t0 + SETUP_TERMINAL_IDLE_MS + 1;
+    expect(manager.sweepIdleSetupTerminals()).toBe(0); // attached — never idle
+    clock = t0 + 60_000;
+    socket.close(); // runs the registered close handlers, so the idle clock starts now
+    clock = t0 + 60_000 + SETUP_TERMINAL_IDLE_MS - 1;
+    expect(manager.sweepIdleSetupTerminals()).toBe(0);
+    clock += 2;
+    expect(manager.sweepIdleSetupTerminals()).toBe(1);
+  });
+
+  it("a viewer that disconnects while its snapshot is prepared leaves the terminal detached, so the reaper still collects it", async () => {
+    const t0 = 5_000_000;
+    let clock = t0;
+    const { manager, ptys } = setupManager({ now: () => clock });
+    const meta = manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    const socket = new FakeSocket();
+    const attaching = manager.attach(meta.id, socket);
+    // The page goes away while the headless terminal is still flushing: its one `close` fires now.
+    socket.close();
+    expect(await attaching).toBe(false);
+    expect(socket.jsonFrames()).toEqual([]); // nothing is sent to a socket that already closed
+    clock = t0 + SETUP_TERMINAL_IDLE_MS + 1;
+    expect(manager.sweepIdleSetupTerminals()).toBe(1);
+    expect(ptys[0].killed).toBe(true);
+  });
+
+  it("tells the owner which surface's setup terminal exited", () => {
+    const exited: string[] = [];
+    const { manager, ptys } = setupManager({ onSetupTerminalExit: (s) => exited.push(s) });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "global-setup" });
+    manager.create({ cliId: "shell" });
+    ptys[0].emitExit(0);
+    ptys[1].emitExit(0);
+    expect(exited).toEqual(["global-setup"]);
+  });
+
+  it("tells the owner when a setup terminal opens — never for a chat terminal — and a replaced one reports its exit before the next opens", () => {
+    const events: string[] = [];
+    const { manager } = setupManager({
+      onSetupTerminalOpen: (s) => events.push(`open:${s}`),
+      onSetupTerminalExit: (s) => events.push(`exit:${s}`),
+    });
+    manager.create({ cliId: "shell" });
+    manager.create({ cliId: "shell", purpose: "setup", surface: "providers" });
+    expect(events).toEqual(["open:providers"]);
+    manager.create({ cliId: "shell", purpose: "setup", surface: "providers" });
+    expect(events).toEqual(["open:providers", "exit:providers", "open:providers"]);
+  });
+
+  it("a setup terminal whose setup fails after it was counted open is removed at once — even when killing it throws too — so its open is matched by an exit and the first error is the one thrown", () => {
+    const events: string[] = [];
+    const broken = new FakePty();
+    broken.onData = () => {
+      throw new Error("pty gone");
+    };
+    broken.kill = function (this: FakePty) {
+      this.killed = true;
+      throw new Error("kill failed");
+    };
+    const manager = new TerminalManager(() => broken, {
+      cwd: () => "/agent-dir",
+      onSetupTerminalOpen: (s) => events.push(`open:${s}`),
+      onSetupTerminalExit: (s) => events.push(`exit:${s}`),
+    });
+    expect(() => manager.create({ cliId: "shell", purpose: "setup", surface: "agents" })).toThrow("pty gone");
+    expect(events).toEqual(["open:agents", "exit:agents"]);
+    expect(broken.killed).toBe(true);
+    expect(manager.list("setup")).toEqual([]);
+  });
+
+  /**
+   * Closing (the Close button, a DELETE) must drop the server's CLI and
+   * registration memos exactly like an exit does — otherwise a re-read right
+   * after closing can serve a value read before the command ran.
+   */
+  it("tells the owner once when a setup terminal is CLOSED, whether or not the PTY reports its exit", () => {
+    const exited: string[] = [];
+    const { manager, ptys } = setupManager({ onSetupTerminalExit: (s) => exited.push(s) });
+    const reporting = manager.create({ cliId: "shell", purpose: "setup", surface: "global-setup" });
+    expect(manager.close(reporting.id)).toBe(true);
+    expect(ptys[0].killed).toBe(true);
+    expect(exited).toEqual(["global-setup"]);
+
+    const silent = manager.create({ cliId: "shell", purpose: "setup", surface: "agents" });
+    ptys[1].kill = function (this: FakePty) {
+      this.killed = true; // a PTY that never fires onExit
+    };
+    expect(manager.close(silent.id)).toBe(true);
+    expect(exited).toEqual(["global-setup", "agents"]);
+    expect(manager.close(silent.id)).toBe(false);
+    expect(exited).toEqual(["global-setup", "agents"]);
   });
 });

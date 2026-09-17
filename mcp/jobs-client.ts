@@ -173,7 +173,7 @@ function resolveBaseUrl(): string {
     const msg = err instanceof Error ? err.message : String(err);
     throw new LibiServerUnavailableError(
       `libi server port not resolvable: ${msg}`,
-      "libi server not running. Start it with `npx @nagellabs/libi` or `npx @nagellabs/libi --connect-agent`.",
+      "libi server not running. Start libi (npx @nagellabs/libi or the desktop app).",
     );
   }
   return `http://127.0.0.1:${port}`;
@@ -233,7 +233,7 @@ export async function enqueueJobOnServer(
       const port = base.split(":").pop();
       throw new LibiServerUnavailableError(
         `failed to reach libi server at ${base}`,
-        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        `libi server not running on port ${port}. Start libi (npx @nagellabs/libi or the desktop app).`,
       );
     }
     throw err;
@@ -457,7 +457,7 @@ export async function runJobViaServer<R = unknown>(
       const port = base.split(":").pop();
       throw new LibiServerUnavailableError(
         `failed to reach libi server at ${base}`,
-        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        `libi server not running on port ${port}. Start libi (npx @nagellabs/libi or the desktop app).`,
       );
     }
     throw err;
@@ -661,7 +661,7 @@ export async function getJobStatusFromServer(
       const port = base.split(":").pop();
       throw new LibiServerUnavailableError(
         `failed to reach libi server at ${base}`,
-        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        `libi server not running on port ${port}. Start libi (npx @nagellabs/libi or the desktop app).`,
       );
     }
     throw err;
@@ -712,7 +712,7 @@ export async function listJobsFromServer(opts: {
       const port = base.split(":").pop();
       throw new LibiServerUnavailableError(
         `failed to reach libi server at ${base}`,
-        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        `libi server not running on port ${port}. Start libi (npx @nagellabs/libi or the desktop app).`,
       );
     }
     throw err;
@@ -748,7 +748,7 @@ export async function cancelJobOnServer(jobId: string): Promise<void> {
       const port = base.split(":").pop();
       throw new LibiServerUnavailableError(
         `failed to reach libi server at ${base}`,
-        `libi server not running on port ${port}. Start it with \`npx @nagellabs/libi\` or \`npx @nagellabs/libi --connect-agent\`.`,
+        `libi server not running on port ${port}. Start libi (npx @nagellabs/libi or the desktop app).`,
       );
     }
     throw err;

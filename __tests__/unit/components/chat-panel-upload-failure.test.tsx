@@ -41,9 +41,6 @@ vi.mock("@/lib/queries/files", () => ({
     return { upload: uploadMock, isUploading: false };
   },
 }));
-vi.mock("@/hooks/agents/use-run-remedy-in-terminal", () => ({
-  useRunRemedyInTerminal: () => vi.fn(() => Promise.resolve()),
-}));
 vi.mock("@/hooks/use-scroll-to-bottom", () => ({
   useScrollToBottom: () => ({
     containerRef: { current: null }, isAtBottom: true,

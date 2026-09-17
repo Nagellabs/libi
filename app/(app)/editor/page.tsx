@@ -24,7 +24,7 @@ import { resolvePiecesScreen } from "@/lib/pieces/pieces-screen";
 import { useAssetFolderList } from "@/lib/queries/asset-folders";
 import { getAncestorIds } from "@/lib/folders/tree";
 import { useFiles } from "@/lib/queries/files";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { fileKeys, uploadFileTo } from "@/lib/queries/files";
 import { pickVideoUrl } from "@/lib/proxy/url";
@@ -33,14 +33,39 @@ import { SidebarInset } from "@/components/ui/sidebar";
 import { InstructionsUpdatedBanner } from "@/components/banner/instructions-updated-banner";
 import { usePieceState } from "@/lib/queries/snapshots";
 import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
-import { OnboardingPanel } from "@/components/onboarding/onboarding-panel";
-import { InlineApiConfigPanel } from "@/components/mcp-config/inline-api-config-panel";
-import { useRouter, useSearchParams } from "next/navigation";
-import { PersonaModal } from "@/components/onboarding/persona-modal";
-import { readinessAllowsChat } from "@/lib/agents/agent-readiness";
-import { trackEvent } from "@/lib/analytics/client";
+import { FirstLaunchGate } from "@/components/onboarding/first-launch-gate";
+import { readinessAllowsChat, readinessMessage } from "@/lib/agents/agent-readiness";
+import { agentSetupHref } from "@/lib/agents/setup/registry";
 
+/**
+ * A first launch belongs on the Agents tab, with the persona question over it —
+ * not on the editor, switched away from a moment later. So nothing of the editor
+ * paints until the onboarding state says this is not a first launch; until then,
+ * only its loading screen.
+ */
 export default function EditorPage() {
+  return (
+    <FirstLaunchGate fallback={<EditorLoadingScreen />}>
+      <EditorWorkspace />
+    </FirstLaunchGate>
+  );
+}
+
+function EditorLoadingScreen() {
+  return (
+    <>
+      <AppSidebar />
+      <SidebarInset className="flex h-full flex-col overflow-hidden">
+        <InstructionsUpdatedBanner />
+        <div className="flex flex-1 items-center justify-center">
+          <Skeleton className="h-8 w-48" />
+        </div>
+      </SidebarInset>
+    </>
+  );
+}
+
+function EditorWorkspace() {
   useReactRenderTelemetry("EditorPage");
   const {
     chatVisible,
@@ -48,6 +73,7 @@ export default function EditorPage() {
     toggleChat,
     toggleResources,
     activeProviderId,
+    isAgentConnecting,
     sessionList,
     lastPieceId,
     setLastPieceId,
@@ -61,80 +87,9 @@ export default function EditorPage() {
     setAssetCurrentFolderId,
     assetOriginFolderId,
     setAssetOriginFolderId,
-    rightRegionMode,
-    setRightRegionMode,
-    apiConfigMcpId,
   } = useEditorState();
 
   const queryClient = useQueryClient();
-
-  // Reuse the same key as PersonaModal so we get one shared fetch.
-  const { data: onboardingState } = useQuery({
-    queryKey: ["onboarding-state"],
-    queryFn: async () => (await fetch("/api/onboarding/state")).json(),
-  });
-
-  // Auto-open the onboarding panel on first run: fires once when the data
-  // lands, persona is already collected (modal is dismissed), and the user
-  // hasn't manually picked another mode (rightRegionMode is still "editor").
-  const onboardingOpenedRef = useRef(false);
-  useEffect(() => {
-    if (onboardingOpenedRef.current) return;
-    if (!onboardingState) return;
-    if (onboardingState.needsPersona) return; // persona modal is still up
-    if (!onboardingState.needsOnboarding) return; // already connected before
-    if (rightRegionMode !== "editor") {
-      if (rightRegionMode === "onboarding") onboardingOpenedRef.current = true;
-      return; // already showing, or the user has chosen another mode
-    }
-    onboardingOpenedRef.current = true;
-    setRightRegionMode("onboarding");
-  }, [onboardingState, rightRegionMode, setRightRegionMode]);
-
-  // Funnel step 4 (Task 14): the connect-an-agent takeover actually replaced
-  // the editor. Fires once per APPEARANCE (not once per render, and not
-  // once per install) — the ref resets the moment rightRegionMode leaves
-  // "onboarding", so a user who navigates away and is later routed back here
-  // again is counted again. No cleanup function needed for the StrictMode
-  // double-invoke guard: the ref alone survives it, same pattern as
-  // PersonaModal's `persona_prompt_shown`.
-  const agentConnectShownRef = useRef(false);
-  useEffect(() => {
-    if (rightRegionMode !== "onboarding") {
-      agentConnectShownRef.current = false;
-      return;
-    }
-    if (agentConnectShownRef.current) return;
-    agentConnectShownRef.current = true;
-    trackEvent("agent_connect_shown");
-  }, [rightRegionMode]);
-
-  // `/editor?setup=agent` — the sidebar's "Connect an agent" row asking for
-  // the connect screen by name. Distinct from the auto-open above, which only
-  // ever fires for a user who has never chosen anything: this one is an
-  // explicit request and must win even mid-flow.
-  const router = useRouter();
-  const searchParams = useSearchParams();
-  const setupParam = searchParams.get("setup");
-  const setupRequestRef = useRef(false);
-  useEffect(() => {
-    if (setupParam !== "agent") {
-      setupRequestRef.current = false;
-      return;
-    }
-    if (setupRequestRef.current) return;
-    setupRequestRef.current = true;
-    setRightRegionMode("onboarding");
-    router.replace("/editor", { scroll: false });
-  }, [setupParam, setRightRegionMode, router]);
-
-  // NOTE: there is deliberately no effect here watching `activeProviderId` to
-  // decide when to leave the takeover. Two attempts at that failed the same
-  // way: at mount the value is briefly null and then populates, which is
-  // indistinguishable from the user choosing an agent, so the screen closed
-  // the instant it opened. Leaving is now driven by the ACTIONS that mean it —
-  // the panel's own connect and Terminal buttons, the sidebar's agent
-  // selector, and starting a chat — each of which is unambiguous.
 
   const piecesQuery = usePieces();
   const createPiece = useCreatePiece();
@@ -610,8 +565,6 @@ export default function EditorPage() {
   if (piecesScreen === "unavailable") {
     return (
       <>
-        {/* Asking who they are does not depend on the library loading. */}
-        <PersonaModal />
         <AppSidebar />
         <SidebarInset className="flex h-full flex-col overflow-hidden">
           <InstructionsUpdatedBanner />
@@ -648,15 +601,36 @@ export default function EditorPage() {
     );
   }
 
+  // The active agent can't chat yet: the empty state says why, in the server's
+  // own words, and points at the agent's setup on the Agents page. The message
+  // is the SERVER's readiness, so a needs-auth link names the agent that
+  // readiness carries; `activeProviderId` is optimistic client state and only
+  // the fallback. Mid-switch the readiness still describes the previous agent,
+  // so the notice stays hidden until the switch settles (as in the sidebar).
+  const setupAgentMessage =
+    isAgentConnecting || readinessAllowsChat(sessionList.readiness)
+      ? null
+      : readinessMessage(sessionList.readiness);
+  const setupAgent = setupAgentMessage
+    ? {
+        message: setupAgentMessage,
+        href: agentSetupHref(
+          sessionList.readiness.state === "needs-auth"
+            ? sessionList.readiness.agentId
+            : activeProviderId,
+        ),
+      }
+    : undefined;
+
   // NOTE: there is deliberately NO early return for `piecesScreen === "welcome"`.
   // A brand-new user with zero pieces falls through to the normal EditorLayout
   // below, whose empty-state carries the first-run copy (`firstRun` on
   // NoPieceEmptyState). It used to return here, and that one early return
-  // silently swallowed the ENTIRE onboarding: the persona modal, the
-  // connect-an-agent takeover and the demo offer chip all live in the main
-  // return, so the only user who never saw any of them was the brand-new one
-  // they were written for. Onboarding appeared *after* you created a piece,
-  // which is backwards. Keep first-run rendering inside the layout.
+  // silently swallowed the first-run onboarding: the demo offer chip lives in
+  // the main return (the persona question once did too), so the only user who
+  // never saw it was the brand-new one it was written for. Onboarding appeared
+  // *after* you created a piece, which is backwards. Keep first-run rendering
+  // inside the layout.
 
   // While pieces are loading and restore hasn't run yet, show a spinner.
   // We deliberately keep the EditorLayout (chat + resources) hidden in this
@@ -664,7 +638,6 @@ export default function EditorPage() {
   if (!activePieceId && !restoreAttempted) {
     return (
       <>
-        <PersonaModal />
         <AppSidebar />
         <SidebarInset className="flex h-full flex-col overflow-hidden">
           <InstructionsUpdatedBanner />
@@ -676,22 +649,12 @@ export default function EditorPage() {
     );
   }
 
-  const rightTakeover =
-    rightRegionMode === "onboarding" ? (
-      <OnboardingPanel />
-    ) : rightRegionMode === "api-config" ? (
-      <InlineApiConfigPanel mcpId={apiConfigMcpId} />
-    ) : undefined;
-
   return (
     <>
-      <PersonaModal />
       <AppSidebar />
       <SidebarInset className="flex h-full flex-col overflow-hidden">
         <InstructionsUpdatedBanner />
         <EditorLayout
-        rightTakeover={rightTakeover}
-        rightTakeoverFull={rightRegionMode === "onboarding"}
         chatPanel={
           activeProviderId === "terminal" ? (
             <TerminalPanel />
@@ -724,6 +687,7 @@ export default function EditorPage() {
             pieces={piecesQuery.data ?? []}
             onOpenPiece={setActivePieceId}
             firstRun={piecesScreen === "welcome"}
+            setupAgent={setupAgent}
           />
         ) : isLoadingQueries ? (
           <div className="flex h-full flex-col">

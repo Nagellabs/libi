@@ -27,6 +27,9 @@ export function createFakeFalMcpServer(): McpServer {
   server.registerTool("get_job_result",
     { title: "Get a job result", description: "Test-mode fal mirror.", inputSchema: schemas.GetJobResultSchema },
     async (a) => tools.get_job_result(a));
+  server.registerTool("upload_file",
+    { title: "Upload a local file", description: "Test-mode fal mirror (deterministic CDN URL).", inputSchema: schemas.UploadFileSchema },
+    async (a) => tools.upload_file(a));
   server.registerTool("search_docs",
     { title: "Search docs", description: "Test-mode fal mirror (stub).", inputSchema: schemas.SearchDocsSchema },
     async (a) => tools.search_docs(a));

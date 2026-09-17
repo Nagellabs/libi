@@ -30,6 +30,12 @@ import type { JobContext } from "@/lib/jobs/types";
 const captured = vi.hoisted(() => ({
   runs: [] as Array<{ composition: Composition; payload: RenderPayload }>,
 }));
+// The chromium branch now begins with `ensureChromium`. On a CI
+// runner with no browser cache that would be a real ~173 MB download.
+vi.mock("@/lib/export/ensure-chromium", async (orig) => ({
+  ...(await orig<typeof import("@/lib/export/ensure-chromium")>()),
+  ensureChromium: vi.fn(async () => {}),
+}));
 vi.mock("@/lib/export/backends/chromium-render", () => ({
   ChromiumRenderBackend: class {
     name = "chromium-render";

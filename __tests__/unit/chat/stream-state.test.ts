@@ -248,7 +248,7 @@ describe("stream-state: patches and notes", () => {
         pendingId: "p-1",
         toolCall: { toolCallId: "tc-1" } as never,
         options: [],
-        reason: "generation",
+        reason: "acp",
       },
     ], state, deps);
     let msgs = selectChatMessages(state);

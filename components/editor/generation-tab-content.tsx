@@ -16,11 +16,10 @@ interface Props {
  * (the trigger is conditional too in asset-preview-panel.tsx).
  *
  * Shows the recipe for an AI-generated file: provider, model, prompt,
- * timing, cost (estimate now + click-to-fetch actual). The cost-fetch
- * shape is intentionally parallel to the script-analysis cost path
- * (`lib/analysis/script-providers/*`) so when the real fal.ai
- * generation tools land in Phase 4 we can reuse the same fetch
- * pattern instead of writing a second one.
+ * timing, and cost. Cost is display-only: libi holds no provider key, so
+ * it cannot query a provider's billing API — the estimate comes from the
+ * tool that generated the file, and an actual cost only appears when a
+ * tool wrote it into `aiGeneration.costActual`.
  */
 export function GenerationTabContent({ file }: Props) {
   const meta = useMemo<AiGenerationMeta | null>(
@@ -50,7 +49,7 @@ export function GenerationTabContent({ file }: Props) {
         ]}
       />
 
-      <CostSection fileId={file.id} meta={meta} />
+      <CostSection meta={meta} />
 
       <PromptSection prompt={meta.prompt} />
 
@@ -78,94 +77,11 @@ function KeyValueRow({ k, v }: { k: string; v: string }) {
   );
 }
 
-/**
- * Cost section with "Fetch actual cost" button.
- *
- * The button POSTs to /api/files/by-id/<fileId>/generation/refresh-cost and
- * retries on `still_pending` up to 3× spaced 10s apart — mirrors the
- * script-analysis cost-refresh pattern (which has its own retry orchestration
- * in `lib/queries/scripts.ts`). The endpoint is single-attempt; cadence lives
- * here in the UI so each network roundtrip stays short.
- */
-function CostSection({ fileId, meta }: { fileId: string; meta: AiGenerationMeta }) {
-  const [fetching, setFetching] = useState(false);
-  const [fetchError, setFetchError] = useState<string | null>(null);
-  const [attemptLabel, setAttemptLabel] = useState<string | null>(null);
-
+/** Cost section — estimate (from the generating tool) and actual (when a
+ *  tool has written one). Read-only. */
+function CostSection({ meta }: { meta: AiGenerationMeta }) {
   const estimate = meta.costEstimate;
   const actual = meta.costActual;
-
-  // Show the button as long as we have a job id and no confirmed actual cost.
-  // (Test-mode estimate=0 still gets the button so users can flip it to
-  // "free, confirmed" after generation.)
-  const canFetch = !actual && Boolean(meta.providerJobId);
-
-  const handleFetchActual = async () => {
-    setFetching(true);
-    setFetchError(null);
-    setAttemptLabel(null);
-    try {
-      const MAX_ATTEMPTS = 3;
-      const DELAY_MS = 10_000;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        setAttemptLabel(`attempt ${attempt}/${MAX_ATTEMPTS}`);
-        const resp = await fetch(
-          `/api/files/by-id/${encodeURIComponent(fileId)}/generation/refresh-cost`,
-          { method: "POST", headers: { "Content-Type": "application/json" } },
-        );
-        if (!resp.ok) {
-          const text = await resp.text().catch(() => "");
-          throw new Error(
-            `Cost fetch failed (HTTP ${resp.status}): ${text.slice(0, 200)}`,
-          );
-        }
-        const body = (await resp.json()) as {
-          status: string;
-          hint?: string;
-          aiGeneration: AiGenerationMeta | null;
-        };
-        if (
-          body.status === "resolved" ||
-          body.status === "free" ||
-          body.status === "already_resolved"
-        ) {
-          setAttemptLabel(null);
-          // The endpoint emits refresh_query; the panel re-renders when the
-          // file query refetches and we'll see costActual on the next pass.
-          return;
-        }
-        if (body.status === "provider_permission_denied") {
-          // Permanent with the current key — retrying is pointless.
-          throw new Error(
-            body.hint ??
-              "The provider's billing API refused the configured API key.",
-          );
-        }
-        if (body.status === "no_provider_fetch_support") {
-          throw new Error(`No cost fetcher registered for "${meta.provider}".`);
-        }
-        if (body.status === "no_request_id") {
-          throw new Error(
-            "Generation has no provider job id — actual cost cannot be fetched.",
-          );
-        }
-        if (body.status === "no_meta") {
-          throw new Error("File has no AI generation metadata.");
-        }
-        if (attempt < MAX_ATTEMPTS) {
-          await new Promise((r) => setTimeout(r, DELAY_MS));
-        }
-      }
-      setFetchError(
-        "Cost not yet available from the provider after 3 attempts. Try again in a minute.",
-      );
-    } catch (e) {
-      setFetchError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setFetching(false);
-      setAttemptLabel(null);
-    }
-  };
 
   return (
     <div className="rounded border border-border p-3 space-y-2">
@@ -178,24 +94,6 @@ function CostSection({ fileId, meta }: { fileId: string; meta: AiGenerationMeta 
           ["Actual", actual ? `${formatCost(actual.amount, actual.currency, actual.tier)} (${actual.source})` : "—"],
         ]}
       />
-      {canFetch && (
-        <div className="pt-1 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleFetchActual}
-            disabled={fetching}
-            className="cursor-pointer text-xs rounded border border-border px-2 py-1 hover:bg-surface-hover disabled:opacity-50"
-          >
-            {fetching ? "Fetching…" : "Fetch actual cost"}
-          </button>
-          {attemptLabel && (
-            <span className="text-xs text-muted-foreground">{attemptLabel}</span>
-          )}
-        </div>
-      )}
-      {fetchError && (
-        <div className="text-xs text-destructive">{fetchError}</div>
-      )}
     </div>
   );
 }

@@ -10,9 +10,8 @@ import { buildInsertText, type ShellFlavor } from "@/lib/terminal/shell-quote";
 interface Options {
   /**
    * Whether a terminal is mounted, attached and alive. Not cosmetic: the insert
-   * is delivered by broadcasting on the window, and
-   * `use-run-remedy-in-terminal.ts` records that a broadcast at a view which has
-   * not mounted is heard by nobody, while a paste right after the socket opens
+   * is delivered by broadcasting on the window, and a broadcast at a view which
+   * has not mounted is heard by nobody, while a paste right after the socket opens
    * is wiped by the `term.reset()` that replays the attach snapshot. This
    * feature only ever fires at a terminal already on screen — which is why it
    * does not spawn one.

@@ -1,10 +1,39 @@
 ---
 name: audio-analysis
-description: Transcribe a video or audio file. Default is local Whisper (faster-whisper, free, on-device). ElevenLabs is opt-in for speaker diarization / audio events or on explicit request. Triggers on "transcribe", "captions", "speech-to-text", or any request to extract spoken text from a media file.
+description: Transcribe a video or audio file. Default is local Whisper (faster-whisper, free, on-device) via libi.analysis_transcribe_audio. Speaker diarization / audio events, or a named STT, go through the agent's own transcription provider (Path B). Triggers on "transcribe", "captions", "speech-to-text", or any request to extract spoken text from a media file.
 when_to_use: User asks to transcribe, generate captions, or extract speech from a video or audio file. Also use when analyzing a video and the transcript step is needed.
 ---
 
 # Audio Analysis (Transcription)
+
+## Provider gate — read this first
+
+You need a **transcription** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do transcription, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for transcription — call
+   `libi.suggest_provider({ kind: "transcription" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do transcription.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for transcription is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
 
 Use this skill whenever the user wants a transcript for a video or audio
 file. The default provider is **local Whisper** — free, no API key.
@@ -15,10 +44,9 @@ file. The default provider is **local Whisper** — free, no API key.
 libi.analysis_transcribe_audio({ fileId })
 ```
 
-`provider` defaults to `whisper`. The tool runs the whole pipeline
-server-side: extract audio, chunk long files, run faster-whisper per
-chunk, save + auto-aggregate into the `transcript_v1` step with
-word-level timings.
+The tool is Whisper-only and runs the whole pipeline server-side:
+extract audio, chunk long files, run faster-whisper per chunk, save +
+auto-aggregate into the `transcript_v1` step with word-level timings.
 
 **First-run bootstrap.** If the response is
 `{ status: "needs_install", hint: ... }`, the Whisper model isn't
@@ -52,25 +80,29 @@ faster-whisper quality scales with model size. To escalate:
 3. `libi.whisper_download_model({ model: "<bigger>" })`
 4. `libi.analysis_transcribe_audio({ fileId, model: "<bigger>" })`
 
-## When to use ElevenLabs instead
+## When you need more than local Whisper
 
-ElevenLabs is opt-in. Use it when:
-- the user explicitly asks for ElevenLabs, OR
-- the transcript needs **speaker diarization** (faster-whisper sets
-  `speaker_id: null`) or **audio-event tags** (faster-whisper emits
-  `type: "word"` only), OR
-- the user finds Whisper quality insufficient even at a larger model.
+Whisper is local, free, and gives word-level timing but sets `speaker_id: null` and emits
+`type: "word"` only. When the transcript needs **speaker diarization** or **audio-event
+tags**, or the user asks for a specific STT by name, use a `transcription` provider from
+your own tool list through **Path B** below — `libi.analysis_transcribe_audio` is
+Whisper-only.
 
-```
-libi.analysis_transcribe_audio({ fileId, provider: "elevenlabs" })
-```
+If this skill ships a reference for your provider — `references/providers/<id>.md` under
+this skill — read it before you start: it names the tool that returns the `words` array
+Path B wants, what it actually buys over Whisper, and how it bills.
 
-Requires the `elevenlabs` MCP installed + `ELEVENLABS_API_KEY` set
-(check `libi.list_bundled_mcps`). It bills per minute of audio.
+If you have no `transcription` provider, say so plainly rather than sending the user
+shopping: libi's own transcription provider is on-device Whisper, and it does not
+diarize, so speaker labels need an STT tool on a provider MCP the user connects
+themselves. `libi.list_providers()` shows what is connected. Let them decide between
+connecting one and accepting a non-diarized transcript.
 
-## Path B — BYO STT provider (custom MCP, etc.)
+## Path B — your own STT provider
 
-For a non-default STT the agent drives manually:
+For any STT other than local Whisper — a transcription tool on a provider MCP you have
+connected yourself, described in `references/providers/<id>.md` under this skill when one
+ships for it — the agent drives the pipeline itself:
 
 1. `libi.analysis_chunk_audio({ fileId })` → `{ chunks: [{ chunkId,
    chunkIndex, audioPath, startSeconds, endSeconds }, ...] }`.
@@ -114,7 +146,7 @@ vs code overlays, and Whisper `medium` defaulting for non-English vocals.
   speaker_id?: string | null }                 // Whisper: always null
 ```
 Transcript `metadata.schema_version` is always `"transcript_v1"`;
-`metadata.provider` reflects the provider used.
+`metadata.provider` is `"whisper"` for Path A and `"external"` for Path B.
 
 ## If local Whisper is unavailable (paid fallback — ASK FIRST)
 
@@ -124,7 +156,7 @@ run — the install repeatedly fails, the environment cannot support faster-whis
 or the model download is impossible — you MAY fall back to a paid STT provider.
 
 **BEFORE any paid STT call:**
-1. **DISCLOSE** that it costs money. ElevenLabs bills per minute of audio — state
+1. **DISCLOSE** that it costs money. A hosted STT bills per minute of audio — state
    the approximate clip length so the user knows the cost exposure.
 2. **ASK** the user for explicit approval. Do not proceed until you have a clear
    "yes" or equivalent confirmation.
@@ -132,10 +164,10 @@ or the model download is impossible — you MAY fall back to a paid STT provider
 
 Free/local Whisper, including its first-run model download, never needs approval.
 
-To fall back once approved:
-- **ElevenLabs** — `libi.analysis_transcribe_audio({ fileId, provider: "elevenlabs" })`.
-  Requires the `elevenlabs` MCP installed + `ELEVENLABS_API_KEY` set.
-- **Other STT MCP** — drive manually via Path B (chunk → STT → save chunks).
+To fall back once approved: drive **Path B** with your `transcription` provider —
+`libi.analysis_chunk_audio({ fileId })`, call the provider's STT on each chunk's `audioPath`,
+save each with `libi.analysis_save_audio_chunk` (or `…_from_file` for a large payload). The
+transcript aggregates automatically when the last chunk lands.
 
 If no STT provider is available at all — local Whisper fails AND no paid
 provider/key is configured — tell the user plainly rather than guessing timings

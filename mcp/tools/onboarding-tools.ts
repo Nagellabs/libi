@@ -12,26 +12,32 @@ import {
   ONBOARDING_DEFINITIONS,
 } from "@/lib/onboarding/piece/definitions";
 import type { ToolResult } from "./types";
-import type {
-  StartOnboardingParams,
-  ShowApiConfigParams,
-  BuildOnboardingPieceParams,
-} from "./schemas";
+import type { StartOnboardingParams, BuildOnboardingPieceParams } from "./schemas";
 
 /**
- * Re-open the onboarding panel in the right region.
+ * Re-open agent setup: the Agents page.
+ *
+ * AWAITED, not fire-and-forget. `opened: "agents"` is a claim about the
+ * user's screen, and this used to make its claim whether or not the POST
+ * landed — on a CLI surface (no studio to notify) or with the server down it
+ * told the agent something was up and the agent narrated a page nobody could
+ * see. Report what actually happened and hand back what the agent can say
+ * instead.
  */
 export async function startOnboarding(_params: StartOnboardingParams): Promise<ToolResult> {
-  notify.rightRegion({ mode: "onboarding" });
-  return { success: true, data: { opened: "onboarding" } };
-}
-
-/**
- * Open the inline API-key config panel for a bundled MCP.
- */
-export async function showApiConfig(params: ShowApiConfigParams): Promise<ToolResult> {
-  notify.rightRegion({ mode: "api-config", mcpId: params.mcpId });
-  return { success: true, data: { opened: "api-config", mcpId: params.mcpId } };
+  const navigated = await notify.navigateAgents({ tab: "agents" });
+  logger.info({ tag: "onboarding", op: "start_onboarding", navigated }, "start_onboarding");
+  if (!navigated) {
+    return {
+      success: true,
+      data: {
+        status: "unavailable",
+        opened: null,
+        note: "The Agents page could not be opened — libi's studio did not accept the request (it may not be running, or this agent is not attached to one). Do NOT tell the user a page is on screen. Say setup lives under Agents in the libi app.",
+      },
+    };
+  }
+  return { success: true, data: { status: "navigated", opened: "agents" } };
 }
 
 /**

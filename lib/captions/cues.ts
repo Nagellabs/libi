@@ -1,5 +1,5 @@
 // lib/captions/cues.ts
-import type { ElevenLabsWord } from "@/lib/elevenlabs/transcribe";
+import type { SttWord } from "@/lib/analysis/types";
 import type { CaptionCue } from "@/lib/captions/types";
 
 export interface BuildCuesOpts {
@@ -15,7 +15,7 @@ export interface BuildCuesOpts {
 
 /** Group spoken words into readable, timed cues. Pure. Ignores non-"word"
  *  tokens (spacing/audio_event). Never overlaps consecutive cues. */
-export function buildCaptionCues(words: ElevenLabsWord[], opts: BuildCuesOpts = {}): CaptionCue[] {
+export function buildCaptionCues(words: SttWord[], opts: BuildCuesOpts = {}): CaptionCue[] {
   const maxChars = opts.maxCharsPerLine ?? 32;
   const maxLines = opts.maxLines ?? 2;
   const lead = opts.lead ?? 0.15;
@@ -24,7 +24,7 @@ export function buildCaptionCues(words: ElevenLabsWord[], opts: BuildCuesOpts = 
 
   const spoken = words.filter((w) => (w.type ?? "word") === "word" && w.text.trim().length > 0);
   const cues: CaptionCue[] = [];
-  let buf: ElevenLabsWord[] = [];
+  let buf: SttWord[] = [];
   let len = 0;
 
   const flush = () => {

@@ -22,7 +22,8 @@ assertions:
   # Native audio left ON — no clip generated with audio disabled.
   - { endpoint_id: "*", where: "input.generate_audio == false", expect: absent }
   # One 8s shot is ONE clip (one card) — must NOT fragment into many clips.
-  - { endpoint_id: "*-to-video*", count: "<=2" }
+  - { tool: submit_job, endpoint_id: "*-to-video*", count: "<=1" }
+  - { tool: run_model, endpoint_id: "*-to-video*", count: "<=1" }
 ```
 
 ## Behavioral expectations

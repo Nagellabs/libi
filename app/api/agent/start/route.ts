@@ -2,6 +2,9 @@ import { NextResponse } from "next/server";
 import { getSessionManager } from "@/lib/sessions/session-manager";
 import { updateSettings } from "@/lib/db/settings";
 import { getAgentConfig } from "@/lib/agents/acp/agent-registry";
+import { resolveAgentCli } from "@/lib/agents/cli/resolve";
+import { cliUnavailableReason } from "@/lib/agents/cli/unavailable-reason";
+import { isSetupAgentId } from "@/lib/agents/setup/registry";
 import { setTerminalSurfaceActive } from "@/lib/terminal/active-surface";
 import { serverLogger as logger } from "@/lib/logger";
 import {
@@ -56,6 +59,20 @@ export async function POST(request: Request) {
         readiness,
         error: `Agent ${providerId} is not available`,
       },
+      { status: 400 },
+    );
+  }
+
+  // The adapter is on disk; the user's own CLI is the other half. `staleOk`: a
+  // session start never waits on the login-shell probe once a memo exists.
+  // An agent without a setup declaration has no CLI of the user's to resolve.
+  const cliReason = isSetupAgentId(providerId)
+    ? cliUnavailableReason(providerId, await resolveAgentCli(providerId, { staleOk: true }))
+    : null;
+  if (cliReason) {
+    const readiness: AgentReadiness = { state: "not-installed", reason: cliReason.message };
+    return NextResponse.json(
+      { success: false, providerId, readiness, error: cliReason.message },
       { status: 400 },
     );
   }

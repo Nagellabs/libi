@@ -165,16 +165,21 @@ export const files = sqliteTable(
     filmstripFrames: integer("filmstrip_frames"),
     /** Per-frame height of the sprite in px (for CSS sizing). */
     filmstripHeight: integer("filmstrip_height"),
-    /** fal.ai storage URL for the uploaded video, persisted to avoid re-uploading across restarts. */
-    falUploadedUrl: text("fal_uploaded_url"),
     notes: text("notes"),
     /**
-     * AI-generation provenance for files produced by an MCP generation tool
-     * (fal-ai, elevenlabs, local-tts, local-music, etc.). In test mode
-     * fake-fal masquerades as fal-ai, so test-mode files also use "fal-ai".
-     * JSON-serialized `AiGenerationMeta`:
+     * AI-generation provenance for files produced by a generation tool.
+     * JSON-serialized `AiGenerationMeta` (`lib/ai-generation/types.ts`).
+     *
+     * `provider` is a CATALOG id (`lib/providers/catalog.ts`) — "fal",
+     * "elevenlabs", "kokoro", "ace-step". Rows written before the catalog
+     * existed carry the old bundled-MCP ids ("fal-ai", "local-tts",
+     * "local-music"); those are mapped forward on read and on write by
+     * `normalizeProviderId`, so nothing downstream sees two spellings of one
+     * provider. An id the catalog does not know is kept verbatim rather than
+     * rejected — the user's own agent may have a provider libi does not.
+     * In test mode fake-fal stamps "fal", exactly as production does.
      *   {
-     *     provider: "fal-ai" | "elevenlabs" | "local-tts" | "local-music" | "...",
+     *     provider: "fal" | "elevenlabs" | "kokoro" | "ace-step" | "...",
      *     model: string,
      *     prompt: string,
      *     costEstimate?: { amount, currency, tier? },
@@ -212,8 +217,7 @@ export const settings = sqliteTable("settings", {
   agentModelPreferences: text("agent_model_preferences"),
   /** JSON-serialized NotificationsSetting (see lib/db/settings.ts). Null = use defaults. */
   notifications: text("notifications"),
-  /** JSON-serialized CodexConnectSetting ({connected, lastSyncStatus}, see lib/db/settings.ts).
-   *  Null = use defaults ({connected:false, lastSyncStatus:"idle"}). */
+  /** Legacy JSON column, no longer read or written; kept to avoid a migration. */
   codex: text("codex"),
   /** JSON-serialized ExportDefaultsSetting (folder, format, quality). Null = use OS-aware defaults. */
   exportDefaults: text("export_defaults"),
@@ -242,6 +246,18 @@ export const settings = sqliteTable("settings", {
    *  onboardingDemoOfferedAt so a dismissal can never be confused with
    *  "never offered" — and, once set, is final: the offer never returns. */
   onboardingDemoDismissedAt: integer("onboarding_demo_dismissed_at", { mode: "timestamp" }),
+  /** The setup wizard's "I've signed in" / "I'm already signed in" for this
+   *  agent. A UI gate ONLY — the server never blocks a chat on it — and cleared
+   *  the moment the agent is OBSERVED rejecting auth. */
+  claudeSignInConfirmedAt: integer("claude_sign_in_confirmed_at", { mode: "timestamp" }),
+  codexSignInConfirmedAt: integer("codex_sign_in_confirmed_at", { mode: "timestamp" }),
+  /** The Agents tab's setup wizard: when an agent was FIRST picked in it, and
+   *  the agent being set up (the latest pick until the wizard is finished).
+   *  Both null = the user's first onboarding. */
+  agentWizardChosenAt: integer("agent_wizard_chosen_at", { mode: "timestamp" }),
+  agentWizardAgent: text("agent_wizard_agent"),
+  /** When the setup wizard first reached its end (Open chat succeeded). */
+  agentWizardFinishedAt: integer("agent_wizard_finished_at", { mode: "timestamp" }),
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
@@ -260,7 +276,6 @@ export const mcpServers = sqliteTable("mcp_servers", {
   url: text("url"),
   headers: text("headers"), // JSON object
   envVars: text("env_vars"), // JSON object
-  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   requireApproval: integer("require_approval", { mode: "boolean" }).notNull().default(true),
   bundled: integer("bundled", { mode: "boolean" }).notNull().default(false),
   installStatus: text("install_status").notNull().default("pending"), // 'pending' | 'checking' | 'installed' | 'failed' | 'not_required'
@@ -282,6 +297,34 @@ export const mcpServers = sqliteTable("mcp_servers", {
   updatedAt: integer("updated_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),
+});
+
+/**
+ * One-shot rescue of the provider API keys libi used to store, so a user
+ * upgrading does not lose the key they gave us. Written ONCE by
+ * `migrateProviderRows` (lib/db/migrate-providers.ts), read ONCE by the
+ * connect panel's notice (lib/providers/legacy.ts), and the values are
+ * DELETED the moment the user acknowledges it. Nothing else in the codebase
+ * may read this table — libi holds no provider key.
+ *
+ * The rescue is TEMPORARY, and `rescuedAt` is what makes that true rather
+ * than aspirational: a row nobody ever acknowledges is blanked at boot once
+ * it passes `LEGACY_KEY_TTL_DAYS` (lib/providers/legacy.ts), and a row whose
+ * provider the user has since reconnected is blanked the moment the detector
+ * sees it. Without the stamp there was no exit at all — a user who never
+ * opened the panel kept a live API key in libi's database forever, which is
+ * the exact opposite of what the branch that added this table set out to do.
+ */
+export const legacyProviderKeys = sqliteTable("legacy_provider_keys", {
+  /** The OLD bundled row id: "fal-ai" | "elevenlabs" | "youtube-downloader". */
+  providerId: text("provider_id").primaryKey(),
+  /** JSON object of the row's env_vars, verbatim. Blanked to `{}` on acknowledge. */
+  envVars: text("env_vars").notNull(),
+  /** When the migration lifted the key out of `mcp_servers`. Drives the TTL. */
+  rescuedAt: integer("rescued_at", { mode: "timestamp" })
+    .notNull()
+    .default(sql`(unixepoch())`),
+  shownAt: integer("shown_at", { mode: "timestamp" }),
 });
 
 export const skills = sqliteTable(
@@ -406,7 +449,7 @@ export const analysisAudioChunks = sqliteTable(
     status: text("status").notNull().default("not_started"),
     /** Transcribed text for this chunk. */
     text: text("text"),
-    /** JSON: ElevenLabsWord[] with timestamps already offset to source audio. */
+    /** JSON: SttWord[] (lib/analysis/types.ts) with timestamps already offset to source audio. */
     words: text("words"),
     language: text("language"),
     languageProbability: real("language_probability"),
@@ -560,4 +603,44 @@ export const seenAnnouncements = sqliteTable("seen_announcements", {
   announcementId: text("announcement_id").primaryKey(),
   seenAt: integer("seen_at", { mode: "timestamp" }).notNull(),
 });
+
+/**
+ * Every place libi installed its skills for the user's OWN Claude Code / Codex,
+ * so each copy is rewritten after every skill change and at every boot.
+ * `folder_path` is `''` for a user-level ("every folder") install — SQLite
+ * treats NULLs as distinct, so a plain unique index needs a real value there.
+ * The user-level skills dir itself is never stored: the agent descriptor
+ * (`lib/agents/skill-targets.ts`) resolves it at write time. Not piece-scoped.
+ */
+export const skillInstalls = sqliteTable(
+  "skill_installs",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    agentId: text("agent_id", { enum: ["claude-code", "codex"] }).notNull(),
+    scope: text("scope", { enum: ["user", "folder"] }).notNull(),
+    /** realpath of the chosen folder; `''` for `scope = "user"`. */
+    folderPath: text("folder_path").notNull().default(""),
+    source: text("source", { enum: ["ui", "cli"] }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    /** Set after every successful write. */
+    lastSyncedAt: integer("last_synced_at", { mode: "timestamp" }),
+    /** Short, user-readable; cleared on the next successful write. */
+    lastError: text("last_error"),
+    /** JSON array of skill names skipped because a dir of that name was not libi's. */
+    skippedNames: text("skipped_names").notNull().default("[]"),
+    /**
+     * The skills root libi last wrote for this row — the one place its copy may live.
+     * A user-level root is resolved from the environment at write time, so when it moves
+     * the copy at this root is removed before the new root is written. NULL until the first write.
+     */
+    lastRoot: text("last_root"),
+  },
+  (t) => ({
+    levelUnique: uniqueIndex("skill_installs_level_unique").on(t.agentId, t.scope, t.folderPath),
+  }),
+);
 

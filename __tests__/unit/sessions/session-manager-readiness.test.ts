@@ -18,12 +18,14 @@ import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 
 vi.mock("@/lib/libi-home", () => ({
   getLibiAgentDir: vi.fn(() => "/tmp/libi-test-agent"),
-  // `getAgentInstallRoot()` (reached via the claude sign-in remedy) joins onto
-  // this; the rest are required by lib/logger, imported transitively.
+  // The rest are required by lib/logger, imported transitively.
   getLibiHome: vi.fn(() => "/tmp/libi-test-home"),
   ensureLibiDirs: vi.fn(),
   getLibiLogDir: vi.fn(() => "/tmp/libi-test-logs"),
 }));
+
+// Session start's entry-shape diagnostic reads codex's MCP listing: a unit test never resolves or runs a real codex.
+vi.mock("@/lib/agents/libi-registration", () => ({ readLibiCodexEntryShape: vi.fn(async () => "unknown") }));
 
 vi.mock("@/lib/mcp-config", () => ({
   getMcpServersForAcp: vi.fn(() => []),
@@ -39,16 +41,29 @@ vi.mock("@/lib/sessions/model-preferences", () => ({
   setAgentModelId: vi.fn(),
 }));
 
+const clearSignInConfirmation = vi.fn();
+vi.mock("@/lib/agents/sign-in-confirmation", () => ({
+  clearSignInConfirmation: (id: string) => clearSignInConfirmation(id),
+}));
+
+const { handlerCtorArgs } = vi.hoisted(() => ({ handlerCtorArgs: [] as unknown[][] }));
 vi.mock("@/lib/agents/session-event-handler", () => ({
-  SessionEventHandler: vi.fn().mockImplementation(() => ({
-    createClient: vi.fn().mockReturnValue({}),
-    cleanUserMessageParts: vi.fn(),
-  })),
+  // A `function`, not an arrow: `getEventHandler` calls it with `new`.
+  SessionEventHandler: vi.fn().mockImplementation(function (...args: unknown[]) {
+    handlerCtorArgs.push(args);
+    return {
+      createClient: vi.fn().mockReturnValue({}),
+      cleanUserMessageParts: vi.fn(),
+      attachJobProgressBridge: vi.fn(),
+    };
+  }),
 }));
 
 // ---------------------------------------------------------------------------
 
-import { SessionManager, signInRemedyFor } from "@/lib/sessions/session-manager";
+import { SessionManager } from "@/lib/sessions/session-manager";
+import { AgentSpawnRefusedError } from "@/lib/agents/spawn-refused-error";
+import { serverLogger } from "@/lib/logger";
 
 /** The ACP rejection codex answers `session/new` with when not signed in. */
 function authError(): Error & { code: number } {
@@ -128,6 +143,232 @@ describe("SessionManager agent readiness", () => {
     expect(readiness.message).toBeTruthy();
     expect(readiness.message).toMatch(/signed in/i);
     expect(readiness.agentId).toBe("codex");
+  });
+
+  it("clears the wizard's sign-in confirmation on the observed rejection", async () => {
+    mockConnection.newSession.mockRejectedValue(authError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(clearSignInConfirmation).toHaveBeenCalledWith("codex");
+  });
+
+  // Claude's unauthenticated `session/new` SUCCEEDS; auth is rejected only at
+  // `session/prompt` (observed on claude 2.1.245 and 2.1.267). These pin that a
+  // clean standby never undoes a prompt rejection, and that a returned turn does.
+
+  /** A claimed claude-code chat: the switch lands a standby (→ ready), the claim replenishes it. */
+  async function claudeChat(): Promise<string> {
+    await sm.switchAgent("claude-code", { awaitStandbyMs: 2000 });
+    const sessionId = await sm.createSession();
+    await new Promise((r) => setTimeout(r, 0));
+    return sessionId;
+  }
+
+  it("claude-code: a prompt auth rejection is NOT undone by the next successful standby session/new, and the confirmation stays cleared", async () => {
+    const sessionId = await claudeChat();
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "hi");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+    expect(clearSignInConfirmation).toHaveBeenCalledWith("claude-code");
+
+    // Live, the standby that replenishes after the rejection flipped needs-auth
+    // back to ready 100–200 ms later. Drive that session/new here.
+    const newSessionsBefore = mockConnection.newSession.mock.calls.length;
+    await sm.createSession();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockConnection.newSession.mock.calls.length).toBeGreaterThan(newSessionsBefore);
+
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["ready", "needs-auth"]);
+    // Only the wizard's POST sets a confirmation; the rejection cleared it exactly once.
+    expect(clearSignInConfirmation).toHaveBeenCalledTimes(1);
+  });
+
+  it("a successful prompt turn is proof of readiness — it clears needs-auth", async () => {
+    const sessionId = await claudeChat();
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "hi");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+
+    await sm.sendMessage(sessionId, "hi again"); // the default mock resolves { stopReason: "end_turn" }
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+  });
+
+  it("a CANCELLED turn proves nothing — needs-auth stays", async () => {
+    const sessionId = await claudeChat();
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "hi");
+    mockConnection.prompt.mockResolvedValueOnce({ stopReason: "cancelled" });
+    await sm.sendMessage(sessionId, "hi again");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+  });
+
+  it("claude-code: the expired-OAuth reply TEXT is an observed auth rejection — needs-auth, confirmation cleared, not undone by the turn's clean resolution", async () => {
+    const sessionId = await claudeChat();
+    sm.getEventHandler();
+    const onAuthRejectedText = handlerCtorArgs.at(-1)?.[5] as ((id: string) => void) | undefined;
+    expect(typeof onAuthRejectedText).toBe("function");
+
+    mockConnection.prompt.mockImplementationOnce(async () => {
+      onAuthRejectedText!(sessionId); // what the handler does when the turn opens with the prefix
+      return { stopReason: "end_turn" };
+    });
+    await sm.sendMessage(sessionId, "hi");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+    expect(clearSignInConfirmation).toHaveBeenCalledWith("claude-code");
+
+    // The next turn that comes back clean is proof of readiness again.
+    await sm.sendMessage(sessionId, "hi again");
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+  });
+
+  it("still records needs-auth, and warns, when clearing the confirmation throws", async () => {
+    clearSignInConfirmation.mockImplementationOnce(() => {
+      throw new Error("database is locked");
+    });
+    const warn = vi.spyOn(serverLogger, "warn");
+    try {
+      mockConnection.newSession.mockRejectedValue(authError());
+      await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+
+      expect(sm.getReadiness("codex").state).toBe("needs-auth");
+      expect(warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tag: "session-manager",
+          op: "clear_sign_in_confirmation_failed",
+          agentId: "codex",
+        }),
+        expect.any(String),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("a NON-auth prompt failure neither clears the confirmation nor changes readiness", async () => {
+    const sessionId = await claudeChat();
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+
+    mockConnection.prompt.mockRejectedValueOnce(new Error("ECONNRESET"));
+    await sm.sendMessage(sessionId, "hi");
+
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+    expect(clearSignInConfirmation).not.toHaveBeenCalled();
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["ready"]);
+  });
+
+  it("codex: a returned prompt turn records ready, with no session/new in between", async () => {
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    const sessionId = await sm.createSession();
+    await new Promise((r) => setTimeout(r, 0));
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "hi");
+    expect(sm.getReadiness("codex").state).toBe("needs-auth");
+
+    const newSessionsBefore = mockConnection.newSession.mock.calls.length;
+    await sm.sendMessage(sessionId, "hi again");
+
+    expect(mockConnection.newSession.mock.calls.length).toBe(newSessionsBefore);
+    expect(sm.getReadiness("codex")).toEqual({ state: "ready" });
+  });
+
+  // A prompt-observed needs-auth has no session/new that can undo it, so without
+  // a way to forget it the user loops back to the sign-in terminal until libi
+  // restarts. Two user actions supersede the old observation — confirming
+  // sign-in, and picking the agent again — and both hand back `unknown`, never
+  // `ready`. From there readiness is observed again: a clean standby
+  // `session/new` records `ready`, and a prompt rejection records `needs-auth`.
+
+  /** A claude-code chat whose prompt was just rejected for auth. */
+  async function claudeRejectedAtPrompt(): Promise<string> {
+    const sessionId = await claudeChat();
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "hi");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+    return sessionId;
+  }
+
+  it("confirming sign-in forgets an observed needs-auth: readiness becomes unknown, and is broadcast", async () => {
+    await claudeRejectedAtPrompt();
+
+    sm.forgetObservedAuthFailure("claude-code");
+
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "unknown" });
+    const events = readinessEvents();
+    expect(events.map((e) => e.readiness.state)).toEqual(["ready", "needs-auth", "unknown"]);
+    expect(events.at(-1)?.agentId).toBe("claude-code");
+  });
+
+  it("after forgetting, the next clean standby session/new records ready, and a prompt rejection records needs-auth again", async () => {
+    const sessionId = await claudeRejectedAtPrompt();
+    sm.forgetObservedAuthFailure("claude-code");
+
+    const newSessionsBefore = mockConnection.newSession.mock.calls.length;
+    await sm.createSession();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(mockConnection.newSession.mock.calls.length).toBeGreaterThan(newSessionsBefore);
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["ready", "needs-auth", "unknown", "ready"]);
+
+    mockConnection.prompt.mockRejectedValueOnce(authError());
+    await sm.sendMessage(sessionId, "still signed out");
+    expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
+  });
+
+  it("claude-code: picking the agent again forgets a prompt-observed needs-auth before its session/new starts", async () => {
+    await claudeRejectedAtPrompt();
+
+    let readinessAtSessionNew: string | null = null;
+    mockConnection.newSession.mockImplementationOnce(async () => {
+      readinessAtSessionNew = sm.getReadiness("claude-code").state;
+      return { sessionId: "s-reselected" };
+    });
+    await sm.switchAgent("claude-code", { awaitStandbyMs: 2000 });
+
+    expect(readinessAtSessionNew).toBe("unknown");
+    // The standby's clean session/new is the observation that follows.
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "ready" });
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["ready", "needs-auth", "unknown", "ready"]);
+  });
+
+  it("codex: picking the agent again keeps needs-auth — its own session/new re-tests it", async () => {
+    mockConnection.newSession.mockRejectedValue(authError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.getReadiness("codex").state).toBe("needs-auth");
+
+    let readinessAtSessionNew: string | null = null;
+    mockConnection.newSession.mockImplementationOnce(async () => {
+      readinessAtSessionNew = sm.getReadiness("codex").state;
+      throw authError();
+    });
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+
+    expect(readinessAtSessionNew).toBe("needs-auth");
+    expect(sm.getReadiness("codex").state).toBe("needs-auth");
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["needs-auth"]);
+  });
+
+  it("forgetting changes nothing for an agent that is not in needs-auth", async () => {
+    sm.forgetObservedAuthFailure("codex"); // unknown
+    expect(sm.getReadiness("codex")).toEqual({ state: "unknown" });
+
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.getReadiness("codex")).toEqual({ state: "ready" });
+    sm.forgetObservedAuthFailure("codex"); // ready
+    expect(sm.getReadiness("codex")).toEqual({ state: "ready" });
+
+    expect(readinessEvents().map((e) => e.readiness.state)).toEqual(["ready"]);
+  });
+
+  it("forgetting ignores an agent the setup wizard does not walk through", async () => {
+    mockConnection.newSession.mockRejectedValue(authError());
+    await sm.switchAgent("some-other-agent", { awaitStandbyMs: 2000 });
+    expect(sm.getReadiness("some-other-agent").state).toBe("needs-auth");
+
+    sm.forgetObservedAuthFailure("some-other-agent");
+
+    expect(sm.getReadiness("some-other-agent").state).toBe("needs-auth");
   });
 
   it("broadcasts the transition on the system channel", async () => {
@@ -226,32 +467,82 @@ describe("SessionManager agent readiness", () => {
 
     expect(sm.activeAgentId).toBeNull();
   });
-});
 
-describe("signInRemedyFor", () => {
-  it("offers Claude Code its own sign-in flow", () => {
-    const remedy = signInRemedyFor("claude-code");
-    expect(remedy).not.toBeNull();
-    expect(remedy?.label).toMatch(/sign in/i);
-    // Never `npm i -g` — the point of the remedy module is that signing in
-    // does not require an install.
-    expect(remedy?.command).not.toMatch(/npm/);
+  it("a spawn REFUSED for a missing/outdated CLI sets readiness not-installed with the Agents reason", async () => {
+    // The error the process manager really throws, not a look-alike message.
+    const refusal = new AgentSpawnRefusedError("codex", {
+      code: "not_installed",
+      message: "Codex 1.0.0 is older than libi needs — open Agents to update it.",
+      detail: "below minimum",
+    });
+    pm.warmProcess.mockRejectedValue(refusal);
+    await expect(sm.switchAgent("codex")).rejects.toBe(refusal);
+    expect(sm.getReadiness("codex")).toEqual({
+      state: "not-installed",
+      reason: "Codex 1.0.0 is older than libi needs — open Agents to update it.",
+    });
+    expect(sm.activeAgentId).toBeNull();
   });
 
-  it("returns null for an agent it knows no remedy for", () => {
-    expect(signInRemedyFor("terminal")).toBeNull();
+  /** The error the process manager throws when the CLI is below the minimum. */
+  function belowMinimumRefusal(): AgentSpawnRefusedError {
+    return new AgentSpawnRefusedError("claude-code", {
+      code: "not_installed",
+      message: "Claude Code 2.0.1 is older than libi needs — open Agents to update it.",
+      detail: "below minimum",
+    });
+  }
+
+  it("a new chat with no standby and no process: a REFUSED spawn records not-installed and is rethrown", async () => {
+    mockConnection.newSession.mockRejectedValueOnce(new Error("standby failed for another reason"));
+    await sm.switchAgent("claude-code", { awaitStandbyMs: 2000 });
+    expect(sm.isStandbyReady()).toBe(false);
+    pm.getConnection.mockReturnValue(null); // the process is gone
+    const refusal = belowMinimumRefusal();
+    pm.warmProcess.mockRejectedValueOnce(refusal);
+
+    await expect(sm.createSession()).rejects.toBe(refusal);
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "not-installed", reason: refusal.reason.message });
   });
 
-  it("offers codex a `login` on a bundled engine, or nothing at all", () => {
-    // Environment-dependent: the bundled ~271MB engine may be absent in a
-    // --omit=optional checkout, in which case null is the honest answer.
-    const remedy = signInRemedyFor("codex");
-    if (remedy) {
-      expect(remedy.command).toMatch(/ login$/);
-      expect(remedy.command).not.toMatch(/npm/);
-    } else {
-      expect(remedy).toBeNull();
-    }
+  it("a resume with no process warms the agent; a REFUSED spawn records not-installed and the resume fails", async () => {
+    pm.getCapabilitiesForAgent.mockReturnValue({ canListSessions: true });
+    mockConnection.listSessions.mockResolvedValueOnce({
+      sessions: [{ sessionId: "old-1", title: "Old", updatedAt: null }],
+      nextCursor: null,
+    });
+    await sm.switchAgent("claude-code", { awaitStandbyMs: 2000 });
+    pm.getConnection.mockReturnValue(null); // the process is gone
+    const refusal = belowMinimumRefusal();
+    pm.warmProcess.mockRejectedValueOnce(refusal);
+
+    await expect(sm.activateSession("old-1")).rejects.toBe(refusal);
+    expect(pm.warmProcess).toHaveBeenCalledTimes(2); // the switch, then this resume
+    expect(sm.getReadiness("claude-code")).toEqual({ state: "not-installed", reason: refusal.reason.message });
+    expect(mockConnection.loadSession).not.toHaveBeenCalled();
+  });
+
+  it("a plain spawn error that merely READS like a refusal leaves readiness alone — the type decides, not the text", async () => {
+    pm.warmProcess.mockRejectedValue(new Error("Agent codex is not installed: something else entirely"));
+    await expect(sm.switchAgent("codex")).rejects.toThrow(/not installed/);
+    expect(sm.getReadiness("codex")).toEqual({ state: "unknown" });
+  });
+
+  it("a session/new error whose message contains 'is not installed: ' never sets not-installed — session/new cannot refuse a spawn", async () => {
+    mockConnection.newSession.mockRejectedValue(new Error("MCP server foo is not installed: run the installer"));
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.getReadiness("codex")).toEqual({ state: "unknown" });
+
+    // No standby survived, so this is the fresh-create path.
+    await expect(sm.createSession()).rejects.toThrow(/is not installed: /);
+    expect(sm.getReadiness("codex")).toEqual({ state: "unknown" });
+    expect(readinessEvents()).toHaveLength(0);
+  });
+
+  it("any other spawn failure leaves readiness alone (no invented diagnosis)", async () => {
+    pm.warmProcess.mockRejectedValue(new Error("spawn ENOENT"));
+    await expect(sm.switchAgent("codex")).rejects.toThrow(/spawn ENOENT/);
+    expect(sm.getReadiness("codex")).toEqual({ state: "unknown" });
   });
 });
 

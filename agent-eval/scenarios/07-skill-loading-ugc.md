@@ -1,7 +1,7 @@
 ---
 id: skill-loading-ugc
 title: Bundled skills load — a UGC ad request triggers the ugc-product-video skill
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [skill-mirror, skill-discovery, skill-invocation]
 cost: subscription-tokens

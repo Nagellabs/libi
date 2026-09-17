@@ -19,6 +19,7 @@ import {
   type InspectorOverlayKind,
 } from "@/lib/overlays/inspector-fields";
 import { DEFAULT_TERMINAL_CLI_ID } from "@/lib/terminal/presets";
+import { MCP_SCROLL_EVENT, setPendingMcpScroll } from "@/lib/mcp-scroll-intent";
 
 import { useRouter } from "next/navigation";
 import { useSessionList, type UseSessionList } from "@/hooks/sessions/use-session-list";
@@ -36,7 +37,7 @@ export interface ProviderInfo {
    * Present only on unavailable providers. The list handed to consumers is
    * deliberately UNFILTERED so the selector can show an unavailable agent
    * disabled-with-a-reason; consumers that need only selectable agents filter
-   * on `available` themselves (see onboarding-panel.tsx).
+   * on `available` themselves.
    */
   unavailableReason?: import("@/lib/agents/types").AgentUnavailableReason;
   [key: string]: unknown;
@@ -88,17 +89,13 @@ interface PersistedEditorState {
   lastEditorTab: "preview" | "storyboard" | "assets" | "objects";
   lastAssetId: string | null;
   /** Last active tab inside the asset preview panel. */
-  lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "script" | "generation" | "notes";
-  /** Width % of the Script tab's left shot-rail in the two-pane split. */
-  scriptShotRailPct: number;
+  lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
   /** Height % of the top (preview+details) section in the Timeline-tab vertical split. Shared across pieces. */
   previewTimelineSplit: number;
   /** Effects picker panel height in px. Global, shared across pieces. Clamped to [200, 560]. */
   effectsPanelHeight: number;
   /** Effects picker panel open/closed. Global, persisted so it survives reload. */
   effectsPanelOpen: boolean;
-  /** Whether the user dismissed the "Connect Codex" first-use nudge. Global, persisted. */
-  codexNudgeDismissed: boolean;
   /** Last selected effect phase sub-tab (in/out/loop). Global. */
   effectsLastPhase: "in" | "out" | "loop";
   /** Width % of the preview side in the Timeline-tab preview|layers split. Shared across pieces. */
@@ -112,8 +109,6 @@ interface PersistedEditorState {
   lastSessionId: string | null;
   /** Selected "Launch CLI" preset for new terminal sessions (lib/terminal/presets.ts id). */
   terminalCliId: string;
-  /** Controls what renders in the right region (right of chat). Persisted so the user's last view is restored. */
-  rightRegionMode: RightRegionMode;
 }
 
 const STORAGE_KEY = "libi:editor-state";
@@ -134,11 +129,9 @@ const DEFAULTS: PersistedEditorState = {
   lastEditorTab: "preview",
   lastAssetId: null,
   lastAssetTab: "summary",
-  scriptShotRailPct: 35,
   previewTimelineSplit: 72,
   effectsPanelHeight: 300,
   effectsPanelOpen: false,
-  codexNudgeDismissed: false,
   effectsLastPhase: "in",
   previewLayersSplit: 64,
   previewLayersDockedPieces: {},
@@ -146,7 +139,6 @@ const DEFAULTS: PersistedEditorState = {
   overlaySizeSplitPieces: {},
   lastSessionId: null,
   terminalCliId: DEFAULT_TERMINAL_CLI_ID,
-  rightRegionMode: "editor",
 };
 
 const OLD_LAYOUT_KEY = "libi:panel-layout";
@@ -197,23 +189,6 @@ function sanitizeOverlayModeMap(
     if (Object.keys(kept).length > 0) out[pieceId] = kept;
   }
   return out;
-}
-
-export type RightRegionMode = "editor" | "onboarding" | "api-config";
-
-export function sanitizeRightRegionMode(v: unknown): RightRegionMode {
-  return v === "onboarding" || v === "api-config" || v === "editor" ? v : "editor";
-}
-
-/**
- * Coerce a PERSISTED mode for first load: `api-config` is meaningless across a
- * reload because its `apiConfigMcpId` is transient (lost on reload), so restoring
- * it would render an empty/generic config panel. Fall back to `editor` — the panel
- * is re-opened on demand by the agent via the `right_region` SSE event.
- */
-function loadRightRegionMode(v: unknown): RightRegionMode {
-  const mode = sanitizeRightRegionMode(v);
-  return mode === "api-config" ? "editor" : mode;
 }
 
 /** Keep only `true` entries — false/garbage means "hidden", which is the default. */
@@ -301,25 +276,16 @@ function loadState(): PersistedEditorState {
           parsed.lastAssetTab === "summary" ||
           parsed.lastAssetTab === "transcript" ||
           parsed.lastAssetTab === "frames" ||
-          parsed.lastAssetTab === "script" ||
           parsed.lastAssetTab === "generation" ||
           parsed.lastAssetTab === "notes"
             ? parsed.lastAssetTab
             : DEFAULTS.lastAssetTab,
-        scriptShotRailPct:
-          typeof parsed.scriptShotRailPct === "number"
-            ? parsed.scriptShotRailPct
-            : DEFAULTS.scriptShotRailPct,
         previewTimelineSplit: clampSplit(parsed.previewTimelineSplit, DEFAULTS.previewTimelineSplit),
         effectsPanelHeight: clampEffectsHeight(parsed.effectsPanelHeight),
         effectsPanelOpen:
           typeof parsed.effectsPanelOpen === "boolean"
             ? parsed.effectsPanelOpen
             : DEFAULTS.effectsPanelOpen,
-        codexNudgeDismissed:
-          typeof parsed.codexNudgeDismissed === "boolean"
-            ? parsed.codexNudgeDismissed
-            : DEFAULTS.codexNudgeDismissed,
         effectsLastPhase: sanitizeEffectPhase(parsed.effectsLastPhase),
         previewLayersSplit: clampSplit(parsed.previewLayersSplit, DEFAULTS.previewLayersSplit),
         previewLayersDockedPieces:
@@ -340,7 +306,6 @@ function loadState(): PersistedEditorState {
           typeof parsed.terminalCliId === "string" && parsed.terminalCliId
             ? parsed.terminalCliId
             : DEFAULTS.terminalCliId,
-        rightRegionMode: loadRightRegionMode(parsed.rightRegionMode),
       };
     }
 
@@ -365,11 +330,9 @@ function loadState(): PersistedEditorState {
         lastEditorTab: DEFAULTS.lastEditorTab,
         lastAssetId: DEFAULTS.lastAssetId,
         lastAssetTab: DEFAULTS.lastAssetTab,
-        scriptShotRailPct: DEFAULTS.scriptShotRailPct,
         previewTimelineSplit: DEFAULTS.previewTimelineSplit,
         effectsPanelHeight: DEFAULTS.effectsPanelHeight,
         effectsPanelOpen: DEFAULTS.effectsPanelOpen,
-        codexNudgeDismissed: DEFAULTS.codexNudgeDismissed,
         effectsLastPhase: DEFAULTS.effectsLastPhase,
         previewLayersSplit: DEFAULTS.previewLayersSplit,
         previewLayersDockedPieces: DEFAULTS.previewLayersDockedPieces,
@@ -377,7 +340,6 @@ function loadState(): PersistedEditorState {
         overlaySizeSplitPieces: DEFAULTS.overlaySizeSplitPieces,
         lastSessionId: DEFAULTS.lastSessionId,
         terminalCliId: DEFAULTS.terminalCliId,
-        rightRegionMode: DEFAULTS.rightRegionMode,
       };
       saveState(migrated);
       localStorage.removeItem(OLD_LAYOUT_KEY);
@@ -456,13 +418,10 @@ interface EditorStateContextValue {
   setLastEditorTab: (tab: "preview" | "storyboard" | "assets" | "objects") => void;
   lastAssetId: string | null;
   setLastAssetId: (id: string | null) => void;
-  lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "script" | "generation" | "notes";
+  lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
   setLastAssetTab: (
-    tab: "preview" | "summary" | "transcript" | "frames" | "script" | "generation" | "notes",
+    tab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes",
   ) => void;
-  scriptShotRailPct: number;
-  setScriptShotRailPct: (value: number) => void;
-
   previewTimelineSplit: number;
   setPreviewTimelineSplit: (value: number) => void;
   effectsPanelHeight: number;
@@ -471,8 +430,6 @@ interface EditorStateContextValue {
   setPreviewTimelineZoom: (value: number | null) => void;
   effectsPanelOpen: boolean;
   setEffectsPanelOpen: (value: boolean) => void;
-  codexNudgeDismissed: boolean;
-  setCodexNudgeDismissed: (value: boolean) => void;
   effectsLastPhase: "in" | "out" | "loop";
   setEffectsLastPhase: (value: "in" | "out" | "loop") => void;
   previewLayersSplit: number;
@@ -508,12 +465,6 @@ interface EditorStateContextValue {
   assetOriginFolderId: string | null;
   setAssetOriginFolderId: (id: string | null) => void;
 
-  // Right region mode (persisted) + inline API-config panel state (transient).
-  rightRegionMode: RightRegionMode;
-  setRightRegionMode: (mode: RightRegionMode) => void;
-  /** The MCP id to configure inline. Transient — not persisted. Null when no panel is open. */
-  apiConfigMcpId: string | null;
-  setApiConfigMcpId: (id: string | null) => void;
   /** First-run flag: true when the user should see the one-tap "Show me how
    *  it works" demo suggestion. In-memory here, but not purely
    *  client-state: it's seeded from the server (armed by
@@ -534,12 +485,12 @@ interface EditorStateContextValue {
   isAgentConnecting: boolean;
   /**
    * Switch to an agent. Resolves with what the server learned about it during
-   * the switch — `needs-auth` carries the sign-in remedy resolved on THIS
-   * machine — or null when the response said nothing useful. Callers that
+   * the switch — an observed `needs-auth`, say — or null when the response
+   * said nothing useful. Callers that
    * only want the side effect can keep ignoring the result.
    */
   selectAgent: (providerId: string) => Promise<AgentReadiness | null>;
-  refreshAgentProviders: () => void;
+  reloadAgentProviders: () => void;
 
   // Session list (shared across the app so the sidebar is identical on every page)
   sessionList: UseSessionList;
@@ -567,9 +518,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const [lastEditorTab, setLastEditorTabState] = useState(() => loadState().lastEditorTab);
   const [lastAssetId, setLastAssetIdState] = useState<string | null>(() => loadState().lastAssetId);
   const [lastAssetTab, setLastAssetTabState] = useState(() => loadState().lastAssetTab);
-  const [scriptShotRailPct, setScriptShotRailPctState] = useState(
-    () => loadState().scriptShotRailPct,
-  );
   const [previewTimelineSplit, setPreviewTimelineSplitState] = useState(
     () => loadState().previewTimelineSplit,
   );
@@ -583,9 +531,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const [previewTimelineZoom, setPreviewTimelineZoomState] = useState<number | null>(null);
   const [effectsPanelOpen, setEffectsPanelOpenState] = useState(
     () => loadState().effectsPanelOpen,
-  );
-  const [codexNudgeDismissed, setCodexNudgeDismissedState] = useState(
-    () => loadState().codexNudgeDismissed,
   );
   const [effectsLastPhase, setEffectsLastPhaseState] = useState<"in" | "out" | "loop">(
     () => loadState().effectsLastPhase,
@@ -606,18 +551,12 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const [lastSessionId, setLastSessionIdState] = useState<string | null>(() => loadState().lastSessionId);
   const [terminalCliId, setTerminalCliIdState] = useState(() => loadState().terminalCliId);
   const [activeTerminalId, setActiveTerminalId] = useState<string | null>(null);
-  const [rightRegionMode, setRightRegionModeState] = useState<RightRegionMode>(
-    () => loadState().rightRegionMode,
-  );
-  const rightRegionModeRef = useRef(rightRegionMode);
-  rightRegionModeRef.current = rightRegionMode;
-  const [apiConfigMcpId, setApiConfigMcpId] = useState<string | null>(null);
 
   // ── Onboarding demo offer (Task 13) ─────────────────────────────────
   //
   // Deliberately plain `fetch`, NOT React Query — same reasoning as
-  // `agentProviders` just above (see lib/queries/agent-setup.ts's header
-  // comment): EditorStateProvider is rendered without a QueryClientProvider
+  // `agentProviders` just above: EditorStateProvider is rendered without a
+  // QueryClientProvider
   // ancestor across a couple dozen existing tests, and there is no other
   // consumer of this specific read/write pair to share a cache with.
   //
@@ -716,16 +655,12 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   lastAssetIdRef.current = lastAssetId;
   const lastAssetTabRef = useRef(lastAssetTab);
   lastAssetTabRef.current = lastAssetTab;
-  const scriptShotRailPctRef = useRef(scriptShotRailPct);
-  scriptShotRailPctRef.current = scriptShotRailPct;
   const previewTimelineSplitRef = useRef(previewTimelineSplit);
   previewTimelineSplitRef.current = previewTimelineSplit;
   const effectsPanelHeightRef = useRef(effectsPanelHeight);
   effectsPanelHeightRef.current = effectsPanelHeight;
   const effectsPanelOpenRef = useRef(effectsPanelOpen);
   effectsPanelOpenRef.current = effectsPanelOpen;
-  const codexNudgeDismissedRef = useRef(codexNudgeDismissed);
-  codexNudgeDismissedRef.current = codexNudgeDismissed;
   const effectsLastPhaseRef = useRef(effectsLastPhase);
   effectsLastPhaseRef.current = effectsLastPhase;
   const previewLayersSplitRef = useRef(previewLayersSplit);
@@ -765,11 +700,9 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       lastEditorTab: lastEditorTabRef.current,
       lastAssetId: lastAssetIdRef.current,
       lastAssetTab: lastAssetTabRef.current,
-      scriptShotRailPct: scriptShotRailPctRef.current,
       previewTimelineSplit: previewTimelineSplitRef.current,
       effectsPanelHeight: effectsPanelHeightRef.current,
       effectsPanelOpen: effectsPanelOpenRef.current,
-      codexNudgeDismissed: codexNudgeDismissedRef.current,
       effectsLastPhase: effectsLastPhaseRef.current,
       previewLayersSplit: previewLayersSplitRef.current,
       previewLayersDockedPieces: previewLayersDockedPiecesRef.current,
@@ -777,7 +710,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       overlaySizeSplitPieces: overlaySizeSplitPiecesRef.current,
       lastSessionId: lastSessionIdRef.current,
       terminalCliId: terminalCliIdRef.current,
-      rightRegionMode: rightRegionModeRef.current,
     });
   }, []);
 
@@ -907,19 +839,13 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   );
 
   const setLastAssetTab = useCallback(
-    (tab: "preview" | "summary" | "transcript" | "frames" | "script" | "generation" | "notes") => {
+    (tab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes") => {
       lastAssetTabRef.current = tab;
       setLastAssetTabState(tab);
       persist();
     },
     [persist],
   );
-
-  const setScriptShotRailPct = useCallback((value: number) => {
-    setScriptShotRailPctState(value);
-    scriptShotRailPctRef.current = value;
-    persist();
-  }, [persist]);
 
   const setPreviewTimelineSplit = useCallback((value: number) => {
     setPreviewTimelineSplitState(value);
@@ -941,12 +867,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const setEffectsPanelOpen = useCallback((value: boolean) => {
     setEffectsPanelOpenState(value);
     effectsPanelOpenRef.current = value;
-    persist();
-  }, [persist]);
-
-  const setCodexNudgeDismissed = useCallback((value: boolean) => {
-    setCodexNudgeDismissedState(value);
-    codexNudgeDismissedRef.current = value;
     persist();
   }, [persist]);
 
@@ -1053,21 +973,13 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
     [persist],
   );
 
-  const setRightRegionMode = useCallback(
-    (mode: RightRegionMode) => {
-      setRightRegionModeState(mode);
-      rightRegionModeRef.current = mode;
-      persist();
-    },
-    [persist],
-  );
-
   // ── Agent state ──────────────────────────────────────────────────────
   //
   // Two pieces of state:
   //   1. `agentProviders` — installed-CLI detection from /api/agent/providers.
-  //      Effectively static (doesn't change unless the user installs a CLI
-  //      and clicks "Re-detect agents"), so we fetch once on mount.
+  //      Fetched on mount and again whenever the agent picker opens; the server
+  //      keeps detection current (the Agents page's status reads and agent
+  //      installs refresh it), so a plain read is enough.
   //   2. `pendingProviderId` — set while selectAgent() is in flight so the UI
   //      shows the in-flight target before the server confirms. Cleared once
   //      the request resolves; from then on we read from `sessionList.activeAgentId`.
@@ -1079,9 +991,8 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const [agentProvidersLoaded, setAgentProvidersLoaded] = useState(false);
   const [pendingProviderId, setPendingProviderId] = useState<string | null>(null);
 
-  const fetchAgentProviders = useCallback((refresh = false) => {
-    const url = refresh ? "/api/agent/providers?refresh=true" : "/api/agent/providers";
-    fetch(url)
+  const fetchAgentProviders = useCallback(() => {
+    fetch("/api/agent/providers")
       .then((r) => r.json())
       .then((data: ProviderInfo[]) => {
         setAgentProviders(data);
@@ -1162,37 +1073,41 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
     fetchAgentProviders();
   }, [fetchAgentProviders]);
 
-  // Listen for `navigate_settings` events from libi.show_mcp_settings tool.
-  // MUST go through the shared singleton EventSource (subscribeBroadcast),
-  // not its own `new EventSource(...)` — EditorStateProvider lives at the
-  // `(app)` layout and is permanently mounted, so a dedicated connection
-  // here would squat on a browser HTTP/1.1 socket forever and contribute
-  // to the Chrome 6-per-origin limit that hangs in-dev navigation.
+  // Listen for `navigate_agents` events (libi.show_extension,
+  // libi.start_onboarding). MUST go through the shared singleton EventSource
+  // (subscribeBroadcast), not its own `new EventSource(...)` —
+  // EditorStateProvider lives at the `(app)` layout and is permanently
+  // mounted, so a dedicated connection here would squat on a browser HTTP/1.1
+  // socket forever and contribute to the Chrome 6-per-origin limit that hangs
+  // in-dev navigation.
   useEffect(() => {
     return subscribeBroadcast((data) => {
-      if (data.type !== "navigate_settings") return;
-      const mcpId = typeof data.mcpId === "string" ? data.mcpId : undefined;
+      if (data.type !== "navigate_agents") return;
       if (typeof window === "undefined") return;
-      if (window.location.pathname !== "/mcps-skills") {
-        router.push("/mcps-skills?tab=mcp");
-      }
-      window.dispatchEvent(
-        new CustomEvent("libi:mcp-scroll-to", { detail: { mcpId } }),
-      );
+      const tab = data.tab === "libi-mcp" || data.tab === "providers" ? data.tab : "agents";
+      const extensionId = typeof data.extensionId === "string" ? data.extensionId : undefined;
+      const provider = typeof data.provider === "string" ? data.provider : undefined;
+      // Park the scroll intent BEFORE navigating. The libi MCP tab's panel is
+      // UNMOUNTED whenever another tab is showing (base-ui's Tabs.Panel
+      // defaults to keepMounted:false, and Agents is the default tab), so the
+      // event below reaches no listener at all — McpServersView has to claim
+      // the id when it mounts instead.
+      if (tab === "libi-mcp") setPendingMcpScroll(extensionId);
+      const params = new URLSearchParams({ tab });
+      if (extensionId) params.set("extension", extensionId);
+      if (provider) params.set("provider", provider);
+      // "Already here" means the same tab AND the same extension/provider focus — a different
+      // provider on the Providers tab must still navigate.
+      const current = new URLSearchParams(window.location.search);
+      const here =
+        window.location.pathname === "/agents" &&
+        current.get("tab") === tab &&
+        (current.get("extension") ?? undefined) === extensionId &&
+        (current.get("provider") ?? undefined) === provider;
+      if (!here) router.push(`/agents?${params.toString()}`);
+      if (extensionId) window.dispatchEvent(new CustomEvent(MCP_SCROLL_EVENT, { detail: { mcpId: extensionId } }));
     });
   }, [router]);
-
-  // Listen for `right_region` broadcast events from the server.
-  // Updates rightRegionMode and apiConfigMcpId in response to MCP tool calls
-  // (e.g. libi.show_onboarding, libi.show_mcp_settings inline).
-  useEffect(() => {
-    return subscribeBroadcast((data) => {
-      if (data.type !== "right_region") return;
-      const mode = sanitizeRightRegionMode(data.mode);
-      setApiConfigMcpId(mode === "api-config" ? ((data.mcpId as string) ?? null) : null);
-      setRightRegionMode(mode);
-    });
-  }, [setRightRegionMode]);
 
   // Stabilize derived values + the context value itself. Every consumer of
   // useEditorState() re-renders when the context value's identity changes,
@@ -1204,8 +1119,8 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   // selector renders unavailable agents disabled with their
   // `unavailableReason`; consumers that want only selectable agents filter on
   // `available` themselves.
-  const refreshAgentProviders = useCallback(
-    () => fetchAgentProviders(true),
+  const reloadAgentProviders = useCallback(
+    () => fetchAgentProviders(),
     [fetchAgentProviders],
   );
 
@@ -1237,8 +1152,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setLastAssetId,
       lastAssetTab,
       setLastAssetTab,
-      scriptShotRailPct,
-      setScriptShotRailPct,
       previewTimelineSplit,
       setPreviewTimelineSplit,
       effectsPanelHeight,
@@ -1248,8 +1161,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setPreviewTimelineZoom,
       effectsPanelOpen,
       setEffectsPanelOpen,
-      codexNudgeDismissed,
-      setCodexNudgeDismissed,
       effectsLastPhase,
       setEffectsLastPhase,
       previewLayersSplit,
@@ -1272,10 +1183,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setAssetCurrentFolderId,
       assetOriginFolderId,
       setAssetOriginFolderId,
-      rightRegionMode,
-      setRightRegionMode,
-      apiConfigMcpId,
-      setApiConfigMcpId,
       onboardingDemoOffer,
       setOnboardingDemoOffer,
       agentProviders,
@@ -1283,7 +1190,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       activeProviderId,
       isAgentConnecting,
       selectAgent,
-      refreshAgentProviders,
+      reloadAgentProviders,
       sessionList,
     }),
     [
@@ -1315,8 +1222,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setLastAssetId,
       lastAssetTab,
       setLastAssetTab,
-      scriptShotRailPct,
-      setScriptShotRailPct,
       previewTimelineSplit,
       setPreviewTimelineSplit,
       effectsPanelHeight,
@@ -1326,8 +1231,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setPreviewTimelineZoom,
       effectsPanelOpen,
       setEffectsPanelOpen,
-      codexNudgeDismissed,
-      setCodexNudgeDismissed,
       effectsLastPhase,
       setEffectsLastPhase,
       previewLayersSplit,
@@ -1353,10 +1256,6 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       setAssetCurrentFolderId,
       assetOriginFolderId,
       setAssetOriginFolderId,
-      rightRegionMode,
-      setRightRegionMode,
-      apiConfigMcpId,
-      setApiConfigMcpId,
       onboardingDemoOffer,
       setOnboardingDemoOffer,
       agentProviders,
@@ -1364,7 +1263,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
       activeProviderId,
       isAgentConnecting,
       selectAgent,
-      refreshAgentProviders,
+      reloadAgentProviders,
       sessionList,
     ],
   );

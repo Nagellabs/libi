@@ -20,21 +20,21 @@ describe("Runner paid-flag coverage", () => {
     registerBuiltinRunners();
   });
 
-  it("the two fal.ai-backed runners carry paid: true", () => {
-    expect(getRunner("tracking_provider")?.paid).toBe(true);
-    expect(getRunner("extra_analysis_model")?.paid).toBe(true);
+  it("the removed paid runners are not registered", () => {
+    expect(getRunner("extra_analysis_model")).toBeNull();
+    expect(getRunner("tracking_provider")).toBeNull();
   });
 
   it("a known-local runner has a falsy paid flag", () => {
     expect(getRunner("proxy_gen")?.paid).toBeFalsy();
   });
 
-  it("exactly the expected set of runners is flagged paid", () => {
+  it("no built-in runner is flagged paid (every remaining kind is local compute)", () => {
     const paidKinds = listRunners()
       .filter((r) => r.paid === true)
       .map((r) => r.kind)
       .sort();
-    expect(paidKinds).toEqual(["extra_analysis_model", "tracking_provider"]);
+    expect(paidKinds).toEqual([]);
   });
 
   it("every *_provider runner is flagged paid", () => {

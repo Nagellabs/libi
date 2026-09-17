@@ -5,7 +5,11 @@ import type { TrackSample } from "@/lib/tracking/types";
 const frame = { w: 608, h: 1080 };
 
 describe("sanitizeSamples", () => {
-  it("forces visible:false when bbox ~= full canvas (the SAM2 collapse)", () => {
+  // A tracker that has lost its subject and returns the whole frame is
+  // claiming "the subject is everywhere", which renders as a full-frame
+  // overlay rather than as the loss it is. The invariant, not the provider
+  // that first produced it: bbox ≈ full canvas ⇒ visible:false, confidence 0.
+  it("forces visible:false when the bbox covers ~the whole canvas", () => {
     const s: TrackSample[] = [
       { t: 0, x: 0, y: 0, w: 607, h: 1079, confidence: 1, visible: true },
       { t: 1, x: 100, y: 200, w: 80, h: 90, confidence: 0.9, visible: true },

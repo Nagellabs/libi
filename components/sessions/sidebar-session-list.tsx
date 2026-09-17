@@ -22,7 +22,6 @@ import SessionContextMenu, {
 } from "./session-context-menu";
 import { emptySessionsMessage } from "./session-list-utils";
 import TerminalSessionList from "./terminal-session-list";
-import { useRunRemedyInTerminal } from "@/hooks/agents/use-run-remedy-in-terminal";
 
 function SessionIcon({ sessionId }: { sessionId: string }) {
   const icon = getSessionIcon(sessionId);
@@ -153,7 +152,6 @@ export default function SidebarSessionList() {
   const isTerminalSurface = activeProviderId === "terminal";
   const pathname = usePathname();
   const router = useRouter();
-  const runRemedyInTerminal = useRunRemedyInTerminal();
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(
     null,
   );
@@ -232,30 +230,14 @@ export default function SidebarSessionList() {
     const activeProvider = agentProviders.find((p) => p.id === activeProviderId);
     const canListSessions = activeProvider?.capabilities.canListSessions ?? true;
 
-    // An agent that CAN'T sign in has no sessions for a reason, and that reason
-    // must be READ, not hovered. Live QA on a machine with an unauthenticated
-    // codex found the whole sidebar saying only "No sessions yet" while the real
-    // explanation sat in a `title` attribute — so the one visible sentence
-    // invited the user to make a session they could never make. This is the
-    // surface the original bug report ("no error anywhere") was actually about.
+    // An agent that can't chat yet has no sessions for a reason, and that
+    // reason must be READ, not hovered. The sidebar says it once, directly above
+    // this list, with its "Set up in Agents" link (components/layout/
+    // app-sidebar.tsx) — so the list neither repeats the line nor says "No
+    // sessions yet", an invitation to make a session the user can't make.
     const readiness = sessionList.readiness;
-    if (readiness?.state === "needs-auth") {
-      return (
-        <SidebarGroup>
-          <div className="flex flex-col gap-2 px-2 py-2 group-data-[collapsible=icon]:hidden">
-            <p className="text-xs text-muted-foreground">{readiness.message}</p>
-            {readiness.remedy && (
-              <button
-                type="button"
-                onClick={() => runRemedyInTerminal(readiness.remedy!, readiness.agentId, "sidebar")}
-                className="cursor-pointer rounded-md bg-primary px-2 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-              >
-                {readiness.remedy.label}
-              </button>
-            )}
-          </div>
-        </SidebarGroup>
-      );
+    if (readiness?.state === "needs-auth" || readiness?.state === "not-installed") {
+      return null;
     }
 
     return (

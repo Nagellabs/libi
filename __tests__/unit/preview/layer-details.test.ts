@@ -35,7 +35,6 @@ function file(partial: Partial<FileRecord> & { id: string }): FileRecord {
     proxyStatus: partial.proxyStatus ?? "ready",
     proxyGeneratedAt: partial.proxyGeneratedAt ?? null,
     proxyHeight: partial.proxyHeight ?? null,
-    falUploadedUrl: partial.falUploadedUrl ?? null,
     notes: partial.notes ?? null,
     aiGeneration: partial.aiGeneration ?? null,
     createdAt: partial.createdAt ?? new Date(),

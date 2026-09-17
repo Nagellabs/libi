@@ -40,6 +40,41 @@ export async function pickDirectory(initialPath?: string): Promise<string | null
   return undefined;
 }
 
+export type PickFolderClientResult =
+  | { status: "picked"; path: string }
+  | { status: "cancelled" }
+  | { status: "unavailable"; reason: string }
+  | { status: "busy" };
+
+/**
+ * "Choose folder…": the Electron bridge's native dialog when there is one,
+ * otherwise a dialog opened by libi's local server. Never throws — the field
+ * next to the button is always there to paste a path into.
+ */
+export async function pickFolder(initialPath?: string): Promise<PickFolderClientResult> {
+  const api = bridge();
+  if (api?.pickDirectory) {
+    try {
+      const picked = await api.pickDirectory(initialPath);
+      return picked ? { status: "picked", path: picked } : { status: "cancelled" };
+    } catch (err) {
+      return { status: "unavailable", reason: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  try {
+    const res = await fetch("/api/system/pick-folder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ initialPath: initialPath ?? null }),
+    });
+    if (res.status === 409) return { status: "busy" };
+    if (!res.ok) return { status: "unavailable", reason: `HTTP ${res.status}` };
+    return (await res.json()) as PickFolderClientResult;
+  } catch (err) {
+    return { status: "unavailable", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 /** True iff the Electron preload bridge is available (matters for the
  *  Settings UI deciding between native picker vs text input). */
 export function hasElectronBridge(): boolean {

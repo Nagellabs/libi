@@ -11,7 +11,9 @@ import fs from "fs";
 import { bootstrapPath } from "./path-bootstrap";
 import { createRendererConsoleForwarder, mainSyncLog } from "./sync-log";
 import { navigationDecision, windowOpenExternal } from "./nav-guard";
+import { installContextMenu } from "./context-menu";
 import { initShellUpdater } from "./shell-updater";
+import { createSplash } from "./splash-window";
 import {
   describeNoRuntimeFailure,
   resolveRuntime,
@@ -84,6 +86,45 @@ process.on("unhandledRejection", (reason) => {
 const isDev = !app.isPackaged;
 mainSyncLog(`main.ts: isDev=${isDev} __dirname=${__dirname}`);
 
+// ── One running app per data folder ───────────────────────────────────────
+// A second launch of the packaged app (the shortcut double-clicked while the
+// window sits behind another) used to run the WHOLE boot again against the same
+// home: a second server, a second MCP endpoint, a rewritten `<LIBI_HOME>/port`.
+// When that launch went away, the first window's libi tools followed the port
+// file to a server that no longer existed. Seen on a fresh Windows install.
+//
+// Electron keys the lock on userData, which `./libi-home-bootstrap` pinned
+// before this line ran and which is the packaged LIBI_HOME. It is taken before
+// anything below starts work: no shell-environment probe, no splash, no
+// runtime, no server, no port file. The app already running receives
+// `second-instance` (registered below) and comes to the front.
+//
+// Packaged only. Dev cannot hit this bug: dev Electron starts no server and
+// writes no port files (Next runs in `bin/libi.js`'s own process), so a second
+// dev shell has nothing to steal. A lock there would only break the harness:
+// in dev, userData is `<LIBI_HOME>/electron-profile`, and the Electron e2e
+// harness (`npm run test:electron`) launches its own unpackaged shell with the
+// same LIBI_HOME beside a running dev shell, a launch that would quit at once.
+const hasSingleInstanceLock = isDev || app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  mainSyncLog("main.ts: libi is already running on this data folder; focusing it and quitting this launch");
+  app.quit();
+}
+
+// UNPACKAGED ONLY — the Electron e2e's handle on the real splash factory.
+// The splash is created only on the packaged boot path, so a spec
+// that wants to render it has to build the window itself, and Playwright's
+// `electronApp.evaluate` runs through `eval` in the main process where neither
+// `require` nor `process.mainModule` is available. Without this the spec
+// re-declares `webPreferences` and the `preload:` path, which is precisely the
+// wiring that shipped broken from v0.1.5 until this handle replaced it — a
+// test that re-declares the preload contract cannot catch a preload bug. One assignment, no
+// behaviour, and never present in a packaged build.
+if (isDev) {
+  (globalThis as typeof globalThis & { __libiCreateSplash?: typeof createSplash })
+    .__libiCreateSplash = createSplash;
+}
+
 // Analytics opt-in, the same one `bin/libi.js` sets for the npx launcher.
 // WITHOUT IT THE DESKTOP APP SENDS NOTHING: `resolveAnalyticsEnabled` gates on
 // this flag, so `startAnalyticsDrain()` returns immediately and every event the
@@ -144,7 +185,7 @@ if (isDev && process.env.LIBI_HOME) {
   }
 }
 
-if (!isDev) {
+if (!isDev && hasSingleInstanceLock) {
   // Already published by `./libi-home-bootstrap` (imported first, above) so it
   // is in place before any module-scope consumer reads it. Re-asserted here
   // only so the value is impossible to miss when reading this file, and logged
@@ -154,6 +195,14 @@ if (!isDev) {
   // launchd-launched .apps have a minimal PATH (no Homebrew, no proto,
   // no nvm). Without this, subprocess spawns for npm/uv/ffmpeg fail
   // with ENOENT and Category A hangs on its first install step.
+  // `bootstrapPath()` applies a known-good PATH synchronously and starts
+  // reading the login shell's environment IN THE BACKGROUND, then returns.
+  // Its result is deliberately ignored — never awaited: boot, Category A, the
+  // Next server and the window proceed exactly as they did before the
+  // environment was imported. path-bootstrap publishes how far the import got
+  // for the runtime itself, which marks any chat whose agent started before
+  // the environment arrived so that chat can warn the user. Pinned by
+  // __tests__/unit/electron/main-does-not-await-shell-env.test.ts.
   mainSyncLog("main.ts: calling bootstrapPath()");
   bootstrapPath();
   mainSyncLog("main.ts: bootstrapPath() done");
@@ -190,34 +239,32 @@ if (isDev && process.env.LIBI_CDP !== "0") {
 }
 
 let mainWindow: BrowserWindow | null = null;
-let splashWindow: BrowserWindow | null = null;
 let serverPort: number | null = null;
+/** The splash, for as long as the packaged boot shows it. */
+let splashWindow: BrowserWindow | null = null;
 
-function createSplash(): BrowserWindow {
-  splashWindow = new BrowserWindow({
-    width: 560,
-    height: 640,
-    resizable: false,
-    frame: false,
-    transparent: false,
-    backgroundColor: "#09090b",
-    // Splash should look like it belongs to the app, not a debug window.
-    // Hide the dock icon's "loading" dot on macOS by giving the window
-    // a clean shadow + center it on the active display.
-    center: true,
-    titleBarStyle: "hidden",
-    // RC-G: isolate the splash renderer like the main window. It receives
-    // lifecycle progress + can quit via the `splash-preload.js` contextBridge,
-    // NOT via `require("electron")` / raw node integration.
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-      preload: path.join(__dirname, "splash-preload.js"),
-    },
+function bringToFront(win: BrowserWindow): void {
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+// Only the lock holder hears this: another launch was refused and is quitting,
+// and the user expects the app they already have to come forward. During boot
+// that is the splash, afterwards the main window.
+if (!isDev && hasSingleInstanceLock) {
+  app.on("second-instance", () => {
+    const target = [mainWindow, splashWindow].find(
+      (w): w is BrowserWindow => w !== null && !w.isDestroyed(),
+    );
+    mainSyncLog(
+      `second-instance: another launch was refused; focusing ${
+        !target ? "nothing (no window yet)" : target === mainWindow ? "the main window" : "the splash"
+      }`,
+    );
+    if (target) bringToFront(target);
+    else if (serverPort) createMainWindow(serverPort);
   });
-  splashWindow.loadFile(path.join(__dirname, "splash.html"));
-  return splashWindow;
 }
 
 function createMainWindow(port: number) {
@@ -269,6 +316,9 @@ function createMainWindow(port: number) {
     if (external) void shell.openExternal(external);
     return { action: "deny" };
   });
+
+  // Electron draws no right-click menu of its own: Cut / Copy / Paste for text fields and the inline terminal.
+  installContextMenu(mainWindow);
 
   mainWindow.webContents.on("did-finish-load", () => {
     mainSyncLog("createMainWindow: did-finish-load");
@@ -417,6 +467,10 @@ ipcMain.handle("libi:window-is-maximized", () =>
 );
 
 app.on("ready", async () => {
+  // A launch that lost the single-instance lock has already asked to quit, and
+  // Electron may still deliver `ready` to it. It must not boot anything on the
+  // way out.
+  if (!hasSingleInstanceLock) return;
   mainSyncLog("app.on ready: handler entered");
   // Dev runs the bare Electron binary, whose dock icon is the stock Electron
   // atom — packaged builds get build/icon.icns from electron-builder instead.
@@ -450,6 +504,7 @@ app.on("ready", async () => {
 
   mainSyncLog("about to createSplash");
   const splash = createSplash();
+  splashWindow = splash;
   mainSyncLog("createSplash returned, waiting did-finish-load");
   await new Promise<void>((r) =>
     splash.webContents.once("did-finish-load", () => r()),

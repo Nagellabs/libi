@@ -19,10 +19,6 @@ describe("Runner mcpToolId coverage", () => {
         makeMcpToolId("libi", "libi.compute_object_track"),
         makeMcpToolId("libi-tracking", "libi.compute_object_track"),
       ],
-      tracking_provider: [
-        makeMcpToolId("libi", "libi.compute_object_track_providers"),
-        makeMcpToolId("libi-tracking", "libi.compute_object_track_providers"),
-      ],
       matte_gen: [
         makeMcpToolId("libi", "libi.remove_background"),
         makeMcpToolId("libi-tracking", "libi.remove_background"),
@@ -31,7 +27,6 @@ describe("Runner mcpToolId coverage", () => {
       whisper_model_download: makeMcpToolId("libi", "libi.whisper_download_model"),
       music_model_download: makeMcpToolId("libi", "libi.music_download_model"),
       tts_model_download: makeMcpToolId("libi", "libi.tts_download_model"),
-      extra_analysis_model: makeMcpToolId("libi", "libi.extra_analysis_model"),
       tracking_engine_install: makeMcpToolId(
         "libi",
         "libi.install_tracking_engine",

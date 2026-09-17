@@ -6,12 +6,20 @@ import type { ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { TERMINAL_INSERT_TEXT_EVENT } from "@/lib/onboarding/demo";
+import { isWindowsPlatform, terminalClipboardShortcut } from "@/lib/terminal/clipboard-keys";
 import "@xterm/xterm/css/xterm.css";
+import "@/components/terminal/terminal-view.css";
 
 interface TerminalViewProps {
   terminalId: string;
   /** Fired when the server reports the shell exited. */
   onExited?: (exitCode: number) => void;
+  /**
+   * Fired when the server no longer has this session (close code 4404): it
+   * was closed while no view was attached, so there is nothing to re-attach
+   * to. Optional — without it the view just stops, as it always has.
+   */
+  onSessionGone?: () => void;
 }
 
 const RECONNECT_MAX_MS = 10_000;
@@ -32,6 +40,12 @@ const DARK_THEME: ITheme = {
   cursor: "#e8e4dc",
   cursorAccent: TERMINAL_BG.dark,
   selectionBackground: "#33373b",
+  // Scrollbar slider (shape lives in terminal-view.css): low-contrast at
+  // rest, stronger on hover, strongest while dragging — the foreground
+  // color at rising opacity.
+  scrollbarSliderBackground: "rgba(232, 228, 220, 0.18)",
+  scrollbarSliderHoverBackground: "rgba(232, 228, 220, 0.32)",
+  scrollbarSliderActiveBackground: "rgba(232, 228, 220, 0.45)",
 };
 
 const LIGHT_THEME: ITheme = {
@@ -56,6 +70,12 @@ const LIGHT_THEME: ITheme = {
   brightMagenta: "#a341c7",
   brightCyan: "#2295a3",
   brightWhite: "#1f1d1a",
+  // Scrollbar slider (shape lives in terminal-view.css): low-contrast at
+  // rest, stronger on hover, strongest while dragging — the foreground
+  // color at rising opacity.
+  scrollbarSliderBackground: "rgba(31, 29, 26, 0.16)",
+  scrollbarSliderHoverBackground: "rgba(31, 29, 26, 0.30)",
+  scrollbarSliderActiveBackground: "rgba(31, 29, 26, 0.42)",
 };
 
 /** Reads the app's current theme off the <html> `dark` class. */
@@ -90,11 +110,13 @@ function webglOptedIn(): boolean {
  * text frames are JSON control messages. On (re)connect the server sends a
  * serialized snapshot first, so reattach restores the exact screen.
  */
-export default function TerminalView({ terminalId, onExited }: TerminalViewProps) {
+export default function TerminalView({ terminalId, onExited, onSessionGone }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
+  const onSessionGoneRef = useRef(onSessionGone);
+  onSessionGoneRef.current = onSessionGone;
   const [isDark, setIsDark] = useState(true);
   // Shared with the insert-text effect below. `wsRef` mirrors whichever
   // socket the connect effect currently owns (null while connecting/between
@@ -187,6 +209,28 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
       }
     });
 
+    // Clipboard shortcuts xterm would otherwise turn into control characters (lib/terminal/clipboard-keys.ts).
+    // Returning false makes xterm leave the key alone, so a paste reaches the browser, whose paste event xterm
+    // reads like any other.
+    const windows = isWindowsPlatform(navigator.platform);
+    term.attachCustomKeyEventHandler((ev) => {
+      const shortcut = terminalClipboardShortcut(ev, { windows, hasSelection: term.hasSelection() });
+      // Without the async clipboard there is no copy to make, so Ctrl+C stays the interrupt.
+      if (!shortcut || (shortcut === "copy" && !navigator.clipboard)) return true;
+      if (shortcut === "copy" && ev.type === "keydown") {
+        ev.preventDefault();
+        const text = term.getSelection();
+        // The selection goes once the copy landed (so the next Ctrl+C interrupts); a refused write keeps it.
+        navigator.clipboard.writeText(text).then(
+          () => {
+            if (!disposed && term.getSelection() === text) term.clearSelection();
+          },
+          () => undefined,
+        );
+      }
+      return false;
+    });
+
     const scheduleReconnect = () => {
       if (disposed) return;
       attempts++;
@@ -230,8 +274,7 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
               // Only NOW — after the reset + replay above — is it safe to
               // land a queued insert. Doing it on `onopen` instead was tried
               // and reverted: the reset a few lines up would wipe it moments
-              // later (see the module doc comment and
-              // hooks/agents/use-run-remedy-in-terminal.ts).
+              // later (see the module doc comment).
               insertReadyRef.current = true;
               if (pendingInsertRef.current.length > 0) {
                 const text = pendingInsertRef.current.join(" ");
@@ -253,9 +296,14 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
           // snapshot before an insert is safe again — don't let "ready" from
           // this connection leak into the next one's pre-snapshot window.
           insertReadyRef.current = false;
-          // 1000 = clean shutdown (shell exited), 4404 = session gone —
-          // both are terminal states, no reconnect.
-          if (ev.code === 1000 || ev.code === 4404) return;
+          // 1000 = clean shutdown (shell exited; `exit` was already
+          // reported), 4404 = session gone — both are terminal states, no
+          // reconnect.
+          if (ev.code === 4404) {
+            onSessionGoneRef.current?.();
+            return;
+          }
+          if (ev.code === 1000) return;
           scheduleReconnect();
         };
       } catch {
@@ -332,10 +380,25 @@ export default function TerminalView({ terminalId, onExited }: TerminalViewProps
   }, []);
 
   return (
+    // `libi-terminal` scopes the scrollbar overrides in
+    // terminal-view.css to xterm hosts only (see that file).
+    //
+    // The padding + background live HERE, on a wrapper xterm never opens
+    // into. FitAddon.proposeDimensions() reads
+    // `getComputedStyle(term.element.parentElement)` for the available
+    // height/width and only subtracts padding found on `term.element`
+    // itself — so if this padding lived on (or above) the element xterm
+    // opens in, fit would propose rows/cols that overflow the frame by
+    // that padding, clipping the last row under the bottom edge. The inner
+    // div below carries NO padding and fills this wrapper's content box
+    // exactly, so its border-box IS the exact space xterm may draw in, and
+    // the ~8px of breathing room around the text comes from the wrapper's
+    // padding instead of eating into xterm's own measurement.
     <div
-      ref={containerRef}
-      className="h-full w-full p-2"
+      className="libi-terminal h-full w-full p-2"
       style={{ backgroundColor: isDark ? TERMINAL_BG.dark : TERMINAL_BG.light }}
-    />
+    >
+      <div ref={containerRef} className="h-full w-full" />
+    </div>
   );
 }

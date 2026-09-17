@@ -6,18 +6,22 @@ import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { getDb } from "@/lib/db/client";
 import { skills } from "@/lib/db/schema";
 import { seedDatabase } from "@/lib/db/init";
-import { prepareAgentDir } from "@/mcp/workspace";
+import { prepareAgentDir, renderAgentInstructions } from "@/mcp/workspace";
 import { BUNDLED_SKILLS } from "@/mcp/skills/registry";
 
 /**
- * `prepareAgentDir` calls through to `writeAllAgentConfigs` →
- * `writeSettingsFile` → `buildLibiEntry()`, which resolves `mcp/index.ts` and
- * `node_modules/tsx/dist/cli.mjs` relative to `process.cwd()` and THROWS if
- * either is missing (see `lib/mcp-config.ts` — deliberately no silent `npx
- * libi serve-mcp` fallback). These tests `chdir` into a synthetic
- * `bundledRoot` that only mirrors `mcp/skills/`, so stub both paths there too
- * — mirrors how a real deploy (dev checkout or packaged build) always has
- * them alongside `mcp/skills`.
+ * `renderAgentInstructions` (exercised below via `getInstructions`) resolves
+ * `mcp/templates/instructions.md` relative to `process.cwd()`, and
+ * `loadEnabledSkills`/`writeSkillsToWorkspace` (via `prepareAgentDir`)
+ * resolve the bundled skill bodies the same way. These tests `chdir` into a
+ * synthetic `bundledRoot` that mirrors `mcp/skills/` (and, in the dialect
+ * describe below, `mcp/templates/instructions.md`) — mirrors how a real
+ * deploy (dev checkout or packaged build) always has them alongside each
+ * other. `stubLibiMcpEntry` is a holdover for `mcp/index.ts` /
+ * `node_modules/tsx/dist/cli.mjs`, which nothing in `prepareAgentDir` reads
+ * any more (the in-app agent dir carries no `.mcp.json`, now that MCP is served
+ * over HTTP), left in
+ * place because it's cheap and harmless.
  */
 function stubLibiMcpEntry(bundledRoot: string): void {
   fs.mkdirSync(path.join(bundledRoot, "mcp"), { recursive: true });
@@ -157,13 +161,15 @@ describe("prepareAgentDir renders per-agent dialects (Task 4.2 / G0b)", () => {
     fs.rmSync(workspace, { recursive: true, force: true });
   });
 
-  const read = (file: string) =>
-    fs.readFileSync(path.join(workspace, file), "utf-8");
+  // Now that MCP is served over HTTP, `prepareAgentDir` no longer writes
+  // CLAUDE.md / AGENTS.md — instructions travel over MCP instead (the
+  // `instructions` field + `libi.read_manual` (sectioned), both backed by
+  // `renderAgentInstructions`). These tests call it directly rather than
+  // reading files `prepareAgentDir` no longer produces.
 
-  it("CLAUDE.md carries claude wording, AGENTS.md carries codex wording + self-check", async () => {
-    await prepareAgentDir(workspace);
-    const claude = read("CLAUDE.md");
-    const agents = read("AGENTS.md");
+  it("claude dialect carries claude wording, codex dialect carries codex wording + self-check", () => {
+    const claude = renderAgentInstructions("claude");
+    const agents = renderAgentInstructions("codex");
 
     expect(claude).not.toBe(agents);
 
@@ -175,7 +181,7 @@ describe("prepareAgentDir renders per-agent dialects (Task 4.2 / G0b)", () => {
     expect(agents).toContain(".agents/skills");
     // Codex self-check text
     expect(agents).toContain("Codex self-check");
-    expect(agents).toContain("MCPs & Skills");
+    expect(agents).toContain("npx @nagellabs/libi connect");
     expect(agents).toContain("codex mcp list");
 
     // Shared body survives in both.
@@ -187,18 +193,17 @@ describe("prepareAgentDir renders per-agent dialects (Task 4.2 / G0b)", () => {
     expect(agents).not.toContain("libi-agent:");
   });
 
-  it("both files carry the same memories section (dialect-neutral)", async () => {
+  it("both dialects carry the same memories section (dialect-neutral)", () => {
     fs.writeFileSync(path.join(homeRoot, "memories.md"), "Remember to be concise.");
-    await prepareAgentDir(workspace);
-    const claude = read("CLAUDE.md");
-    const agents = read("AGENTS.md");
+    const claude = renderAgentInstructions("claude");
+    const agents = renderAgentInstructions("codex");
 
     const memBlock = "## Memories\n\nRemember to be concise.";
     expect(claude).toContain(memBlock);
     expect(agents).toContain(memBlock);
   });
 
-  it("a marker-free user override renders identically for both dialects", async () => {
+  it("a marker-free user override renders identically for both dialects", () => {
     // Override with content that has NO dialect markers → graceful degradation.
     const instrDir = path.join(homeRoot, "instructions");
     fs.mkdirSync(instrDir, { recursive: true });
@@ -207,9 +212,8 @@ describe("prepareAgentDir renders per-agent dialects (Task 4.2 / G0b)", () => {
       "<!-- libi-instructions-start v9.9.9 -->\n# Custom rules\nJust do the thing.\n<!-- libi-instructions-end -->\n",
     );
 
-    await prepareAgentDir(workspace);
-    const claude = read("CLAUDE.md");
-    const agents = read("AGENTS.md");
+    const claude = renderAgentInstructions("claude");
+    const agents = renderAgentInstructions("codex");
 
     expect(claude).toBe(agents);
     expect(claude).toContain("Just do the thing.");

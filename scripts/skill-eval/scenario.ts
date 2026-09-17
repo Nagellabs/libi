@@ -1,6 +1,8 @@
 import matter from "gray-matter";
 import yaml from "js-yaml";
+import { basename, isAbsolute, normalize, sep } from "node:path";
 import type { Matcher, ParsedScenario } from "./types";
+import { SHAREABLE, isShareable, type Shareable } from "./shared-deps";
 
 /** Extract the body of a "## <heading>" section up to the next "## " or EOF. */
 function sectionBody(markdown: string, heading: string): string | null {
@@ -34,6 +36,8 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
   }
   const title = typeof data.title === "string" ? data.title : id;
   const skills = asStringArray(data.skills ?? [], "skills", sourcePath);
+  // See ParsedScenario.mcps (types.ts) for what the names mean; the configure
+  // route validates them, the parser only normalizes.
   const mcps = asStringArray(data.mcps ?? [], "mcps", sourcePath);
   const agents = asStringArray(data.agent ?? "claude-code", "agent", sourcePath);
   const covers = asStringArray(data.covers ?? [], "covers", sourcePath);
@@ -41,6 +45,47 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
   const timeoutSec =
     Number.isInteger(data.timeoutSec) && data.timeoutSec > 0 ? data.timeoutSec : 300;
   const falStrict = data.falStrict === true;
+  // Validated HERE rather than at boot: a typo'd `share:` should fail the run
+  // before anything is spawned, and the allowlist is what keeps this from
+  // becoming "point the harness at any directory".
+  const share = asStringArray(data.share ?? [], "share", sourcePath);
+  for (const name of share) {
+    if (!isShareable(name)) {
+      throw new Error(
+        `Scenario ${sourcePath}: "share" may only name ${SHAREABLE.join(" / ")}; got "${name}"`,
+      );
+    }
+  }
+
+  // Media fixtures, validated here for the same reason `share` is: a typo'd path
+  // should fail before anything is spawned. Repo-relative only — an absolute path, or one
+  // that climbs out of the repo with `..`, is rejected, because a fixture list that can
+  // name any file on the machine is a very different feature from a fixture list.
+  const fixtures = asStringArray(data.fixtures ?? [], "fixtures", sourcePath);
+  for (const rel of fixtures) {
+    if (isAbsolute(rel)) {
+      throw new Error(
+        `Scenario ${sourcePath}: "fixtures" entries must be repo-relative; got absolute "${rel}"`,
+      );
+    }
+    const resolved = normalize(rel);
+    if (resolved.startsWith("..") || resolved.split(sep).includes("..")) {
+      throw new Error(
+        `Scenario ${sourcePath}: "fixtures" may not escape the repo with ".."; got "${rel}"`,
+      );
+    }
+    if (basename(resolved) !== basename(rel) || basename(resolved).length === 0) {
+      throw new Error(`Scenario ${sourcePath}: "fixtures" entry "${rel}" names no file`);
+    }
+  }
+
+  // Default TRUE: without the pre-authorization preamble an unattended run stops at
+  // the first "OK to generate?" and produces an empty trace. Setting it false is what lets
+  // a scenario assert a paid call is ABSENT — see harness.ts#preambleFor.
+  if (data.preauthorize !== undefined && typeof data.preauthorize !== "boolean") {
+    throw new Error(`Scenario ${sourcePath}: frontmatter "preauthorize" must be a boolean`);
+  }
+  const preauthorize = data.preauthorize !== false;
 
   const prompt = sectionBody(content, "Prompt");
   if (!prompt) {
@@ -88,6 +133,9 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
     runs,
     timeoutSec,
     falStrict,
+    share: share as Shareable[],
+    fixtures,
+    preauthorize,
     covers,
     prompt,
     assertions,

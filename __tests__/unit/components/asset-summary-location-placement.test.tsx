@@ -14,16 +14,6 @@ vi.mock("@/components/editor/asset-location-row", () => ({
   ),
 }));
 
-// The Script tab (unlike Summary/Transcript/Frames) isn't behind
-// StepStateGate, so with Tabs mocked to render every panel unconditionally
-// it would otherwise mount for real and hit useLatestScript/useScriptJob
-// (react-query) plus useEditorState/useDispatchToAgent with no providers in
-// this test. None of that is relevant to where the location row sits, so
-// stub it out — same approach as the AssetLocationRow mock above.
-vi.mock("@/components/editor/script-tab-content", () => ({
-  ScriptTabContent: () => <div data-testid="script-tab-stub" />,
-}));
-
 // The Notes tab also mounts unconditionally under the Tabs mock, and
 // FileNotesTabBody calls useUpdateFileNotes (react-query) directly with no
 // provider in this test. AssetLocationRow itself is stubbed above, so this

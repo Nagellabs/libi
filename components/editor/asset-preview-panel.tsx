@@ -10,8 +10,6 @@ import { AssetMediaView } from "./asset-media-view";
 import { AssetLocationRow } from "./asset-location-row";
 import { AnalysisSummaryPanel } from "./analysis-summary-panel";
 import { TranscriptView, FramesTabContent, StepStateGate, StepIcon } from "./analysis-viewer";
-import { ScriptTabContent } from "./script-tab-content";
-import { findLatestScriptStep } from "@/lib/analysis/scripts";
 import { useVideoAnalysis } from "@/lib/queries/analysis";
 import { useUpdateFileNotes } from "@/lib/queries/files";
 import { GenerationTabContent } from "./generation-tab-content";
@@ -62,7 +60,7 @@ function FileNotesTabBody({ file }: { file: { id: string; notes: string | null }
   );
 }
 
-type AssetTab = "preview" | "summary" | "transcript" | "frames" | "script" | "generation" | "notes";
+type AssetTab = "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
 
 interface Props {
   asset: FileRecord;
@@ -234,11 +232,6 @@ export function AssetPreviewPanel({
             <TabsTrigger value="frames">
               Frames <TabTriggerWithIcon asset={asset} kind="frames" />
             </TabsTrigger>
-            {/* Tab value stays "script" (persisted via lastAssetTab); only the
-                label changed — "Script" collided with the piece-level Script tab. */}
-            <TabsTrigger value="script">
-              Extra analysis <TabTriggerWithIcon asset={asset} kind="script" />
-            </TabsTrigger>
             {asset.aiGeneration && (
               <TabsTrigger value="generation">Generation</TabsTrigger>
             )}
@@ -373,14 +366,6 @@ export function AnalysisTabsBody({
           />
         </StepStateGate>
       </TabsContent>
-      <TabsContent value="script" className="m-0 h-full">
-        <ScriptTabContent
-          fileId={asset.id}
-          fileName={asset.name || asset.filename}
-          onSeek={onSeek}
-          currentTime={currentTime}
-        />
-      </TabsContent>
       {asset.aiGeneration && (
         <TabsContent value="generation" className="m-0">
           <GenerationTabContent file={asset} />
@@ -398,12 +383,9 @@ function TabTriggerWithIcon({
   kind,
 }: {
   asset: FileRecord;
-  kind: "transcript" | "summary" | "frames" | "script";
+  kind: "transcript" | "summary" | "frames";
 }) {
   const { data } = useVideoAnalysis(asset.id);
-  const step =
-    kind === "script"
-      ? findLatestScriptStep(data?.steps)
-      : data?.byKind?.[kind];
+  const step = data?.byKind?.[kind];
   return <StepIcon step={step} />;
 }

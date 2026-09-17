@@ -21,6 +21,7 @@ import * as Sentry from "@sentry/nextjs";
 import { getCrashReportSettings } from "./lib/db/settings";
 import { getLibiDbPath } from "./lib/libi-home";
 import { SENTRY_DSN, SENTRY_ENABLED, SENTRY_ENVIRONMENT } from "./lib/sentry/config";
+import { SURFACE_TAG, detectSurface } from "./lib/sentry/surface";
 import { setCrashReportChoice } from "./lib/sentry/enabled";
 import { gateTransport } from "./lib/sentry/gated-transport";
 import {
@@ -110,6 +111,14 @@ Sentry.init({
   dsn: SENTRY_DSN,
   enabled: SENTRY_ENABLED,
   environment: SENTRY_ENVIRONMENT,
+
+  // Which distribution this came from — the Electron shell or `npx` in the
+  // user's own browser. Sentry's own contexts cannot tell them apart (the
+  // Electron renderer reports as Chrome on macOS, same as an npx user in
+  // Chrome), and a large class of bugs happens in only one of the two. Set as
+  // an initialScope tag so it rides EVERY event — errors, transactions, logs
+  // and user feedback alike — rather than being attached at one call site.
+  initialScope: { tags: { [SURFACE_TAG]: detectSurface() } },
 
   sendDefaultPii: false,
   includeLocalVariables: false,

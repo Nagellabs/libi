@@ -18,6 +18,7 @@ import { ChromiumRenderBackend } from "@/lib/export/backends/chromium-render";
 import { resolveExportFolder } from "@/lib/db/settings";
 import { ensureFolderExists } from "@/lib/export/folder";
 import { claimExportPath } from "@/lib/export/filename";
+import { ensureChromium } from "@/lib/export/ensure-chromium";
 import { getDb } from "@/lib/db/client";
 import { files as filesTable, pieces } from "@/lib/db/schema";
 import type { RenderPayload } from "@/lib/export/render-jobs";
@@ -181,130 +182,168 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
       }
     }
 
-    // Claim the destination path atomically.
-    const ext = resolvedSettings.format;
-    const outputPath = claimExportPath(destFolder, filename, ext);
-
-    exportLogger.info(
-      {
-        event: "start",
-        jobId: ctx.jobId,
-        backend: shape,
-        pieceId,
-        source,
-        outputPath,
-        targetWidth: resolvedSettings.width,
-        targetHeight: resolvedSettings.height,
-        bitrate: resolvedSettings.bitrate,
-      },
-      "export.start",
-    );
-
-    // Progress is reported as a percentage on a fixed 0..100 scale. The
-    // underlying ffmpeg-overlay / stream-copy backends compute the ratio
-    // against their OWN duration math (which is the trimmed window, not the
-    // composition total) — keeping the runner's denominator fixed at 100
-    // means the bar moves monotonically and ends exactly at 100% no matter
-    // which backend ran.
-    ctx.reportProgress(0, 100, "%");
-
-    // Wire AbortSignal — JobManager will cancel via ctx.shouldCancel; we
-    // additionally expose a signal to the backend so ffmpeg + chromium get
-    // a SIGKILL/teardown on cancel.
+    // ── Step `ensure-chromium` ────────────────────────────────────────────
+    // The classifier is pure — the `fallbackShape()` sites in
+    // lib/export/classifier.ts know an export needs a browser but cannot
+    // fetch one. This is the first impure place that knows `shape`, and it is
+    // deliberately BEFORE `claimExportPath` so a failed or cancelled download
+    // leaves no placeholder file behind.
+    //
+    // Progress is reported in MB, not on the 0..100 "%" scale the render uses
+    // below. The unit travels with each event (JobManager stores
+    // `progressUnit` per row; the agent-facing string is built from it in
+    // mcp/tools/export-tools.ts), so the chat reads "87/173 MB" during the
+    // download and "12/100 %" during the render — two honest phases rather
+    // than one bar that restarts. Every MB tick comes from the download
+    // itself: an export on a machine that already has Chromium must not
+    // flash a "0/173 MB" bar (it did, until a review caught it).
+    //
+    // Wire the AbortSignal here, before the download, rather than at the
+    // render: JobManager cancels via ctx.shouldCancel, and the signal gives
+    // the download (and later ffmpeg + chromium) a SIGKILL/teardown on cancel
+    // without waiting for the poll. ONE `finally` owns the interval from
+    // here to the end of the run — every exit path clears it, including a
+    // throw from `claimExportPath` between the download and the render,
+    // which used to leak a poll that outlived the failed job.
     const ac = new AbortController();
     const cancelPoll = setInterval(() => {
       if (ctx.shouldCancel() && !ac.signal.aborted) ac.abort();
     }, 500);
 
-    const onProgress = (ratio: number) => {
-      const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-      ctx.reportProgress(pct, 100, "%");
-    };
-
     try {
-      let durationSeconds = 0;
-
-      if (shape === "stream-copy-trim") {
-        const backend = new StreamCopyTrimBackend();
-        const result = await backend.run({
-          composition,
-          settings: resolvedSettings,
-          outputPath,
-          onProgress,
+      if (shape === "chromium-render") {
+        await ensureChromium({
+          shouldCancel: () => ctx.shouldCancel(),
           signal: ac.signal,
+          onProgress: ({ doneMb, totalMb }) => {
+            ctx.reportProgress(doneMb, totalMb, "MB");
+          },
         });
-        durationSeconds = result.duration;
-      } else if (shape === "ffmpeg-overlay") {
-        const backend = new FfmpegOverlayBackend();
-        const result = await backend.run({
-          composition,
-          settings: resolvedSettings,
-          outputPath,
-          onProgress,
-          signal: ac.signal,
-        });
-        durationSeconds = result.duration;
-      } else {
-        // chromium-render path: build the payload, run the existing backend
-        // (which delegates to the export_render runner via JobManager), then
-        // MOVE the temp file to outputPath.
-        const payload = buildRenderPayload(pieceId, manifest);
-        const backend = new ChromiumRenderBackend();
-        const result = await backend.run({
-          pieceId,
-          composition,
-          payload,
-          settings: resolvedSettings,
-          onProgress,
-          signal: ac.signal,
-        });
-        durationSeconds = result.duration;
-        // The chromium backend returned a Blob; write it to our claimed path.
-        const buf = Buffer.from(await result.blob.arrayBuffer());
-        await fs.writeFile(outputPath, new Uint8Array(buf));
+        // Nothing about a completed download is resumable — the Playwright CLI
+        // owns its own partial state under ms-playwright — but the checkpoint
+        // records that this phase is behind us, so a resumed job's status page
+        // does not re-advertise a download that already happened.
+        await ctx.checkpoint({ chromiumReady: true });
+        if (ctx.shouldCancel()) throw new Error("cancelled");
       }
 
-      const stat = await fs.stat(outputPath);
-      // Snap to 100% on success so the bar lands exactly full, regardless of
-      // whether the backend stopped reporting at 99%.
-      ctx.reportProgress(100, 100, "%");
+      // Claim the destination path atomically.
+      const ext = resolvedSettings.format;
+      const outputPath = claimExportPath(destFolder, filename, ext);
+
       exportLogger.info(
         {
-          event: "done",
+          event: "start",
           jobId: ctx.jobId,
           backend: shape,
           pieceId,
+          source,
           outputPath,
+          targetWidth: resolvedSettings.width,
+          targetHeight: resolvedSettings.height,
+          bitrate: resolvedSettings.bitrate,
+        },
+        "export.start",
+      );
+
+      // Progress is reported as a percentage on a fixed 0..100 scale. The
+      // underlying ffmpeg-overlay / stream-copy backends compute the ratio
+      // against their OWN duration math (which is the trimmed window, not the
+      // composition total) — keeping the runner's denominator fixed at 100
+      // means the bar moves monotonically and ends exactly at 100% no matter
+      // which backend ran.
+      ctx.reportProgress(0, 100, "%");
+
+      const onProgress = (ratio: number) => {
+        const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+        ctx.reportProgress(pct, 100, "%");
+      };
+
+      try {
+        let durationSeconds = 0;
+
+        if (shape === "stream-copy-trim") {
+          const backend = new StreamCopyTrimBackend();
+          const result = await backend.run({
+            composition,
+            settings: resolvedSettings,
+            outputPath,
+            onProgress,
+            signal: ac.signal,
+          });
+          durationSeconds = result.duration;
+        } else if (shape === "ffmpeg-overlay") {
+          const backend = new FfmpegOverlayBackend();
+          const result = await backend.run({
+            composition,
+            settings: resolvedSettings,
+            outputPath,
+            onProgress,
+            signal: ac.signal,
+          });
+          durationSeconds = result.duration;
+        } else {
+          // chromium-render path: build the payload, run the existing backend
+          // (which delegates to the export_render runner via JobManager), then
+          // MOVE the temp file to outputPath.
+          const payload = buildRenderPayload(pieceId, manifest);
+          const backend = new ChromiumRenderBackend();
+          const result = await backend.run({
+            pieceId,
+            composition,
+            payload,
+            settings: resolvedSettings,
+            onProgress,
+            signal: ac.signal,
+          });
+          durationSeconds = result.duration;
+          // The chromium backend returned a Blob; write it to our claimed path.
+          const buf = Buffer.from(await result.blob.arrayBuffer());
+          await fs.writeFile(outputPath, new Uint8Array(buf));
+        }
+
+        const stat = await fs.stat(outputPath);
+        // Snap to 100% on success so the bar lands exactly full, regardless of
+        // whether the backend stopped reporting at 99%.
+        ctx.reportProgress(100, 100, "%");
+        exportLogger.info(
+          {
+            event: "done",
+            jobId: ctx.jobId,
+            backend: shape,
+            pieceId,
+            outputPath,
+            sizeBytes: stat.size,
+            durationSeconds,
+          },
+          "export.done",
+        );
+        return {
+          filePath: outputPath,
           sizeBytes: stat.size,
           durationSeconds,
-        },
-        "export.done",
-      );
-      return {
-        filePath: outputPath,
-        sizeBytes: stat.size,
-        durationSeconds,
-        backend: shape as ExportResult["backend"],
-        width: resolvedSettings.width,
-        height: resolvedSettings.height,
-      };
-    } catch (err) {
-      // Clean up the claimed placeholder/partial file.
-      try { fsSync.unlinkSync(outputPath); } catch { /* ignore */ }
-      const message = err instanceof Error ? err.message : String(err);
-      const isCancel = ctx.shouldCancel() || ac.signal.aborted;
-      exportLogger.warn(
-        {
-          event: isCancel ? "cancel" : "fail",
-          jobId: ctx.jobId,
-          backend: shape,
-          pieceId,
-          outputPath,
-          error: message,
-        },
-        `export.${isCancel ? "cancel" : "fail"}`,
-      );
-      throw err;
+          backend: shape as ExportResult["backend"],
+          width: resolvedSettings.width,
+          height: resolvedSettings.height,
+        };
+      } catch (err) {
+        // Clean up the claimed placeholder/partial file.
+        try { fsSync.unlinkSync(outputPath); } catch { /* ignore */ }
+        const message = err instanceof Error ? err.message : String(err);
+        const isCancel = ctx.shouldCancel() || ac.signal.aborted;
+        exportLogger.warn(
+          {
+            event: isCancel ? "cancel" : "fail",
+            jobId: ctx.jobId,
+            backend: shape,
+            pieceId,
+            outputPath,
+            error: message,
+          },
+          `export.${isCancel ? "cancel" : "fail"}`,
+        );
+        throw err;
+      }
     } finally {
       clearInterval(cancelPoll);
     }

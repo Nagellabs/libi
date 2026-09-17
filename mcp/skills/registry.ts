@@ -37,8 +37,9 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     name: "realistic-image-generation",
     description:
       "Generate realistic AI images — photoreal people / creator portraits and video KEYFRAMES " +
-      "(start/end frames). Owns the realism model picker (gpt-image-2 default, never let " +
-      "recommend_model downgrade it), anti-'AI-look' tokens + Flux negatives, the UGC selfie + " +
+      "(start/end frames). Owns the realism model picker (strongest realism-and-anatomy model, " +
+      "never let a recommendation tool downgrade it), anti-'AI-look' tokens + negative prompts " +
+      "(provider specifics in references/providers/fal.md), the UGC selfie + " +
       "demographic templates, the anatomy plausibility pre-check, and the post-generation image " +
       "validation rubric. Loaded BY the Storyboard keyframe step / ugc-product-video / " +
       "generic-video — produces ONE good image; the board sequences keyframe→clip. Not a " +
@@ -60,7 +61,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "voiceover-production",
     name: "voiceover-production",
     description:
-      "The authority on AI-video audio + voice DURING GENERATION. Native audio is ON by default on every AI clip (generate_audio=true); multi-clip voice consistency is carried via Seedance reference-to-video (@Audio1), NEVER by muting clips + layering a TTS voiceover. Replacing or changing the voice on an EXISTING video is a separate, user-triggered flow — the voice-replacement skill. Loaded BY ugc-product-video / generic-video / mimic-video / stitching-multi-clip — not a standalone entry point.",
+      "The authority on AI-video audio + voice DURING GENERATION. Native audio is ON by default on every AI clip (generate_audio=true); multi-clip voice consistency is carried via a reference-conditioned generation (@Audio1), NEVER by muting clips + layering a TTS voiceover. Replacing or changing the voice on an EXISTING video is a separate, user-triggered flow — the voice-replacement skill. Loaded BY ugc-product-video / generic-video / mimic-video / stitching-multi-clip — not a standalone entry point.",
   },
   {
     id: "voice-replacement",
@@ -84,7 +85,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "audio-analysis",
     name: "audio-analysis",
     description:
-      "Transcribe a video or audio file. Default is local Whisper (free, on-device, word-level timing). ElevenLabs is opt-in for speaker diarization/audio-events or on explicit request. BYO STT via per-chunk save tools. Use whenever the user asks for a transcript, captions, or speech-to-text.",
+      "Transcribe a video or audio file. Default is local Whisper (free, on-device, word-level timing) via libi.analysis_transcribe_audio. Speaker diarization/audio events, or a named STT, go through the agent's own transcription provider via the per-chunk save tools (Path B). Use whenever the user asks for a transcript, captions, or speech-to-text.",
   },
   {
     id: "video-analysis",
@@ -122,8 +123,8 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     description:
       "Remove a video's or photo's background into a reusable alpha cutout asset, then " +
       "compose it over a new background or transplant it into another video. Local free " +
-      "MatAnyone matting for video (libi.remove_background), paid fal fallback (bria video / " +
-      "birefnet photos). Triggers: \"remove the background\", \"put her on a beach\", " +
+      "MatAnyone matting for video (libi.remove_background), with a paid provider fallback " +
+      "for hard video subjects and for photos. Triggers: \"remove the background\", \"put her on a beach\", " +
       "\"green screen this\", \"cut out the product\", \"transparent background\".",
   },
   {
@@ -131,7 +132,8 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     name: "music-creation",
     description:
       "Interview-style music generation. Asks the user about genre, vocals, lyrics, " +
-      "length, optional reference track — then dispatches via ai-asset-generation. " +
+      "length, optional reference track — then dispatches via ai-asset-generation " +
+      "(local ACE-Step by default; a paid music provider only on explicit request). " +
       "If the user supplies a reference track, calls libi.music_profile first to seed " +
       "the answers.",
   },
@@ -161,7 +163,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
       "Reproduce / mimic the ON-SCREEN CAPTIONS of an existing video — lyric typography, kinetic " +
       "text, road/perspective captions, glowing animated subtitles. Splits the two sources " +
       "(Whisper transcript for exact words+timing; a caption-focused paid analysis " +
-      "(extra_analysis_model focus:captions) for treatment+motion), routes each caption to " +
+      "(a caption-focused provider analysis) for treatment+motion), routes each caption to " +
       "three-overlays (3D) / animated-text-overlays (flat kinetic) / speech-captions (plain), and " +
       "runs the render-verify loop so captions can't ship out of frame or blank. Loaded by " +
       "mimic-video when captions are part of the recreate; also a direct entry point.",
@@ -198,7 +200,7 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
     id: "installing-mcps",
     name: "installing-mcps",
     description:
-      "Use when the user asks you to install, set up, configure, repair, or fix an MCP server. Drives the get_install_plan → follow plan → update_dep_status → verify_install flow with appropriate progress updates.",
+      "Use when the user asks you to install, set up, configure, repair, or fix a libi extension. Drives the get_install_plan → follow plan → verify → update_dep_status flow with appropriate progress updates.",
   },
   {
     id: "animated-text-overlays",

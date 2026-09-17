@@ -13,8 +13,16 @@
 //     Wrapping the transport is therefore the ONE chokepoint that covers all of
 //     them, and — unlike the `integrations` option it replaces — the gate is
 //     evaluated PER ENVELOPE, at send time. So a mid-session opt-out takes
-//     effect immediately, with no reload. That matters on an Electron desktop
-//     app whose process lifetime is measured in days.
+//     effect immediately, with no reload.
+//
+//     THE ONE EXCEPTION IS USER FEEDBACK. An envelope carrying a `feedback`
+//     item is sent even while the user has switched crash reports OFF — but NOT
+//     while the operator kill switch is on. See `containsFeedback` below for
+//     why, for which leg of the gate is waived, and for why the exception
+//     cannot be widened by an attachment riding along with an error.
+//
+//     That matters on an Electron desktop app whose process lifetime is
+//     measured in days.
 //
 //     ONE CAVEAT for whoever adds an integration later: `sendEnvelope` is the
 //     only chokepoint for envelopes the SDK sends ITSELF. `Client.on("beforeEnvelope")`
@@ -45,7 +53,7 @@
 // runtimes. The runtime-specific transport FACTORY is injected by the caller
 // (`Sentry.makeNodeTransport` on the server, `Sentry.makeFetchTransport` in the
 // browser) rather than imported here.
-import { shouldSendCrashReports } from "./enabled";
+import { getServerKillSwitch, shouldSendCrashReports } from "./enabled";
 
 /**
  * Structural mirror of @sentry/core's `Transport` interface, which is exactly
@@ -66,6 +74,59 @@ type TransportLike = {
   send: (envelope: never) => PromiseLike<unknown>;
   flush: (timeout?: number) => PromiseLike<boolean>;
 };
+
+/**
+ * True when the envelope carries at least one `feedback` item.
+ *
+ * WHY FEEDBACK IS EXEMPT FROM THE GATE AT ALL. Everything else this wrapper
+ * sees is telemetry the app decided to emit. Feedback is the one envelope the
+ * USER composed and pressed Send on, so the act of sending it is the consent
+ * for it — and dropping it would show the widget's own success message for a
+ * message that never left the machine. The crash-report switch keeps meaning
+ * exactly what it says: no automatic reports.
+ *
+ * WHAT THE EXEMPTION IS AN EXEMPTION *FROM* — narrower than it looks.
+ * `shouldSendCrashReports()` is a four-leg precedence chain
+ * (lib/sentry/enabled.ts): build gate → runtime kill switch → user preference →
+ * default. Only the USER PREFERENCE leg is waived here; the operator's kill
+ * switch is not, which is why the call site pairs this predicate with
+ * `!getServerKillSwitch()`. That leg is the one that actually works in a
+ * prebuilt browser bundle (the `NEXT_PUBLIC_*` reads behind the build gate are
+ * frozen to the build machine — see `setServerKillSwitch`), so without the
+ * pairing `LIBI_SENTRY_DISABLED=1 npx @nagellabs/libi` would still ship
+ * feedback, defeating what lib/sentry/config.ts calls "a hard kill-switch that
+ * wins". A user's consent to send their own message is not consent to override
+ * the operator switch that says this install talks to nobody.
+ *
+ * WHY "CONTAINS" AND NOT "CONSISTS ONLY OF". A feedback screenshot travels as
+ * an `attachment` item in the SAME envelope, so an every-item-is-feedback rule
+ * would drop precisely the envelopes that carry one. Nothing is widened by the
+ * looser test: error, transaction, span, session, log and check-in envelopes
+ * never carry a feedback item, and an envelope of attachments alone (which an
+ * error event can produce) still fails it.
+ *
+ * WHY THIS IS HAND-WALKED. @sentry/core exposes `envelopeContainsItemType`, but
+ * this module deliberately does not import from that undeclared transitive
+ * dependency — the same reason `TransportLike` above is declared structurally.
+ * The shape walked here is `[headers, items]` with each item
+ * `[itemHeaders, payload]` (@sentry/core/build/types/types/envelope.d.ts), and
+ * every access is defensive because the envelope shape is not statically known
+ * here.
+ */
+function containsFeedback(envelope: unknown): boolean {
+  if (!Array.isArray(envelope)) return false;
+  const items: unknown = envelope[1];
+  if (!Array.isArray(items)) return false;
+  return items.some((item) => {
+    if (!Array.isArray(item)) return false;
+    const headers: unknown = item[0];
+    return (
+      typeof headers === "object" &&
+      headers !== null &&
+      (headers as { type?: unknown }).type === "feedback"
+    );
+  });
+}
 
 /**
  * Wrap a Sentry transport factory so that, per envelope, `send` performs the
@@ -93,8 +154,13 @@ export function gateTransport<TOptions, TTransport extends TransportLike>(
   return (options: TOptions): TTransport => {
     const inner = makeTransport(options);
 
+    // The feedback exception waives the USER PREFERENCE leg of
+    // `shouldSendCrashReports()` only — never the operator kill switch. See
+    // `containsFeedback` above for why that distinction is the whole point.
     const send = (envelope: Parameters<TTransport["send"]>[0]) =>
-      shouldSendCrashReports() ? inner.send(envelope) : Promise.resolve({});
+      shouldSendCrashReports() || (containsFeedback(envelope) && !getServerKillSwitch())
+        ? inner.send(envelope)
+        : Promise.resolve({});
 
     // Spread-then-override rather than a hand-written object, so `flush` and
     // anything else the concrete transport adds keeps delegating. Safe against

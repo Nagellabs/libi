@@ -8,7 +8,7 @@ const baseSample = { t: 0, x: 10, y: 20, w: 30, h: 40, visible: true };
 
 const validParams = {
   fileId: "file-abc",
-  method: "sam2-local",
+  method: "external-mcp:acme-tracker",
   framerate: 30,
   samples: [baseSample],
 };

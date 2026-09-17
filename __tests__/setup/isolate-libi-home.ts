@@ -3,11 +3,10 @@
  * so tests can never touch the real `~/.libi/` — no DB, no logs, no agent
  * workspace files.
  *
- * Isolation now rides entirely on LIBI_HOME. The default agent dir
+ * Isolation rides entirely on LIBI_HOME. The default agent dir
  * (`getLibiAgentDir()`) derives from it as `<LIBI_HOME>/agent/`, so there
- * is no need for a separate workspace-dir env var. LIBI_CONNECT_AGENT_DIR
- * is never set globally here — tests that exercise connect-agent behavior
- * set it themselves within their own beforeEach/afterEach.
+ * is no separate workspace-dir env var to isolate — the per-folder agent
+ * directory a CLI used to be pointed at no longer exists.
  *
  * Without this, tests that import code which reaches for
  * `~/.libi/agent/.claude/settings.local.json` (via `invalidateMcpConfig`,
@@ -36,6 +35,14 @@ export async function setup(): Promise<void> {
   linkProvisionedBinaries(tempRoot);
 
   process.env.LIBI_HOME = tempRoot;
+
+  // The Codex home too: outside test mode `resolveCodexHome()` names the user's
+  // real `~/.codex`, so a test that reaches a codex spawn or a config backup
+  // without naming a home of its own must land here instead. Tests that clear
+  // CODEX_HOME on purpose stub HOME to a scratch dir as well.
+  const codexHome = path.join(tempRoot, "codex-home");
+  fs.mkdirSync(codexHome, { recursive: true });
+  process.env.CODEX_HOME = codexHome;
 }
 
 export async function teardown(): Promise<void> {

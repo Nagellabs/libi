@@ -109,6 +109,31 @@ export function PrivacyTab() {
           anonymous usage analytics, so we know which features matter, and
           automatic crash reports, so we can fix what breaks.
         </p>
+        {/*
+          The third egress channel, stated because it has no switch here and it
+          is NOT covered by the crash-report one below (lib/sentry/gated-transport.ts
+          lets a feedback envelope through while crash reports are off). A user
+          who reads the paragraph above, turns crash reports off, and then sends
+          feedback would otherwise be surprised — so say it plainly rather than
+          let the sentence above be quietly wrong. Nothing about screenshots
+          here: that is the widget's own affordance and its copy lives with it.
+
+          "the same technical context a crash report carries" is doing real
+          work — do not trim it to just the user-chosen content. A feedback
+          event is scrubbed exactly like an error event
+          (lib/sentry/scrub.ts#scrubFeedback reuses scrubCommonEventFields and
+          additionally drops breadcrumbs), but "scrubbed like" is not "empty":
+          it still carries the page URL, locale and time zone, and the release.
+          Describing it as only what the user chose to type would be the same
+          class of quiet wrongness this paragraph exists to fix.
+        */}
+        <p className="text-sm text-muted-foreground mt-2">
+          There is a third: feedback you send from Settings → General also goes
+          to Sentry — your message, plus anything you choose to add to it, plus
+          the same technical context a crash report carries. It is sent because
+          you asked us to send it, so the crash-report switch below does not
+          apply to it.
+        </p>
       </div>
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1">

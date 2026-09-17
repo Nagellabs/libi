@@ -12,3 +12,5 @@ export const SubmitJobSchema = RunModelSchema;
 export const CheckJobSchema = z.object({ request_id: z.string().min(1) });
 export const GetJobResultSchema = z.object({ request_id: z.string().min(1) });
 export const SearchDocsSchema = z.object({ query: z.string().min(1) });
+/** Mirrors the real fal MCP's upload tool: one local path in, a CDN URL out. */
+export const UploadFileSchema = z.object({ path: z.string().min(1) });

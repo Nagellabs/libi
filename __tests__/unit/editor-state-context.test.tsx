@@ -6,6 +6,7 @@ import {
   EditorStateProvider,
   useEditorState,
 } from "@/lib/editor-state-context";
+import { MCP_SCROLL_EVENT, takePendingMcpScroll } from "@/lib/mcp-scroll-intent";
 
 // Mutable box so individual tests can flip `readiness` (and re-render) to
 // simulate a connection succeeding mid-session — see the "readiness-driven
@@ -29,13 +30,30 @@ const sessionListMock = vi.hoisted(() => ({
 vi.mock("@/hooks/sessions/use-session-list", () => ({
   useSessionList: () => sessionListMock.current,
 }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+// A STABLE router mock: the navigate_agents describe below asserts on the
+// pushes libi.show_extension / libi.start_onboarding make, so every
+// useRouter() call has to hand back the same spy.
+const routerMock = vi.hoisted(() => ({ push: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => routerMock }));
+// SSE broadcasts reach the context through subscribeBroadcast; capturing the
+// handler lets a test play an event in.
+const broadcast = vi.hoisted(() => ({
+  handlers: new Set<(data: Record<string, unknown>) => void>(),
+  emit(data: Record<string, unknown>) {
+    for (const h of broadcast.handlers) h(data);
+  },
+}));
 vi.mock("@/hooks/sessions/use-agent-chat", () => ({
-  subscribeBroadcast: () => () => {},
+  subscribeBroadcast: (handler: (data: Record<string, unknown>) => void) => {
+    broadcast.handlers.add(handler);
+    return () => broadcast.handlers.delete(handler);
+  },
 }));
 
 beforeEach(() => {
   localStorage.clear();
+  broadcast.handlers.clear();
+  routerMock.push.mockClear();
   sessionListMock.current = {
     sessions: [],
     activeSessionId: null,
@@ -55,26 +73,26 @@ function captureCtx() {
   return () => result.current;
 }
 
-describe("editor-state-context script additions", () => {
-  it("accepts and persists 'script' as a lastAssetTab value", () => {
+describe("editor-state-context asset tab + prefill", () => {
+  it("accepts and persists a valid lastAssetTab value", () => {
     const get = captureCtx();
-    act(() => get().setLastAssetTab("script"));
-    expect(get().lastAssetTab).toBe("script");
+    act(() => get().setLastAssetTab("frames"));
+    expect(get().lastAssetTab).toBe("frames");
     const raw = JSON.parse(localStorage.getItem("libi:editor-state")!);
-    expect(raw.lastAssetTab).toBe("script");
+    expect(raw.lastAssetTab).toBe("frames");
   });
 
-  it("defaults scriptShotRailPct to 35", () => {
+  it("falls back to 'summary' when a persisted lastAssetTab names the removed Script tab", () => {
+    // The asset-level "Extra analysis" (script) tab was deleted. A localStorage
+    // value written before that must not resurrect a tab that no longer
+    // renders — it degrades to the default.
+    localStorage.setItem(
+      "libi:editor-state",
+      JSON.stringify({ lastAssetTab: "script", scriptShotRailPct: 50 }),
+    );
     const get = captureCtx();
-    expect(get().scriptShotRailPct).toBe(35);
-  });
-
-  it("persists scriptShotRailPct changes", () => {
-    const get = captureCtx();
-    act(() => get().setScriptShotRailPct(50));
-    expect(get().scriptShotRailPct).toBe(50);
-    const raw = JSON.parse(localStorage.getItem("libi:editor-state")!);
-    expect(raw.scriptShotRailPct).toBe(50);
+    expect(get().lastAssetTab).toBe("summary");
+    expect("scriptShotRailPct" in get()).toBe(false);
   });
 
   it("exposes setPrefilledMessage / prefilledMessage", () => {
@@ -305,7 +323,6 @@ describe("onboarding demo offer — armed by an observed connection, not by agen
         state: "needs-auth",
         agentId: "codex",
         message: "Codex isn't signed in on this machine",
-        remedy: null,
       },
     };
     rerender();
@@ -342,5 +359,82 @@ describe("onboarding demo offer — armed by an observed connection, not by agen
     rerender();
 
     await vi.waitFor(() => expect(result.current.onboardingDemoOffer).toBe(true));
+  });
+});
+
+/**
+ * `libi.show_extension` / `libi.start_onboarding` → `navigate_agents` → the
+ * Agents page on the tab the event names — for libi MCP, scrolled to a card.
+ *
+ * The tab is the whole point: `Tabs.Panel` defaults to keepMounted:false and
+ * Agents is the DEFAULT tab, so on `/agents` with any other tab showing there
+ * is no McpServersView mounted, no listener for the CustomEvent, and no card
+ * in the DOM. Matching on the pathname alone (what this once did) left the
+ * agent saying "I've opened the card for you" while nothing moved. The pushed
+ * URL carries the id as `&extension=` so the page itself can name the card.
+ */
+describe("navigate_agents — the named tab, not just the page", () => {
+  function goto(url: string) {
+    window.history.replaceState({}, "", url);
+  }
+
+  it("pushes ?tab=libi-mcp&extension= when the Skills tab is showing on the same page", () => {
+    goto("/agents?tab=skills");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp", extensionId: "local-music" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=libi-mcp&extension=local-music");
+  });
+
+  it("pushes ?tab=libi-mcp when the URL carries no tab at all (the default is Agents)", () => {
+    goto("/agents");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=libi-mcp");
+  });
+
+  it("pushes from another page", () => {
+    goto("/editor");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp", extensionId: "whisper" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=libi-mcp&extension=whisper");
+  });
+
+  it("does not push when the same extension on the libi MCP tab is already showing", () => {
+    goto("/agents?tab=libi-mcp&extension=whisper");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp", extensionId: "whisper" }));
+    expect(routerMock.push).not.toHaveBeenCalled();
+  });
+
+  it("parks the id for a view that has not mounted yet, and still fires the event", () => {
+    goto("/agents?tab=skills");
+    captureCtx();
+    const seen: Array<string | undefined> = [];
+    const listener = (e: Event) =>
+      seen.push(((e as CustomEvent).detail as { mcpId?: string }).mcpId);
+    window.addEventListener(MCP_SCROLL_EVENT, listener);
+    try {
+      act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp", extensionId: "local-tts" }));
+    } finally {
+      window.removeEventListener(MCP_SCROLL_EVENT, listener);
+    }
+    expect(seen).toEqual(["local-tts"]);
+    // The event above reaches nobody in the real app (the panel is unmounted);
+    // this is what McpServersView claims when it finally mounts.
+    expect(takePendingMcpScroll()).toBe("local-tts");
+  });
+
+  it("pushes the Agents tab for { tab: 'agents' } (libi.start_onboarding)", () => {
+    goto("/editor");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "agents" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=agents");
+  });
+
+  it("pushes a different provider even when the Providers tab is already showing", () => {
+    goto("/agents?tab=providers&provider=elevenlabs");
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_agents", tab: "providers", provider: "fal" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=providers&provider=fal");
   });
 });

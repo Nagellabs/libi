@@ -2,8 +2,8 @@
 name: music-creation
 description: Interview-style music generation. Asks the user about genre,
   vocals, lyrics, length, optional reference track. Dispatches via
-  ai-asset-generation skill which routes to local-music (default), or
-  elevenlabs / fal-ai on explicit request.
+  ai-asset-generation skill which routes to local ACE-Step by default, or
+  a music provider on explicit request.
 when_to_use: User asks to "make music", "create a soundtrack", "write a
   song", "generate background music" with no detailed prompt provided.
   Also use when deciding the music for a RECREATE / mimic — when a source
@@ -18,6 +18,35 @@ tags:
 ---
 
 # Music Creation
+
+## Provider gate — read this first
+
+You need a **music** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do music, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for music — call
+   `libi.suggest_provider({ kind: "music" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do music.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for music is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
 
 > **Related:** when the user supplies a reference track, run
 > `libi.music_profile({ fileId })` first to seed the answers — it
@@ -118,16 +147,18 @@ on paid providers; even local ACE-Step takes ~10–15s per 8s on CPU).
 
 ## Stage 6 — Provider
 
-Disclose cost + quality trade-off:
+Disclose the cost + quality trade-off:
 
-- **local-music (default, recommended)** — free, on-device, instrumental
-  excellent, vocals decent
-- **elevenlabs** — paid; best vocal quality especially for English; needs
-  ELEVENLABS_API_KEY
-- **fal-ai** — paid; specific models (Stable Audio, etc.); needs FAL_KEY
+- **local ACE-Step (default, recommended)** — `libi.generate_music`: free, on-device, no
+  key. Instrumental excellent, vocals decent.
+- **A paid `music` provider** — better vocals, specific style models. Costs the user money
+  on their own provider account; see `references/providers/<id>.md` under this skill for
+  what yours offers.
 
-If user has no provider opinion, pick local-music. If they want vocals
-and the language is English, mention ElevenLabs as a quality upgrade.
+If the user has no provider opinion, pick local ACE-Step. If they want vocals and the
+language is English, mention a paid provider as a quality upgrade — as an option, not a
+recommendation. If they want a paid provider and you have none in your tool list, call
+`libi.suggest_provider({ kind: "music" })` and say what it showed.
 
 ## Stage 7 — Assemble the prompt
 

@@ -8,24 +8,25 @@
  * silently mis-escaped.
  *
  * This test imports both the route's `GET` and `resolveShell` and asserts
- * they always agree, with `isWindows()` mocked both ways — same mocking
- * style as `__tests__/unit/agents/terminal-remedy.test.ts`, which already
- * flips `isWindows` per test rather than relying on the host platform.
+ * they always agree, with `isWindows()` mocked both ways — flipping
+ * `isWindows` per test rather than relying on the host platform.
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const isWindows = vi.fn(() => false);
+const isMac = vi.fn(() => false);
 vi.mock("@/lib/platform", () => ({
   isWindows: () => isWindows(),
-  isMac: () => false,
+  isMac: () => isMac(),
   isLinux: () => false,
 }));
 
 import { GET } from "@/app/api/terminal/shell-flavor/route";
-import { resolveShell } from "@/lib/terminal/pty";
+import { resolveSetupShell, resolveShell } from "@/lib/terminal/pty";
 
 beforeEach(() => {
   isWindows.mockReturnValue(false);
+  isMac.mockReturnValue(false);
 });
 
 describe("GET /api/terminal/shell-flavor agrees with resolveShell", () => {
@@ -49,5 +50,27 @@ describe("GET /api/terminal/shell-flavor agrees with resolveShell", () => {
 
     const { shell } = resolveShell();
     expect(shell).not.toBe("powershell.exe");
+  });
+});
+
+describe("resolveSetupShell — a known shell regardless of $SHELL", () => {
+  const prevShell = process.env.SHELL;
+  afterEach(() => {
+    if (prevShell === undefined) delete process.env.SHELL;
+    else process.env.SHELL = prevShell;
+  });
+
+  it("macOS: /bin/zsh -l even when $SHELL is fish", () => {
+    isMac.mockReturnValue(true);
+    process.env.SHELL = "/opt/homebrew/bin/fish";
+    expect(resolveSetupShell()).toEqual({ shell: "/bin/zsh", args: ["-l"] });
+    expect(resolveShell()).toEqual({ shell: "/opt/homebrew/bin/fish", args: ["-l"] }); // chat keeps $SHELL
+  });
+  it("Linux: /bin/bash -l", () => {
+    expect(resolveSetupShell()).toEqual({ shell: "/bin/bash", args: ["-l"] });
+  });
+  it("Windows: powershell.exe", () => {
+    isWindows.mockReturnValue(true);
+    expect(resolveSetupShell()).toEqual({ shell: "powershell.exe", args: [] });
   });
 });

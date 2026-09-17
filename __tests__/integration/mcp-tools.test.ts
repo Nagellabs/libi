@@ -379,38 +379,4 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
     expect(result.data?.fileId).toBe(VIDEO_FILE_ID);
   }, 15_000);
 
-  // =========================================================================
-  // 22. register_mcp_server
-  // =========================================================================
-  it("libi.register_mcp_server registers a new server", async () => {
-    const result = parseResult(
-      await client.callTool({
-        name: "libi.register_mcp_server",
-        arguments: {
-          name: "Test MCP Server",
-          type: "stdio",
-          command: "npx",
-          args: ["@test/mcp-server"],
-          description: "A test MCP server",
-          requireApproval: false,
-        },
-      }),
-    );
-    expect(result.success).toBe(true);
-    expect(result.data?.id).toBeDefined();
-    expect(result.data?.name).toBe("Test MCP Server");
-    expect(result.data?.type).toBe("stdio");
-    expect(result.data?.requireApproval).toBe(false);
-
-    // Verify in DB
-    const serverId = result.data!.id as string;
-    const rows = testDb
-      .select()
-      .from(mcpServers)
-      .where(eq(mcpServers.id, serverId))
-      .all();
-    expect(rows.length).toBe(1);
-    expect(rows[0].name).toBe("Test MCP Server");
-    expect(rows[0].command).toBe("npx");
-  }, 15_000);
 });

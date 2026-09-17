@@ -127,6 +127,36 @@ const {
 const ROOT = path.resolve(__dirname, "..");
 const OUT_DIRNAME = path.join("build", "libi-bundle");
 const STAMP_NAME = ".libi-runtime.json";
+/**
+ * Hard ceiling on the bundled `node_modules`, asserted immediately after the
+ * prune and therefore BEFORE `resolveNativeAbi` adds the better-sqlite3
+ * Electron binding and Node ABI sidecars. It measures the prune's result, not
+ * the finished bundle.
+ *
+ * It is a TRIPWIRE, not a target. Its job is to catch a prune that quietly
+ * stopped working — a renamed package makes `pruneBundle` skip it in SILENCE —
+ * and a dependency that arrives with three digits of megabytes. Raising it to
+ * make a build pass is the one thing it exists to prevent.
+ *
+ * The arithmetic it has to sit between, measured 2026-09-09:
+ *
+ *   891 MB  darwin-arm64, prune disabled                  ← must FAIL
+ *   706 MB  darwin-arm64, measured (220 packages, 185 MB) ← must PASS
+ *  ~750 MB  win32-x64, projected: +14.4 MB for @next/swc-win32-x64-msvc
+ *           (130.5 vs 116.1 MB unpacked, per `npm view`) and +29.6 MB because
+ *           the node-pty prebuild the sweep KEEPS there is win32-x64 (29.7 MB)
+ *           rather than darwin-arm64 (0.1 MB)              ← must PASS
+ *
+ * 800 clears the Windows projection by ~50 MB and still fires the moment the
+ * prune stops removing anything. Every target builds on its own host
+ * (scripts/release-electron.js: electron-builder cross-compiles poorly and we
+ * do not try), so those are the two numbers that ship.
+ *
+ * It is a coarse instrument on purpose. The finer one is the prune log line,
+ * which names every package removed on every build: a list that has quietly
+ * gone short is visible there long before it is visible here.
+ */
+const BUNDLE_CEILING_MB = 800;
 const PKG_NAME = "@nagellabs/libi";
 
 // ---------------------------------------------------------------------------
@@ -176,6 +206,460 @@ function capture(cmd, args, opts = {}) {
 /** `<prefix>/node_modules/@nagellabs/libi` — must mirror `runtimeRootFor()`. */
 function runtimeRootFor(prefix) {
   return path.join(prefix, "node_modules", ...PKG_NAME.split("/"));
+}
+
+/**
+ * Packages an `npm install --omit=dev` of the published tarball puts in the
+ * bundle that the RUNTIME never resolves.
+ *
+ * Four checks decide membership. All four must be clean, and the fourth is the
+ * only one that can prove a negative:
+ *
+ *   1. no `require("<pkg>")` / `from "<pkg>"` anywhere under `dist-cli/`,
+ *      `bin/`, `scripts/`, `electron/`, `lib/`, `mcp/` or `app/api/`. Not
+ *      `dist-cli` alone: the tarball also ships `scripts/` and `bin/`, and a
+ *      build-time-only package can still be reached by something the CLI runs.
+ *   2. not in `next.config.ts`'s `serverExternalPackages`, i.e. not an entry of
+ *      `.next/externals-manifest.json` and therefore not a link in the farm
+ *      `materializeNextExternals` builds below.
+ *   3. not reachable from either route that runs esbuild with `bundle: true` at
+ *      REQUEST time against source TypeScript — `app/api/track-bundle/route.ts`
+ *      (entry lib/tracking/track-entry.ts) and
+ *      `app/api/export/render-bundle/route.ts` (entry lib/export/render-entry.ts).
+ *      Those routes resolve from the USER'S node_modules at runtime, so a
+ *      package they need is invisible to checks 1 and 2. An esbuild metafile
+ *      pass over both entries yields exactly `@mediapipe/tasks-vision`,
+ *      `mediabunny`, `opentype.js`, `three`, `zod` — which is what keeps those
+ *      off this list.
+ *   4. blocking the name at `Module._resolveFilename` and then booting the
+ *      product does not change what the product does. Checks 1-3 are static and
+ *      all three MISSED the biggest candidate on the original list.
+ *
+ * ── Why `@next/swc-*` is not here, at 116 MB ───────────────────────────────
+ * "The runtime never compiles" is false, and it is false in the one place
+ * nobody greps. `next({ dev: false })` calls Next's `loadConfig`, which sees a
+ * `next.config.ts` — the file `package.json#files` ships — and hands it to
+ * `transpileConfig`, which loads the SWC native bindings to strip the types.
+ * (The no-SWC path exists but is gated on `__NEXT_NODE_NATIVE_TS_LOADER_ENABLED`,
+ * which only Next's own `bin/next` sets; the programmatic API never does.)
+ *
+ * With the package blocked and the download cache cleared, `loadConfig` did not
+ * fail — it went to the network, fetched 116 MB, and wrote it to
+ * `node_modules/next/next-swc-fallback/` INSIDE the runtime tree. Measured
+ * 2026-09-09: 80 ms with the package present, 11 460 ms without. Two ways that
+ * ships broken: offline first launch (the whole point of bundling an installed
+ * snapshot), and a signed .app, where writing into `Contents/Resources` is
+ * EPERM. A static grep sees none of it, because nothing in this repo names the
+ * package.
+ *
+ * The 116 MB is still winnable — by shipping a precompiled `next.config.js` so
+ * `loadConfig` takes its plain-`import()` branch — but that is a build-output
+ * change with its own failure modes, not a prune, and it does not belong in the
+ * same commit as one.
+ *
+ * Data, not code, so the test can assert the whole set at once. Adding an entry
+ * means re-running all four checks — a package removed on a hunch produces an
+ * app that 500s a route nobody exercises until a user does.
+ */
+const PRUNE_LIST = [
+  // Build-time only: `withSentryConfig` in next.config.ts uploads source maps
+  // during `next build`. Verified separately that loading next.config.ts at
+  // PHASE_PRODUCTION_SERVER with all four blocked still succeeds — the wrapper
+  // does not reach for the uploader outside a build.
+  { pkg: "@sentry/cli", why: "build-time source-map upload only (next.config.ts withSentryConfig); @sentry/node and @sentry/nextjs stay" },
+  { pkg: "@sentry/bundler-plugin-core", why: "build-time source-map upload only; nothing requires it at runtime" },
+  { pkg: "@sentry/webpack-plugin", why: "build-time source-map upload only; nothing requires it at runtime" },
+  { pkg: "@sentry/babel-plugin-component-annotate", why: "build-time JSX annotation only; nothing requires it at runtime" },
+  // Client-only. These are compiled INTO `.next` by the production build; the
+  // server never resolves them, because `output: standalone` is off and app
+  // code is served from the prebuilt chunks, not from the shipped `.tsx`.
+  { pkg: "lucide-react", why: "client-only icon set, already inlined into .next by the production build" },
+  { pkg: "@base-ui/react", why: "client-only UI primitives, already inlined into .next" },
+  { pkg: "recharts", why: "client-only charts, already inlined into .next" },
+  { pkg: "@xyflow/react", why: "client-only node graph, already inlined into .next" },
+  { pkg: "konva", why: "client-only canvas library, already inlined into .next; the SERVER canvas is @napi-rs/canvas, which stays" },
+  { pkg: "react-konva", why: "client-only canvas bindings, already inlined into .next" },
+  { pkg: "@dnd-kit/core", why: "client-only drag and drop, already inlined into .next" },
+  { pkg: "@dnd-kit/modifiers", why: "client-only drag and drop, already inlined into .next" },
+  { pkg: "@dnd-kit/sortable", why: "client-only drag and drop, already inlined into .next" },
+  { pkg: "@dnd-kit/utilities", why: "client-only drag and drop, already inlined into .next" },
+  { pkg: "@xterm/xterm", why: "the browser terminal front-end; the SERVER side is @xterm/headless + @xterm/addon-serialize, which stay" },
+  { pkg: "@xterm/addon-fit", why: "browser terminal addon, already inlined into .next" },
+  { pkg: "@xterm/addon-web-links", why: "browser terminal addon, already inlined into .next" },
+  { pkg: "@xterm/addon-webgl", why: "browser terminal addon, already inlined into .next" },
+  { pkg: "react-markdown", why: "client-only markdown renderer, already inlined into .next" },
+  { pkg: "remark-gfm", why: "client-only markdown plugin, already inlined into .next" },
+  { pkg: "vaul", why: "client-only drawer component, already inlined into .next" },
+  { pkg: "@tanstack/react-table", why: "client-only table; @tanstack/react-query is NOT pruned (41 dist-cli requires)" },
+  { pkg: "next-themes", why: "client-only theme provider, already inlined into .next" },
+  { pkg: "react-resizable-panels", why: "client-only layout, already inlined into .next" },
+  // shadcn moved to devDependencies in the same change, so `--omit=dev` already
+  // excludes all three. Kept here as the belt to that braces: harmless when
+  // absent, and correct if a future dependency drags them back in.
+  { pkg: "shadcn", why: "a scaffolding CLI with zero runtime imports; moved to devDependencies in the same change" },
+  { pkg: "ts-morph", why: "only reachable from shadcn, which is now a devDependency" },
+  { pkg: "@ts-morph/common", why: "only reachable from shadcn, which is now a devDependency" },
+];
+
+/** Recursive byte total. Best-effort: an unreadable entry counts as 0. */
+function dirBytes(dir) {
+  let total = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) total += dirBytes(full);
+    else {
+      try {
+        total += fs.statSync(full).size;
+      } catch {
+        /* skip */
+      }
+    }
+  }
+  return total;
+}
+
+/**
+ * node-pty ships prebuilds for four platforms (~58 MB, and 58 of those MB are
+ * the two win32 ones); the bundle runs on exactly one.
+ * `restorePrebuiltExecutables` above already chmods only what is present and
+ * `assertPrebuiltExecutablesRunnable` only asserts over what is present, so
+ * removing the rest changes nothing either of them does.
+ *
+ * Safe because host === target on every path that ships: `scripts/release-electron.js`
+ * says outright that electron-builder cross-compiles poorly and each target
+ * builds on its own runner (macos-15 → `Libi-arm64.dmg`, windows-2022 →
+ * `Libi-Setup-x64.exe`).
+ *
+ * The guard is the point of the function, though: if the HOST's own prebuild is
+ * not there, this deletes nothing. Stripping every prebuild because the naming
+ * scheme changed, or because node-pty shipped a source build instead, would
+ * take the Terminal out of a signed .app where it cannot be repaired.
+ */
+function pruneNodePtyPrebuilds(outDir) {
+  const nodePty = path.join(outDir, "node_modules", "node-pty");
+  const dir = path.join(nodePty, "prebuilds");
+  const host = `${process.platform}-${process.arch}`;
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const hasHost = entries.some((e) => e.isDirectory() && e.name === host);
+  const hasSourceBuild = fs.existsSync(path.join(nodePty, "build", "Release", "pty.node"));
+  if (!hasHost && !hasSourceBuild) {
+    log(
+      `node-pty carries no prebuild for this host (${host}) and no build/Release — ` +
+        "leaving all prebuilds in place rather than shipping a bundle with none.",
+    );
+    return [];
+  }
+  const removed = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === host) continue;
+    const full = path.join(dir, entry.name);
+    const bytes = dirBytes(full);
+    fs.rmSync(full, { recursive: true, force: true });
+    removed.push({ pkg: `node-pty/prebuilds/${entry.name}`, bytes });
+  }
+  return removed;
+}
+
+/**
+ * Every `node_modules/.bin` directory in the bundle, top level and nested.
+ */
+function binDirs(nm, out = []) {
+  let entries;
+  try {
+    entries = fs.readdirSync(nm, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    if (e.name === ".bin") {
+      out.push(path.join(nm, e.name));
+      continue;
+    }
+    if (e.name.startsWith(".")) continue;
+    const dir = path.join(nm, e.name);
+    // A scope directory holds packages, not a package — recurse straight in.
+    if (e.name.startsWith("@")) {
+      binDirs(dir, out);
+      continue;
+    }
+    const nested = path.join(dir, "node_modules");
+    if (fs.existsSync(nested)) binDirs(nested, out);
+  }
+  return out;
+}
+
+/**
+ * What a `.bin` entry points at: the link target on posix, or the paths a
+ * Windows `.cmd`/`.ps1`/sh wrapper names. An empty array means "cannot tell",
+ * which is deliberately treated as "leave it alone".
+ */
+function shimTargets(file) {
+  const dir = path.dirname(file);
+  if (fs.lstatSync(file).isSymbolicLink()) {
+    return [path.resolve(dir, fs.readlinkSync(file))];
+  }
+  let text;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return [];
+  }
+  const found = new Set();
+  for (const m of text.matchAll(/\.\.[\\/][^\s"'`$%)]+/g)) {
+    found.add(path.resolve(dir, m[0].split(/[\\/]/).join(path.sep)));
+  }
+  return [...found];
+}
+
+/**
+ * Delete `.bin` shims whose target no longer exists.
+ *
+ * npm writes one `.bin` entry per package `bin` field — a symlink on posix, a
+ * `.cmd`/`.ps1`/sh wrapper trio on Windows — and REMOVING THE PACKAGE LEAVES
+ * THEM BEHIND. Pruning `@sentry/cli` left
+ * `node_modules/.bin/sentry-cli -> ../@sentry/cli/bin/sentry-cli` pointing at
+ * nothing, and nothing in this build noticed: the failure surfaced two steps
+ * later in electron-builder's macOS signing pass, which stats every file it
+ * packages, as `ENOENT … Resources/libi-bundle/node_modules/.bin/sentry-cli`,
+ * AFTER it had already written a half-signed `.app` (`Identifier=Electron`,
+ * `Sealed Resources=none`) that exits instantly when launched.
+ *
+ * Generic on purpose. `@sentry/cli` is not special — every PRUNE_LIST entry
+ * that declares a `bin` does this, so deleting the one path would just move
+ * the failure to the next package added to the list.
+ */
+function pruneDanglingBinShims(outDir) {
+  const nm = path.join(outDir, "node_modules");
+  const removed = [];
+  for (const dir of binDirs(nm)) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const full = path.join(dir, name);
+      const targets = shimTargets(full);
+      if (targets.length === 0) continue;
+      if (targets.some((t) => fs.existsSync(t))) continue;
+      let bytes = 0;
+      try {
+        bytes = fs.lstatSync(full).size;
+      } catch {
+        /* about to remove it anyway */
+      }
+      fs.rmSync(full, { force: true });
+      removed.push({ pkg: `${path.relative(nm, dir)}/${name}`, bytes, danglingShim: true });
+    }
+  }
+  return removed;
+}
+
+/**
+ * No dangling symlink may leave this function, anywhere in the bundle.
+ *
+ * electron-builder stats every file it packages, so ANY unresolvable link is
+ * fatal — but it is fatal during signing, minutes later, with a half-written
+ * `.app` as the artifact. This turns that into a prune-time failure that names
+ * the link and the target it wanted.
+ */
+function assertNoDanglingLinks(outDir) {
+  const dangling = [];
+  const walk = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isSymbolicLink()) {
+        let target;
+        try {
+          target = path.resolve(dir, fs.readlinkSync(full));
+        } catch {
+          continue;
+        }
+        if (!fs.existsSync(target)) dangling.push({ full, target });
+      } else if (e.isDirectory()) {
+        walk(full);
+      }
+    }
+  };
+  walk(path.join(outDir, "node_modules"));
+  if (dangling.length === 0) return;
+  throw new Error(
+    `[runtime-bundle] ${dangling.length} dangling symlink(s) in the bundle:\n` +
+      dangling.map((d) => `   ${d.full} -> ${d.target}`).join("\n") +
+      "\n   electron-builder stats every packaged file and dies on these DURING\n" +
+      "   SIGNING, leaving a half-signed .app behind. A prune that removed a\n" +
+      "   package without its `.bin` shim is the usual cause — see\n" +
+      "   `pruneDanglingBinShims` in this file.",
+  );
+}
+
+/** A package's declared edges. Peers included: keeping too much is the safe
+ *  direction, and a peer is a name some remaining package expects to resolve. */
+function declaredDeps(pkgJsonPath) {
+  let j;
+  try {
+    j = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+  } catch {
+    return [];
+  }
+  return [
+    ...Object.keys(j.dependencies || {}),
+    ...Object.keys(j.optionalDependencies || {}),
+    ...Object.keys(j.peerDependencies || {}),
+  ];
+}
+
+/** Top-level package names under `nm`, scopes expanded. */
+function topLevelPackages(nm) {
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(nm, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+    if (e.name.startsWith(".")) continue;
+    if (!e.name.startsWith("@")) {
+      out.push(e.name);
+      continue;
+    }
+    let scoped;
+    try {
+      scoped = fs.readdirSync(path.join(nm, e.name), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const s of scoped) {
+      if (s.isDirectory() || s.isSymbolicLink()) out.push(`${e.name}/${s.name}`);
+    }
+  }
+  return out;
+}
+
+/** Every name any surviving package.json anywhere under `nm` still asks for. */
+function referencedNames(nm) {
+  const names = new Set();
+  const walk = (dir, depth) => {
+    if (depth > 8) return;
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isFile() && e.name === "package.json") {
+        for (const d of declaredDeps(path.join(dir, e.name))) names.add(d);
+      } else if (e.isDirectory() && !e.name.startsWith(".")) {
+        walk(path.join(dir, e.name), depth + 1);
+      }
+    }
+  };
+  walk(nm, 0);
+  return names;
+}
+
+/**
+ * The packages the PRUNE_LIST roots dragged in, and nothing else.
+ *
+ * Deleting `recharts` leaves `victory-vendor` and `decimal.js-light` behind;
+ * deleting `@sentry/cli` — a 0.1 MB shim — leaves its 35 MB platform binary
+ * `@sentry/cli-darwin` behind. Measured on the first real build: 32 packages,
+ * 53 MB, more than a third of what the prune itself freed.
+ *
+ * Deliberately NOT a general "delete anything unreferenced" sweep. This set is
+ * seeded ONLY from the PRUNE_LIST roots, so the worst a bug in it can do is
+ * remove something a package we already decided to remove had brought in. A
+ * general sweep would additionally delete any package the runtime imports
+ * without declaring — and this branch found one of those the hard way
+ * (`@modelcontextprotocol/sdk` reached the production tree only through
+ * `shadcn`, so moving shadcn to devDependencies would have taken every MCP
+ * tool with it; it is a direct dependency now).
+ */
+function reachableFromRoots(nm, roots) {
+  const seen = new Set();
+  const queue = [...roots];
+  while (queue.length) {
+    const name = queue.shift();
+    for (const dep of declaredDeps(path.join(nm, ...name.split("/"), "package.json"))) {
+      if (seen.has(dep)) continue;
+      if (!fs.existsSync(path.join(nm, ...dep.split("/")))) continue;
+      seen.add(dep);
+      queue.push(dep);
+    }
+  }
+  for (const r of roots) seen.delete(r);
+  return seen;
+}
+
+/**
+ * Remove every PRUNE_LIST entry present under `<outDir>/node_modules`, then the
+ * packages only those entries brought in, then the non-host node-pty prebuilds.
+ * Absent entries are silently fine — the list spans platforms and npm only
+ * installs the ones this host matched.
+ */
+function pruneBundle(outDir) {
+  const nm = path.join(outDir, "node_modules");
+  const removed = [];
+
+  const roots = PRUNE_LIST.map((e) => e.pkg).filter((p) =>
+    fs.existsSync(path.join(nm, ...p.split("/"))),
+  );
+  // Read the graph BEFORE deleting anything — a deleted package.json declares
+  // nothing, and its subtree would then be invisible.
+  const candidates = reachableFromRoots(nm, roots);
+
+  for (const pkg of roots) {
+    const full = path.join(nm, ...pkg.split("/"));
+    const bytes = dirBytes(full);
+    fs.rmSync(full, { recursive: true, force: true });
+    removed.push({ pkg, bytes });
+  }
+
+  // To a fixpoint: recharts → victory-vendor → decimal.js-light only unwinds
+  // one link per pass.
+  for (;;) {
+    const present = new Set(topLevelPackages(nm));
+    const referenced = referencedNames(nm);
+    const dead = [...candidates].filter((c) => present.has(c) && !referenced.has(c));
+    if (dead.length === 0) break;
+    for (const pkg of dead) {
+      const full = path.join(nm, ...pkg.split("/"));
+      const bytes = dirBytes(full);
+      fs.rmSync(full, { recursive: true, force: true });
+      removed.push({ pkg, bytes, transitive: true });
+      candidates.delete(pkg);
+    }
+  }
+
+  removed.push(...pruneNodePtyPrebuilds(outDir));
+  // After every removal above: a shim is only dangling once its package is
+  // gone.
+  removed.push(...pruneDanglingBinShims(outDir));
+  assertNoDanglingLinks(outDir);
+  const totalBytes = removed.reduce((n, r) => n + r.bytes, 0);
+  return { removed, totalBytes };
 }
 
 // ---------------------------------------------------------------------------
@@ -918,6 +1402,40 @@ async function buildRuntimeBundle({ fromRegistry = null, registry = null, outDir
   }
 
   stripForcedMainArtifact(root);
+
+  // Prune BEFORE `materializeNextExternals` below: that step asserts every farm
+  // symlink resolves, so a prune that removed something the farm needs fails
+  // this build loudly instead of shipping a runtime that 500s every route. And
+  // before `resolveNativeAbi`, so the node-pty prebuild sweep runs ahead of
+  // `restorePrebuiltExecutables` and the execute-bit assertion — both of which
+  // only ever look at what is actually present.
+  const pruned = pruneBundle(target);
+  const freedMb = (pruned.totalBytes / (1024 * 1024)).toFixed(1);
+  // The whole list, every build. It is the only record of WHAT was removed from
+  // the artifact a user installs, and a silently-shrinking list is the failure
+  // this and the ceiling below exist to make visible.
+  log(
+    `pruned ${pruned.removed.length} package(s), ${freedMb} MB freed: ` +
+      pruned.removed
+        .map(
+          (r) =>
+            `${r.pkg}${r.transitive ? " [transitive]" : ""} ` +
+            `(${(r.bytes / (1024 * 1024)).toFixed(1)} MB)`,
+        )
+        .join(", "),
+  );
+  const bundleMb = dirBytes(path.join(target, "node_modules")) / (1024 * 1024);
+  log(`bundle node_modules after prune: ${bundleMb.toFixed(0)} MB`);
+  if (bundleMb > BUNDLE_CEILING_MB) {
+    throw new Error(
+      `[runtime-bundle] node_modules is ${bundleMb.toFixed(0)} MB, over the ` +
+        `${BUNDLE_CEILING_MB} MB ceiling.\n` +
+        "   A dependency was added, or a prune entry stopped matching (a rename\n" +
+        "   is silent — `pruneBundle` skips what it cannot find). Compare the\n" +
+        "   prune log line above with PRUNE_LIST before raising this number.",
+    );
+  }
+
   resolveNativeAbi({ outDir: target, electron });
   assertNoProprietaryDeps(target);
 
@@ -1301,6 +1819,11 @@ function assertPrebuiltExecutablesRunnable(outDir = path.join(ROOT, OUT_DIRNAME)
 module.exports = {
   OUT_DIRNAME,
   STAMP_NAME,
+  PRUNE_LIST,
+  pruneBundle,
+  pruneDanglingBinShims,
+  assertNoDanglingLinks,
+  BUNDLE_CEILING_MB,
   runtimeRootFor,
   readRuntimeFacts,
   factMismatch,

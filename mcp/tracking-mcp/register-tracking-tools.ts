@@ -2,7 +2,6 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as tools from "@/mcp/tools";
 import {
   ComputeObjectTrackShape,
-  ComputeObjectTrackProvidersShape,
   AddTrackedOverlaySchema,
   UpdateTrackedOverlaySchema,
   DeleteTrackSchema,
@@ -12,7 +11,6 @@ import {
   SkipSegmentSchema,
   ListTrackSegmentsSchema,
   GroundTargetSchema,
-  RefineTrackWithSam2Schema,
   VerifyInstallSchema,
   VerifyTrackedOverlayShape,
   ListIdentityCandidatesSchema,
@@ -101,7 +99,6 @@ export function registerTrackingTools(server: McpServer): void {
         "and computes one segment per shot (recompute a bad window later with libi.compute_track_segment). " +
         "Returns {trackId, segments[], summary{perSegment,visibleRanges,lostRanges,flags}}. " +
         "Returns a trackId compatible with libi.add_tracked_overlay. " +
-        "For pixel-precise mask refinement after tracking, see libi.refine_track_with_sam2 (PAID, opt-in). " +
         "Dedup is handled per-segment inside the shot fan-out — sub-job markers " +
         "(attachedToRunning/matchedExisting) are not surfaced at the fan-out result. " +
         "Pass forceNew:true to force every per-shot segment recompute (e.g., after the " +
@@ -111,51 +108,6 @@ export function registerTrackingTools(server: McpServer): void {
     async (params, extra) => {
       try {
         const result = await tools.computeObjectTrack(params, extra);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.compute_object_track_providers",
-    {
-      description:
-        "OPTIONAL PAID mask refinement via fal.ai SAM2. NOT the default tracker — use " +
-        "libi.compute_object_track / libi.compute_track_segment (local, free) first. " +
-        "Use SAM2 only when a precise mask is needed for object replacement / matting. " +
-        "Requires FAL_KEY configured in Settings → MCP Servers → fal-ai. " +
-        "Returns a trackId compatible with libi.add_tracked_overlay. " +
-        "Dedup signals — when the tool returns `attachedToRunning:true`, the server " +
-        "attached this call to a still-running matching job and BLOCKED until it " +
-        "finished, so a fresh track IS available in this response; inform the user " +
-        "we continued an existing run (mention elapsed time from `existingJob.startedAt`) " +
-        "and ASK if they prefer a separate fresh run (retry with `forceNew:true`). " +
-        "When the tool returns `matchedExisting:true`, the track is already computed " +
-        "and saved — proceed to use the trackId. Use `forceNew:true` only to recompute " +
-        "the track (e.g., after the source video changed).",
-      inputSchema: ComputeObjectTrackProvidersShape,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.computeObjectTrackProviders(params, extra);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.refine_track_with_sam2",
-    {
-      description:
-        "Refine an existing box track into precise SAM2 masks over an optional time range " +
-        "(PAID, fal.ai, requires user approval). Adds a 'sam2-refine' segment. " +
-        "Not a tracker — refines a track you already have from libi.compute_object_track. " +
-        "Only use when a precise pixel mask is needed (e.g. object replacement / matting).",
-      inputSchema: RefineTrackWithSam2Schema,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.refineTrackWithSam2(params, extra);
         return makeContent(result);
       } catch (err) { return makeError(err); }
     },
@@ -313,7 +265,10 @@ export function registerTrackingTools(server: McpServer): void {
     {
       description:
         "Check whether the libi-tracking engine (uv Python env + ONNX models) is installed and its self-test passes. " +
-        "Returns {ok, installed, missing[], versions}. Takes no parameters. " +
+        "Returns {ok, installed, missing[], versions}. Call it with NO arguments. " +
+        "It speaks ONLY for libi-tracking: `missing[]` always lists the tracking engine's dependencies, never another extension's, " +
+        "so a call naming a different extension (e.g. mcpId:'local-music') is refused rather than answered. " +
+        "To verify any OTHER extension, re-call the tool that returned status:\"needs_install\", or read the `dependencies` array on libi.get_install_plan. " +
         "Call this if a tracking tool returned tracking_engine_not_installed (if not installed, " +
         "libi.install_tracking_engine runs the actual install), and again after installing to confirm. " +
         "On success this ALSO closes the lazy-install loop — it persists the tracking engine as installed in the dependency registry the tracking gate reads, so the next tracking call is unblocked with no manual DB patch and no update_dep_status needed.",
@@ -408,14 +363,16 @@ export function registerTrackingTools(server: McpServer): void {
     {
       description:
         "STOP — before using this you MUST invoke the `removing-and-replacing-backgrounds` skill via the Skill " +
-        "tool and follow it (subject pick, local-vs-fal routing, the verify-pixels step, compose/transplant). " +
+        "tool and follow it (subject pick, local-vs-paid-provider routing, the verify-pixels step, " +
+        "compose/transplant). " +
         "Produce an alpha CUTOUT asset (subject isolated, background transparent) from a VIDEO file. " +
         "LOCAL + FREE by default (MatAnyone, seeded from libi's subject masks) — a long job with live progress. " +
         "Returns {cutoutFileId} — a VP9-alpha WebM you place with libi.add_overlay over any new background " +
         "(add the background as a full-frame overlay too, at a LOWER z); export honors the alpha as-is. " +
         "subject: omit for auto (largest person) or pass a libi.ground_target candidate bbox. " +
-        "Photos + non-person/low-quality cases route to the PAID fal path (bria video / birefnet image) — " +
-        "the skill owns that flow; engine:'fal' here only returns those instructions.",
+        "Photos + non-person/low-quality cases route to the PAID provider path — the skill owns that flow " +
+        "and its references/providers/<id>.md names the endpoints; engine:'fal' here only returns " +
+        "those instructions.",
       inputSchema: RemoveBackgroundSchema,
     },
     async (params, extra) => {

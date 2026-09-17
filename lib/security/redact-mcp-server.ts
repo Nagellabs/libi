@@ -7,8 +7,7 @@
  * values include `Authorization: Bearer <FAL_KEY>` bearer secrets. Neither the
  * envVars values NOR the header values must EVER reach the browser. The settings
  * API therefore serializes ONLY the NAMES via `configuredEnvVars` /
- * `configuredHeaders` — mirroring what `libi.list_bundled_mcps`
- * (`mcp/tools/mcp-status-tools.ts`) already does — and never echoes a value.
+ * `configuredHeaders` — and never echoes a value.
  */
 
 /** Parse the value map from the stored envVars JSON. SERVER-SIDE ONLY — the

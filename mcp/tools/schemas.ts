@@ -4,6 +4,23 @@
 // conversion uses Zod v3 internals (._zod) that don't exist in Zod v4.
 import { z } from "zod/v3";
 import { aiGenerationMetaSchema } from "@/lib/ai-generation/types";
+import { PROSE_EXAMPLE_SECTION_KEYS } from "@/mcp/manual-sections";
+
+/**
+ * The one place `mcpId` / `extensionId` is collapsed to a single id.
+ *
+ * Lives here, next to the schemas that declare both keys, so a tool can never
+ * accept the alias in its schema and then read only `mcpId` in its body.
+ * Returns null when neither was supplied — the caller owns the error text,
+ * because a useful one names that tool's own known ids.
+ */
+export function resolveExtensionId(input: {
+  mcpId?: string;
+  extensionId?: string;
+}): string | null {
+  const id = input.extensionId ?? input.mcpId;
+  return typeof id === "string" && id.trim().length > 0 ? id.trim() : null;
+}
 
 // ---------------------------------------------------------------------------
 // Layer effects schemas (Plan 1 — used by Plan 2 MCP tools and inspector)
@@ -282,41 +299,12 @@ export const updateFileNotesSchema = z.object({
   mode: z.enum(["append", "replace"]).default("append").describe("'append' (default) prepends an ISO timestamp and appends a trailing newline; 'replace' overwrites the entire notes field."),
 });
 
-export const registerMcpServerSchema = z.object({
-  name: z.string().describe("Human-readable name for the MCP server (e.g., 'YouTube Downloader')"),
-  type: z.enum(["stdio", "http"]).describe("Transport type: 'stdio' for command-line servers, 'http' for HTTP endpoints"),
-  command: z.string().optional().describe("For stdio: the executable command (e.g., 'npx')"),
-  args: z.array(z.string()).optional().describe("For stdio: command arguments (e.g., ['@kevinwatt/yt-dlp-mcp'])"),
-  url: z.string().optional().describe("For http: the MCP server endpoint URL"),
-  headers: z.record(z.string()).optional().describe("For http: headers as key-value pairs"),
-  envVars: z.record(z.string()).optional().describe("Environment variables needed by the server (e.g., API keys)"),
-  description: z.string().optional().describe("Brief description of what the server does"),
-  requireApproval: z.boolean().optional().default(true).describe("Whether the agent must ask the user before calling this server's tools (default true)"),
-});
-
 export const updateMcpServerSchema = z.object({
-  id: z.string().describe("ID of the MCP server row to update"),
-  name: z.string().optional().describe("Human-readable name (custom rows only)"),
-  description: z.string().nullable().optional().describe("Brief description (custom rows only). Pass null to clear."),
-  command: z.string().optional().describe("Executable command for stdio rows (custom rows only)"),
-  args: z.array(z.string()).optional().describe("Command arguments for stdio rows (custom rows only)"),
-  url: z.string().optional().describe("Endpoint URL for http rows (custom rows only)"),
-  headers: z.record(z.string()).optional().describe("HTTP headers as key-value pairs (custom rows only)"),
-  envVars: z.record(z.string()).optional().describe(
-    "Environment variables as key-value pairs (allowed on bundled and custom rows). Replaces the full env-var map.",
-  ),
-  requireApproval: z.boolean().optional().describe(
-    "Whether the agent must ask the user before calling this server's tools (allowed on bundled and custom rows)",
-  ),
-});
-
-export const setMcpServerEnabledSchema = z.object({
-  id: z.string().describe("ID of the MCP server row to toggle"),
-  enabled: z.boolean().describe("New enabled state. Disabled servers are not surfaced to agents but their definition is preserved."),
-});
-
-export const removeMcpServerSchema = z.object({
-  id: z.string().describe("ID of the custom MCP server row to permanently remove. Bundled servers cannot be removed."),
+  id: z.string().describe("libi-owned MCP row id, e.g. 'libi-tracking'"),
+  requireApproval: z
+    .boolean()
+    .optional()
+    .describe("Prompt the user before every tool this extension owns."),
 });
 
 export const uploadFileSchema = z.object({
@@ -327,18 +315,13 @@ export const uploadFileSchema = z.object({
   aiGeneration: aiGenerationMetaSchema
     .optional()
     .describe(
-      "Optional provenance metadata for AI-generated files. Set when the source of this file is a generation call (fal-ai veo, image-to-video, TTS, etc.). Populates the asset preview Generation tab and enables the Fetch-actual-cost flow. Include provider (e.g. \"fal-ai\"), model, the full engineered prompt, costEstimate, startedAt/completedAt ISO timestamps, durationMs, and providerJobId (the fal request_id). Omit for non-AI uploads.",
+      "Optional provenance metadata for AI-generated files. Set when the source of this file is a generation call (fal-ai veo, image-to-video, TTS, etc.). Populates the asset preview Generation tab and enables the Fetch-actual-cost flow. Include provider (the catalog id, e.g. \"fal\" or \"elevenlabs\"), model, the full engineered prompt, costEstimate, startedAt/completedAt ISO timestamps, durationMs, and providerJobId (the fal request_id). Omit for non-AI uploads.",
     ),
   folderId: z.string().optional().describe(
     "Place the uploaded file inside this asset folder (must match the file's " +
     "scope). Omit to land at the scope root.",
   ),
 });
-
-export const UploadFileToFalSchema = z.object({
-  fileId: z.string().describe("libi file id to upload to fal storage"),
-});
-export type UploadFileToFalParams = z.infer<typeof UploadFileToFalSchema>;
 
 export const UploadFontSchema = z.object({
   path: z.string().describe("Absolute local filesystem path to a .ttf/.otf/.woff2 font file"),
@@ -463,6 +446,23 @@ export const showInChatSchema = z.object({
     .describe("Optional short caption shown under the media in chat"),
 });
 
+export const downloadVideoSchema = z.object({
+  url: z
+    .string()
+    .describe(
+      "Video page URL. YouTube playlist/radio parameters (list, start_radio, index, pp, t) are stripped automatically — pass the URL as the user gave it.",
+    ),
+  pieceId: z
+    .string()
+    .nullable()
+    .describe("Piece to import the file into, or null for the unassigned library."),
+  audioOnly: z
+    .boolean()
+    .default(false)
+    .describe("Download and extract audio only (mp3) instead of the muxed mp4."),
+});
+export type DownloadVideoParams = z.infer<typeof downloadVideoSchema>;
+
 export const showPreviewSchema = z.object({
   pieceId: z.string().describe("ID of the piece whose timeline/preview should be shown"),
 });
@@ -511,10 +511,7 @@ export type ListFilesParams = z.infer<typeof listFilesSchema>;
 export type DuplicateFileParams = z.infer<typeof duplicateFileSchema>;
 export type AssignFileToolParams = z.infer<typeof assignFileSchema>;
 export type UploadFileParams = z.infer<typeof uploadFileSchema>;
-export type RegisterMcpServerParams = z.infer<typeof registerMcpServerSchema>;
 export type UpdateMcpServerParams = z.infer<typeof updateMcpServerSchema>;
-export type SetMcpServerEnabledParams = z.infer<typeof setMcpServerEnabledSchema>;
-export type RemoveMcpServerParams = z.infer<typeof removeMcpServerSchema>;
 export type ListPiecesParams = z.infer<typeof listPiecesSchema>;
 export type CreatePieceParams = z.infer<typeof createPieceSchema>;
 export type ShowPieceParams = z.infer<typeof showPieceSchema>;
@@ -1042,8 +1039,7 @@ export const analysisTranscribeAudioSchema = z.object({
   fileId: z.string().describe("ID of the video or audio file"),
   retry: z.boolean().optional().describe("If true, only re-process chunks with status='failed' or 'not_started'. Default false."),
   chunkSeconds: z.number().int().positive().optional().describe("Chunk length in seconds. Default 600 (10 minutes)."),
-  provider: z.enum(["whisper", "elevenlabs"]).optional().describe("STT provider. Default 'whisper' (local, free). 'elevenlabs' for diarization/audio-events or on explicit user request."),
-  model: z.string().optional().describe("Whisper model id (tiny|base|small|medium|large-v3). Ignored for elevenlabs. Default 'small'."),
+  model: z.string().optional().describe("Whisper model id (tiny|base|small|medium|large-v3). Default 'small'."),
 });
 
 export const analysisChunkAudioSchema = z.object({
@@ -1113,33 +1109,6 @@ export const analysisUpdateSummaryCustomSchema = z.object({
   value: z.unknown().describe("Value to assign (any JSON-serializable value)"),
 });
 
-export const extraAnalysisModelInputSchema = z.object({
-  fileId: z.string().min(1).describe("The video file's id."),
-  pieceId: z.string().min(1).optional().describe("Optional piece scope."),
-  providerId: z
-    .string()
-    .min(1)
-    .optional()
-    .describe("Script provider id (defaults to the first configured provider)."),
-  modelId: z
-    .string()
-    .min(1)
-    .optional()
-    .describe("Provider-specific model id (defaults to the provider's defaultModelId)."),
-  regenerate: z
-    .boolean()
-    .optional()
-    .describe(
-      "When true, run a fresh job even if a script for this (providerId, modelId) already exists.",
-    ),
-  focus: z
-    .enum(["script", "captions"])
-    .optional()
-    .describe(
-      "What the analysis should describe. 'script' (default) = full production script. 'captions' = a per-caption recreation spec (words, 3D-vs-flat treatment, motion keyframes, reveal) for mimicking on-screen text.",
-    ),
-});
-
 export type AnalysisGetParams = z.infer<typeof analysisGetSchema>;
 export type AnalysisExtractAudioParams = z.infer<typeof analysisExtractAudioSchema>;
 export type AnalysisExtractFramesParams = z.infer<typeof analysisExtractFramesSchema>;
@@ -1150,7 +1119,6 @@ export type AnalysisRemoveStepParams = z.infer<typeof analysisRemoveStepSchema>;
 export type AnalysisSearchFramesParams = z.infer<typeof analysisSearchFramesSchema>;
 export type AnalysisSearchTranscriptParams = z.infer<typeof analysisSearchTranscriptSchema>;
 export type AnalysisUpdateSummaryCustomParams = z.infer<typeof analysisUpdateSummaryCustomSchema>;
-export type ExtraAnalysisModelParams = z.infer<typeof extraAnalysisModelInputSchema>;
 
 // ---------------------------------------------------------------------------
 // Memories + instruction-override tools
@@ -1180,17 +1148,33 @@ export const overrideInstructionsSchema = z.object({
 export type OverrideInstructionsParams = z.infer<typeof overrideInstructionsSchema>;
 
 // ---------------------------------------------------------------------------
-// MCP status / settings navigation tools
+// Extension navigation (Agents → Libi MCP)
 // ---------------------------------------------------------------------------
 
-export const listBundledMcpsSchema = z.object({});
-
-export const showMcpSettingsSchema = z.object({
-  mcpId: z.string().optional().describe("Optional bundled MCP id (e.g. 'elevenlabs') to focus and scroll to in the settings page"),
+export const showExtensionSchema = z.object({
+  extensionId: z.string().optional().describe("libi extension id to focus, e.g. 'libi-tracking'"),
+  mcpId: z.string().optional().describe("Deprecated alias of extensionId."),
 });
 
-export type ListBundledMcpsParams = z.infer<typeof listBundledMcpsSchema>;
-export type ShowMcpSettingsParams = z.infer<typeof showMcpSettingsSchema>;
+export type ShowExtensionParams = z.infer<typeof showExtensionSchema>;
+
+// ---------------------------------------------------------------------------
+// Providers — what the user connects to their OWN agent (lib/providers/catalog.ts)
+// ---------------------------------------------------------------------------
+
+export const suggestProviderSchema = z.object({
+  kind: z
+    .enum(["image", "video", "music", "voice", "sfx", "transcription"])
+    .describe("The capability you need and do not have."),
+  reason: z
+    .string()
+    .optional()
+    .describe("One short line on what the user asked for. Shown to them; never a key or a prompt."),
+});
+export type SuggestProviderParams = z.infer<typeof suggestProviderSchema>;
+
+export const listProvidersSchema = z.object({});
+export type ListProvidersParams = z.infer<typeof listProvidersSchema>;
 
 export const retryMcpServerSchema = z.object({
   mcpId: z.string().min(1).describe("ID of the MCP server to re-probe (e.g. 'elevenlabs')"),
@@ -1201,8 +1185,45 @@ export type RetryMcpServerParams = z.infer<typeof retryMcpServerSchema>;
 // Tier-2 bundled-MCP install flow tools (agent-driven install)
 // ---------------------------------------------------------------------------
 
+/**
+ * `mcpId` stays the CANONICAL spelling; `extensionId` is accepted as an alias.
+ *
+ * "Both spellings are accepted" was only half true: `{ mcpId, extensionId }` parsed (zod strips the extra key),
+ * but `{ extensionId }` ALONE failed with a bare `Required` and no hint about
+ * which name to use. An agent reading this branch's own noun — every def is
+ * `kind: "extension"`, the manual says "a libi **extension** id" — guesses
+ * `extensionId` and gets a validation error it cannot act on.
+ *
+ * Canonical is `mcpId` and not `extensionId`, because five sibling tools (`update_dep_status`, `diagnose_mcp`,
+ * `recheck_mcp`, `restart_mcp_server`, `retry_mcp_server`), all four install
+ * plans and `mcp/templates/instructions.md` spell it `mcpId`. (`show_extension`
+ * is the one exception: it is named for the extension, so `extensionId` is its
+ * canonical key and `mcpId` its deprecated alias.) Renaming this ONE tool would manufacture the drift the
+ * follow-up is about instead of removing it — the flow's very next call is
+ * `libi.update_dep_status({ mcpId })`.
+ *
+ * NOT a `z.preprocess` around the object, deliberately: the MCP SDK's
+ * `normalizeObjectSchema` returns `undefined` for a `ZodEffects`, so
+ * `tools/list` would fall back to `EMPTY_OBJECT_JSON_SCHEMA` and this tool
+ * would advertise NO parameters at all — the same silent schema loss the
+ * zod-v3 rule in AGENTS.md exists for. Two plain optional fields plus
+ * `resolveExtensionId()` in the tool keeps the advertised schema intact.
+ */
 export const getInstallPlanSchema = z.object({
-  mcpId: z.string().describe("ID of the bundled MCP (e.g. 'youtube-downloader')"),
+  mcpId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "ID of the libi extension (e.g. 'whisper', 'local-music', 'libi-tracking'). Canonical spelling — use this one.",
+    ),
+  extensionId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Alias for mcpId, accepted so either spelling works. Prefer mcpId: the install plans, the manual and every sibling install tool use it.",
+    ),
 });
 
 export const updateDepStatusSchema = z.object({
@@ -1299,11 +1320,6 @@ export const setSkillEnabledSchema = z.object({
   enabled: z.boolean(),
 });
 export type SetSkillEnabledParams = z.infer<typeof setSkillEnabledSchema>;
-
-export const listMcpServersSchema = z.object({}).describe(
-  "List enabled MCP servers — names, descriptions, install status (no secrets)",
-);
-export type ListMcpServersParams = z.infer<typeof listMcpServersSchema>;
 
 export const listSkillPromptsSchema = z.object({
   skillName: z.string().min(1).describe("Kebab-case name of the skill whose prompt files to list"),
@@ -1440,8 +1456,7 @@ const anchorSchema = z.object({
     .describe("[x, y, w, h] in source-frame pixels"),
 });
 
-// Shared fields between ComputeObjectTrackSchema and ComputeObjectTrackProvidersSchema.
-// The only delta between the two schemas is the `provider` field added by the providers variant.
+// Fields of ComputeObjectTrackSchema — also exported as the raw MCP shape below.
 const baseTrackingFields = {
   fileId: z.string().min(1),
   objectKind: z.enum(["face", "object"] as const),
@@ -1469,7 +1484,7 @@ const baseTrackingFields = {
         "class (e.g. ['backpack']) auto-routes to the generalized YOLOE-VP " +
         "detector server-side — no method change needed. Identity is still " +
         "from anchors[] + the normal repair loop. " +
-        "Applies to compute_object_track (local engine); ignored by external-provider tracking.",
+        "Applies to compute_object_track (local engine).",
     ),
   anchors: z
     .array(anchorSchema)
@@ -1523,15 +1538,6 @@ export const refineAtLeastOneAnchorSource = (v: {
 export const REFINE_ANCHOR_MESSAGE =
   "At least one of anchors, derivedFromSubjectName, or derivedFromItemName must be provided.";
 
-const providerField = {
-  provider: z
-    .enum(["sam2-fal"])
-    .describe(
-      "External tracking provider. Currently only 'sam2-fal' is supported. " +
-        "Requires FAL_KEY configured in Settings → MCP Servers → fal-ai.",
-    ),
-};
-
 /**
  * RAW SHAPES for MCP tool registration.
  *
@@ -1545,22 +1551,10 @@ const providerField = {
  * `refineAtLeastOneAnchorSource` instead.
  */
 export const ComputeObjectTrackShape = baseTrackingFields;
-export const ComputeObjectTrackProvidersShape = {
-  ...baseTrackingFields,
-  ...providerField,
-};
-
 // Kept for `z.infer` type derivation and any server-side `.parse()`. Do NOT
 // pass these to `server.registerTool({ inputSchema })` — see the note above.
 export const ComputeObjectTrackSchema = z
   .object(baseTrackingFields)
-  .refine(refineAtLeastOneAnchorSource, { message: REFINE_ANCHOR_MESSAGE });
-
-export const ComputeObjectTrackProvidersSchema = z
-  .object({
-    ...baseTrackingFields,
-    ...providerField,
-  })
   .refine(refineAtLeastOneAnchorSource, { message: REFINE_ANCHOR_MESSAGE });
 
 export const AddTrackedOverlaySchema = z.object({
@@ -1636,7 +1630,7 @@ export const UpdateTrackResultSchema = z.object({
   label: z.string().optional(),
   subjectId: z.string().optional(),
   method: z.string().min(1).describe(
-    "Free-form identifier for the tracker that produced these samples (e.g. 'sam2-local', 'external-mcp:my-tracker'). Stored as-is in the track row.",
+    "Free-form identifier for the tracker that produced these samples (e.g. 'yoloe+botsort', 'external-mcp:my-tracker'). Stored as-is in the track row.",
   ),
   framerate: z.number().positive(),
   samples: z.array(z.object({
@@ -1657,7 +1651,6 @@ export const UpdateTrackResultSchema = z.object({
 });
 
 export type ComputeObjectTrackParams = z.infer<typeof ComputeObjectTrackSchema>;
-export type ComputeObjectTrackProvidersParams = z.infer<typeof ComputeObjectTrackProvidersSchema>;
 export type AddTrackedOverlayParams = z.infer<typeof AddTrackedOverlaySchema>;
 export type UpdateTrackedOverlayParams = z.infer<typeof UpdateTrackedOverlaySchema>;
 export type DeleteTrackParams = z.infer<typeof DeleteTrackSchema>;
@@ -1733,20 +1726,6 @@ export const PickCandidateSchema = z.object({
 });
 export type PickCandidateParams = z.infer<typeof PickCandidateSchema>;
 
-export const RefineTrackWithSam2Schema = z.object({
-  trackId: z.string().min(1).describe("ID of the existing track to refine with SAM2 masks."),
-  range: z
-    .object({
-      start: z.number().nonnegative().describe("Start time in seconds"),
-      end: z.number().positive().describe("End time in seconds"),
-    })
-    .optional()
-    .describe(
-      "Optional time range to refine. If omitted, refines the entire visible span of the track.",
-    ),
-});
-export type RefineTrackWithSam2Params = z.infer<typeof RefineTrackWithSam2Schema>;
-
 // ---------------------------------------------------------------------------
 // Stage-0 grounding (set-of-marks)
 // ---------------------------------------------------------------------------
@@ -1765,7 +1744,7 @@ export type GroundTargetParams = z.infer<typeof GroundTargetSchema>;
 // serialize to an empty {properties:{}} through the MCP SDK). Cross-field
 // rules (box required when kind:"box") are enforced in the handler.
 export const RemoveBackgroundSchema = z.object({
-  fileId: z.string().min(1).describe("Video file to cut out (photos use the fal birefnet path — see the removing-and-replacing-backgrounds skill)"),
+  fileId: z.string().min(1).describe("Video file to cut out (photos use the paid provider path — see the removing-and-replacing-backgrounds skill and its references/providers/<id>.md)"),
   engine: z
     .enum(["local", "fal"])
     .optional()
@@ -1797,7 +1776,30 @@ export type RemoveBackgroundParams = z.infer<typeof RemoveBackgroundSchema>;
 // Tracking engine install verification
 // ---------------------------------------------------------------------------
 
-export const VerifyInstallSchema = z.object({});
+/**
+ * Verifying the tracking engine takes no target — there is only one engine.
+ * The optional id exists so a call aimed at a DIFFERENT extension is refused
+ * instead of silently answered.
+ *
+ * `libi.verify_install({ mcpId: "local-music" })` used to report
+ * `missing: ["tracking-pyenv"]`. Nothing was wrong with local-music's
+ * dependency wiring (`mcp/registry/bundled.ts` declares uv plus the virtual
+ * `ace-step-model` dep, and nothing else) — the schema was `z.object({})`,
+ * zod stripped the unknown key, and the tool answered with the TRACKING
+ * engine's status under the caller's music-shaped question. An agent then
+ * tells the user music needs a Python tracking sidecar. Declaring the key is
+ * what lets `verifyInstall` see it and say no.
+ */
+export const VerifyInstallSchema = z.object({
+  mcpId: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional, and only ever 'libi-tracking' — this tool verifies the tracking engine and nothing else. Any other extension id is refused with a pointer to the right tool. Omit it.",
+    ),
+  extensionId: z.string().min(1).optional().describe("Alias for mcpId. Same rule: omit it."),
+});
 export type VerifyInstallParams = z.infer<typeof VerifyInstallSchema>;
 
 export const installTrackingEngineSchema = z.object({
@@ -2256,7 +2258,7 @@ export const sleepSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Optional — short reason for the wait, surfaced in progress notifications + logs. Example: 'waiting for fal-ai/veo3.1/fast/extend-video to finish', 'polling elevenlabs voice clone'. Helps the user understand what the agent is waiting on.",
+      "Optional — short reason for the wait, surfaced in progress notifications + logs. Example: 'waiting for the video extend job to finish', 'polling elevenlabs voice clone'. Helps the user understand what the agent is waiting on.",
     ),
 });
 
@@ -2324,16 +2326,11 @@ export const importRemoteFilesSchema = z.object({
 export type ImportRemoteFilesParams = z.infer<typeof importRemoteFilesSchema>;
 
 // ---------------------------------------------------------------------------
-// Onboarding + API-config navigation tools
+// Onboarding navigation tools
 // ---------------------------------------------------------------------------
 
 export const startOnboardingSchema = z.object({});
 export type StartOnboardingParams = z.infer<typeof startOnboardingSchema>;
-
-export const showApiConfigSchema = z.object({
-  mcpId: z.string().describe("Bundled MCP id needing a key (e.g. 'fal-ai', 'elevenlabs')"),
-});
-export type ShowApiConfigParams = z.infer<typeof showApiConfigSchema>;
 
 export const buildOnboardingPieceSchema = z.object({
   version: z
@@ -2641,6 +2638,25 @@ export const createCaptionStyleSchema = z.object({
     ),
 });
 export type CreateCaptionStyleParams = z.infer<typeof createCaptionStyleSchema>;
+
+// ---------------------------------------------------------------------------
+// Manual (tiered instructions)
+// ---------------------------------------------------------------------------
+
+/**
+ * `libi.read_manual` is sectioned: the full manual is ~87 KB, which a client
+ * spools to disk rather than reading. No `section` returns the index plus the
+ * pre-first-edit essentials; a key returns one section; `"all"` the lot.
+ */
+export const readManualSchema = z.object({
+  section: z
+    .string()
+    .optional()
+    .describe(
+      `Section key from the index, e.g. ${PROSE_EXAMPLE_SECTION_KEYS.map((k) => `"${k}"`).join(" or ")} (case- and punctuation-insensitive). Omit to get the index plus the sections you need before a first edit. Pass "all" for the whole ~87 KB manual.`,
+    ),
+});
+export type ReadManualParams = z.infer<typeof readManualSchema>;
 
 export const listCaptionStylesSchema = z.object({});
 export type ListCaptionStylesParams = z.infer<typeof listCaptionStylesSchema>;

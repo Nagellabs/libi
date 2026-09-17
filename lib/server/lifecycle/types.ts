@@ -2,15 +2,13 @@
  * Lifecycle event vocabulary for libi's two-phase startup.
  *
  * Category A runs in the CLI parent process (or Electron main process)
- * BEFORE Next.js is spawned. It installs every bundled MCP's npm package
- * + binary deps, then verifies each MCP with an in-memory probe. On any
- * failure, A emits a `fatal` event with an actionable hint and the CLI
- * exits.
+ * BEFORE Next.js is spawned. It installs the tier-1 binary set — a spawnable
+ * Node.js runtime, ffmpeg and ffprobe. On any failure, A emits a `fatal`
+ * event with an actionable hint and the CLI exits.
  *
  * Category B runs in the Next.js process (or the Electron main process
  * for in-process Electron builds). It assumes Category A has already
- * completed successfully — every bundled MCP's deps are on disk and
- * have been probe-verified.
+ * completed successfully — the tier-1 deps are on disk.
  */
 
 /** A unit of work in Category A — one MCP package or one binary dep. */
@@ -43,8 +41,8 @@ export interface CategoryAInstallProgressEvent {
    * until it exits — yet the adapter's is the single largest download in
    * Category A (~345MB) and can legitimately run for minutes. Without a tick
    * the UI sits motionless on "running" and reads as a hang, which users
-   * resolve by force-quitting — the most plausible way to end up with the
-   * half-installed tree `lib/agents/claude-native-binary.ts` exists to detect.
+   * resolve by force-quitting — the most plausible way to end up with a
+   * half-installed adapter tree.
    */
   detail?: string;
 }
@@ -69,23 +67,12 @@ export interface CategoryAInstallDoneEvent {
   reason?: string;
 }
 
-/** Emitted when Category A starts probing a single MCP. */
-export interface CategoryAProbeStartEvent {
-  kind: "category-a-probe-start";
-  mcpId: string;
-  label: string;
-}
-
-/** Emitted when a probe finishes. */
-export interface CategoryAProbeDoneEvent {
-  kind: "category-a-probe-done";
-  mcpId: string;
-  label: string;
-  status: "up" | "down" | "skipped";
-  /** Reason when status === "skipped" (e.g. "needs_config"). */
-  reason?: string;
-  durationMs: number;
-}
+// There is no `category-a-probe-*` event any more. Category A's phase 3
+// — an in-memory `initialize` round-trip against each bundled MCP — was deleted
+// on 2026-09-08 along with the bundled MCPs themselves, and nothing has emitted
+// a probe event since. The two kinds outlived it as declarations with handlers
+// in the CLI adapter and the Electron splash, which read as a working feature
+// and were not one. Deleted together; `category-b-step` renders boot progress.
 
 /** Category A reached a terminal success state. */
 export interface CategoryADoneEvent {
@@ -98,6 +85,7 @@ export type CategoryBStepId =
   | "db-migrate"
   | "jobs-recover"
   | "port-file"
+  | "mcp-http"
   | "agent-warm"
   | "standby-create"
   | "probe-persist";
@@ -111,6 +99,20 @@ export interface CategoryBStepEvent {
 export interface CategoryBDoneEvent {
   kind: "category-b-done";
   durationMs: number;
+}
+
+/**
+ * Something did not work, and boot carries on without it. Unlike `fatal`, the
+ * prelude does not stop: the adapter shows `message` wherever the user is
+ * looking while libi starts, and the feature's own surface in the app is where
+ * it gets fixed. A step that warned must not also render as a plain success.
+ */
+export interface WarningEvent {
+  kind: "warning";
+  phase: "category-b";
+  step: CategoryBStepId;
+  /** One line of user-facing copy that says what is missing and where to fix it. */
+  message: string;
 }
 
 /** Fatal terminates the prelude. `hint` is the actionable copy. */
@@ -138,11 +140,10 @@ export type LifecycleEvent =
   | CategoryAInstallStartEvent
   | CategoryAInstallProgressEvent
   | CategoryAInstallDoneEvent
-  | CategoryAProbeStartEvent
-  | CategoryAProbeDoneEvent
   | CategoryADoneEvent
   | CategoryBStepEvent
   | CategoryBDoneEvent
+  | WarningEvent
   | FatalEvent
   | ServerListeningEvent;
 

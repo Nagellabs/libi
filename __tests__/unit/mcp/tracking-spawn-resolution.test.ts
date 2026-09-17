@@ -10,7 +10,7 @@ import type { BundledMcpDef } from "@/mcp/registry/types";
  * Regression: a real agent run reported `npx libi serve-mcp-tracking`
  * failing to spawn because `libi` isn't on PATH in the spawned env.
  *
- * The session/settings path (`buildMcpServers`) substituted the tsx-direct
+ * The session/settings path (the since-deleted `buildMcpServers`) substituted the tsx-direct
  * `buildTrackingEntry()`, but the prober + diagnose path resolves the spawn
  * command via `resolveBundledSpawn(def)` — which returned the def's raw
  * `command`/`args` fallback (`npx libi serve-mcp-tracking`).
@@ -80,6 +80,8 @@ describe("libi-tracking spawn resolution (prober/session shared resolver)", () =
       id: "plain-test",
       name: "Plain",
       description: "",
+      kind: "extension",
+      toolPrefixes: [],
       npmUrl: null,
       type: "stdio",
       command: "npx",

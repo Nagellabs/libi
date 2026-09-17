@@ -14,7 +14,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import Database from "better-sqlite3";
+
 import {
+  LIBI_DB_FILENAME,
   MAX_SHELL_API_VERSION,
   MIN_SHELL_API_VERSION,
   RUNTIME_PACKAGE,
@@ -111,6 +114,128 @@ function makeRuntime(prefix: string, opts: FakeRuntimeOptions = {}): string {
   }
   return prefix;
 }
+
+/** A database stamped as if a runtime at `schema` had migrated it. */
+function makeStampedDb(dir: string, schema: number): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const dbPath = path.join(dir, LIBI_DB_FILENAME);
+  const db = new Database(dbPath);
+  db.exec("CREATE TABLE t (a INTEGER)");
+  db.pragma(`user_version = ${schema}`);
+  db.close();
+  return dbPath;
+}
+
+/** Give a synthetic runtime a drizzle journal topping out at `maxIdx`. */
+function withMigrations(prefix: string, maxIdx: number): string {
+  const meta = path.join(runtimeRootFor(prefix), "drizzle", "sqlite", "meta");
+  fs.mkdirSync(meta, { recursive: true });
+  fs.writeFileSync(
+    path.join(meta, "_journal.json"),
+    JSON.stringify({
+      entries: Array.from({ length: maxIdx + 1 }, (_, idx) => ({ idx, tag: `${idx}_x` })),
+    }),
+  );
+  return prefix;
+}
+
+describe("gate 8 — a runtime older than the database on disk", () => {
+  // The scenario this gate exists for: a shell update bumps Electron's ABI, so
+  // every staged runtime is rejected at gate 2 and the user is demoted to the
+  // snapshot inside the .app. Before migration 0051 that was harmless; now the
+  // older runtime's seedDatabase writes a dropped column and the app dies in
+  // its first boot step, advising `rm -rf` on the user's database.
+  it("rejects a runtime whose migrations stop short of the database", () => {
+    const prefix = withMigrations(makeRuntime(path.join(tmp, "old")), 50);
+    const dbPath = makeStampedDb(path.join(tmp, "home"), 52);
+    expect(inspectRuntimePrefix(prefix, { abi: ABI, probeNative: false, dbPath })).toMatchObject({
+      ok: false,
+      reason: "db-schema-too-new",
+    });
+  });
+
+  it("accepts a runtime at the same schema, and one ahead of it", () => {
+    const dbPath = makeStampedDb(path.join(tmp, "home"), 52);
+    for (const [name, idx] of [["same", 52], ["newer", 53]] as const) {
+      const prefix = withMigrations(makeRuntime(path.join(tmp, name)), idx);
+      expect(
+        inspectRuntimePrefix(prefix, { abi: ABI, probeNative: false, dbPath }).ok,
+      ).toBe(true);
+    }
+  });
+
+  it("fails OPEN when there is no database, no stamp, or no journal", () => {
+    const withJournal = withMigrations(makeRuntime(path.join(tmp, "j")), 50);
+    // No database at all — a first run.
+    expect(
+      inspectRuntimePrefix(withJournal, {
+        abi: ABI,
+        probeNative: false,
+        dbPath: path.join(tmp, "home", "absent.sqlite"),
+      }).ok,
+    ).toBe(true);
+    // A database from before the stamp existed reads 0.
+    const unstamped = makeStampedDb(path.join(tmp, "home0"), 0);
+    expect(
+      inspectRuntimePrefix(withJournal, { abi: ABI, probeNative: false, dbPath: unstamped }).ok,
+    ).toBe(true);
+    // A runtime with no `drizzle/` to read.
+    const noJournal = makeRuntime(path.join(tmp, "nj"));
+    const ahead = makeStampedDb(path.join(tmp, "home2"), 52);
+    expect(
+      inspectRuntimePrefix(noJournal, { abi: ABI, probeNative: false, dbPath: ahead }).ok,
+    ).toBe(true);
+  });
+
+  it("is skipped entirely when no dbPath is given", () => {
+    const prefix = withMigrations(makeRuntime(path.join(tmp, "old2")), 50);
+    expect(inspectRuntimePrefix(prefix, { abi: ABI, probeNative: false }).ok).toBe(true);
+  });
+
+  it("resolveRuntime derives the database path from LIBI_HOME", () => {
+    const home = path.join(tmp, "libihome");
+    makeStampedDb(home, 52);
+    const runtimes = path.join(home, "runtime");
+    fs.mkdirSync(runtimes, { recursive: true });
+    withMigrations(makeRuntime(path.join(runtimes, "0.1.13"), { version: "0.1.13" }), 50);
+    const resourcesPath = path.join(tmp, "resources");
+    withMigrations(
+      makeRuntime(path.join(resourcesPath, "libi-bundle"), { version: "0.1.12" }),
+      50,
+    );
+
+    const resolved = resolveRuntime({
+      isPackaged: true,
+      resourcesPath,
+      libiHome: home,
+      abi: ABI,
+      probeNative: false,
+    });
+    expect(resolved.runtime).toBeNull();
+    expect(resolved.rejections.map((r) => r.reason)).toEqual([
+      "db-schema-too-new",
+      "db-schema-too-new",
+    ]);
+  });
+
+  it("the splash for an all-too-old resolution never mentions the database", () => {
+    const { error, hint } = describeNoRuntimeFailure([
+      {
+        prefix: "/p",
+        root: "/p/root",
+        ok: false,
+        reason: "db-schema-too-new",
+        detail: "libi 0.1.13 understands database schema 50",
+        version: "0.1.13",
+      },
+    ]);
+    expect(error).toMatch(/older than your libi data/i);
+    expect(hint).toMatch(/Install the latest/i);
+    // "nothing to delete or repair" is fine; an INSTRUCTION to delete, or the
+    // damaged-install copy, is what must never reach this screen.
+    expect(hint).not.toMatch(/rm -rf|damaged|Reinstalling the app/i);
+  });
+});
 
 describe("inspectRuntimePrefix", () => {
   it("accepts a well-formed runtime", () => {

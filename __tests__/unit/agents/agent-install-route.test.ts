@@ -29,11 +29,24 @@ vi.mock("@/lib/agents/setup/registry", () => ({
       return { id: "claude-code", name: "Claude Code", install: { command: "npm i -g x" } };
     }
     if (agentId === "codex") {
-      // Real registry entry: install is null — libi ships Codex.
-      return { id: "codex", name: "Codex", install: null };
+      // Real registry shape: Codex downloads on selection too, just like Claude Code.
+      return { id: "codex", name: "Codex", install: { command: "npm i -g y" } };
+    }
+    if (agentId === "shipped-agent") {
+      // The `install: null` shape — an agent libi ships inside itself. No
+      // registry entry declares it today; kept so the 400 branch stays covered.
+      return { id: "shipped-agent", name: "Shipped Agent", install: null };
     }
     return null; // unknown id, e.g. "terminal"
   },
+}));
+
+// Whether each agent's adapter is on disk right now, as the agent registry
+// detects it. A completed install only stands while its adapter is still there.
+let adapterInstalled: Record<string, boolean> = {};
+vi.mock("@/lib/agents/acp/agent-registry", () => ({
+  getAgentConfig: (agentId: string) =>
+    agentId in adapterInstalled ? { id: agentId, installed: adapterInstalled[agentId] } : undefined,
 }));
 
 interface FakeJobRow {
@@ -118,6 +131,7 @@ beforeEach(() => {
   // second value into the next test's first `enqueue()` call.
   manager.enqueue.mockReset();
   installedAgents = new Set(["claude-code"]);
+  adapterInstalled = { "claude-code": true, codex: true };
   dbRows = [];
 });
 
@@ -162,10 +176,23 @@ describe("POST /api/agents/[agentId]/install", () => {
     expect(manager.runToCompletion).toHaveBeenNthCalledWith(2, "job-1");
   });
 
-  it("returns 400 (never 500) when asked to install codex — libi ships it, install is null", async () => {
+  it("enqueues agent_install for codex — it downloads on selection just like Claude Code", async () => {
+    // This used to respond 400 "codex has no install step".
+    manager.enqueue.mockResolvedValue({ status: "new", jobId: "job-codex", clientKey: "k1" });
     const { POST } = await import("@/app/api/agents/[agentId]/install/route");
 
     const res = await POST(req("POST"), ctx("codex"));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ jobId: "job-codex", status: "new" });
+    expect(manager.enqueue).toHaveBeenCalledWith("agent_install", { agentId: "codex" });
+    expect(manager.runToCompletion).toHaveBeenCalledWith("job-codex");
+  });
+
+  it("returns 400 (never 500) for an agent that declares install: null", async () => {
+    const { POST } = await import("@/app/api/agents/[agentId]/install/route");
+
+    const res = await POST(req("POST"), ctx("shipped-agent"));
 
     expect(res.status).toBe(400);
     const body = await res.json();
@@ -231,7 +258,7 @@ describe("POST /api/agents/[agentId]/install", () => {
     expect(manager.runToCompletion).toHaveBeenCalledWith("job-new");
   });
 
-  it("does NOT re-run a completed install", async () => {
+  it("does NOT re-run a completed install whose adapter is still installed", async () => {
     // Clicking twice on a finished install must not spend another 250 MB.
     manager.enqueue.mockResolvedValueOnce({
       status: "matching_completed",
@@ -250,6 +277,33 @@ describe("POST /api/agents/[agentId]/install", () => {
     expect(body).toEqual({ jobId: "job-done", status: "matching_completed" });
     expect(manager.enqueue).toHaveBeenCalledTimes(1);
     expect(manager.runToCompletion).not.toHaveBeenCalled();
+  });
+
+  it("starts a fresh job when the completed install's adapter is gone", async () => {
+    // The adapter tree was removed after a successful install. Job rows are never
+    // pruned, so without this the old success is replayed forever and the setup
+    // wizard waits on an install that will never run.
+    adapterInstalled = { "claude-code": false };
+    manager.enqueue
+      .mockResolvedValueOnce({
+        status: "matching_completed",
+        existingJob: {
+          jobId: "job-done",
+          pieceId: null,
+          completedAt: new Date(0).toISOString(),
+          status: "completed",
+        },
+      })
+      .mockResolvedValueOnce({ status: "new", jobId: "job-new", clientKey: "k2", forced: true });
+    const { POST } = await import("@/app/api/agents/[agentId]/install/route");
+
+    const res = await POST(req("POST"), ctx("claude-code"));
+    const body = await res.json();
+
+    expect(body).toEqual({ jobId: "job-new", status: "new" });
+    expect(manager.enqueue).toHaveBeenCalledTimes(2);
+    expect(manager.enqueue).toHaveBeenNthCalledWith(2, "agent_install", { agentId: "claude-code" }, { forceNew: true });
+    expect(manager.runToCompletion).toHaveBeenCalledWith("job-new");
   });
 });
 

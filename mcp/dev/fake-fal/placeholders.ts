@@ -83,7 +83,7 @@ async function imagePlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
   const stored = await storeFile({
     pieceId: opts.pieceId ?? null, filename, buffer: buf, contentType: "image/jpeg",
     name: filename, description: `[FAKE FAL] ${opts.prompt}`, mediaWidth: width, mediaHeight: height,
-    aiGeneration: { provider: "fal-ai", model: opts.endpointId ?? "test-mode", prompt: opts.prompt,
+    aiGeneration: { provider: "fal", model: opts.endpointId ?? "test-mode", prompt: opts.prompt,
       costEstimate: { amount: 0, currency: "USD", tier: "test-mode" },
       startedAt: startedAt.toISOString(),
       completedAt: completedAt.toISOString(),
@@ -117,7 +117,7 @@ async function videoPlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
   const stored = await storeFile({
     pieceId: opts.pieceId ?? null, filename, buffer: buf, contentType: "video/mp4",
     name: filename, description: `[FAKE FAL] ${opts.prompt}`, mediaWidth: width, mediaHeight: height, mediaDuration: duration,
-    aiGeneration: { provider: "fal-ai", model: opts.endpointId ?? "test-mode", prompt: opts.prompt,
+    aiGeneration: { provider: "fal", model: opts.endpointId ?? "test-mode", prompt: opts.prompt,
       costEstimate: { amount: 0, currency: "USD", tier: "test-mode" },
       startedAt: startedAt.toISOString(),
       completedAt: completedAt.toISOString(),
@@ -138,7 +138,7 @@ async function audioPlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
   const stored = await storeFile({
     pieceId: opts.pieceId ?? null, filename, buffer: buf, contentType: "audio/wav",
     name: filename, description: `[FAKE FAL audio] ${opts.prompt}`, mediaDuration: duration, hasAudio: true,
-    aiGeneration: { provider: "fal-ai", model: opts.endpointId ?? "test-mode-audio", prompt: opts.prompt,
+    aiGeneration: { provider: "fal", model: opts.endpointId ?? "test-mode-audio", prompt: opts.prompt,
       costEstimate: { amount: 0, currency: "USD", tier: "test-mode" },
       startedAt: startedAt.toISOString(),
       completedAt: completedAt.toISOString(),

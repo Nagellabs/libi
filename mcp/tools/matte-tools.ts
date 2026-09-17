@@ -27,12 +27,12 @@ interface RemoveBackgroundData {
 
 const FAL_REDIRECT_HINT =
   "The fal engine is agent-driven — this tool never spends money for you. " +
-  "Follow the removing-and-replacing-backgrounds skill: disclose the price " +
-  "(fal get_pricing) and get user approval, push the source with " +
-  "libi.upload_file_to_fal({ fileId }), run bria/video/background-removal " +
-  "(video, { video_url }) or fal-ai/birefnet (image, { image_url }) on the " +
-  "fal-ai MCP, then import the transparent result with libi.import_remote_files " +
-  "and append a libi.update_file_notes lineage line.";
+  "Follow the removing-and-replacing-backgrounds skill and its " +
+  "references/providers/fal.md (the endpoints, their required params and the " +
+  "endpoints NOT to use): disclose the price and get user approval, put the " +
+  "source on fal's CDN with the fal MCP's own upload tool, run the endpoint the " +
+  "reference names on your fal MCP, then import the transparent result with " +
+  "libi.import_remote_files and append a libi.update_file_notes lineage line.";
 
 /**
  * libi.remove_background — produce an alpha cutout asset (subject isolated,
@@ -86,9 +86,9 @@ export async function removeBackground(
       error: "local_image_matting_not_supported",
       data: {
         hint:
-          "v1 local matting is video-only (MatAnyone). For photos use the fal " +
-          "path — fal-ai/birefnet with { image_url } — per the " +
-          "removing-and-replacing-backgrounds skill. " + FAL_REDIRECT_HINT,
+          "v1 local matting is video-only (MatAnyone). For photos use the paid " +
+          "provider path per the removing-and-replacing-backgrounds skill (the photo " +
+          "endpoint is in its references/providers/fal.md). " + FAL_REDIRECT_HINT,
       },
     };
   }

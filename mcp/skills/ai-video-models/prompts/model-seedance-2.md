@@ -1,3 +1,8 @@
+---
+prompt_kind: model-guide
+model: Seedance 2.0
+---
+
 <!-- Adapted from krusemediallc/arcads-claude-code (MIT, © Caleb Kruse / Kruse Media LLC).
      Reworked for libi tooling (ai-asset-generation flow, fal-ai model ids, libi.upload_file). -->
 
@@ -9,45 +14,17 @@ walkthrough, premium reveal, studio lookbook). Read this file once before
 composing any Seedance prompt, then read the matching use-case formula from the
 `ugc-product-video` skill's `prompts/` folder.
 
-> **libi mechanics first.** You do NOT call Seedance directly. All generation
-> runs through the `ai-asset-generation` skill — it owns provider selection,
-> approval, and the `fal-ai` model ids. This file is the *prompting* layer; the
-> `ai-asset-generation` skill is the *plumbing* layer. Seedance 2.0 endpoints
-> that matter:
-> - **`bytedance/seedance-2.0/image-to-video`** — the default. ONE start frame
->   (`image_url`) + optional `end_image_url` (FLF), `prompt`, `duration` (4–15s),
->   `resolution`, `aspect_ratio`, `generate_audio` (defaults **true**). **No
->   reference-token mechanism and no audio input** — it animates the single start
->   frame.
-> - **`bytedance/seedance-2.0/reference-to-video`** — the multi-reference endpoint.
->   Three reference modalities, each cited by token in the prompt (verified live fal 2026-06-08):
->   `image_urls` (JPEG/PNG/WebP, up to 9, `@Image1`…), `audio_urls` (**MP3/WAV, up to 3,
->   combined duration ≤15s, ≤15 MB/file**, `@Audio1`…), and `video_urls` (MP4/MOV, up to 3,
->   **combined 2–15s, <50 MB total, ~480–720p each**, `@Video1`…). **Total files across all
->   modalities ≤12.** A reference *guides* the generation — audio is a voice **conditioning**
->   reference (under `generate_audio: true` the model produces lip-synced speech in that voice),
->   NOT a literal audio overlay. **Hard rule: if you pass `audio_urls` you MUST also pass at
->   least one `image_urls` or `video_urls` entry — audio alone is rejected.** Use this endpoint
->   to bind multiple reference images, to carry a voice across multi-clip generations, or to
->   carry the original creator's voice into a stitch's faceless AI inserts (see "Native audio +
->   multi-clip voice carry" below).
->
-> **Cheaper "fast" tier.** Each of the two above has a real lower-cost variant —
-> **`bytedance/seedance-2.0/fast/image-to-video`** and
-> **`bytedance/seedance-2.0/fast/reference-to-video`** (verified live, ~half the
-> price, identical input shape incl. `generate_audio` / `end_image_url` / `duration`).
-> These are the right pick for an **eval / draft pass** on a tight budget — surface
-> the choice + price to the user (don't silently downgrade for hero/final work).
-> ⚠️ **Known issue (2026-06-06):** a real-AI run on the `fast/image-to-video` endpoint
-> came back COMPLETED but its *result* 404'd via the bundled fal MCP (the result URL
-> dropped the `bytedance/` vendor segment), so no usable clip landed. The endpoint is
-> real — this is a fal-client/result-fetch issue. Apply the **completed-but-empty
-> guard** below, and if a fast job comes back empty, fall back to the standard
-> (non-`fast`) endpoint rather than re-spending on the same path.
->
-> **Endpoint paths are exact — do NOT invent tier/segment variants.** Use ONLY the
-> four ids above (verify each with `get_model_schema` before `submit_job` — a 404 /
-> empty schema means the path is wrong; never submit to an unconfirmed id).
+> **libi mechanics first.** You do NOT call Seedance directly. All generation runs through
+> the `ai-asset-generation` skill — it owns provider selection, approval and the job
+> mechanics. This file is the *prompting* layer. The endpoint ids and their input keys are
+> in [references/providers/fal.md](../references/providers/fal.md) when your provider is
+> fal — read that alongside this file. What matters for prompting: the **image-to-video**
+> endpoint takes ONE start frame and has **no reference-token mechanism and no audio
+> input**; the **reference-to-video** endpoint is the one with `image_urls` / `audio_urls`
+> arrays that `@Image1` / `@Audio1` refer to. It also has a cheaper **fast** tier of each
+> (draft/eval passes — surface the price; don't silently downgrade hero work) and one
+> known result-fetch issue on it — both in the reference. Endpoint paths are exact: verify
+> the id with your provider's schema tool before submitting — never submit to an unconfirmed id.
 >
 > **Completed-but-empty guard (applies to EVERY generation, all providers).** A job
 > that reports `completed` is NOT proof of a usable output. Treat it as **FAILED** —
@@ -59,8 +36,8 @@ composing any Seedance prompt, then read the matching use-case formula from the
 > kind. On a phantom-`completed` job: retry (different tier/endpoint/params), and tell
 > the user it did not actually generate — never silently treat it as done.
 >
-> Always confirm the live capability/price at runtime via the fal tools
-> (`recommend_model` / `get_model_schema` / `get_pricing`) — pins drift.
+> Always confirm the live capability/price at runtime with your provider's schema and
+> pricing tools (named in the reference) — pins drift.
 
 ## Reference images, not an API array
 
@@ -74,11 +51,10 @@ own HTTP route. In libi you do it the libi way:
    reference when it calls the fal endpoint and records the lineage on the
    resulting file's `aiGeneration` provenance.
 3. To use a LOCAL libi file as a `reference-to-video` `image_urls` / `audio_urls`
-   input (`@Image1` / `@Audio1`), turn it into a fal-hosted URL with
-   **`libi.upload_file_to_fal({ fileId })`** — it returns a cached fal CDN URL and
-   the FAL key is handled server-side. **NEVER** read `FAL_KEY` from the DB/env/shell
-   or `PUT`/`curl` bytes to fal storage yourself — you don't hand-manage a
-   presigned-URL array or any credential.
+   input (`@Image1` / `@Audio1`), turn it into a public URL with **your fal MCP's own
+   upload tool** — see `references/providers/fal.md` in the `ai-video-models` skill.
+   **NEVER** read `FAL_KEY` from the DB/env/shell or `PUT`/`curl` bytes to fal storage
+   yourself — you don't hand-manage a presigned-URL array or any credential.
 
 ### Reference tokens — `@Image1` / `@Audio1` (reference-to-video ONLY)
 
@@ -250,16 +226,18 @@ passing that sample in `audio_urls` (`@Audio1`) **plus the insert's start frame 
 Reuse the SAME `@Audio1` sample on every insert so one voice runs through the whole piece.
 The insert needs no on-camera face — Seedance emits the spoken line as the clip's audio
 track, so this voices b-roll without depicting the character. This is the DEFAULT stitch
-audio path; ElevenLabs cloning is the explicit opt-in fallback only. `stitching-multi-clip`
-owns the step-by-step; `voiceover-production` owns the decision.
+audio path. Deliberately re-voicing — a clone, or a voice that is neither the source's nor
+the native AI one — is the `voice-replacement` skill, on the user's explicit request after
+the video exists. `stitching-multi-clip` owns the step-by-step; `voiceover-production` owns
+the decision.
 
 ## First-last-frame (FLF) on Seedance
 
 Seedance 2.0 exposes FLF as a **parameter on the i2v endpoint**, not a separate
-endpoint: pass an `end_image_url` to `bytedance/seedance-2.0/image-to-video`
-alongside the start image. Use this for physical-manipulation beats where the
-start and end state must be exact (see `physical-action-video` for the
-FLF-first discipline and the model-escalation ladder). The `ai-asset-generation`
+endpoint: pass an `end_image_url` to the image-to-video endpoint alongside the start
+image (id in [references/providers/fal.md](../references/providers/fal.md)). Use this
+for physical-manipulation beats where the start and end state must be exact (see
+`physical-action-video` for the FLF-first discipline and the model-escalation ladder). The `ai-asset-generation`
 skill drives the actual call — you just decide the start/end frames.
 
 ## Iteration: one element at a time

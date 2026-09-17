@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { AgentEvent } from "@/lib/agents/types";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
@@ -9,17 +9,31 @@ import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 
 vi.mock("@/lib/libi-home", () => ({
   getLibiAgentDir: vi.fn(() => "/tmp/libi-test-agent"),
-  // Reached via `signInRemedyFor` → `getAgentInstallRoot()` when an auth
-  // failure is recorded on the prompt path.
   getLibiHome: vi.fn(() => "/tmp/libi-test-home"),
   // Required by lib/logger (imported transitively via session-manager)
   ensureLibiDirs: vi.fn(),
   getLibiLogDir: vi.fn(() => "/tmp/libi-test-logs"),
 }));
 
+// Session start's entry-shape diagnostic reads codex's MCP listing: a unit test never resolves or runs a real codex.
+vi.mock("@/lib/agents/libi-registration", () => ({ readLibiCodexEntryShape: vi.fn(async () => "unknown") }));
+
+vi.mock("@/lib/agents/sign-in-confirmation", () => ({ clearSignInConfirmation: vi.fn() }));
+
 vi.mock("@/lib/mcp-config", () => ({
   getMcpServersForAcp: vi.fn(() => []),
   onMcpConfigInvalidated: vi.fn(),
+}));
+
+// Whether a standby is still current reads the agent's config files (standby-freshness.test.ts covers that): here
+// each test chooses the answer.
+const freshness = vi.hoisted(() => ({
+  captured: { config: "digest-at-creation", setupEpoch: 0, setupLive: false },
+  staleReason: vi.fn<(agentId: string, created: unknown) => "mcp_config_changed" | "setup_terminal" | null>(() => null),
+}));
+vi.mock("@/lib/sessions/standby-freshness", () => ({
+  captureStandbyFreshness: vi.fn(() => freshness.captured),
+  staleStandbyReason: (agentId: string, created: unknown) => freshness.staleReason(agentId, created),
 }));
 
 // Stub approval-mode reader so we don't hit the settings DB (and the
@@ -49,8 +63,9 @@ vi.mock("@/lib/agents/session-event-handler", () => ({
 // Import after mocks
 // ---------------------------------------------------------------------------
 
-import { SessionManager } from "@/lib/sessions/session-manager";
+import { refreshStandbyWhenSetupSettles, SessionManager } from "@/lib/sessions/session-manager";
 import { MAX_ACTIVE_SESSIONS } from "@/lib/sessions/types";
+import { __resetSetupActivity, noteSetupTerminalClosed, noteSetupTerminalOpened } from "@/lib/terminal/setup-activity";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -258,7 +273,7 @@ describe("SessionManager", () => {
   describe("approval-mode ACP push", () => {
     // getApprovalMode is stubbed to "auto" (see top-of-file mock).
 
-    it("pushes bypassPermissions to claude-code when advertised", async () => {
+    it("pushes default (NOT bypassPermissions — that skips libi's permission handler) to claude-code", async () => {
       await sm.loadInitialSessions("claude-code");
       mockConnection.setSessionMode = vi.fn().mockResolvedValue(undefined);
       mockConnection.newSession.mockResolvedValueOnce({
@@ -272,11 +287,11 @@ describe("SessionManager", () => {
 
       expect(mockConnection.setSessionMode).toHaveBeenCalledWith({
         sessionId: "cc-1",
-        modeId: "bypassPermissions",
+        modeId: "default",
       });
     });
 
-    it("pushes full-access (NOT bypassPermissions) to codex", async () => {
+    it("pushes agent (NOT bypassPermissions) to codex", async () => {
       await sm.loadInitialSessions("codex");
       mockConnection.setSessionMode = vi.fn().mockResolvedValue(undefined);
       mockConnection.newSession.mockResolvedValueOnce({
@@ -284,8 +299,8 @@ describe("SessionManager", () => {
         modes: {
           availableModes: [
             { id: "read-only" },
-            { id: "auto" },
-            { id: "full-access" },
+            { id: "agent" },
+            { id: "agent-full-access" },
           ],
         },
       });
@@ -294,7 +309,7 @@ describe("SessionManager", () => {
 
       expect(mockConnection.setSessionMode).toHaveBeenCalledWith({
         sessionId: "cx-1",
-        modeId: "full-access",
+        modeId: "agent",
       });
       // The whole point of the fix: codex must never be handed Claude's id.
       for (const call of mockConnection.setSessionMode.mock.calls) {
@@ -305,10 +320,10 @@ describe("SessionManager", () => {
     it("skips the push (no setSessionMode call) when the target isn't advertised", async () => {
       await sm.loadInitialSessions("codex");
       mockConnection.setSessionMode = vi.fn().mockResolvedValue(undefined);
-      // full-access absent → cannot push blind → -32602 avoided.
+      // agent (and its legacy alias auto) absent → cannot push blind → -32602 avoided.
       mockConnection.newSession.mockResolvedValueOnce({
         sessionId: "cx-restricted",
-        modes: { availableModes: [{ id: "read-only" }, { id: "auto" }] },
+        modes: { availableModes: [{ id: "read-only" }] },
       });
 
       await sm.createSession();
@@ -324,8 +339,8 @@ describe("SessionManager", () => {
         modes: {
           availableModes: [
             { id: "read-only" },
-            { id: "auto" },
-            { id: "full-access" },
+            { id: "agent" },
+            { id: "agent-full-access" },
           ],
         },
       });
@@ -333,12 +348,12 @@ describe("SessionManager", () => {
       mockConnection.setSessionMode.mockClear();
 
       // The broadcast passes availableModes: undefined; it must fall back to
-      // the cached set and still resolve full-access (never push blind).
+      // the cached set and still resolve agent (never push blind).
       await sm.applyApprovalModeToActiveSessions("codex");
 
       expect(mockConnection.setSessionMode).toHaveBeenCalledWith({
         sessionId: "cx-broadcast",
-        modeId: "full-access",
+        modeId: "agent",
       });
     });
   });
@@ -1466,6 +1481,122 @@ describe("SessionManager", () => {
       // Should have attempted to close the old standby
       expect(mockConnection.closeSession).toHaveBeenCalledWith({
         sessionId: "standby-old",
+      });
+    });
+
+    describe("a standby whose MCP servers may be out of date", () => {
+      afterEach(() => {
+        freshness.staleReason.mockReset();
+        freshness.staleReason.mockReturnValue(null);
+        __resetSetupActivity();
+      });
+
+      it("a standby that a setup terminal overlapped, which closed before it was ready, is replaced as soon as it is ready", async () => {
+        await sm.loadInitialSessions("claude-code");
+        // A terminal opened and closed after what the standby is judged by was taken.
+        noteSetupTerminalOpened();
+        noteSetupTerminalClosed();
+        // Asked once when it is ready, and once more by the discard itself.
+        freshness.staleReason.mockReturnValueOnce("setup_terminal").mockReturnValueOnce("setup_terminal");
+        mockConnection.newSession
+          .mockResolvedValueOnce({ sessionId: "standby-born-stale" })
+          .mockResolvedValueOnce({ sessionId: "standby-current" });
+
+        await sm.createStandbySession();
+
+        expect(mockConnection.closeSession).toHaveBeenCalledWith({ sessionId: "standby-born-stale" });
+        await vi.waitFor(() => expect(sm.isStandbyReady()).toBe(true));
+        expect(await sm.createSession()).toBe("standby-current");
+      });
+
+      it("…but is kept while a setup terminal is still open, and one no setup terminal overlapped is left to the claim", async () => {
+        await sm.loadInitialSessions("claude-code");
+        noteSetupTerminalOpened();
+        freshness.staleReason.mockReturnValue("setup_terminal");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-1" });
+        await sm.createStandbySession();
+        expect(mockConnection.closeSession).not.toHaveBeenCalled();
+
+        // No setup terminal around this one (what it is judged by matches the activity now): a config change is left to
+        // the claim, so a config that keeps changing can't make standbys replace each other.
+        noteSetupTerminalClosed();
+        freshness.captured = { config: "digest-at-creation", setupEpoch: 2, setupLive: false };
+        freshness.staleReason.mockReturnValue("mcp_config_changed");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-2" });
+        sm.invalidateStandbySession();
+        await vi.waitFor(() => expect(sm.isStandbyReady()).toBe(true));
+        expect(mockConnection.closeSession).toHaveBeenCalledTimes(1);
+        freshness.captured = { config: "digest-at-creation", setupEpoch: 0, setupLive: false };
+      });
+
+      it("the settle wiring asks the session manager to refresh once the last setup terminal closed", async () => {
+        const target = { refreshStaleStandby: vi.fn() };
+        const unsubscribe = refreshStandbyWhenSetupSettles(() => target);
+        noteSetupTerminalOpened();
+        noteSetupTerminalClosed();
+        await new Promise<void>((resolve) => queueMicrotask(resolve));
+        expect(target.refreshStaleStandby).toHaveBeenCalledTimes(1);
+        unsubscribe();
+      });
+
+      it("a current standby is still claimed, judged by what was captured when it was created", async () => {
+        await sm.loadInitialSessions("claude-code");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-1" });
+        await sm.createStandbySession();
+
+        expect(await sm.createSession()).toBe("standby-1");
+        expect(freshness.staleReason).toHaveBeenCalledWith("claude-code", freshness.captured);
+      });
+
+      it("is never handed to the new chat: it is closed, the chat starts fresh, and a replacement standby starts", async () => {
+        await sm.loadInitialSessions("claude-code");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-old" });
+        await sm.createStandbySession();
+        freshness.staleReason.mockReturnValueOnce("mcp_config_changed");
+        let n = 0;
+        mockConnection.newSession.mockImplementation(async () => ({ sessionId: `new-${++n}` }));
+
+        const sessionId = await sm.createSession();
+
+        expect(sessionId).not.toBe("standby-old");
+        expect(sm.getSession(sessionId)?.active).toBe(true);
+        expect(sm.getSession("standby-old")).toBeUndefined();
+        expect(mockConnection.closeSession).toHaveBeenCalledWith({ sessionId: "standby-old" });
+        expect(pm.unregisterSessionId).toHaveBeenCalledWith("claude-code", "standby-old");
+        // The discarded standby, its replacement, and the fresh chat.
+        await vi.waitFor(() => expect(mockConnection.newSession).toHaveBeenCalledTimes(3));
+        await vi.waitFor(() => expect(sm.isStandbyReady()).toBe(true));
+      });
+
+      it("refreshStaleStandby replaces an unclaimed standby that went stale, and leaves a current one alone", async () => {
+        await sm.loadInitialSessions("claude-code");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-1" });
+        await sm.createStandbySession();
+
+        sm.refreshStaleStandby();
+        expect(mockConnection.closeSession).not.toHaveBeenCalled();
+
+        freshness.staleReason.mockReturnValueOnce("setup_terminal");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "standby-2" });
+        sm.refreshStaleStandby();
+        expect(mockConnection.closeSession).toHaveBeenCalledWith({ sessionId: "standby-1" });
+        await vi.waitFor(() => expect(sm.isStandbyReady()).toBe(true));
+        expect(await sm.createSession()).toBe("standby-2");
+      });
+
+      it("a standby still being created is left to finish; the chat opened meanwhile starts fresh as before", async () => {
+        await sm.loadInitialSessions("claude-code");
+        let finish!: (value: { sessionId: string }) => void;
+        mockConnection.newSession.mockImplementationOnce(() => new Promise((resolve) => (finish = resolve)));
+        const creating = sm.createStandbySession();
+        freshness.staleReason.mockReturnValue("mcp_config_changed");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: "fresh-1" });
+
+        expect(await sm.createSession()).toBe("fresh-1");
+        expect(freshness.staleReason).not.toHaveBeenCalled();
+        finish({ sessionId: "standby-late" });
+        await creating;
+        expect(mockConnection.closeSession).not.toHaveBeenCalled();
       });
     });
   });

@@ -26,7 +26,7 @@ import {
   RUNTIME_STAMP_FILE,
   userRuntimeDir,
 } from "@/lib/runtime/runtime-install";
-import { compareVersions } from "@/lib/runtime/update-check";
+import { compareVersions } from "@/lib/runtime/version-compare";
 
 export interface InstalledRuntimeEntry {
   prefix: string;

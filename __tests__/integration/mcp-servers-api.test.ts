@@ -42,12 +42,11 @@ describe("MCP Servers DB operations", () => {
       .run();
 
     db.update(mcpServers)
-      .set({ enabled: false, requireApproval: false })
+      .set({ requireApproval: false })
       .where(eq(mcpServers.id, "test-1"))
       .run();
 
     const [row] = db.select().from(mcpServers).where(eq(mcpServers.id, "test-1")).all();
-    expect(row.enabled).toBe(false);
     expect(row.requireApproval).toBe(false);
   });
 

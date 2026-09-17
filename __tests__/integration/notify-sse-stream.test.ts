@@ -120,6 +120,22 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
     });
   });
 
+  it("forwards navigate_agents events (show_extension / start_onboarding)", async () => {
+    const res = await postNotify({
+      type: "navigate_agents",
+      tab: "libi-mcp",
+      extensionId: "whisper",
+    });
+    expect(res.status).toBe(200);
+
+    const event = await readNextEvent(stream.reader);
+    expect(event).toEqual({
+      type: "navigate_agents",
+      tab: "libi-mcp",
+      extensionId: "whisper",
+    });
+  });
+
   it("rejects unknown notify types with 400", async () => {
     const res = await postNotify({ type: "bogus-nope" });
     expect(res.status).toBe(400);

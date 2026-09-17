@@ -1,7 +1,7 @@
 ---
 id: background-job-progress
 title: ffmpeg tool round-trip (trim) + async jobs SSE bridge (tracking)
-surfaces: [terminal, acp, connect-agent]
+surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [ffmpeg-tool, jobs-http-bridge, job-manager, jobs-ui]
 cost: subscription-tokens

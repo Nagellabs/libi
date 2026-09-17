@@ -15,9 +15,8 @@ import { join } from "node:path";
  * on an observed clean `session/new`) and this page's own
  * `activeProviderId` effect (wrong — `activeProviderId` flips the moment an
  * agent is SELECTED, before the handshake that would prove it's actually
- * usable resolves or fails). The fix removes the latter; the effect keeps
- * its real job of leaving the onboarding takeover once an agent is chosen,
- * but must never itself claim the offer is armed.
+ * usable resolves or fails). The fix removes the latter: nothing on this page
+ * may claim the offer is armed.
  *
  * This is a source scan, not a render test, for the same reason as the
  * sibling file (editor-page-onboarding-reachable.test.ts): rendering this
@@ -42,18 +41,9 @@ describe("editor page — selecting an agent does not, by itself, arm the demo o
   it("does NOT try to decide when to leave by watching provider state", () => {
     // Two state-watching effects were tried here and both failed identically:
     // at mount `activeProviderId` is briefly null and then populates, which is
-    // indistinguishable from the user picking an agent, so the connect screen
-    // closed the instant it opened. Leaving is driven by the ACTIONS that mean
-    // it — see app-sidebar (new chat, agent selector) and onboarding-panel
-    // (connect, Terminal).
+    // indistinguishable from the user picking an agent. Provider state is not
+    // a signal this page may act on; agent setup lives on /agents now.
     expect(source).not.toContain("providerOnEnterRef");
     expect(source).not.toContain("sessionOnEnterRef");
-  });
-
-  it("honours an explicit ?setup=agent request for the connect screen", () => {
-    // The sidebar row asks for the screen by name. Unlike the first-run
-    // auto-open, this must win mid-flow.
-    expect(source).toContain('setupParam !== "agent"');
-    expect(source).toContain('setRightRegionMode("onboarding");');
   });
 });

@@ -11,7 +11,7 @@ type Props = {
   pendingId: string;
   toolCall: ToolCallUpdate;
   options: PermissionOption[];
-  reason: "acp" | "generation";
+  reason: "acp" | "extension";
   status: "pending" | "resolved";
   outcome?: { kind: "selected"; optionId: string } | { kind: "cancelled" };
 };
@@ -53,9 +53,13 @@ export function PermissionRequestCard({
   const toolId = fromAnyToolName(rawTitle);
   const title = toolId ? formatToolId(toolId) : formatBuiltinTitle(rawTitle);
   const headline =
-    reason === "generation"
-      ? "Approve generation tool"
+    reason === "extension"
+      ? "Approve extension tool"
       : "Approve tool call";
+  const hint =
+    reason === "extension"
+      ? "This libi extension is marked \"requires approval\" in Settings."
+      : null;
 
   if (status === "resolved") {
     const selected =
@@ -86,6 +90,9 @@ export function PermissionRequestCard({
         {headline}
       </div>
       <div className="mb-3 break-all font-medium text-foreground">{title}</div>
+      {hint && (
+        <div className="mb-3 text-xs text-muted-foreground">{hint}</div>
+      )}
       <div className="flex flex-wrap gap-2">
         {options.map((opt) => {
           const isAllow =

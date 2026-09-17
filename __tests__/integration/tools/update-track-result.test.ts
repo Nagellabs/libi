@@ -52,7 +52,7 @@ describe("updateTrackResult tool integration", () => {
 
     const result = await updateTrackResult({
       fileId: FILE_ID,
-      method: "sam2-local",
+      method: "external-mcp:acme-tracker",
       framerate: 25,
       samples: [
         { t: 0, x: 5, y: 5, w: 20, h: 20, confidence: 0.95, visible: true },
@@ -70,7 +70,7 @@ describe("updateTrackResult tool integration", () => {
 
     const row = await getTrackRow(db as never, data?.trackId as string);
     expect(row).not.toBeNull();
-    expect(row?.method).toBe("sam2-local");
+    expect(row?.method).toBe("external-mcp:acme-tracker");
     expect(row?.sampleCount).toBe(2);
     expect(row?.label).toBe("product");
 
@@ -86,7 +86,7 @@ describe("updateTrackResult tool integration", () => {
 
     const firstResult = await updateTrackResult({
       fileId: FILE_ID,
-      method: "sam2-local",
+      method: "external-mcp:acme-tracker",
       framerate: 25,
       samples: [{ t: 0, x: 1, y: 1, w: 5, h: 5, confidence: 1, visible: true }],
     });
@@ -99,7 +99,7 @@ describe("updateTrackResult tool integration", () => {
     const secondResult = await updateTrackResult({
       trackId,
       fileId: FILE_ID,
-      method: "sam2-local",
+      method: "external-mcp:acme-tracker",
       framerate: 25,
       samples: [
         { t: 0, x: 99, y: 99, w: 10, h: 10, confidence: 0.8, visible: true },

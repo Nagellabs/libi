@@ -62,20 +62,14 @@ export async function POST(request: Request): Promise<Response> {
       });
       break;
 
-    case "navigate_settings":
-      navigationEmitter.emit("navigate_settings", {
-        mcpId: typeof body.mcpId === "string" ? body.mcpId : undefined,
-      });
-      break;
-
-    case "right_region": {
-      const mode =
-        body.mode === "onboarding" || body.mode === "api-config" || body.mode === "editor"
-          ? body.mode
-          : "editor";
-      navigationEmitter.emit("right_region", {
-        mode,
-        mcpId: typeof body.mcpId === "string" ? body.mcpId : undefined,
+    // The retired `navigate_settings` and `right_region` types fall through to
+    // the 400 below: nothing sends them any more.
+    case "navigate_agents": {
+      const tab = body.tab === "libi-mcp" || body.tab === "providers" ? body.tab : "agents";
+      navigationEmitter.emit("navigate_agents", {
+        tab,
+        ...(typeof body.extensionId === "string" ? { extensionId: body.extensionId } : {}),
+        ...(typeof body.provider === "string" ? { provider: body.provider } : {}),
       });
       break;
     }
@@ -128,6 +122,7 @@ export async function POST(request: Request): Promise<Response> {
         toolArgs: "toolArgs" in body ? body.toolArgs : undefined,
         progressLabel:
           typeof body.progressLabel === "string" ? body.progressLabel : undefined,
+        message: typeof body.message === "string" ? body.message : undefined,
       });
       break;
     }

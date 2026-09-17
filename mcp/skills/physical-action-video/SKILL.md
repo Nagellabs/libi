@@ -9,6 +9,40 @@ tags:
 
 # Physical-Action Video (manipulation-beat craft)
 
+## Provider gate — read this first
+
+You need a **video** provider. libi generates no media itself.
+
+1. **Check your tool list.** If you already have a provider that can do video, use it.
+   If this skill ships a reference for it — `references/providers/<id>.md` under this
+   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
+   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
+   reference file for your provider, use the provider's own tool docs (its
+   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
+   constraint rules in this skill. **libi's own extension tools count as a provider**
+   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
+   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
+   not generation). Prefer them by default: they are free and on-device. If one answers
+   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
+   tools) instead of switching provider.
+2. **If you have none** — no remote provider tool and no libi extension for video — call
+   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
+   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
+   back to a tool that cannot do video.
+   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
+   for video is already connected or already installed, and its `covered` list names it.
+   Do not open anything or ask for a key — use what `covered` names, or, if that
+   cannot do what was asked, say plainly what libi cannot do.
+
+`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
+for a general "what's connected?". When the user asks about a provider that is not in your tool
+list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+
+3. **Read `references/providers/<id>.md` under this skill BEFORE your first provider
+   call.** Every concrete model id in this skill — the FLF endpoint, the escalation
+   ladder's tiers, the endpoint behind the nail-strip post-mortem — is in that file and
+   nowhere else in the body. Skipping it is how an agent ends up inventing an endpoint.
+
 This is the **video-craft** layer for the hardest beats: a character physically interacting
 with an object — filling, opening, pouring, applying, twisting, gripping-and-releasing, writing,
 cutting, lifting. Frame analysis CANNOT validate these (each frame in isolation is plausible; the
@@ -118,9 +152,9 @@ Rules:
 **Background:** the 2026-05-28 nail-wraps QA produced a clip where a press-on
 nail strip wiggled and then DISAPPEARED mid-application — the canonical
 object-permanence break during fine manipulation. Root cause: the beat was a
-fine manipulation, sent text-only to the weakest physics model
-(`veo3.1/fast/image-to-video`), with a run-on multi-action prompt and no
-end-state pin. Full citations + research:
+fine manipulation, sent text-only to the cheapest, weakest-physics tier of the
+video model, with a run-on multi-action prompt and no end-state pin (the exact
+endpoint is named in `references/providers/<id>.md`). Full citations + research:
 [docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md](../../../docs-local/superpowers/notes/2026-05-28-physical-realism-flf-and-model-ladder.md).
 
 This fires whenever the beat is a physical manipulation (applying, peeling,
@@ -142,25 +176,20 @@ state instead of improvising. FLF also sidesteps the timestamp-bracket problem
    spending video credits — the output is only as stable as the start frame;
    flaws compound.
 3. Generate the clip with the model's first-last-frame mode, describing only the
-   *transition*. Default: `fal-ai/veo3.1/fast/first-last-frame-to-video` (same
-   $0.10–0.15/s tier as i2v — verify via `get_pricing`).
+   *transition*. Your provider reference (`references/providers/<id>.md`) names the default
+   FLF endpoint and its price tier — confirm the tier with the provider's pricing tool
+   before spending.
 
-> **FLF is a capability, surfaced differently per model — always confirm via
-> `get_model_schema` before assuming.** Two shapes exist:
-> - **Dedicated endpoint:** Veo `fal-ai/veo3.1/fast/first-last-frame-to-video`
->   (and `veo3.1/lite/...`); Kling `fal-ai/kling-video/o1/image-to-video`
->   (start = `@Image1`/first image, end = `@Image2`/last image); Wan
->   `fal-ai/wan-flf2v`.
-> - **Parameter on the i2v endpoint:** Seedance `bytedance/seedance-2.0/image-to-video`
->   takes an `end_image_url` (no separate endpoint).
-> When picking a model, look for EITHER a `*first-last-frame*` endpoint OR an
-> `end_image`/`end_image_url`/second-image input in the schema.
-
-> **Timestamp brackets DON'T work on veo3.1/fast.** The Fast endpoint misparses
-> `[00:00-00:02] …` segments as missing-attachment refs and fails
-> `no_media_generated`. Timestamp decomposition (above / Veo official guide)
-> is a **full-Veo-3.1** feature only. On Fast, use FLF + a single transition
-> sentence instead.
+> **FLF is a capability, surfaced two ways — always confirm against the model's schema
+> before assuming.** Either a **dedicated FLF endpoint**, or an **end-image parameter on
+> the ordinary image-to-video endpoint**. When picking a model, look for EITHER a
+> `*first-last-frame*` endpoint OR an `end_image` / second-image input in the schema. Which
+> models take which shape is in `references/providers/<id>.md`.
+>
+> **Some cheap tiers misparse timestamp brackets.** `[00:00-00:02] …` segment syntax is a
+> full-model feature; on a "fast"/"lite" tier it can be read as a missing-attachment
+> reference and fail the whole generation. Your provider reference names the tiers where
+> this bites. On those, use FLF + a single transition sentence instead.
 
 ### B) Prompt discipline that works WITHOUT timestamp brackets
 
@@ -185,28 +214,23 @@ state instead of improvising. FLF also sidesteps the timestamp-bracket problem
 
 ### C) Model-escalation ladder (escalate only the failing beat — controls cost)
 
-When the beat still fails Stage 4.5 validation after the FLF + prompt fixes,
-escalate THAT beat (keep cheap beats on Fast). **The model names below are dated
-examples (2026-05), NOT a fixed ranking — discover the current strongest one at
-runtime** via fal `recommend_model` / `search_models` / `get_model_schema` /
-`get_pricing` (query for "first-last-frame" / "fine object manipulation" /
-"hands"), and prefer whatever the provider currently ranks top. Better models
-ship every few weeks; never assume a hardcoded id is still best or even present.
-**For a known-hard `complex-on-body` beat (see `ugc-product-video` Stage 3),
-start at the strong model — do NOT waste two cheap Fast attempts that are
-predictably going to morph (that burned ~$1.20 for nothing in QA).**
+When the beat still fails Stage 4.5 validation after the FLF + prompt fixes, escalate THAT
+beat (keep cheap beats on the cheap tier). The ladder is a **shape**, not a fixed ranking:
 
-- **Tier 0:** `fal-ai/veo3.1/fast/first-last-frame-to-video` + the discipline above.
-- **Tier 1:** **Kling** start/end frame — best 2026 hands/close-up +
-  object-permanence. FLF endpoint: `fal-ai/kling-video/o1/image-to-video`
-  (`@Image1` = start, `@Image2` = end); Kling 2.5 Turbo also exposes start/end.
-- **Tier 2:** **Seedance 2.0** (ByteDance, newest, strong physics) — FLF via the
-  `end_image_url` param on `bytedance/seedance-2.0/image-to-video`.
-- **Ceiling:** Sora 2 Pro (physics leader) — only if confirmed live on the
-  provider (reported API sunset ~Sept 2026).
+- **Tier 0** — the cheap FLF tier + the discipline in section B.
+- **Tier 1** — the model with the best hands / close-up fidelity and object permanence.
+- **Tier 2** — the newest strong-physics model.
+- **Ceiling** — the current physics leader, only if confirmed live on the provider.
 
-Disclose the higher per-second cost before escalating; escalation counts against
-`batchCap`.
+**Which concrete models fill those tiers is in `references/providers/<id>.md`, and it is
+dated — discover the current strongest at runtime** with your provider's model-discovery
+and schema tools (query for "first-last-frame" / "fine object manipulation" / "hands").
+Better models ship every few weeks; never assume a hardcoded id is still best or present.
+**For a known-hard `complex-on-body` beat (see `ugc-product-video` Stage 3), start at the
+strong model — do NOT waste two cheap attempts that are predictably going to morph (that
+burned ~$1.20 for nothing in QA).**
+
+Disclose the higher per-second cost before escalating; escalation counts against `batchCap`.
 
 ### D) Editorial fallback (strongest defense — use when generation keeps failing)
 
@@ -259,11 +283,13 @@ each beat independently editable (see the `stitching-multi-clip` skill). The
 `ugc-product-video` Path E flow is the worked example of this loop.
 
 > **Tool inventory for this step** (so you know what's available): image gen
-> (`realistic-image-generation` picker) for keyframes; `…/first-last-frame-to-video`
-> endpoints for FLF; `recommend_model`/`get_model_schema`/`get_pricing` to find + price the
-> ladder models; `libi.generate_thumbnails` for last-frame extraction;
-> `libi.concat_videos` to stitch; `libi.add_overlay({ kind: "image" })` for a real-product
-> composite; `fal-ai/video-understanding` for the physics-QA pass (Stage 4.5).
+> (`realistic-image-generation` picker) for keyframes; a first-last-frame endpoint (or an
+> end-image param) for FLF; your provider's schema + pricing tools to find and price the
+> ladder models; `libi.generate_thumbnails` for last-frame extraction; `libi.concat_videos`
+> to stitch; `libi.add_overlay({ kind: "image" })` for a real-product composite; a
+> video-understanding model on your own provider for the physics-QA pass (Stage 4.5) —
+> see `video-analysis` flow (B). The concrete endpoint ids are in
+> `references/providers/<id>.md`.
 
 ## Related
 

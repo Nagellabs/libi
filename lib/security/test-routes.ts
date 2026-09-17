@@ -8,6 +8,6 @@
  * the skill-eval harness and the e2e runner, which set this flag explicitly on
  * the libi process they spawn. Default OFF.
  */
-export function testRoutesEnabled(): boolean {
-  return process.env.LIBI_ENABLE_TEST_ROUTES === "1";
+export function testRoutesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.LIBI_ENABLE_TEST_ROUTES === "1";
 }

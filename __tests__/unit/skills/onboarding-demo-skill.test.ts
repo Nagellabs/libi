@@ -112,6 +112,44 @@ describe("onboarding-libi-explainer-short", () => {
     expect(SKILL).toMatch(/credits/i);
   });
 
+  /** This skill is DELIBERATELY ungated, and that is the fragile part. Every other
+   *  skill that says the word "generate" opens with the canonical provider gate, so the
+   *  standing risk is a future sweep gating this one too — which would make a brand-new
+   *  user's very first interaction with libi a request to connect a provider, before they
+   *  have seen anything work. There is nothing to gate: the whole skill is one
+   *  `libi.build_onboarding_piece({})` call against a pre-made film, a reveal, and a
+   *  conversation. */
+  it("has no provider gate, and must never grow one", () => {
+    expect(SKILL).not.toContain("## Provider gate");
+    expect(SKILL).not.toContain("libi.suggest_provider");
+    expect(SKILL).not.toContain("libi.list_providers");
+    expect(SKILL).not.toContain("references/providers/");
+    // The single call that IS the build — no arguments, so there is no provider to pick.
+    expect(SKILL).toContain("libi.build_onboarding_piece({})");
+  });
+
+  it("forbids every generation tool absolutely, without naming a vendor", () => {
+    // The constraint is provider-AGNOSTIC on purpose. Its previous wording enumerated
+    // vendors ("no fal-ai, no ElevenLabs"), which is a list that goes stale and, worse,
+    // reads as permission for anything not on it. "any generation tool at all" cannot.
+    expect(SKILL).toMatch(/Do \*\*not\*\* call any generation tool at all/);
+    expect(SKILL).toMatch(/no provider, no libi generation tool/);
+    for (const vendor of [
+      "elevenlabs",
+      "fal-ai",
+      "higgsfield",
+      "ace-step",
+      "kokoro",
+      "seedance",
+      "veo",
+      "kling",
+    ]) {
+      expect(SKILL, `the onboarding demo names ${vendor}`).not.toMatch(
+        new RegExp(`\\b${vendor}\\b`, "i"),
+      );
+    }
+  });
+
   it("keeps its frontmatter accurate", () => {
     // The description is what selects the skill; it must not still promise
     // two imported sample clips.

@@ -1,9 +1,9 @@
 # Install: Whisper (local STT)
 
-Whisper is the **default** transcript provider. It is local and free — no
-API key. Transcription runs inside libi via
-`libi.analysis_transcribe_audio` (provider defaults to `whisper`). This
-plan only ensures the model is downloaded.
+Whisper is libi's only built-in transcript provider. It is local and free — no
+API key. Transcription runs inside libi via `libi.analysis_transcribe_audio`
+(Whisper-only; the tool takes no provider option). This plan only ensures the
+model is downloaded.
 
 ## 1. Tell the user what's about to happen
 
@@ -28,10 +28,20 @@ choosing.
 
 ## 2. Confirm `uv` is present
 
-Whisper runs faster-whisper through the bundled `uv`. Call
-`libi.list_bundled_mcps` and check the `whisper` row's dependencies — `uv`
-should be `installed` (it is a tier-1 dep installed at boot). If it is not,
-something is wrong with the base install; tell the user.
+Whisper runs faster-whisper through libi's own `uv`. It is a dependency of this
+extension (not part of the base install), so it may not be on disk yet. The
+`libi.get_install_plan({ mcpId: "whisper" })` result that gave you this plan
+carries a `dependencies` array — find the entry with `binary: "uv"`:
+
+- `installed: true` — carry on to step 3.
+- `installed: false` — libi downloads it from the Agents → Libi MCP
+  tab: call `libi.show_extension({ extensionId: "whisper" })` and ask the user to
+  press **Download** next to `uv` on that card, then re-run
+  `libi.get_install_plan` to confirm before continuing. Do not try to install
+  `uv` yourself, and do not go on to step 3 without it — the model download
+  runs through `uv` and fails without it.
+- `dependenciesError` set — the readout itself failed; tell the user what it
+  says rather than guessing.
 
 ## 3. Download the default model
 
@@ -60,7 +70,7 @@ libi.update_dep_status({ mcpId: "whisper", status: "installed" })
 libi.analysis_transcribe_audio({ fileId: "<id>" })
 ```
 
-Provider defaults to `whisper`. Done.
+Whisper runs. Done.
 
 ## Larger models (optional)
 
@@ -76,21 +86,32 @@ libi.analysis_transcribe_audio({ fileId: "<id>", model: "medium" })
 
 ## Speaker diarization / audio events
 
-faster-whisper does not label speakers and emits word tokens only. If the
-user needs speaker labels or audio-event tags, use ElevenLabs instead:
+faster-whisper does not label speakers and emits word tokens only, and
+`libi.analysis_transcribe_audio` is Whisper-only. If the user needs speaker
+labels or audio-event tags, drive a transcription tool from your own tool list
+through the `audio-analysis` skill's Path B:
 
 ```
-libi.analysis_transcribe_audio({ fileId: "<id>", provider: "elevenlabs" })
+libi.analysis_chunk_audio({ fileId: "<id>" })
+→ your provider's STT on each chunk's audioPath
+→ libi.analysis_save_audio_chunk({ chunkId, text, words, ... })
 ```
 
-(Requires the `elevenlabs` MCP configured with an API key.)
+When that skill ships a `references/providers/<id>.md` for the provider you
+have, read it first — it says what the provider's STT buys and how it bills.
+
+With no such provider connected, say so plainly: Whisper is the only
+transcription provider libi has, so speaker labels need an STT tool on a
+provider MCP the user connects themselves. `libi.list_providers` shows what is
+connected. Let the user decide between connecting one and accepting a
+non-diarized transcript.
 
 ## Model size & updates
 
 The Whisper model is small (~75 MB for `tiny`; larger sizes on request).
-State the size before downloading. If `libi.list_bundled_mcps` later
-shows the `whisper` model dep not installed after it was (a bumped model
-version shipped in a libi update), tell the user and re-run
+State the size before downloading. If the Agents → Libi MCP
+tab later shows the `whisper` model dep not installed after it was (a
+bumped model version shipped in a libi update), tell the user and re-run
 `libi.whisper_download_model` on approval.
 
 ---
@@ -108,7 +129,7 @@ After a libi release that bumps a pinned Python dep (e.g.
 resolves the new spec. The model download is INDEPENDENT (see above).
 
 If you want to pre-warm explicitly (e.g. to surface the cost up-front
-before a batch run), open Settings → MCP Servers → Whisper and click
+before a batch run), open Agents → Libi MCP → Whisper and click
 **Retry** on the env chip. Otherwise the warm-up happens transparently
 on the next normal use, and the env install token is written on success.
 

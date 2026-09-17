@@ -100,15 +100,66 @@ export function isInstallInFlight(dto: RuntimeUpdateDto | undefined): boolean {
   return s === "queued" || s === "running" || s === "cancel-requested";
 }
 
+/**
+ * True while an auto-download shell is mid-transition toward its restart —
+ * from the instant its feed reports `update-available` (which is also the
+ * instant such a shell starts fetching; how long the user actually watches
+ * this state is decided by the CLIENT's poll cadence, not electron's speed)
+ * through the download itself. False for an old shell (`autoDownload` absent
+ * or false), where `update-available` is a stationary click-to-install offer
+ * — see `updateOffer` — not something already moving.
+ *
+ * `isShellInstallInFlight` and `restartOffer` both key off exactly this, so
+ * the "is something happening" the poll cadence answers and the "can I offer
+ * a restart" the offer answers can't drift apart again (they used to: the
+ * offer suppressed `update-available`, the in-flight check didn't, leaving a
+ * window where the UI promised a restart with no progress and no button).
+ */
+export function isShellAutoDownloadWindow(
+  shell: ShellUpdateStatusDto | null | undefined,
+): boolean {
+  if (!shell) return false;
+  if (shell.phase === "downloading") return true;
+  return shell.phase === "update-available" && !!shell.autoDownload;
+}
+
+/**
+ * An OLD shell (one that cannot auto-download) sitting at `ready`: it quits into
+ * its own update about 2.5s later, without being asked. Distinct from an
+ * auto-download shell's `ready`, which is a stable state waiting for a click.
+ */
+export function isShellSelfRestarting(
+  shell: ShellUpdateStatusDto | null | undefined,
+): boolean {
+  return !!shell && shell.phase === "ready" && !shell.autoDownload;
+}
+
 /** True while the SHELL is downloading / about to restart into its update. */
 export function isShellInstallInFlight(dto: RuntimeUpdateDto | undefined): boolean {
   const shell = dto?.shell;
   if (!shell) return false;
-  if (shell.phase === "downloading") return true;
+  if (isShellAutoDownloadWindow(shell)) return true;
   // "ready" is only transient on OLD shells (they restart themselves moments
   // later). On auto-download shells it is a stable waiting state — treating
   // it as in-flight would leave the 2s poll running forever.
   return shell.phase === "ready" && !shell.autoDownload;
+}
+
+/** Idle cadence. This is a loopback GET, but not a free one: every call does a
+ *  `readFileSync` of package.json (`current-runtime.ts`), a `readdirSync` plus a stamp
+ *  read per staged runtime (`installed-runtimes.ts`), and a SQLite select for the latest
+ *  job row — on top of the registry check, which is cached 6h on SUCCESS, 15min on
+ *  FAILURE, and not at all for `unsupported` (`update-check.ts`). Cheap disk and DB work,
+ *  not literally free — but the cost of NOT polling is a card that describes the moment
+ *  it mounted. React Query pauses intervals for a hidden tab by default, so a
+ *  backgrounded window is not polling at all. */
+export const IDLE_POLL_MS = 30_000;
+/** How old the shell's last feed check may be before a mount forces a fresh one. */
+export const SHELL_CHECK_STALE_MS = 10 * 60 * 1000;
+
+/** Extracted so the cadence is testable without rendering a query. */
+export function pollInterval(dto: RuntimeUpdateDto | undefined): number {
+  return isInstallInFlight(dto) || isShellInstallInFlight(dto) ? 2000 : IDLE_POLL_MS;
 }
 
 /**
@@ -167,6 +218,23 @@ export function restartOffer(dto: RuntimeUpdateDto | undefined): UpdateOffer | n
   if (shell && shell.phase === "ready" && shell.latestVersion && shell.autoDownload) {
     return { target: "shell", version: shell.latestVersion };
   }
+  // A desktop update is being fetched, or (for an auto-download shell) about to be —
+  // restarting into a staged runtime now would kill the download (observed 2026-09-07:
+  // 340 MB discarded, restarted from zero) — and the shell it is fetching carries its
+  // own newer bundled runtime, so the runtime restart buys nothing the shell restart
+  // will not. Wait for `ready`, which is the branch above. Keyed off the exact same
+  // predicate as `isShellInstallInFlight` so the two can't disagree about this window
+  // again — an old shell's `update-available` is a stationary offer, not this.
+  if (isShellAutoDownloadWindow(shell)) {
+    return null;
+  }
+  // An old shell at `ready` is already quitting into its update. Offering a
+  // runtime restart here would print "restart whenever suits you" beside
+  // "Restarting Libi…", and the click would race the shell's own quit — while
+  // the restart it is performing applies the staged runtime anyway.
+  if (isShellSelfRestarting(shell)) {
+    return null;
+  }
   if (dto?.pendingVersion) {
     return { target: "runtime", version: dto.pendingVersion };
   }
@@ -208,17 +276,16 @@ export function useRuntimeUpdate() {
   return useQuery({
     queryKey: runtimeUpdateKeys.all,
     queryFn: () => fetchRuntimeUpdate(false),
-    // The server caches the registry answer; this keeps the client from
-    // re-asking on every mount of a page that renders the sidebar.
-    staleTime: 5 * 60 * 1000,
+    // The server caches the registry answer server-side; this only keeps a
+    // REMOUNT inside the window from rendering a stale snapshot instead of
+    // refetching — the interval below is what keeps an already-mounted card
+    // fresh, so this no longer needs to be long.
+    staleTime: IDLE_POLL_MS,
     // A failed CHECK is not a failed query — the route always answers 200 with
     // `state: "unknown"`. A rejection here means the app itself is unreachable,
     // and retrying that in a loop helps nobody.
     retry: false,
-    refetchInterval: (query) => {
-      const dto = query.state.data as RuntimeUpdateDto | undefined;
-      return isInstallInFlight(dto) || isShellInstallInFlight(dto) ? 2000 : false;
-    },
+    refetchInterval: (query) => pollInterval(query.state.data as RuntimeUpdateDto | undefined),
   });
 }
 
@@ -238,8 +305,8 @@ export interface InstallUpdateResponse {
 
 /**
  * "Restart to apply" — the click that applies a downloaded update.
- * Runtime target: the same server reset the MCPs & Skills "Restart server"
- * button uses (`app.relaunch()` in the packaged shell). Shell target: the
+ * Runtime target: the same `/api/server-status/reset` route
+ * (`app.relaunch()` in the packaged shell). Shell target: the
  * update route relays to the shell's `restart()` and it quits-and-installs.
  */
 export function useRestartToApply() {
