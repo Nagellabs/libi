@@ -8,6 +8,7 @@ import { buildAudioMixGraph } from "@/lib/export/audio-mix";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "@/lib/export/duck-envelopes";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { exportLogger as logger } from "@/lib/logger";
+import { resolveAudioBitrate } from "@/lib/export/quality";
 
 /**
  * Build the ffmpeg args for muxing a mixed audio track onto an already-rendered
@@ -33,7 +34,7 @@ export function buildRenderMuxArgs(opts: {
   args.push("-map", "0:v:0", "-map", "[aout]");
   args.push("-c:v", "copy");
   args.push("-c:a", isWebm ? "libopus" : "aac");
-  args.push("-b:a", String(opts.audioBitrate ?? 256_000));
+  args.push("-b:a", String(resolveAudioBitrate(opts.format, opts.audioBitrate)));
   if (!isWebm) args.push("-movflags", "+faststart");
   args.push(opts.outPath);
   return args;

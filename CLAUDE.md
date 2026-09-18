@@ -84,7 +84,8 @@ Two consequences worth holding on to:
 - **Rehearse the shells before publishing them.** `release-electron.yml` with
   `dry_run: true` builds both and uploads the artifacts without cutting a Release. Use it
   after ANY change to the shell jobs or `release-electron.js` — that is the whole reason
-  the workflows are split, and it costs nothing.
+  the workflows are split, and it costs nothing — but it packs the runtime of the version
+  you name, so run it against the version you are about to ship, after its npm publish.
 - **Recovery differs by cause.** A transient failure takes *Re-run failed jobs* — the ref
   already carries the right code. Both halves of "transient" have now bitten: Apple
   notarization is a network round-trip, and on 0.1.9 GitHub's CDN cut the connection

@@ -46,6 +46,11 @@ vi.mock("@/lib/agents/sign-in-confirmation", () => ({
   clearSignInConfirmation: (id: string) => clearSignInConfirmation(id),
 }));
 
+const trackServerEvent = vi.fn();
+vi.mock("@/lib/analytics/server", () => ({
+  trackServerEvent: (name: string, params?: Record<string, unknown>) => trackServerEvent(name, params),
+}));
+
 const { handlerCtorArgs } = vi.hoisted(() => ({ handlerCtorArgs: [] as unknown[][] }));
 vi.mock("@/lib/agents/session-event-handler", () => ({
   // A `function`, not an arrow: `getEventHandler` calls it with `new`.
@@ -151,6 +156,19 @@ describe("SessionManager agent readiness", () => {
     expect(clearSignInConfirmation).toHaveBeenCalledWith("codex");
   });
 
+  it("reports the observed rejection as agent_auth_rejected { agent, stage } — codex at session-start", async () => {
+    mockConnection.newSession.mockRejectedValue(authError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    const fired = trackServerEvent.mock.calls.filter(([name]) => name === "agent_auth_rejected");
+    expect(fired).toEqual([["agent_auth_rejected", { agent: "codex", stage: "session-start" }]]);
+  });
+
+  it("a non-auth session/new failure reports no agent_auth_rejected — only an observed rejection counts", async () => {
+    mockConnection.newSession.mockRejectedValue(new Error("transport closed"));
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(trackServerEvent).not.toHaveBeenCalledWith("agent_auth_rejected", expect.anything());
+  });
+
   // Claude's unauthenticated `session/new` SUCCEEDS; auth is rejected only at
   // `session/prompt` (observed on claude 2.1.245 and 2.1.267). These pin that a
   // clean standby never undoes a prompt rejection, and that a returned turn does.
@@ -217,6 +235,10 @@ describe("SessionManager agent readiness", () => {
     await sm.sendMessage(sessionId, "hi");
     expect(sm.getReadiness("claude-code").state).toBe("needs-auth");
     expect(clearSignInConfirmation).toHaveBeenCalledWith("claude-code");
+    // Claude rejects at the prompt, so its funnel event says so.
+    expect(trackServerEvent.mock.calls.filter(([name]) => name === "agent_auth_rejected")).toEqual([
+      ["agent_auth_rejected", { agent: "claude-code", stage: "prompt" }],
+    ]);
 
     // The next turn that comes back clean is proof of readiness again.
     await sm.sendMessage(sessionId, "hi again");

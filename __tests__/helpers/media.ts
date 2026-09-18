@@ -236,3 +236,23 @@ export const DRAWTEXT_SKIP_REASON =
   `ffmpeg at "${resolveFfmpegPath()}" was built without the drawtext filter ` +
   "(needs libfreetype) — run libi once so Category A provisions a full build " +
   "into <LIBI_HOME>/bin, or install one with drawtext";
+
+/**
+ * Does the resolved ffmpeg's drawtext know `y_align` (ffmpeg ≥ 6.1)? The
+ * export's drawtext spec places text with it, so a real-ffmpeg test of that
+ * spec can only run where it exists.
+ */
+let yAlignPresent: boolean | null = null;
+
+export function hasDrawtextYAlign(): boolean {
+  if (yAlignPresent !== null) return yAlignPresent;
+  try {
+    const out = execFileSync(resolveFfmpegPath(), ["-hide_banner", "-h", "filter=drawtext"], {
+      timeout: 3000,
+    }).toString();
+    yAlignPresent = /\by_align\b/.test(out);
+  } catch {
+    yAlignPresent = false;
+  }
+  return yAlignPresent;
+}

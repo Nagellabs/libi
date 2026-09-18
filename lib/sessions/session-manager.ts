@@ -49,6 +49,7 @@ import {
 import { getAgentModelId, setAgentModelId } from "@/lib/sessions/model-preferences";
 import { getSettings, updateSettings } from "@/lib/db/settings";
 import { trackServerEvent } from "@/lib/analytics/server";
+import { toAgentEventId } from "@/lib/analytics/events";
 import type {
   SessionUsageState,
   AvailableCommandInfo,
@@ -2208,6 +2209,11 @@ export class SessionManager {
       agentId,
       message,
     });
+    // The funnel's drop-off signal: the sign-in the wizard's confirmation
+    // claimed, disproved by the agent itself. Only a setup agent has a bounded
+    // id to report; `context` is the `AuthNoteContext` enum.
+    const agent = toAgentEventId(agentId);
+    if (agent) trackServerEvent("agent_auth_rejected", { agent, stage: context });
   }
 
   /** Sessions whose CURRENT turn opened with Claude's auth-failure text. */

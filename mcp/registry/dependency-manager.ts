@@ -4,6 +4,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { getDb } from "@/lib/db/client";
+import { trackServerEvent } from "@/lib/analytics/server";
 import { mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
 import { BUNDLED_MCP_SERVERS } from "./bundled";
@@ -734,6 +735,9 @@ export class DependencyManager {
         return;
       }
       this.writeDepTransition(mcpId, binary, fresh);
+      // Verified present, not merely "the download finished" — the boot diet
+      // made this the install path for everything but node and ffmpeg.
+      trackServerEvent("dependency_installed", { extension: mcpId, dep: binary });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error(

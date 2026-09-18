@@ -41,6 +41,9 @@ native-audio defaults lives elsewhere, that place points here.
    every clip on a model with native audio (`ai-video-models` names which engines have
    it). The spoken voice is baked into the generation. **Muting an AI generation is a
    defect**, not a "clean" result — never `generate_audio = false` to "add the voice later."
+   Whether a clip has a LINE at all is settled once, at the voice-line intake
+   (`ai-asset-generation` Step 6.6): a line goes into the prompt as dialogue; "no line" means
+   ambient-only native audio plus an offered music bed — never a silenced clip.
 
 2. **Multi-clip (> ~15s) that needs ONE consistent voice — carry it via a
    reference-conditioned generation. This is the STANDARD multi-clip voice path, not an

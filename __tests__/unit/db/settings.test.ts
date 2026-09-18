@@ -9,7 +9,7 @@ vi.mock("@/lib/db/client", () => ({
   getDb: () => testDb,
 }));
 
-import { getSettings, updateSettings } from "@/lib/db/settings";
+import { getSettings, updateSettings, getExportDefaults, setExportDefaults } from "@/lib/db/settings";
 
 describe("getSettings", () => {
   beforeEach(() => {
@@ -99,5 +99,45 @@ describe("updateSettings", () => {
     expect(s1.onboardingPersona).toBe("agency");
     expect(s1.agentEverConnected).toBe(true);
     expect(s1.personaSelectedAt?.getTime()).toBe(when.getTime());
+  });
+});
+
+describe("getExportDefaults / setExportDefaults", () => {
+  beforeEach(() => {
+    testDb = createTestDb();
+  });
+
+  it("falls back to source/4k when no row exists", () => {
+    const d = getExportDefaults();
+    expect(d.quality).toBe("source");
+    expect(d.graphicsQuality).toBe("4k");
+  });
+
+  it("reads graphicsQuality:'4k' for legacy stored JSON that predates the field", () => {
+    // Simulate a settings row written before graphicsQuality existed.
+    setExportDefaults({
+      folder: null,
+      format: "mp4",
+      quality: "1080p",
+    } as unknown as Parameters<typeof setExportDefaults>[0]);
+    const d = getExportDefaults();
+    expect(d.quality).toBe("1080p");
+    expect(d.graphicsQuality).toBe("4k");
+  });
+
+  it("round-trips an explicit graphicsQuality", () => {
+    setExportDefaults({ folder: null, format: "webm", quality: "4k", graphicsQuality: "1440p" });
+    const d = getExportDefaults();
+    expect(d.graphicsQuality).toBe("1440p");
+  });
+
+  it("rejects a garbage stored graphicsQuality back to the '4k' fallback", () => {
+    setExportDefaults({
+      folder: null,
+      format: "mp4",
+      quality: "source",
+      graphicsQuality: "8k",
+    } as unknown as Parameters<typeof setExportDefaults>[0]);
+    expect(getExportDefaults().graphicsQuality).toBe("4k");
   });
 });

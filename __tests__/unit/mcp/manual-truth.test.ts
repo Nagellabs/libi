@@ -222,3 +222,21 @@ describe("the rendered manual tells the truth about libi", () => {
     }
   });
 });
+
+/**
+ * The no-argument `libi.read_manual` inlines the essentials under a byte budget
+ * and silently SKIPS an essential that no longer fits. On 2026-09-18 a 900-byte
+ * addition to the storyboard-first section pushed it out: the index inlined the
+ * DrawContext sections instead, and the agent — which reads the manual once and
+ * never asked for that section by key — never saw the gate. Pin the section that
+ * carries the video gates as inlined, for both dialects, so the next creep fails
+ * here instead of in a user's chat.
+ */
+describe("the default manual index still inlines the storyboard-first section", () => {
+  it.each(["claude", "codex"] as const)("%s", (dialect) => {
+    const index = renderManualIndex(renderAgentInstructions(dialect));
+    expect(index).toContain("\n## Planning workflow — Storyboard-first for video");
+    expect(index).toMatch(/Ask once, before the first AI video generation: does it speak\?/);
+    expect(index).toContain("\n## Workflow");
+  });
+});

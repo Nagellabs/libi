@@ -60,8 +60,16 @@ export const ESSENTIAL_SECTION_KEYS: readonly string[] = [
 /**
  * Byte ceiling for the no-argument index. Well inside the ~25 K-token result
  * budget that makes a client spool to disk, and roughly a sixth of the manual.
+ *
+ * Raised from 15_000 on 2026-09-18: the four essentials that must inline
+ * (workflow, working-with-pieces, canvas-coordinate-system, planning-workflow)
+ * had crept to 14.8 KB, so a 900-byte addition to the storyboard-first section
+ * silently dropped that whole section from the index — the agent read the
+ * DrawContext sections instead and never saw the gate. `manual-truth.test.ts`
+ * now pins the planning section as inlined, so the next creep fails a test
+ * rather than a user.
  */
-export const DEFAULT_INDEX_BUDGET_BYTES = 15_000;
+export const DEFAULT_INDEX_BUDGET_BYTES = 16_384;
 
 /** The reserved key that returns the manual unchanged. */
 export const ALL_SECTIONS_KEY = "all";

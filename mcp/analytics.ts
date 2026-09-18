@@ -4,6 +4,7 @@
 // mcp/notify.ts). Every libi.* tool call emits `tool_used`.
 import { getCurrentPort } from "@/lib/libi-home";
 import type { AnalyticsEventName, AnalyticsParams } from "@/lib/analytics/events";
+import type { AgentSurface } from "@/lib/mcp/agent-surface";
 
 function serverUrl(): string | null {
   try {
@@ -32,6 +33,34 @@ export function trackMcpEvent(name: AnalyticsEventName, params?: AnalyticsParams
 /** Every libi.* tool call emits `tool_used`. */
 export function trackToolUsed(toolName: string): void {
   trackMcpEvent("tool_used", { tool_name: toolName });
+}
+
+/** A session opened on libi's HTTP endpoint from the user's OWN CLI — any
+ *  request without the in-app surface header. In-app sessions are the chat's
+ *  own and are already counted (`agent_connected`, the wizard's `open-chat`),
+ *  so they report nothing here. `dialect` is the endpoint's `?agent=` query,
+ *  bounded by construction. */
+export function trackCliSessionOpened(surface: AgentSurface, dialect: "claude" | "codex"): void {
+  if (surface !== "cli") return;
+  trackMcpEvent("mcp_cli_session_opened", { dialect });
+}
+
+/** Reach a first_* milestone from the MCP process. The studio server owns the
+ *  mark-once primitive (`POST /api/analytics/milestone` wraps
+ *  `markAnalyticsMilestoneOnce`), so the event fires exactly once per install
+ *  however many processes reach the step, and the MCP child never writes the
+ *  analytics settings itself. Fire-and-forget; never throws. */
+export function trackMcpMilestone(name: string, event: AnalyticsEventName): void {
+  const url = serverUrl();
+  if (!url) return;
+  void fetch(`${url}/api/analytics/milestone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, event }),
+    signal: AbortSignal.timeout(3000),
+  }).catch(() => {
+    // Fire-and-forget — server may not be running.
+  });
 }
 
 type RegisterFn = (...args: unknown[]) => unknown;

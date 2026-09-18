@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -23,6 +23,7 @@ import {
 } from "@/lib/agents/setup/commands";
 import { explainSetupCommand } from "@/lib/agents/setup/explain";
 import { isSetupAgentId, SETUP_AGENTS, setupAgentName } from "@/lib/agents/setup/registry";
+import { trackEvent } from "@/lib/analytics/client";
 import { useAllAgentStatus } from "@/lib/queries/agent-status";
 import { useLibiRegistration, useRefreshLibiRegistration } from "@/lib/queries/libi-registration";
 import { useMcpHealth } from "@/lib/queries/mcp-health";
@@ -142,9 +143,29 @@ export function ConnectedAgents() {
 
   // The terminal opens under the tools row of the agent it acts on, so the
   // command sits next to the button that built it.
+  //
+  // A connect or reconnect is then waited on: counted once the registration
+  // reads `connected` for that agent, never on the click (the wizard's connect
+  // step does the same). A newer command replaces the wait; a disconnect is
+  // never waited on.
+  const awaitingConnect = useRef<{ agentId: SetupAgentId; action: "connect-libi" | "reconnect-libi" } | null>(null);
   const run = (agentId: SetupAgentId, command: string, action: SetupAction, explanation: string) => {
-    void host.open("global-setup", command, action, agentId, explanation).catch(() => undefined);
+    void host
+      .open("global-setup", command, action, agentId, explanation)
+      .then(() => {
+        awaitingConnect.current = action === "connect-libi" || action === "reconnect-libi" ? { agentId, action } : null;
+      })
+      .catch(() => undefined);
   };
+  useEffect(() => {
+    const awaited = awaitingConnect.current;
+    if (!awaited) return;
+    const observed = rowFor(awaited.agentId, statusQuery.data, registrationQuery.data?.[awaited.agentId]);
+    // A last known (stale) registration is not what the command did.
+    if (observed.kind !== "connected" || observed.stale) return;
+    awaitingConnect.current = null;
+    trackEvent("libi_mcp_connected", { agent: awaited.agentId, action: awaited.action, surface: "global-setup" });
+  }, [statusQuery.data, registrationQuery.data]);
 
   // The tab's one terminal belongs to the agent whose button opened it, and
   // shows only while that agent is selected; otherwise one line leads back to it.

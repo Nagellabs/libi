@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { storyboardBusyResponse } from "@/lib/storyboard/busy-response";
 import { commitDraft } from "@/lib/composition/lifecycle";
 
 interface RouteParams {
@@ -13,6 +14,6 @@ export async function POST(req: Request, { params }: RouteParams) {
     const result = await commitDraft(pieceId, { summary, actor: "user" });
     return NextResponse.json(result);
   } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+    return storyboardBusyResponse(err) ?? NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }

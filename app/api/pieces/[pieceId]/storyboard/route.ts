@@ -7,6 +7,7 @@ import { getModelSchemaCache } from "@/lib/storyboard/model-schema-cache";
 import { getStorage } from "@/lib/storage";
 import { slotSketchPath } from "@/lib/storyboard/paths";
 import { sketchRev } from "@/lib/storyboard/sketch-rev";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
 export async function GET(
   _req: Request,
@@ -57,7 +58,7 @@ export async function GET(
   return NextResponse.json({ storyboard: { ...sb, cards: resolvedCards }, schemas, sketchRevs });
 }
 
-export async function PATCH(
+export const PATCH = withStoryboardBusy(async function PATCH(
   req: Request,
   ctx: { params: Promise<{ pieceId: string }> },
 ) {
@@ -70,4 +71,4 @@ export async function PATCH(
   }
   if (body.layout) await updateManifestLayout(pieceId, body.layout);
   return NextResponse.json({ ok: true });
-}
+});

@@ -45,6 +45,20 @@ describe("render-jobs registry", () => {
     await expect(j.done).resolves.toEqual({ tempFilePath: "/tmp/x.mp4", durationSeconds: 1.5 });
   });
 
+  it("resolveRenderJob forwards a droppedOverlays list through to the caller (QA 2026-09-18 B1 propagation)", async () => {
+    const j = createRenderJob({ pieceId: "p1", payload: {} as RenderPayload, settings: {} as ExportSettings });
+    resolveRenderJob(j.jobId, j.token, {
+      tempFilePath: "/tmp/x.mp4",
+      durationSeconds: 1.5,
+      droppedOverlays: [{ id: "code-abc", message: "ctx is not defined" }],
+    });
+    await expect(j.done).resolves.toEqual({
+      tempFilePath: "/tmp/x.mp4",
+      durationSeconds: 1.5,
+      droppedOverlays: [{ id: "code-abc", message: "ctx is not defined" }],
+    });
+  });
+
   it("rejectRenderJob rejects the promise", async () => {
     const j = createRenderJob({ pieceId: "p1", payload: {} as RenderPayload, settings: {} as ExportSettings });
     rejectRenderJob(j.jobId, j.token, "boom");

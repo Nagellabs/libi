@@ -20,6 +20,11 @@
  */
 
 import { composeFont } from "@/lib/overlays/caption-style";
+import { parseFontShorthand } from "@/lib/fonts/family";
+import { quoteFilterValue, escapeDrawtext } from "@/lib/ffmpeg/filter-escape";
+import { firstFamily } from "@/lib/fonts/bundled";
+
+export { quoteFilterValue, escapeDrawtext };
 import { cssColorToFfmpeg } from "./backends/ffmpeg-overlay";
 
 /** Minimal rect shape shared by runtime + persisted overlays. */
@@ -46,11 +51,18 @@ export interface TextOverlayLike {
   fontFamily?: string;
   fontSize?: number;
   fontWeight?: number | string;
+  /** Line-height multiplier (renderer default 1.2) — sizes the text block the
+   *  renderer centres vertically in `rect`. */
+  lineHeight?: number;
   /** Optional uploaded font file id; the backend resolves it to an absolute
    *  path and passes it to `drawtextSpecFor` as `fontFilePath`. */
   fontFileId?: string;
   color: string;
   align: "left" | "center" | "right";
+  /** Optional outline stroke (mirrors `TextOverlay.stroke` /
+   *  `CaptionStroke` — {color, width}). `width` is in composition-pixel
+   *  space, the same space as `fontSize`/`rect`, so it scales the same way. */
+  stroke?: { color: string; width: number };
 }
 
 /** Structural shape of an image/video overlay sufficient to composite it. */
@@ -80,24 +92,13 @@ export function parseFont(font: string): { size: number; family?: string } {
   return { size: 32 };
 }
 
-/** ffmpeg drawtext escapes: backslash, colon, apostrophe, percent. */
-export function escapeDrawtext(text: string): string {
-  return text
-    .replace(/\\/g, "\\\\")
-    .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'")
-    .replace(/%/g, "\\%");
-}
-
-/**
- * Escape a filesystem path for use as a drawtext `fontfile=` option value.
- * Only `\` and `:` are option-delimiter-significant in the filter graph (a
- * colon separates drawtext options); apostrophes/percents are content-only
- * concerns, so they are left untouched here. macOS/Linux paths rarely contain
- * `:`, but escape defensively so a colon in the path can't split the option.
- */
-export function escapeFontFilePath(p: string): string {
-  return p.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
+/** The family + CSS weight a text overlay renders with — structured fields
+ *  over the shorthand, the same resolution as the canvas renderer. */
+export function textFaceOf(o: TextOverlayLike): { family?: string; weight: number | string | undefined } {
+  const composed = composeFont(o);
+  const prefix = parseFontShorthand(composed)?.prefix ?? "";
+  const weightToken = prefix.split(/\s+/).find((t) => /^(bold|normal|\d{3})$/i.test(t));
+  return { family: parseFont(composed).family, weight: o.fontWeight ?? weightToken };
 }
 
 /** Horizontal-position expression honoring the overlay's text alignment. */
@@ -136,10 +137,12 @@ export function enableExpr(
  * Emit a single `drawtext=...` filter spec (no input/output labels) for a
  * text overlay. `timeOffset` shifts the enable window to window-local time.
  *
- * When `fontFilePath` is supplied (an uploaded custom font's absolute path),
- * the spec emits `fontfile=<path>` and OMITS the `font=<family>` token —
- * ffmpeg uses one or the other. Otherwise it falls back to the shorthand's
- * named family via `font=<family>`.
+ * When `fontFilePath` is supplied (an uploaded custom font's absolute path, or
+ * the bundled face the preview draws with — resolved by the ffmpeg-overlay
+ * backend), the spec
+ * emits `fontfile=<path>` and OMITS the `font=<family>` token — ffmpeg uses
+ * one or the other. Otherwise it falls back to the shorthand's named family
+ * via `font=<family>` (a fontconfig lookup, which can't express a weight).
  */
 export function drawtextSpecFor(
   o: TextOverlayLike,
@@ -158,25 +161,72 @@ export function drawtextSpecFor(
   // text overflowed its rect and was clipped while the preview looked right.
   const { size, family } = parseFont(composeFont(o));
   const enable = enableExpr(o.startTime, o.duration, timeOffset);
-  const safeText = escapeDrawtext(o.content);
   const fontPart = fontFilePath
-    ? [`fontfile=${escapeFontFilePath(fontFilePath)}`]
+    ? [`fontfile=${quoteFilterValue(fontFilePath)}`]
     : family
-      ? [`font=${family}`]
+      ? // drawtext takes ONE fontconfig family, not a CSS list: the whole list
+        // put its comma in the graph and ended the filter (exit 234).
+        [`font=${quoteFilterValue(firstFamily(family))}`]
       : [];
-  const parts = [
-    `drawtext=text='${safeText}'`,
-    `fontcolor=${cssColorToFfmpeg(o.color)}`,
-    `fontsize=${Math.round(size * scale)}`,
-    ...fontPart,
-    // text_w (ffmpeg's measured text width) scales with the scaled fontsize, so
-    // scaling x/width by the same factor keeps center/right alignment correct.
-    `x=${xExprForAlign(o.align, Math.round(o.rect.x * scale), Math.round(o.rect.width * scale))}`,
-    `y=${Math.round(o.rect.y * scale)}`,
-    `alpha=${o.opacity ?? 1}`,
-    `enable='${enable}'`,
-  ];
-  return parts.join(":");
+  // Outline stroke. The canvas preview draws it via `ctx.strokeText` with
+  // `lineWidth = stroke.width`, which strokes CENTRED on the glyph outline, and
+  // then fills the glyph over it (lib/engine/overlay-renderer.ts): only
+  // width/2 is visible, all of it outside the glyph. freetype's `borderw` is
+  // drawn entirely outside the glyph, so `borderw = width/2` reproduces the
+  // visible outline — mapping 1:1 read about twice as thick as the preview
+  // (QA 2026-09-18 N3). `width` is in composition-pixel space, same as
+  // fontSize/rect, so the composition→target `scale` applies. Rounding can
+  // floor a real (width>0) stroke to 0 — clamp to at least 1.
+  const strokePart =
+    o.stroke && o.stroke.width > 0
+      ? [
+          `borderw=${Math.max(1, Math.round((o.stroke.width / 2) * scale))}`,
+          `bordercolor=${cssColorToFfmpeg(o.stroke.color)}`,
+        ]
+      : [];
+  // Vertical placement, mirroring drawTextOverlay: the renderer centres the
+  // block (lines × fontSize × lineHeight) in the rect — clamped so an
+  // overflowing block starts at the top — and draws each line with
+  // `textBaseline: "top"`. In Chromium that is the top of the EM box, so the
+  // baseline sits fontSize × ascent/(ascent+descent) below it (measured: 96.08
+  // px for 120px Inter — its hhea metrics are 0.969/0.242 em). drawtext's
+  // `font_a`/`font_d` are that ascent/descent for the face actually loaded
+  // (font_d reads positive; abs() guards a build that reports it signed), so
+  // placing the BASELINE (`y_align=baseline`) there matches the preview for
+  // any font, uploaded ones included. `y = rect.y` top-aligned the text.
+  //
+  // Each line is its own drawtext at the renderer's line top. drawtext's own
+  // line pitch is the face's line height (145px for 120px Inter-Bold), not
+  // lineHeight × fontSize, and its `text_w` is the WIDEST line's — so one
+  // multi-line drawtext drifted line by line and mis-aligned every shorter
+  // centred/right line. An empty line draws nothing but keeps its slot. The
+  // specs are joined with "," into one linear chain between the caller's
+  // labels.
+  const fontsize = Math.round(size * scale);
+  const lines = o.content.split("\n");
+  const lineHeightPx = size * (o.lineHeight ?? 1.2);
+  const blockTop = o.rect.y + Math.max(0, (o.rect.height - lines.length * lineHeightPx) / 2);
+  const specs = lines.flatMap((line, i) => {
+    if (line === "") return [];
+    const lineTop = Math.round((blockTop + i * lineHeightPx) * scale);
+    const parts = [
+      `drawtext=text=${quoteFilterValue(escapeDrawtext(line))}`,
+      `fontcolor=${cssColorToFfmpeg(o.color)}`,
+      `fontsize=${fontsize}`,
+      ...fontPart,
+      ...strokePart,
+      // text_w (ffmpeg's measured text width) scales with the scaled fontsize, so
+      // scaling x/width by the same factor keeps center/right alignment correct.
+      `x=${xExprForAlign(o.align, Math.round(o.rect.x * scale), Math.round(o.rect.width * scale))}`,
+      `y_align=baseline`,
+      `y=${lineTop}+${fontsize}*font_a/(font_a+abs(font_d))`,
+      `alpha=${o.opacity ?? 1}`,
+      `enable='${enable}'`,
+    ];
+    return [parts.join(":")];
+  });
+  // An all-empty caption still has to be a valid filter between two labels.
+  return specs.length > 0 ? specs.join(",") : "null";
 }
 
 /**

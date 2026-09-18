@@ -227,6 +227,34 @@ Place it in the negative-prompt field when the model supports one (Flux, Hunyuan
 that generates AI video — `ugc-product-video`, `generic-video`, `music-video-creation`,
 `mimic-video` — not just one route. Those skills reference this rule; they do not override it.**
 
+#### Voice-line intake — ask ONCE before the first AI video generation
+
+`generate_audio = true` only gives the clip a soundtrack; a **voice** exists only if the prompt
+carries a spoken line, and a request that never mentions audio gets no line — which is how a
+user got an ad that was "generated without audio" (ambient sound only). So, before the first
+video generation of a brief, **ask once** (one message, both parts; skip whatever the user has
+already said; never ask again per clip):
+
+1. **"Should it have a spoken line?"** If yes: *what does it say* — or offer to write it, then
+   draft the line sized to the duration (`ugc-craft`'s word-count → duration method) and show it
+   in the cost disclosure (Step 5) so the user reads it BEFORE paying. On a storyboard the line
+   lives on the card (`voiceover.line`) and becomes the clip prompt's dialogue (`She says: "…"`).
+2. **If no line: "Want a music bed instead?"** — offer libi's free, on-device
+   `libi.generate_music` (ACE-Step; hand the bed to the `music-creation` skill after the clips
+   exist), or the user's own music provider when they have one connected, or *ambient only*.
+   A "no line" answer is what "silent by design" means below — it is the user's choice, never
+   your default.
+
+Native audio stays ON either way: a no-line clip still renders ambient/SFX (`generate_audio =
+true`, no dialogue in the prompt) and the music bed is laid under it as a separate clip.
+
+**If nobody can answer** (an automated run that told you to settle questions with defaults), the
+default is a **spoken line drafted from the brief**: a voice-over narration line sized to the
+duration — narration fits ANY shot, b-roll and product macros included, so "there is no speaker in
+frame" is not a reason to skip it — put in the prompt as dialogue and shown in the cost disclosure.
+State the audio decision in your reply. The one thing you may not do is decide "no line" on the
+user's behalf, silently or with a reason.
+
 When generating **any AI video clip on a model with native audio** (Seedance 2.0, Veo 3.1):
 - **Default `generate_audio = true`.** If the beat has dialogue or a speaking presenter, the voice
   is generated natively, baked into the clip. Do NOT set `generate_audio = false` to "keep it
@@ -241,8 +269,9 @@ When generating **any AI video clip on a model with native audio** (Seedance 2.0
   with lip-sync) is owned by the **`voice-replacement`** skill (user-triggered); the generation-time
   native-vs-carry policy is `voiceover-production`. Don't decide audio replacement here.
 - **Silent beats are fine when the beat is silent by design** (pure b-roll / product macro with no
-  spoken line) — this rule targets spoken beats, not ambient-only shots. A silent beat still leaves
-  `generate_audio = true` so ambient/SFX is rendered; just write no dialogue.
+  spoken line, or a "no line" answer at the voice-line intake above) — this rule targets spoken
+  beats, not ambient-only shots. A silent beat still leaves `generate_audio = true` so ambient/SFX
+  is rendered; just write no dialogue. A whole brief with no line gets the music-bed offer.
 
 **Prompt ↔ audio coherence (mandatory).** If you write spoken lines in a prompt (`She says: "…"`),
 the clip MUST be `generate_audio = true`. Never write dialogue into a clip you are silencing — the

@@ -19,9 +19,23 @@ import {
   type ExportFormat,
   type UseExportFlowResult,
 } from "@/hooks/editor/use-export-flow";
+import type { GraphicsQuality } from "@/lib/engine/types";
 import { useExportDefaults } from "@/lib/queries/export-defaults";
-import { presetDimensions, isUpscaling as computeIsUpscaling } from "@/lib/export/quality";
+import {
+  presetDimensions,
+  isUpscaling as computeIsUpscaling,
+  resolveOutputDimensions,
+  DEFAULT_GRAPHICS_QUALITY,
+  GRAPHICS_SHARPNESS_WARNING,
+  graphicsLosesSharpness,
+} from "@/lib/export/quality";
 import { revealFile, pickDirectory, hasElectronBridge } from "@/lib/shell/client";
+
+/** The dialog offers no Custom UI (removed — API-only now), so its media
+ *  quality state never takes the "custom" value. Narrowing the local state
+ *  to this type lets `presetDimensions`/`resolveOutputDimensions` calls
+ *  below skip re-litigating the custom-dims case. */
+type DialogQuality = Exclude<ExportQuality, "custom">;
 
 interface ExportDialogProps {
   pieceId: string | null;
@@ -30,11 +44,11 @@ interface ExportDialogProps {
    *  the upscaling warning. */
   compositionWidth: number;
   compositionHeight: number;
-  /** Whether the composition has any overlays (text/image/video/code/three).
-   *  Overlays are rendered procedurally at the export resolution, so upscaling
-   *  DOES sharpen them (unlike the base video) — this flips the upscaling copy
-   *  from "no benefit" to "overlays render sharper". */
-  hasOverlays?: boolean;
+  /** Whether the composition has any graphics overlays (text/code/3D, or a
+   *  tracked overlay whose content is one of those). Gates whether the
+   *  "Text, code & 3D" resolution row renders at all — a piece with no
+   *  graphics has nothing for that tier to affect. */
+  hasGraphics?: boolean;
   flow: UseExportFlowResult;
   hasSnapshot: boolean;
   hasDraft: boolean;
@@ -60,7 +74,7 @@ export function ExportDialog(props: ExportDialogProps) {
     pieceName,
     compositionWidth,
     compositionHeight,
-    hasOverlays = false,
+    hasGraphics = false,
     flow,
     hasSnapshot,
     hasDraft,
@@ -101,9 +115,10 @@ export function ExportDialog(props: ExportDialogProps) {
     !hasDraft && hasSnapshot ? "snapshot" : "draft",
   );
   const [format, setFormat] = useState<ExportFormat>(defaults?.format ?? "mp4");
-  const [quality, setQuality] = useState<ExportQuality>(defaults?.quality ?? "source");
-  const [customW, setCustomW] = useState(1920);
-  const [customH, setCustomH] = useState(1080);
+  const [quality, setQuality] = useState<DialogQuality>(defaults?.quality ?? "source");
+  const [graphicsQuality, setGraphicsQuality] = useState<GraphicsQuality>(
+    defaults?.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
+  );
   const [filename, setFilename] = useState<string>(pieceName ?? "libi-export");
   const [folderOverride, setFolderOverride] = useState<string | null>(null);
 
@@ -119,6 +134,7 @@ export function ExportDialog(props: ExportDialogProps) {
     if (defaults) {
       setFormat(defaults.format);
       setQuality(defaults.quality);
+      setGraphicsQuality(defaults.graphicsQuality);
     }
   }
 
@@ -128,16 +144,40 @@ export function ExportDialog(props: ExportDialogProps) {
     if (!hasDraft && hasSnapshot) setSource("snapshot");
   }
 
-  const targetDims = useMemo(() => {
+  // The media choice's OWN frame, ignoring graphics entirely — this is what
+  // the media upscaling warning judges (upscaling the base video/images past
+  // the composition), never the graphics tier pushing the output larger.
+  // Derived from the SAME short-edge logic the server uses, rather than a
+  // second hardcoded table — a stale copy here is what showed "1920×1080"
+  // (and a false upscaling warning) for a portrait export.
+  const mediaDims = useMemo(() => {
     if (quality === "source") return { width: compositionWidth, height: compositionHeight };
-    if (quality === "custom") return { width: customW, height: customH };
-    // Derive from the SAME short-edge logic the server uses, rather than a
-    // second hardcoded table — a stale copy here is what showed "1920×1080"
-    // (and a false upscaling warning) for a portrait export.
     return presetDimensions(quality, compositionWidth, compositionHeight);
-  }, [quality, compositionWidth, compositionHeight, customW, customH]);
+  }, [quality, compositionWidth, compositionHeight]);
 
-  const isUpscaling = computeIsUpscaling(targetDims, compositionWidth, compositionHeight);
+  const mediaIsUpscaling = computeIsUpscaling(mediaDims, compositionWidth, compositionHeight);
+
+  // The actual output frame — the larger of the media and (when the piece
+  // has graphics) graphics tiers, per resolveOutputDimensions. Drives the
+  // "Output W×H" hint on the media field.
+  const outputDims = useMemo(
+    () =>
+      resolveOutputDimensions({
+        quality,
+        graphicsQuality,
+        hasGraphics,
+        sourceWidth: compositionWidth,
+        sourceHeight: compositionHeight,
+      }),
+    [quality, graphicsQuality, hasGraphics, compositionWidth, compositionHeight],
+  );
+
+  // Only warn when the text really comes out below 4K: media at 4K already
+  // raises the frame there, whatever the graphics choice says.
+  const fullGraphics = presetDimensions(DEFAULT_GRAPHICS_QUALITY, compositionWidth, compositionHeight);
+  const graphicsWarning =
+    graphicsLosesSharpness(graphicsQuality) &&
+    outputDims.width * outputDims.height < fullGraphics.width * fullGraphics.height;
 
   const isRunning = flow.status === "starting" || flow.status === "running";
 
@@ -159,22 +199,13 @@ export function ExportDialog(props: ExportDialogProps) {
       filename: stem,
       format,
       quality,
-      customWidth: quality === "custom" ? customW : undefined,
-      customHeight: quality === "custom" ? customH : undefined,
+      // Sent even when hasGraphics is false — the server ignores it for a
+      // graphics-free piece, and keeping it always-present means it never
+      // silently drops out of the payload if graphics get added later.
+      graphicsQuality,
       destFolder: folderOverride ?? undefined,
     });
-  }, [
-    pieceId,
-    filename,
-    pieceName,
-    flow,
-    source,
-    format,
-    quality,
-    customW,
-    customH,
-    folderOverride,
-  ]);
+  }, [pieceId, filename, pieceName, flow, source, format, quality, graphicsQuality, folderOverride]);
 
   const handlePickFolder = useCallback(async () => {
     const picked = await pickDirectory(folder);
@@ -311,58 +342,42 @@ export function ExportDialog(props: ExportDialogProps) {
               />
             </Field>
 
-            <Field
-              label="Quality"
-              hint={
-                quality === "source"
-                  ? `${compositionWidth}×${compositionHeight} (source)`
-                  : `${targetDims.width}×${targetDims.height}`
-              }
-            >
+            <Field label="Videos & images" hint={`Output ${outputDims.width}×${outputDims.height}`}>
               <Segmented
                 value={quality}
-                onChange={(v) => setQuality(v as ExportQuality)}
+                onChange={(v) => setQuality(v as DialogQuality)}
                 options={[
-                  { value: "source", label: "Source" },
+                  { value: "source", label: "Original" },
                   { value: "1080p", label: "1080p" },
                   { value: "1440p", label: "1440p" },
                   { value: "4k", label: "4K" },
-                  { value: "custom", label: "Custom" },
                 ]}
               />
-              {quality === "custom" && (
-                <div className="mt-2 flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={customW}
-                    onChange={(e) => setCustomW(parseInt(e.target.value, 10) || 0)}
-                    className="w-24"
-                    aria-label="Width"
-                  />
-                  <span className="text-xs text-muted-foreground">×</span>
-                  <Input
-                    type="number"
-                    value={customH}
-                    onChange={(e) => setCustomH(parseInt(e.target.value, 10) || 0)}
-                    className="w-24"
-                    aria-label="Height"
-                  />
-                  <span className="text-xs text-muted-foreground">px</span>
-                </div>
-              )}
-              {isUpscaling && (
+              {mediaIsUpscaling && (
                 <p className="mt-2 rounded bg-amber-500/10 px-2 py-1.5 text-xs text-amber-600 dark:text-amber-400">
-                  {hasOverlays
-                    ? `The ${compositionWidth}×${compositionHeight} video will be upscaled — it won't gain detail — but text, graphics & 3D overlays are re-rendered sharp at this resolution. Larger file.`
-                    : `Upscaling from ${compositionWidth}×${compositionHeight} — the file will be larger without added detail.`}
-                </p>
-              )}
-              {quality === "source" && hasOverlays && compositionHeight < 1080 && (
-                <p className="mt-2 rounded bg-muted px-2 py-1.5 text-xs text-muted-foreground">
-                  {`Overlays render at the source resolution (${compositionWidth}×${compositionHeight}). For crisper text & graphics, pick 1080p or higher — the video is upscaled, but overlays stay sharp.`}
+                  {`Videos and images are upscaled from ${compositionWidth}×${compositionHeight}: no added detail, larger file.`}
                 </p>
               )}
             </Field>
+
+            {hasGraphics && (
+              <Field label="Text, code & 3D">
+                <Segmented
+                  value={graphicsQuality}
+                  onChange={(v) => setGraphicsQuality(v as GraphicsQuality)}
+                  options={[
+                    { value: "1080p", label: "1080p" },
+                    { value: "1440p", label: "1440p" },
+                    { value: "4k", label: "4K" },
+                  ]}
+                />
+                {graphicsWarning && (
+                  <p className="mt-2 rounded bg-amber-500/10 px-2 py-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    {GRAPHICS_SHARPNESS_WARNING}
+                  </p>
+                )}
+              </Field>
+            )}
 
             <Field label="Save to">
               <div className="flex items-center gap-2">

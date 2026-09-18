@@ -389,6 +389,12 @@ if (dryRun) {
   console.log("\n✅ dry run complete — nothing was published.");
   process.exit(0);
 }
+// npm has accepted the package: from here the version is permanent. Tell the
+// workflow now, so its push of the version commit + tag still runs if the
+// verification below fails on a lagging CDN (release-npm.yml).
+if (process.env.GITHUB_OUTPUT) {
+  require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, "published=true\n");
+}
 // A publish's WRITES land before its READS do. npm serves the per-version
 // document and the aggregated packument from different caches, and a brand-new
 // scoped package's packument lags: on 2026-08-14 `npm view` answered E404 for

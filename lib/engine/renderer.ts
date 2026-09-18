@@ -6,6 +6,7 @@ import type { Track } from '@/lib/tracking/types';
 import type { ThreeOverlayInstance } from './three-overlay';
 import type { OverlayQuadInstance } from './overlay-quad';
 import { drawOverlay } from './overlay-renderer';
+import { drawWithBalancedState } from './canvas-state';
 import { overlaysActiveAt } from './overlays';
 import type { ContentBox } from '@/lib/overlays/code-content-fit';
 import { clamp01 } from './overlay-timing';
@@ -120,6 +121,12 @@ export function renderFrame(
   threeScenes?: Record<string, ThreeOverlayInstance>,
   spatialQuads?: Record<string, OverlayQuadInstance>,
   codeContentBoxes?: Record<string, ContentBox | null>,
+  /** Fired once per (overlay, frame) whose draw threw and was skipped —
+   *  in addition to the console warning below. The export loop uses this to
+   *  collect a bounded, deduped `droppedOverlays` list for the export result
+   *  (QA 2026-09-18 B1: a dropped overlay used to be visible only as an
+   *  info-level console line, with the export still reporting success). */
+  onOverlayDropped?: (overlayId: string, message: string) => void,
 ): void {
   const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
   if (!ctx) {
@@ -164,12 +171,12 @@ export function renderFrame(
       const active = overlaysActiveAt(composition.overlays, globalTime);
       for (const overlay of active) {
         // Isolate each overlay: a broken code/3D-text/three overlay must not
-        // blank the background + sibling overlays. drawOverlay save()/restore()s
-        // internally, but a throw mid-draw could leave the ctx stack unbalanced,
-        // so we snapshot depth and rebalance on failure.
+        // blank the background + sibling overlays, and must not leave its
+        // save()/clip on the stack — drawWithBalancedState unwinds whatever
+        // the draw pushed, thrown or not.
         const savedAlpha = baseCtx.ctx.globalAlpha;
         try {
-          drawOverlay(overlay, {
+          drawWithBalancedState(baseCtx.ctx, () => drawOverlay(overlay, {
             ...baseCtx,
             // Global-timeline coordinates for overlay timing.
             frame: globalFrame,
@@ -193,10 +200,14 @@ export function renderFrame(
             // before this overlay draws — order of operations is safe since the
             // effect clips to its own bbox.
             sourceCanvas: canvas as HTMLCanvasElement | OffscreenCanvas,
-          });
+          }));
         } catch (err) {
           baseCtx.ctx.globalAlpha = savedAlpha;
           warnOnceDraw(`overlay:${overlay.id}`, err);
+          if (onOverlayDropped) {
+            const message = err instanceof Error ? err.message : String(err);
+            onOverlayDropped(overlay.id, message);
+          }
         }
       }
     }

@@ -417,8 +417,13 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
   // a serif fallback because it asked for "Inter", and nothing reported it
   // for twenty hours. This only reports; `font` is left byte-identical and a
   // bad family never makes the save throw.
+  // An overlay with a `fontFileId` renders its uploaded font (registered as
+  // `libifont-<id>` by the preview and the chromium render page, `fontfile=`
+  // on the ffmpeg path) whatever family `font` names, so it can't be
+  // unresolved — naming the family libi.upload_font returned warned on every
+  // save (Final QA O-F2), noise that trains people to ignore the real one.
   const textOverlays = (manifest.overlays ?? []).filter(
-    (o): o is Extract<PersistedOverlay, { kind: "text" }> => o.kind === "text",
+    (o): o is Extract<PersistedOverlay, { kind: "text" }> => o.kind === "text" && !o.fontFileId,
   );
   const badFamilies = unresolvedFamilies(textOverlays.map((o) => o.font));
   if (badFamilies.length > 0) {

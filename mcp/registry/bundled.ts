@@ -78,11 +78,17 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
         // the johnvansickle build ran perfectly and had no drawtext filter.
         // Assert the capability itself.
         capabilityCheck: {
-          args: ["-filters"],
           // drawtext is what every text overlay on the ffmpeg export path
-          // compiles to. Without it `ffmpeg-overlay` fails outright and the
-          // user just sees a failed export.
-          mustContain: ["drawtext"],
+          // compiles to, and since 2026-09-18 its spec places text with
+          // `y_align` (ffmpeg ≥ 6.1) — a 4.4 build has drawtext and still
+          // fails every text export on the unknown option. drawtext's own
+          // option list answers both at once: `y_align` appears only when the
+          // filter exists AND is new enough. ("drawtext" is not a usable
+          // token here: "Unknown filter 'drawtext'" contains it.) Every
+          // download source above is a current release, so a failing probe
+          // re-fetches one that passes; it never blocks a good install.
+          args: ["-h", "filter=drawtext"],
+          mustContain: ["y_align"],
         },
         downloadUrl: {
           darwin: {

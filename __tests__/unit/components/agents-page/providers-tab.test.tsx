@@ -1558,3 +1558,57 @@ describe("Providers tab — legacy key notices", () => {
     expect(ackLegacy).toHaveBeenCalledWith("r1");
   });
 });
+
+describe("Providers tab — provider_connected is the OBSERVED success, never the click", () => {
+  const falOnClaude = { agent: "claude", name: "fal-ai", providerId: "fal", transport: "http", status: "connected", scope: "user" };
+
+  it("Add, then detection reads the provider connected on that agent → provider_connected once, with the same enums as the opened command", async () => {
+    bothReady();
+    const { rerender } = renderTab();
+    await click("fal", /add to claude code/i);
+    // The click itself: the host's own terminal event plus the command event — and no connect yet.
+    expect(trackEvent.mock.calls.filter(([name]) => name !== "setup_terminal_opened")).toEqual([
+      ["provider_command_opened", { provider: "fal", agent: "claude", surface: "providers" }],
+    ]);
+    connected = [falOnClaude];
+    rerender(tabUi());
+    expect(trackEvent).toHaveBeenCalledWith("provider_connected", { provider: "fal", agent: "claude", surface: "providers" });
+    // Forgotten once counted: a re-render with the same detection adds nothing.
+    rerender(tabUi());
+    expect(trackEvent.mock.calls.filter(([name]) => name === "provider_connected")).toHaveLength(1);
+  });
+
+  it("the row a libi.suggest_provider link narrowed the tab to reports surface suggestion, on the command and on the connect", async () => {
+    bothReady();
+    const { rerender } = renderTab({ provider: "fal" });
+    await click("fal", /add to claude code/i);
+    expect(trackEvent).toHaveBeenCalledWith("provider_command_opened", { provider: "fal", agent: "claude", surface: "suggestion" });
+    connected = [falOnClaude];
+    rerender(tabUi({ provider: "fal" }));
+    expect(trackEvent).toHaveBeenCalledWith("provider_connected", { provider: "fal", agent: "claude", surface: "suggestion" });
+  });
+
+  it("a Remove is never waited on: the provider still reading connected afterwards counts nothing", async () => {
+    bothReady();
+    connected = [falOnClaude];
+    const { rerender } = renderTab();
+    await click("fal", /remove/i);
+    expect(trackEvent).toHaveBeenCalledWith("provider_command_opened", { provider: "fal", agent: "claude", surface: "providers" });
+    rerender(tabUi());
+    expect(trackEvent).not.toHaveBeenCalledWith("provider_connected", expect.anything());
+  });
+
+  it("a Codex last-known (stale) listing that says connected is not the command's doing", async () => {
+    bothReady();
+    const { rerender } = renderTab();
+    showAgent("codex");
+    await click("fal", /add to codex/i);
+    connected = [{ ...falOnClaude, agent: "codex", scope: undefined }];
+    providersCodex = "stale";
+    rerender(tabUi());
+    expect(trackEvent).not.toHaveBeenCalledWith("provider_connected", expect.anything());
+    providersCodex = undefined;
+    rerender(tabUi());
+    expect(trackEvent).toHaveBeenCalledWith("provider_connected", { provider: "fal", agent: "codex", surface: "providers" });
+  });
+});

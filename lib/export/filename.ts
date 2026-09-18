@@ -33,7 +33,13 @@ export function sanitizeFilename(stem: string): string {
  *  use `claimExportPath` if you need race-safe behaviour. */
 export function resolveExportPath(folder: string, baseStem: string, extWithoutDot: string): string {
   const ext = extWithoutDot.replace(/^\./, "");
-  const safe = sanitizeFilename(baseStem);
+  // An agent or user who types "clip.mp4" for an mp4 export means the stem
+  // "clip", not "clip.mp4.mp4". Only the SAME extension is stripped — a
+  // "v1.2" or "cut.mov" stem is kept as written.
+  const stem = baseStem.trim().toLowerCase().endsWith(`.${ext.toLowerCase()}`)
+    ? baseStem.trim().slice(0, -(ext.length + 1))
+    : baseStem;
+  const safe = sanitizeFilename(stem);
   const candidate = path.join(folder, `${safe}.${ext}`);
   if (!fs.existsSync(candidate)) return candidate;
   for (let n = 1; n < 1000; n++) {

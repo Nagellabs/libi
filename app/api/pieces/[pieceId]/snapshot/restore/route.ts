@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { storyboardBusyResponse } from "@/lib/storyboard/busy-response";
 import { restoreSnapshot } from "@/lib/composition/lifecycle";
 
 interface RouteParams {
@@ -15,6 +16,6 @@ export async function POST(req: Request, { params }: RouteParams) {
     await restoreSnapshot(pieceId, body.snapshotId);
     return NextResponse.json({ ok: true });
   } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 500 });
+    return storyboardBusyResponse(err) ?? NextResponse.json({ error: (err as Error).message }, { status: 500 });
   }
 }

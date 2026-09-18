@@ -134,4 +134,35 @@ describe("saveManifest — unresolvable font warning", () => {
 
     expect(serverLogger.warn).not.toHaveBeenCalled();
   });
+
+  // Final QA O-F2: naming the family libi.upload_font returned
+  // (`libifont-<id>`) warned on every save, though the overlay renders that
+  // font everywhere — through its fontFileId, which is what the preview and
+  // both export paths draw with. Such an overlay's `font` family isn't what
+  // renders, so it can't be "unresolved".
+  function textOverlay(font: string, fontFileId?: string) {
+    return {
+      id: "o1", kind: "text" as const, startTime: 0, duration: 1,
+      rect: { x: 0, y: 0, width: 100, height: 100 }, z: 0, opacity: 1,
+      content: "hi", font, color: "#fff", align: "left" as const,
+      ...(fontFileId ? { fontFileId } : {}),
+    };
+  }
+
+  it("does not warn for an overlay drawn with an uploaded font (fontFileId)", async () => {
+    await saveManifest(PIECE_ID, {
+      width: 1920, height: 1080, fps: 30,
+      overlays: [textOverlay("48px libifont-309bf7b0", "309bf7b0")],
+    });
+    expect(serverLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it("still warns when the uploaded family is named without its fontFileId (nothing loads it)", async () => {
+    await saveManifest(PIECE_ID, {
+      width: 1920, height: 1080, fps: 30,
+      overlays: [textOverlay("48px libifont-309bf7b0")],
+    });
+    expect(serverLogger.warn).toHaveBeenCalledTimes(1);
+  });
 });
+

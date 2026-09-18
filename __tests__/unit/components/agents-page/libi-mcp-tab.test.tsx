@@ -170,6 +170,7 @@ vi.mock("@/lib/mcp-scroll-intent", async (orig) => ({
 }));
 
 import { LibiMcpTab } from "@/components/agents-page/libi-mcp-tab/libi-mcp-tab";
+import { trackEvent } from "@/lib/analytics/client";
 import { GlobalSetupTab } from "@/components/agents-page/global-setup-tab/global-setup-tab";
 import { ProvidersTab } from "@/components/agents-page/providers-tab/providers-tab";
 import { SetupTerminalHost, useSetupTerminalHost } from "@/components/agents-page/setup-terminal-host";
@@ -1591,5 +1592,61 @@ describe("which tab holds what", () => {
     expect(screen.getByText("npx @nagellabs/libi connect", { exact: true })).toBeInTheDocument();
     expect(screen.queryByTestId("endpoint-card")).toBeNull();
     expect(screen.queryByTestId("extensions")).toBeNull();
+  });
+});
+
+describe("Global setup tab — libi_mcp_connected is the OBSERVED registration, never the click", () => {
+  function tree(qc: QueryClient) {
+    return (
+      <QueryClientProvider client={qc}>
+        <SetupTerminalHost>
+          <GlobalSetupTab />
+        </SetupTerminalHost>
+      </QueryClientProvider>
+    );
+  }
+
+  it("Connect reports nothing on the click; the registration reading connected afterwards reports it once", async () => {
+    vi.mocked(trackEvent).mockClear();
+    const qc = new QueryClient();
+    const { rerender } = render(tree(qc));
+    await act(async () => {
+      fireEvent.click(within(screen.getByTestId("libi-agent-row-claude-code")).getByRole("button", { name: /^connect$/i }));
+    });
+    expect(trackEvent).toHaveBeenCalledWith("setup_terminal_opened", { surface: "global-setup", action: "connect-libi" });
+    expect(trackEvent).not.toHaveBeenCalledWith("libi_mcp_connected", expect.anything());
+
+    registration = { "claude-code": { state: "connected", scope: "user" }, codex: { state: "not-connected" } };
+    act(() => rerender(tree(qc)));
+    expect(screen.getByTestId("libi-agent-row-claude-code")).toHaveTextContent("Connected");
+    expect(trackEvent).toHaveBeenCalledWith("libi_mcp_connected", { agent: "claude-code", action: "connect-libi", surface: "global-setup" });
+    act(() => rerender(tree(qc)));
+    expect(vi.mocked(trackEvent).mock.calls.filter(([name]) => name === "libi_mcp_connected")).toHaveLength(1);
+  });
+
+  it("Reconnect from an old port reports action reconnect-libi, and a stale (last known) Codex listing does not count", async () => {
+    vi.mocked(trackEvent).mockClear();
+    registration = { "claude-code": { state: "not-connected" }, codex: { state: "stale-port", url: "http://127.0.0.1:3400/mcp?agent=codex" } };
+    status = { "claude-code": ready("/u/bin/claude"), codex: ready("/u/bin/codex") };
+    const qc = new QueryClient();
+    const { rerender } = render(tree(qc));
+    showAgent("codex");
+    await act(async () => {
+      fireEvent.click(within(screen.getByTestId("libi-agent-row-codex")).getByRole("button", { name: /reconnect/i }));
+    });
+    registration = { "claude-code": { state: "not-connected" }, codex: { state: "connected", stale: true } };
+    act(() => rerender(tree(qc)));
+    expect(trackEvent).not.toHaveBeenCalledWith("libi_mcp_connected", expect.anything());
+    registration = { "claude-code": { state: "not-connected" }, codex: { state: "connected" } };
+    act(() => rerender(tree(qc)));
+    expect(trackEvent).toHaveBeenCalledWith("libi_mcp_connected", { agent: "codex", action: "reconnect-libi", surface: "global-setup" });
+  });
+
+  it("an agent that was already connected when the tab opened reports nothing", () => {
+    vi.mocked(trackEvent).mockClear();
+    registration = { "claude-code": { state: "connected", scope: "user" }, codex: { state: "not-connected" } };
+    render(tree(new QueryClient()));
+    expect(screen.getByTestId("libi-agent-row-claude-code")).toHaveTextContent("Connected");
+    expect(trackEvent).not.toHaveBeenCalledWith("libi_mcp_connected", expect.anything());
   });
 });

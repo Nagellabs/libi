@@ -24,7 +24,7 @@ vi.mock("@/lib/db/client", () => ({
 // (the production-correct behaviour: report failed promptly, don't hang).
 //
 // One exception to the empty-stdout default: a `capabilityCheck` probe
-// (`ffmpeg -filters`) is checked for CONTENT, not just exit code, so an empty
+// (`ffmpeg -h filter=drawtext`) is checked for CONTENT, not just exit code, so an empty
 // answer means "this ffmpeg has no drawtext filter" and the dep is correctly
 // marked unusable. That is the F5 guard doing its job — but in these tests the
 // binary is a mock, so it must answer like a healthy one or every ffmpeg
@@ -44,7 +44,9 @@ vi.mock("child_process", async () => {
     // so it must answer like a healthy one.
     argv.includes("-filters")
       ? " TS. drawtext          V->V       Draw text on top of video frames.\n"
-      : "";
+      : argv.includes("filter=drawtext")
+        ? "Filter drawtext\n  y_align           <int>        ..FV.....T. set the y alignment\n"
+        : "";
 
   const execFile = vi.fn((...args: unknown[]) => {
     const cb = args[args.length - 1];

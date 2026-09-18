@@ -8,7 +8,17 @@ vi.mock("@/lib/db/client", () => ({
 }));
 
 const getPieceDefaults = vi.fn(() => ({ aspectRatioId: "9:16" }));
-vi.mock("@/lib/db/settings", () => ({ getPieceDefaults: () => getPieceDefaults() }));
+// The real primitive's contract: true the first time a name is marked, false after.
+const marked = new Set<string>();
+const markAnalyticsMilestoneOnce = vi.fn((name: string) => {
+  if (marked.has(name)) return false;
+  marked.add(name);
+  return true;
+});
+vi.mock("@/lib/db/settings", () => ({
+  getPieceDefaults: () => getPieceDefaults(),
+  markAnalyticsMilestoneOnce: (name: string) => markAnalyticsMilestoneOnce(name),
+}));
 
 const saveManifest = vi.fn(async () => {});
 const saveCurrentSnapshot = vi.fn(async () => {});
@@ -21,13 +31,19 @@ vi.mock("@/lib/composition/snapshots", () => ({
 }));
 
 vi.mock("@/lib/navigation-events", () => ({ navigationEmitter: { emit: vi.fn() } }));
-vi.mock("@/lib/analytics/server", () => ({ trackServerEvent: vi.fn() }));
+const trackServerEvent = vi.fn<(name: string, params?: Record<string, unknown>) => void>();
+vi.mock("@/lib/analytics/server", () => ({
+  trackServerEvent: (name: string, params?: Record<string, unknown>) => trackServerEvent(name, params),
+}));
 
 import { POST } from "@/app/api/pieces/route";
 
 beforeEach(() => {
   saveManifest.mockClear();
   saveCurrentSnapshot.mockClear();
+  trackServerEvent.mockClear();
+  marked.clear();
+  markAnalyticsMilestoneOnce.mockClear();
   getPieceDefaults.mockReturnValue({ aspectRatioId: "9:16" });
 });
 
@@ -47,6 +63,26 @@ describe("POST /api/pieces", () => {
       "p_new",
       expect.objectContaining({ width: 1920, height: 1080 }),
     );
+  });
+
+  it("counts every creation as piece_created but only the install's first as first_piece_created", async () => {
+    await POST();
+    await POST();
+    expect(trackServerEvent.mock.calls.filter(([n]) => n === "piece_created")).toEqual([
+      ["piece_created", { source: "ui" }],
+      ["piece_created", { source: "ui" }],
+    ]);
+    expect(trackServerEvent.mock.calls.filter(([n]) => n === "first_piece_created")).toEqual([["first_piece_created", undefined]]);
+    expect(markAnalyticsMilestoneOnce).toHaveBeenCalledWith("first_piece");
+  });
+
+  it("a milestone write that throws never fails the creation — the row is already committed", async () => {
+    markAnalyticsMilestoneOnce.mockImplementationOnce(() => {
+      throw new Error("settings table locked");
+    });
+    const res = await POST();
+    expect(res.status).toBe(201);
+    expect(trackServerEvent).not.toHaveBeenCalledWith("first_piece_created", undefined);
   });
 
   it("writes the snapshot too, so the two-state invariant holds from birth", async () => {

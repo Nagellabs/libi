@@ -15,19 +15,30 @@ const overlay: TextOverlayLike = {
 describe("drawtext fontfile", () => {
   it("emits fontfile= when a font file path is supplied", () => {
     const spec = drawtextSpecFor(overlay, 0, "/abs/path/MyFont.ttf");
-    expect(spec).toContain("fontfile=/abs/path/MyFont.ttf");
+    expect(spec).toContain("fontfile='/abs/path/MyFont.ttf'");
     // family name not used when a file is given
     expect(spec).not.toMatch(/(^|:)font=/);
   });
 
-  it("escapes a colon in the font file path", () => {
+  // A filter option value is read by TWO parsers: the filtergraph parser
+  // strips one level of quoting, then the option parser splits on ':' and
+  // strips one level of backslash escaping. The old one-level `\:` escape was
+  // eaten by the first parser, so the colon split the option — every Windows
+  // path (`C:\...`) failed the whole export (review of 640e4a59). The value is
+  // now escaped for the option parser and quoted for the graph parser.
+  it("escapes a colon in the font file path for both filter parsers", () => {
     const spec = drawtextSpecFor(overlay, 0, "/abs/Weird:Path/MyFont.ttf");
-    expect(spec).toContain("fontfile=/abs/Weird\\:Path/MyFont.ttf");
+    expect(spec).toContain("fontfile='/abs/Weird\\:Path/MyFont.ttf'");
+  });
+
+  it("escapes a Windows path with a drive colon, backslashes and an apostrophe", () => {
+    const spec = drawtextSpecFor(overlay, 0, "C:\\Users\\O'Brien\\f.ttf");
+    expect(spec).toContain("fontfile='C\\:\\\\Users\\\\O\\'\\''Brien\\\\f.ttf'");
   });
 
   it("falls back to font=<family> when no file path is supplied", () => {
     const spec = drawtextSpecFor(overlay, 0, undefined);
-    expect(spec).toContain("font=Inter");
+    expect(spec).toContain("font='Inter'");
     expect(spec).not.toContain("fontfile=");
   });
 });

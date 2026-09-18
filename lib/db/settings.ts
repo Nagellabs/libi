@@ -196,18 +196,23 @@ export function setNotificationsSetting(s: NotificationsSetting): void {
 // ---------------------------------------------------------------------------
 
 import { defaultExportFolder } from "@/lib/export/folder";
+import type { GraphicsQuality } from "@/lib/engine/types";
 
 export type ExportDefaultsSetting = {
   /** Absolute path. Null = use OS-aware default (~/Movies/libi on darwin, ~/Videos/libi elsewhere). */
   folder: string | null;
   format: "mp4" | "webm";
+  /** Media (videos & images) resolution default. */
   quality: "source" | "1080p" | "1440p" | "4k";
+  /** Text/code/3D resolution default. Absent in legacy stored JSON ⇒ "4k". */
+  graphicsQuality: GraphicsQuality;
 };
 
 const EXPORT_DEFAULTS_FALLBACK: ExportDefaultsSetting = {
   folder: null,
   format: "mp4",
   quality: "source",
+  graphicsQuality: "4k",
 };
 
 /** Read the export defaults. Falls back to OS-aware folder + MP4/Source if
@@ -234,6 +239,10 @@ export function getExportDefaults(): ExportDefaultsSetting {
         parsed.quality === "1080p" || parsed.quality === "1440p" || parsed.quality === "4k"
           ? parsed.quality
           : "source",
+      graphicsQuality:
+        parsed.graphicsQuality === "1080p" || parsed.graphicsQuality === "1440p" || parsed.graphicsQuality === "4k"
+          ? parsed.graphicsQuality
+          : "4k",
     };
   } catch {
     return { ...EXPORT_DEFAULTS_FALLBACK };

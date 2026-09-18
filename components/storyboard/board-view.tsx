@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ReactFlow,
   Background,
@@ -20,6 +20,7 @@ import "@xyflow/react/dist/style.css";
 import { Maximize, LayoutGrid } from "lucide-react";
 import { deriveBoardGraph } from "@/lib/storyboard/board-graph";
 import { gridLayout } from "@/lib/storyboard/board-layout";
+import { newNodeIds, fitReadyIds, allMeasured } from "@/lib/storyboard/board-fit";
 import { useUpdateLayout, type SchemasMap } from "@/lib/queries/storyboard";
 import { StoryboardBoardSkeleton } from "@/components/skeletons/storyboard-skeleton";
 import { cn } from "@/lib/utils";
@@ -99,11 +100,78 @@ export function BoardView({ pieceId, storyboard, schemas, sketchRevs = {} }: Boa
   const [nodes, setNodes, onNodesChange] = useNodesState<StoryboardNodeType>(rfNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(rfEdges);
 
+  // Captured on init so the toolbar buttons can drive viewport actions.
+  const rfRef = useRef<ReactFlowInstance<StoryboardNodeType, Edge> | null>(null);
+
+  // A card added after mount (the agent's add_storyboard_card) lands on the
+  // auto-grid, usually outside a viewport that was fitted to the earlier cards
+  // — the user had to zoom out to find it. Ids that appear after the first
+  // sync are marked pending, and the board re-fits once React Flow has
+  // MEASURED them (their first `dimensions` change below); fitting on the tick
+  // the node mounts centres on a 0×0 box. The initial mount keeps onInit's fit.
+  const knownIds = useRef<Set<string> | null>(null);
+  const pendingFit = useRef<Set<string>>(new Set());
+
   // Re-sync from props when the storyboard changes (SSE refetch: cards added /
   // removed / stage changed). Drag positions still persist because rfNodes is
   // derived from the persisted `layout` stored in the manifest.
-  useEffect(() => { setNodes(rfNodes); }, [rfNodes, setNodes]);
+  // Put every node back at its saved (persisted-layout) position. Carries each
+  // node's measured box over from the previous state: rfNodes are fresh
+  // objects, and a node without `measured` is invisible to fitView until React
+  // Flow re-measures it (see allMeasured / fitWhenMeasured below).
+  //
+  // Reads the saved nodes from a ref, not a closure: a failed save's onError
+  // can land up to 60 s after the drag (the lock timeout), after an SSE
+  // refetch has added a card. Restoring the nodes captured at drag end would
+  // hide that card.
+  const savedNodes = useRef(rfNodes);
+  // Updated after render, not during it (React may render and discard).
+  useLayoutEffect(() => {
+    savedNodes.current = rfNodes;
+  }, [rfNodes]);
+  const resetToSaved = useCallback(() => {
+    setNodes((cur) => {
+      const measured = new Map(cur.map((n) => [n.id, n.measured]));
+      return savedNodes.current.map((n) => (measured.get(n.id) ? { ...n, measured: measured.get(n.id) } : n));
+    });
+  }, [setNodes]);
+
+  useEffect(() => {
+    resetToSaved();
+    const ids = rfNodes.map((n) => n.id);
+    if (knownIds.current) {
+      for (const id of newNodeIds(knownIds.current, ids)) pendingFit.current.add(id);
+    }
+    knownIds.current = new Set(ids);
+  }, [rfNodes, resetToSaved]);
   useEffect(() => { setEdges(rfEdges); }, [rfEdges, setEdges]);
+
+  // Fit once EVERY node has a measured box — fitView ignores unmeasured nodes,
+  // and a fit against a subset zooms in on it (QA saw one card at 1.8× with the
+  // rest off-screen). Re-checks each frame, bounded so a node that never
+  // measures (hidden tab) can't loop forever.
+  const fitWhenMeasured = useCallback((attempt = 0) => {
+    const inst = rfRef.current;
+    if (!inst) return;
+    if (allMeasured(inst.getNodes()) || attempt >= 60) {
+      inst.fitView({ padding: 0.2, duration: 400 });
+      return;
+    }
+    requestAnimationFrame(() => fitWhenMeasured(attempt + 1));
+  }, []);
+
+  const handleNodesChange = useCallback<typeof onNodesChange>(
+    (changes) => {
+      onNodesChange(changes);
+      if (fitReadyIds(changes, pendingFit.current)) {
+        pendingFit.current.clear();
+        // Next frame: the measured size has been applied to the node state by
+        // then, so the fit includes the new card's real box.
+        requestAnimationFrame(() => fitWhenMeasured());
+      }
+    },
+    [onNodesChange, fitWhenMeasured],
+  );
 
   const onNodeDragStop = useCallback(() => {
     // Read the current node state (updated by onNodesChange during the drag)
@@ -112,11 +180,11 @@ export function BoardView({ pieceId, storyboard, schemas, sketchRevs = {} }: Boa
     for (const n of nodes) {
       positions[n.id] = { x: n.position.x, y: n.position.y };
     }
-    updateLayout.mutate({ positions });
-  }, [nodes, updateLayout]);
-
-  // Captured on init so the toolbar buttons can drive viewport actions.
-  const rfRef = useRef<ReactFlowInstance<StoryboardNodeType, Edge> | null>(null);
+    // A failed save (409 busy) refetches the SAME storyboard — structural
+    // sharing keeps its reference, so rfNodes never re-derives and the node
+    // would sit at a position that was never saved. Snap it back here.
+    updateLayout.mutate({ positions }, { onError: resetToSaved });
+  }, [nodes, updateLayout, resetToSaved]);
 
   // The board is hidden behind a skeleton until the initial fit-to-view settles,
   // so the user never sees the cards jump from their raw positions into the
@@ -146,9 +214,9 @@ export function BoardView({ pieceId, storyboard, schemas, sketchRevs = {} }: Boa
     setNodes((cur) =>
       cur.map((n) => (positions[n.id] ? { ...n, position: positions[n.id] } : n)),
     );
-    updateLayout.mutate({ positions });
+    updateLayout.mutate({ positions }, { onError: resetToSaved });
     requestAnimationFrame(() => rfRef.current?.fitView({ padding: 0.2, duration: 400 }));
-  }, [nodes, setNodes, updateLayout]);
+  }, [nodes, setNodes, updateLayout, resetToSaved]);
 
   return (
     <div className="relative h-full w-full">
@@ -161,7 +229,7 @@ export function BoardView({ pieceId, storyboard, schemas, sketchRevs = {} }: Boa
       <ReactFlow
         nodes={nodes}
         edges={edges}
-        onNodesChange={onNodesChange}
+        onNodesChange={handleNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeDragStop={onNodeDragStop}
         nodeTypes={nodeTypes}

@@ -26,6 +26,12 @@ import type { ContentBox } from "@/lib/overlays/code-content-fit";
  */
 const EXPORT_KEYFRAME_INTERVAL_S = 1;
 
+/** Cap on how many distinct dropped overlays ride in the export result — an
+ *  export with a broken code overlay throws on every frame; without a bound
+ *  the list would be unbounded (in practice it's deduped to one entry per
+ *  overlay id well before this, but this is the hard backstop). */
+const MAX_DROPPED_OVERLAYS = 20;
+
 /**
  * Exports a composition as a video file using MediaBunny.
  *
@@ -107,6 +113,17 @@ export async function exportVideo(
 
   await output.start();
 
+  // Collects overlays whose draw threw during this export, deduped by overlay
+  // id (the first message wins — later frames of the same broken overlay
+  // repeat the same throw) and bounded (see MAX_DROPPED_OVERLAYS). Surfaced
+  // as `droppedOverlays` in the returned ExportResult.
+  const droppedOverlays = new Map<string, string>();
+  const onOverlayDropped = (overlayId: string, message: string) => {
+    if (droppedOverlays.has(overlayId)) return;
+    if (droppedOverlays.size >= MAX_DROPPED_OVERLAYS) return;
+    droppedOverlays.set(overlayId, message);
+  };
+
   // Render and encode each frame via the unified `renderFrame()` pipeline.
   // It handles scene rendering (canvas vs. video), overlay compositing, and
   // canvas clear + resize internally — do not duplicate any of that here.
@@ -144,6 +161,7 @@ export async function exportVideo(
       threeScenes,
       spatialQuads,
       codeContentBoxes,
+      onOverlayDropped,
     );
 
     // Feed the rendered frame to the encoder. For a chunk, the timestamp is
@@ -179,5 +197,8 @@ export async function exportVideo(
     blob,
     duration,
     format: settings.format,
+    ...(droppedOverlays.size
+      ? { droppedOverlays: Array.from(droppedOverlays, ([id, message]) => ({ id, message })) }
+      : {}),
   };
 }

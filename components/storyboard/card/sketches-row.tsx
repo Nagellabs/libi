@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { StoryboardCard, GenParamValue } from "@/lib/storyboard/types";
 import { sketchSlotViews, partitionSketchRows, type SketchSlotView } from "@/lib/storyboard/sketch-row-view";
+import { cardAspect } from "@/lib/storyboard/card-aspect";
 import { MediaTile } from "./media-tile";
 import { MediaViewer } from "@/components/storyboard/media-viewer";
 
@@ -37,6 +38,10 @@ export function SketchesRow({ pieceId, card, sketchRevs, onEditParam }: Sketches
   if (views.length === 0) return null;
   const { pairedRows, sketchOnlyRow } = partitionSketchRows(views);
   const editable = !!onEditParam;
+  // Sketches are rendered in the card's generation frame (frameForCard), so the
+  // tile takes the same aspect — a 16:9 drawing in a fixed 9:16 box showed only
+  // its middle third until the viewer opened it.
+  const aspect = cardAspect(card) ?? undefined;
 
   // Plain render helpers — called as functions, NOT JSX elements, so React doesn't
   // remount their subtrees on every render.
@@ -51,6 +56,7 @@ export function SketchesRow({ pieceId, card, sketchRevs, onEditParam }: Sketches
       <MediaTile
         kind="image"
         width={64}
+        aspect={aspect}
         src={src}
         label={v.label}
         onView={() => setViewer({ src, title: `${v.label} — sketch` })}
@@ -64,6 +70,7 @@ export function SketchesRow({ pieceId, card, sketchRevs, onEditParam }: Sketches
       <MediaTile
         kind="image"
         width={64}
+        aspect={aspect}
         src={`/api/files/by-id/${v.imageFileId}/content`}
         label="image"
         onView={() => setViewer({ src: `/api/files/by-id/${v.imageFileId}/content`, title: `${v.label} — image` })}

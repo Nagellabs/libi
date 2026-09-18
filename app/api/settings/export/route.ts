@@ -12,6 +12,9 @@ const bodySchema = z.object({
   folder: z.string().nullable(),
   format: z.enum(["mp4", "webm"]),
   quality: z.enum(["source", "1080p", "1440p", "4k"]),
+  // Optional so an older client (or one that only edits the media field)
+  // doesn't clobber the stored graphics default — see PUT below.
+  graphicsQuality: z.enum(["1080p", "1440p", "4k"]).optional(),
 });
 
 export async function GET(): Promise<Response> {
@@ -52,10 +55,14 @@ export async function PUT(req: Request): Promise<Response> {
   try {
     // Normalize empty strings to null so "resolveExportFolder" uses the OS default.
     const folder = parsed.data.folder?.trim() ? parsed.data.folder : null;
-    setExportDefaults({ ...parsed.data, folder });
+    // Missing graphicsQuality keeps whatever is already stored (falling back
+    // to "4k" itself when nothing was ever stored) rather than resetting it.
+    const graphicsQuality = parsed.data.graphicsQuality ?? getExportDefaults().graphicsQuality;
+    setExportDefaults({ ...parsed.data, folder, graphicsQuality });
     return NextResponse.json({
       ...parsed.data,
       folder,
+      graphicsQuality,
       effectiveFolder: resolveExportFolder(),
       osDefaultFolder: defaultExportFolder(),
     });

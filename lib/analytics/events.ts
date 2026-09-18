@@ -42,12 +42,28 @@ export const EVENT_NAMES = [
   // npm/verification diagnostic routinely contains an absolute filesystem
   // path and must never reach an event param; only the bounded verdict does.
   "agent_install_failed",
+  // An agent REJECTED auth — the one observation that proves a sign-in
+  // missing (`lib/sessions/session-manager.ts#markAgentAuthFailure`, which is
+  // also what sets `needs-auth` readiness and clears the wizard's sign-in
+  // confirmation). Never inferred by probing credentials. Params: `agent` is
+  // the bounded `AnalyticsAgentId`; `stage` is `"session-start" | "prompt"`
+  // (`AuthNoteContext`) — codex rejects at `session/new`, Claude only at the
+  // first prompt, so the two arrive at different funnel steps.
+  "agent_auth_rejected",
   // First user-sent chat message this install — via the mark-once milestone
   // primitive (`markAnalyticsMilestoneOnce`, the same one `POST
   // /api/analytics/milestone` wraps for client callers), NOT fired per
   // message, or this would just be a message counter wearing a first_*
   // name. No params.
   "first_message_sent",
+  // First piece this install ever created, by either creation path — the
+  // New-piece button (`POST /api/pieces`) or the agent's `libi.create_piece`
+  // (the MCP child asks `POST /api/analytics/milestone`). Mark-once through
+  // `markAnalyticsMilestoneOnce("first_piece")`, so it is a funnel step and
+  // not a piece counter; `piece_created` / `tool_used` count the rest. The
+  // onboarding demo film is NOT a first piece: its runner builds the piece
+  // directly and reports `onboarding_piece_built` instead. No params.
+  "first_piece_created",
   // core creation (UI-initiated; agent-driven creation is covered by tool_used)
   "piece_created",
   "export_started",
@@ -80,6 +96,30 @@ export const EVENT_NAMES = [
   // observed connected — Skip fires nothing), `open-chat` (a session created).
   // `agent` is `claude-code | codex`. Fixed enums, no free text.
   "agent_wizard_step_completed",
+  // One of the five tabs of the `/agents` page was shown
+  // (components/agents-page/agents-page.tsx) — once per tab change, and once
+  // for the tab the page opened on. `page_view` sees only `/agents`: the tab
+  // is a query param, so without this the Global setup, Libi MCP and
+  // Providers surfaces are invisible in the funnel. `tab` is the `AgentsTab`
+  // union (`agents | global-setup | skills | libi-mcp | providers`).
+  "agents_tab_viewed",
+  // libi's endpoint OBSERVED registered with the user's own agent after a
+  // connect / reconnect command was opened on the Global setup tab
+  // (components/agents-page/global-setup-tab/connected-agents.tsx) — the
+  // registration read says `connected`, never the click. The wizard's own
+  // copy of this step is `agent_wizard_step_completed { step: "connect" }`;
+  // the `libi connect` CLI reports `cli_connected`. Params are construction-
+  // time enums: `agent` (`AnalyticsAgentId`), `action` (`connect-libi |
+  // reconnect-libi`), `surface` (`"global-setup"`).
+  "libi_mcp_connected",
+  // A session on libi's MCP endpoint opened from the user's OWN CLI — a
+  // request WITHOUT the in-app surface header (`mcp/http/server.ts`, via
+  // `mcp/analytics.ts#trackCliSessionOpened`). This is the ground truth that
+  // a connect actually gets used, whichever way the registration was made
+  // (wizard, Global setup, `libi connect`, by hand). Per session, so a CLI
+  // that reconnects counts again. The only param is `dialect: "claude" |
+  // "codex"` — the endpoint's `?agent=` query, bounded by construction.
+  "mcp_cli_session_opened",
   "terminal_session_started",
   // A newer @nagellabs/libi runtime was fetched + laid down from Settings
   // (applies at next launch). Fired server-side at the install success path in
@@ -89,6 +129,16 @@ export const EVENT_NAMES = [
   // life). This is the adoption signal for the npm-as-runtime model: how many
   // installs actually move off the snapshot their .app shipped with.
   "runtime_update_installed",
+  // An on-demand binary or asset install completed and was VERIFIED present
+  // (`mcp/registry/dependency-manager.ts#retryDep`, the path both `ensureDep`
+  // — the tracker's MediaPipe assets, yt-dlp before a download, uv before the
+  // tracking engine — and the Settings Retry button take). Since the boot
+  // diet, the first launch installs only node + ffmpeg/ffprobe; everything
+  // else lands here, on first use. Params are the bundled registry's ids —
+  // `extension` (the MCP id) and `dep` (the binary id) — bounded because
+  // `findBundledDep` throws for anything outside the registry before an
+  // install can start.
+  "dependency_installed",
   "version_restore",
   "overlay_added",
   "overlay_edited",
@@ -143,9 +193,20 @@ export const EVENT_NAMES = [
   // terminal exists, never on a refused spawn. Every param is a
   // construction-time enum: `provider` is a catalog `ProviderId`, `agent` is
   // `"claude" | "codex"` (the catalog's command key, NOT the registry id),
-  // `surface` is an `AnalyticsSurface`. The command text and any key are never
-  // sent.
+  // `surface` is `"suggestion"` while the tab is narrowed to the one row a
+  // `libi.suggest_provider` link (`?provider=`) opened it on — the in-app
+  // card or the CLI's printed URL — and `"providers"` otherwise, so the
+  // suggestion's conversion is readable. The command text and any key are
+  // never sent.
   "provider_command_opened",
+  // A provider OBSERVED connected on the Providers tab after an add, replace
+  // or sign-in command was opened for it — detection of the agent's own
+  // config reads `connected` for that provider and agent, never the click.
+  // (The name is the retired setup-card event's, re-used on purpose: it
+  // means the same thing to a reader — the user has this provider — with the
+  // key now in the agent's config instead of libi's.) Params are the same
+  // enums as `provider_command_opened`: `provider`, `agent`, `surface`.
+  "provider_connected",
   // The agent had no provider for a media kind and called
   // `libi.suggest_provider` (a card in the chat in-app, the commands as text
   // on a CLI). Fired from the MCP process on the tool's success path; the
@@ -166,13 +227,15 @@ export function isEventName(name: string): name is AnalyticsEventName {
 
 /** Where a setup action was initiated from — a closed, bounded set of UI
  *  surfaces, so every emit site draws from the same set instead of inventing
- *  its own string. `agents`, `global-setup`, `libi-mcp` and `providers` are tabs of
- *  the `/agents` page (each owns a setup terminal; the Providers tab's
- *  `provider_command_opened` reports `providers`); `chat-card` is the in-chat
- *  provider suggestion card; `sidebar` and `chat` are the editor's sidebar and
- *  chat panel; `settings` is the Settings page. Not every event can produce
- *  every member; each event's own comment says which. */
-export type AnalyticsSurface = "sidebar" | "chat" | "settings" | "agents" | "global-setup" | "libi-mcp" | "providers" | "chat-card";
+ *  its own string. `agents`, `global-setup` and `providers` are the three tabs
+ *  of the `/agents` page that own a setup terminal (`SetupSurface` in
+ *  lib/terminal/types.ts — the Libi MCP and Skills tabs open none);
+ *  `suggestion` is the Providers tab narrowed to the row a
+ *  `libi.suggest_provider` link opened it on. Not every event can produce
+ *  every member; each event's own comment says which. The editor's sidebar,
+ *  chat panel and Settings page, and the in-chat card itself, no longer
+ *  initiate setup actions and are not members. */
+export type AnalyticsSurface = "agents" | "global-setup" | "providers" | "suggestion";
 
 /** The catalog's command key, as the Providers tab's events report it. This
  *  is the `commands.{claude,codex}` selector from `lib/providers/catalog.ts`,

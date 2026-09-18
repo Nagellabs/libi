@@ -63,4 +63,40 @@ describe("renderFrame draw isolation", () => {
     expect(() => renderFrame(canvas, comp, 0, {}, undefined, undefined, compiled)).not.toThrow();
     expect(good).toHaveBeenCalledTimes(1);
   });
+
+  // QA 2026-09-18 B1: the throw was only visible as an info-level console
+  // line inside the render page — nothing structured reached the export
+  // result. renderFrame now accepts an optional callback so a caller (the
+  // export loop) can collect which overlays were skipped and why.
+  it("reports a throwing overlay's id and message via onOverlayDropped", () => {
+    const comp: Composition = {
+      id: "c", name: "c", width: 100, height: 100, fps: 30,
+      overlays: [codeOverlay("o1", 0)],
+    };
+    const { canvas } = mockCanvas();
+    const compiled = { o1: () => { throw new ReferenceError("ctx is not defined"); } };
+    const onOverlayDropped = vi.fn();
+    renderFrame(
+      canvas, comp, 0, {}, undefined, undefined, compiled,
+      undefined, undefined, undefined, undefined,
+      onOverlayDropped,
+    );
+    expect(onOverlayDropped).toHaveBeenCalledWith("o1", "ctx is not defined");
+  });
+
+  it("does not call onOverlayDropped when no overlay throws", () => {
+    const good = vi.fn((_ctx: DrawContext) => {});
+    const comp: Composition = {
+      id: "c", name: "c", width: 100, height: 100, fps: 30,
+      overlays: [codeOverlay("good", 0)],
+    };
+    const { canvas } = mockCanvas();
+    const onOverlayDropped = vi.fn();
+    renderFrame(
+      canvas, comp, 0, {}, undefined, undefined, { good },
+      undefined, undefined, undefined, undefined,
+      onOverlayDropped,
+    );
+    expect(onOverlayDropped).not.toHaveBeenCalled();
+  });
 });

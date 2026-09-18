@@ -15,6 +15,10 @@ import { eq } from "drizzle-orm";
 // MediaPipe assets on every tracker start and failed outright offline.
 
 vi.mock("@/lib/db/client", () => ({ getDb: vi.fn() }));
+const trackServerEvent = vi.fn();
+vi.mock("@/lib/analytics/server", () => ({
+  trackServerEvent: (name: string, params?: Record<string, unknown>) => trackServerEvent(name, params),
+}));
 
 const { BODY_A, BODY_B, SHA_A, SHA_B } = vi.hoisted(() => {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -151,6 +155,7 @@ describe("DependencyManager.ensureDep", () => {
       return new Response("std-binary-bytes", { status: 200 });
     }) as unknown as typeof fetch;
     customInstall.mockClear();
+    trackServerEvent.mockClear();
   });
 
   afterEach(() => {
@@ -182,6 +187,8 @@ describe("DependencyManager.ensureDep", () => {
 
     expect(global.fetch).not.toHaveBeenCalled();
     expect(depStatus("fake-vision")).toEqual(before);
+    // Nothing was installed, so nothing is counted as installed.
+    expect(trackServerEvent).not.toHaveBeenCalled();
   });
 
   it("multi-file dep with assets missing: downloads once and lands on runtimeStatus installed", async () => {
@@ -191,11 +198,16 @@ describe("DependencyManager.ensureDep", () => {
     expect(fs.readFileSync(path.join(visionDir, "models", "a.bin"), "utf8")).toBe(BODY_A);
     expect(fs.readFileSync(path.join(visionDir, ".install-token"), "utf8")).toBe(TOKEN);
     expect(depStatus("fake-vision")?.runtimeStatus).toBe("installed");
+    // Counted once, after the install was VERIFIED, with the registry's own
+    // ids and nothing else (no URL, no path, no size).
+    expect(trackServerEvent.mock.calls).toEqual([["dependency_installed", { extension: "fake-tracking", dep: "fake-vision" }]]);
 
     // And the very next call is the no-op path.
     vi.mocked(global.fetch).mockClear();
+    trackServerEvent.mockClear();
     await new DependencyManager().ensureDep("fake-tracking", "fake-vision");
     expect(global.fetch).not.toHaveBeenCalled();
+    expect(trackServerEvent).not.toHaveBeenCalled();
   });
 
   it("token-bearing standard dep already in bin/ with a matching token: no download", async () => {

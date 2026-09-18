@@ -87,7 +87,10 @@ Skip any the user already answered:
 6. **Model** — recommend a default, then VERIFY it at runtime with your provider's own
    schema and pricing tools (`references/providers/<id>.md` under this skill names them),
    and read its prompting guide in `ai-video-models`.
-7. **Voice / audio** — default ON (native model audio, per `ai-asset-generation`); confirm.
+7. **Voice / audio** — the voice-line intake from `ai-asset-generation` Step 6.6: a spoken
+   line (what it says, or "write it for me"), or no line — and if no line, offer a music bed
+   (libi's free on-device ACE-Step via `music-creation`, or the user's music provider) or
+   ambient only. Native model audio stays ON either way.
 
 ## Step 2 — Branch on stitch-vs-fully-AI
 - **Stitch** → hand to `stitching-multi-clip` (reuse the source's segments as separate scenes).
@@ -105,8 +108,8 @@ video is ~2 clips, not 7. The blocks map 1:1 to storyboard cards (Step 4).
 ## Step 4 — Generate (per card)
 Each clip is a Storyboard **card's take**. Compose its prompt using the chosen engine's guide
 (`ai-video-models`) + `ugc-craft` craft, then generate via `ai-asset-generation`. **No in-video
-text** — captions are overlays (Step 7). Voice: default `generate_audio=true` for beats with
-spoken lines. After Step 5 validation, `libi.attach_storyboard_clip` the take to its card and
+text** — captions are overlays (Step 7). Voice: `generate_audio=true` on every beat; a
+beat's dialogue is its card's `voiceover.line` from the intake. After Step 5 validation, `libi.attach_storyboard_clip` the take to its card and
 `libi.select_storyboard_take` to place the scene (a regen is a new take on the same card).
 
 ## Step 5 — Validate every clip

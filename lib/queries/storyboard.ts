@@ -1,4 +1,5 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
 import type { Storyboard } from "@/lib/storyboard/types";
 import type { CostSummary } from "@/lib/storyboard/cost";
 import type { CardPatch } from "@/lib/storyboard/repo";
@@ -36,6 +37,23 @@ export function useStoryboard(pieceId: string | null) {
   });
 }
 
+/** Throw with the server's own message (a 409 busy says why) when a save fails. */
+async function throwIfFailed(r: Response): Promise<void> {
+  if (r.ok) return;
+  const body = (await r.json().catch(() => null)) as { error?: string } | null;
+  throw new Error(body?.error ?? `HTTP ${r.status}`);
+}
+
+/** A failed save must not be silent (QA 2026-09-18 U1: a Board drag that hit
+ *  a held lock left the node at an unsaved position with only a console
+ *  error). Say so, and re-read the board so it shows what was actually saved. */
+function onSaveError(qc: QueryClient, pieceId: string) {
+  return (err: Error) => {
+    toast.error("Storyboard change not saved", { description: err.message });
+    void qc.invalidateQueries({ queryKey: storyboardKeys.detail(pieceId) });
+  };
+}
+
 export function useUpdateCard(pieceId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -43,10 +61,11 @@ export function useUpdateCard(pieceId: string) {
       const r = await fetch(`/api/pieces/${pieceId}/storyboard/cards/${cardId}`, {
         method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(patch),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await throwIfFailed(r);
       return r.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: storyboardKeys.detail(pieceId) }),
+    onError: onSaveError(qc, pieceId),
   });
 }
 
@@ -57,10 +76,11 @@ export function useUpdateLayout(pieceId: string) {
       const r = await fetch(`/api/pieces/${pieceId}/storyboard`, {
         method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ layout }),
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      await throwIfFailed(r);
       return r.json();
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: storyboardKeys.detail(pieceId) }),
+    onError: onSaveError(qc, pieceId),
   });
 }
 

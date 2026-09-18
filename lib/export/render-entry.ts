@@ -12,6 +12,7 @@
  */
 import { exportVideo } from "@/lib/engine/export";
 import { ensureBundledFontsLoaded } from "@/lib/fonts/load-client";
+import { loadOverlayFonts } from "@/lib/fonts/registry-client";
 import { getCompositionFrames } from "@/lib/engine/renderer";
 import { buildComposition } from "@/lib/composition/build-composition";
 import type {
@@ -288,6 +289,12 @@ export async function runRender({
     // width. See lib/fonts/load-client.ts for the measured proof.
     await ensureBundledFontsLoaded();
     console.log("[Render] bundled fonts loaded");
+    // Uploaded fonts (libi.upload_font → overlay.fontFileId), registered the
+    // way the preview does and awaited before the first frame. Without this
+    // they exported in the default face (QA 2026-09-18 recheck N5). Failures
+    // go back with the result so the server logs them.
+    const unloadedFonts = await loadOverlayFonts(payload.overlays ?? []);
+    if (unloadedFonts.length) console.warn("[Render] uploaded fonts failed to load", { unloadedFonts });
     // Register custom effect packages into THIS bundle's registry before any
     // frame is rendered — the render entry is a standalone esbuild bundle with
     // its own module instances, so the server's boot-time registration doesn't
@@ -394,6 +401,13 @@ export async function runRender({
     // which mean "output duration". The chunked path already posts totalFrames/fps;
     // this unifies the single-chunk path to the same semantics.
     fd.append("durationSeconds", String(result.duration));
+    // Overlays skipped this render because their draw threw (QA 2026-09-18
+    // B1) — forwarded to the server so it can log it loud and surface it in
+    // the export result, instead of only the info-level console line above.
+    if (result.droppedOverlays?.length) {
+      fd.append("droppedOverlays", JSON.stringify(result.droppedOverlays));
+    }
+    if (unloadedFonts.length) fd.append("unloadedFonts", JSON.stringify(unloadedFonts));
     fd.append("file", result.blob, `out.${settings.format}`);
     const up = await fetch("/api/export/render-result", {
       method: "POST",

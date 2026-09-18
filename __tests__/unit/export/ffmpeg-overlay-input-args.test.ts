@@ -256,4 +256,40 @@ describe("FfmpegOverlayBackend — inputOptionArgs stays index-parallel with inp
     expect(inputs).toHaveLength(2);
     expect(inputs.map((i) => i.opts)).toEqual([[], []]);
   });
+
+  // QA N2: the backend's own fallback (settings without audioBitrate) must be
+  // codec-aware too — 320k Opus fails on a mono source.
+  it.each([
+    ["webm", "vp9", "256000"],
+    ["mp4", "avc", "320000"],
+  ] as const)("falls back to the codec's default audio bitrate (%s)", async (format, codec, expected) => {
+    const db = vi.mocked(getDb)();
+    seedVideoFile(db, "base", "clip.mp4", { hasAlpha: false });
+    seedVideoFile(db, "clip-audio", "voice.m4a", { type: "audio", hasAlpha: null });
+    const composition = {
+      id: "c3", name: "c", width: 1080, height: 1920, fps: 30,
+      overlays: [
+        {
+          id: "s1", kind: "video", fileId: "base", videoUrl: "",
+          startTime: 0, duration: 2, z: 0, opacity: 1, fit: "cover",
+          rect: { x: 0, y: 0, width: 1080, height: 1920 },
+        },
+      ],
+      audioClips: [
+        { id: "a1", kind: "standalone", fileId: "clip-audio", startTime: 0, duration: 2, trimStart: 0, volume: 1, enabled: true },
+      ],
+    } as unknown as Composition;
+    const outputPath = path.join(tmp, `out3.${format}`);
+    vi.mocked(runFfmpeg).mockImplementation(async () => {
+      fs.writeFileSync(outputPath, Buffer.alloc(16));
+      return { stdout: "", stderr: "" };
+    });
+    await new FfmpegOverlayBackend().run({
+      composition,
+      settings: { format, codec, bitrate: 4_000_000, width: 1080, height: 1920, fps: 30 },
+      outputPath,
+    } as ExportContext);
+    const args = vi.mocked(runFfmpeg).mock.calls[0][0] as string[];
+    expect(args[args.indexOf("-b:a") + 1]).toBe(expected);
+  });
 });

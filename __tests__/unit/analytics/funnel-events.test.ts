@@ -38,10 +38,24 @@ describe("funnel events — allow-list", () => {
       "persona_prompt_shown",
       "agent_install_completed",
       "agent_install_failed",
+      "agent_auth_rejected",
       "first_message_sent",
+      "first_piece_created",
+      "libi_mcp_connected",
+      "mcp_cli_session_opened",
+      "provider_connected",
     ]) {
       expect(isEventName(n)).toBe(true);
     }
+  });
+
+  it("the first_* milestones are a closed set a reader can enumerate", () => {
+    expect(EVENT_NAMES.filter((n) => n.startsWith("first_")).sort()).toEqual([
+      "first_export",
+      "first_launch",
+      "first_message_sent",
+      "first_piece_created",
+    ]);
   });
 
   it("keeps every event name within GA4's limit", () => {

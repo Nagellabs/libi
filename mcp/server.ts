@@ -334,9 +334,10 @@ import { downloadVideo, YT_DLP_INSTALL_MB } from "@/mcp/tools/video-download-too
 import { runJobViaServer, legacyTripleFromRunJobResult } from "@/mcp/jobs-client";
 import { isTestMode } from "@/lib/test-mode";
 import { storyboardGet, addStoryboardCard, approveStoryboardStage, attachStoryboardKeyframe, attachStoryboardClip, setStoryboardGeneration, selectStoryboardTake, hideStoryboardTake, setStoryboardReference, editStoryboardCard } from "@/mcp/tools/storyboard-tools";
+import { makeError } from "@/mcp/tool-error";
 import { getModelSchemaCacheTool, saveModelSchemaCacheTool, invalidateModelSchemaCacheTool } from "@/mcp/tools/model-schema-tools";
 import { notify } from "@/mcp/notify";
-import { trackToolUsed, wrapRegisterToolWithTracking } from "@/mcp/analytics";
+import { trackMcpMilestone, trackToolUsed, wrapRegisterToolWithTracking } from "@/mcp/analytics";
 import { wrapRegisterToolWithContext } from "@/mcp/tool-call-context";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema";
@@ -346,14 +347,6 @@ import { eq } from "drizzle-orm";
 // `ToolResultOf<…>` — the sink only serializes, so it accepts either.
 function makeContent(result: tools.AnyToolResult) {
   return { content: [{ type: "text" as const, text: JSON.stringify(result) }] };
-}
-
-function makeError(err: unknown) {
-  const message = err instanceof Error ? err.message : String(err);
-  return {
-    content: [{ type: "text" as const, text: JSON.stringify({ success: false, error: message }) }],
-    isError: true,
-  };
 }
 
 function makeContext(pieceId: string, sessionId?: string): ToolContext {
@@ -1161,7 +1154,7 @@ export function createLibiMcpServer(
     "libi.upload_font",
     {
       description:
-        "Upload a custom font file (.ttf/.otf/.woff2) and return a fontFileId usable on text overlays. Reads the file from the local filesystem, infers its type from the extension, and stores it. Set the returned fontFileId on a text overlay (via libi.add_overlay / libi.update_overlay) to render that typeface in the preview and ffmpeg export.",
+        "Upload a custom font file (.ttf/.otf/.woff2) and return a fontFileId usable on text overlays. Reads the file from the local filesystem, infers its type from the extension, and stores it. Set the returned fontFileId on a text overlay (via libi.add_overlay / libi.update_overlay) to render that typeface in the preview and in every export (both the ffmpeg and the chromium-rendered paths). If a chromium-rendered export can't load it, the result lists it in \`unloadedFonts\` and that text renders in a fallback face.",
       inputSchema: UploadFontSchema.shape,
     },
     async (params) => {
@@ -1246,6 +1239,9 @@ export function createLibiMcpServer(
           const newPieceId = (result.data as { id: string }).id;
           notify.refreshQuery({ queryKey: "pieces" });
           notify.refreshQuery({ queryKey: "piece", pieceId: newPieceId });
+          // The funnel's first-piece step, mark-once on the server; the
+          // per-call count is `tool_used`.
+          trackMcpMilestone("first_piece", "first_piece_created");
         }
         return makeContent(result);
       } catch (err) {
@@ -3275,8 +3271,8 @@ export function createLibiMcpServer(
     "libi.export_video",
     {
       description:
-        "Export the piece's composition to a video file on disk. Output goes to the user's configured export folder (Settings → Export) unless `destFolder` is provided. Returns the absolute file path. Progress streams through `notifications/progress` so the chat UI shows a live tool call. ALWAYS confirm with the user before exporting — it produces a final file and runs for tens of seconds to minutes. Best quality at 'source' (preserves native dimensions); use '1080p'/'1440p'/'4k' only when the user requests a specific delivery spec. Upscaling from a lower-res source is allowed but produces a larger file without added detail. Exports that cannot be composited by ffmpeg (code overlays, 3D text, tracked layers, keyframed motion) render in headless Chromium; the FIRST such export downloads Chromium (~" +
-        `${CHROMIUM_DOWNLOAD_MB} MB) as its first step — say so to the user when you confirm.`,
+        "Export the piece's composition to a video file on disk. Output goes to the user's configured export folder (Settings → Export) unless `destFolder` is provided. Returns the absolute file path. Progress streams through `notifications/progress` so the chat UI shows a live tool call. ALWAYS confirm with the user before exporting — it produces a final file and runs for tens of seconds to minutes. Resolution has two parts: `quality` for videos and images ('source', the default, keeps the composition size) and `graphicsQuality` for text, code and 3D (default '4k'). The file is ONE frame, so when the piece has any text/code/3D overlay it is raised to the graphics tier: a 1080×1920 piece with captions exports at 2160×3840 by default (about 4× the file size, slower). Tell the user the resulting size when you confirm, and offer graphicsQuality '1080p' for a smaller, faster file. Upscaling videos adds no detail. Exports that cannot be composited by ffmpeg (code overlays, 3D text, tracked layers, keyframed motion) render in headless Chromium; the FIRST such export downloads Chromium (~" +
+        `${CHROMIUM_DOWNLOAD_MB} MB) as its first step — say so to the user when you confirm. The export still succeeds even if an overlay's draw function throws (e.g. a code overlay left with an invalid/empty body): that overlay is skipped for every frame and listed in the result's \`droppedOverlays\` (overlay id + error message). If present, tell the user which overlay was dropped and why, and offer to fix its draw function (read the codeFilePath) rather than assuming the export is complete. Likewise \`unloadedFonts\` (fontFileId + family + reason) lists uploaded fonts that failed to load in a chromium-rendered export: that text rendered in a fallback face — tell the user which font and why, and offer to re-upload it (libi.upload_font).`,
       inputSchema: exportVideoSchema,
     },
     async (params, extra) => {

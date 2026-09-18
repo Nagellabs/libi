@@ -2292,7 +2292,11 @@ export const exportVideoSchema = {
   quality: z
     .enum(["source", "1080p", "1440p", "4k", "custom"])
     .optional()
-    .describe("Target resolution preset. 'source' (default) preserves the composition's native dimensions. 'custom' requires customWidth + customHeight."),
+    .describe("Resolution for videos and images. 'source' (default) keeps the composition's own size. 'custom' requires customWidth + customHeight."),
+  graphicsQuality: z
+    .enum(["1080p", "1440p", "4k"])
+    .optional()
+    .describe("Resolution text, code and 3D overlays render at. Default '4k' (sharpest). The output file takes the larger of the two when the piece has text/code/3D."),
   customWidth: z.number().int().positive().optional().describe("Custom output width in pixels (only when quality='custom')."),
   customHeight: z.number().int().positive().optional().describe("Custom output height (only when quality='custom')."),
   destFolder: z.string().optional().describe("Absolute path to write to. Defaults to the user's configured export folder (Settings → Export). Always confirm with the user before overriding."),

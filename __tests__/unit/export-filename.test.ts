@@ -57,6 +57,15 @@ describe("resolveExportPath", () => {
     expect(resolveExportPath(dir, "x", "mp4")).toBe(path.join(dir, "x.mp4"));
     expect(resolveExportPath(dir, "x", ".mp4")).toBe(path.join(dir, "x.mp4"));
   });
+  it("does not double an extension the stem already carries", () => {
+    expect(resolveExportPath(dir, "x.mp4", "mp4")).toBe(path.join(dir, "x.mp4"));
+    expect(resolveExportPath(dir, "X.MP4", "mp4")).toBe(path.join(dir, "X.mp4"));
+    expect(resolveExportPath(dir, "clip.webm", ".webm")).toBe(path.join(dir, "clip.webm"));
+  });
+  it("keeps a different extension or a dotted stem as written", () => {
+    expect(resolveExportPath(dir, "cut.mov", "mp4")).toBe(path.join(dir, "cut.mov.mp4"));
+    expect(resolveExportPath(dir, "v1.2", "mp4")).toBe(path.join(dir, "v1.2.mp4"));
+  });
 });
 
 describe("claimExportPath", () => {

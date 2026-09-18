@@ -1,9 +1,10 @@
 // mcp/tools/storyboard-tools.ts
 import type { ToolContext, ToolResult } from "./types";
+import { isStoryboardBusyError } from "@/lib/storyboard/lock";
 import {
   loadStoryboard,
   loadCard,
-  saveCard,
+  mutateCard,
   getCardAbsolutePaths,
   attachCardArtifact,
   appendClipTake,
@@ -28,7 +29,7 @@ import { resolveInheritedRefs } from "@/lib/storyboard/resolve-refs";
 import { validateParams } from "@/lib/storyboard/gen-schema";
 import { nearestAspectOption } from "@/lib/storyboard/param-catalog";
 import { loadManifest } from "@/lib/composition/persistence";
-import type { GenSpec } from "@/lib/storyboard/types";
+import type { GenSpec, StoryboardCard } from "@/lib/storyboard/types";
 
 export async function storyboardGet(
   params: { pieceId: string },
@@ -72,6 +73,8 @@ export async function addStoryboardCard(
     const cardPaths = await getCardAbsolutePaths(params.pieceId, card.id);
     return { success: true, data: { cardId: card.id, stage: card.stage, card, cardPaths } };
   } catch (err) {
+    // A lock timeout goes up to the server's makeError, which marks it retryable.
+    if (isStoryboardBusyError(err)) throw err;
     return { success: false, error: (err as Error).message };
   }
 }
@@ -233,20 +236,26 @@ export async function approveStoryboardStage(
   params: { pieceId: string; cardId: string; stage: "schematic" | "keyframe" | "clip" },
   _ctx: ToolContext,
 ): Promise<ToolResult> {
-  const card = await loadCard(params.pieceId, params.cardId);
-  if (!card) return { success: false, error: `card not found: ${params.cardId}` };
-  // Enforce ladder gating. The only hard gate is the free schematic — the
-  // review-before-spend rung. The keyframe is OPTIONAL: a clip may be generated
-  // without one (prompt/text-to-video), so `clip` requires only the schematic,
-  // not an approved keyframe.
-  if (params.stage === "keyframe" && !card.approvals.schematic) {
-    return { success: false, error: "schematic must be approved before keyframe" };
-  }
-  if (params.stage === "clip" && !card.approvals.schematic) {
-    return { success: false, error: "schematic must be approved before clip" };
-  }
-  card.approvals[params.stage] = true;
-  await saveCard(params.pieceId, card);
+  // Read-modify-write under the storyboard lock (mutateCard) so a concurrent
+  // edit/attach on the same card isn't overwritten by this approval.
+  type Outcome = { error: string } | { card: StoryboardCard };
+  const outcome = await mutateCard<Outcome>(params.pieceId, params.cardId, (card) => {
+    if (!card) return { result: { error: `card not found: ${params.cardId}` } };
+    // Enforce ladder gating. The only hard gate is the free schematic — the
+    // review-before-spend rung. The keyframe is OPTIONAL: a clip may be generated
+    // without one (prompt/text-to-video), so `clip` requires only the schematic,
+    // not an approved keyframe.
+    if (params.stage === "keyframe" && !card.approvals.schematic) {
+      return { result: { error: "schematic must be approved before keyframe" } };
+    }
+    if (params.stage === "clip" && !card.approvals.schematic) {
+      return { result: { error: "schematic must be approved before clip" } };
+    }
+    card.approvals[params.stage] = true;
+    return { next: card, result: { card } };
+  });
+  if ("error" in outcome) return { success: false, error: outcome.error };
+  const { card } = outcome;
   if (params.stage === "clip") {
     await placeCardOverlay(params.pieceId, card);
   }

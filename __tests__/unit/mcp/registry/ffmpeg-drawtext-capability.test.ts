@@ -5,6 +5,7 @@ import path from "node:path";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 import { DependencyManager } from "@/mcp/registry/dependency-manager";
 import type { BundledDependency } from "@/mcp/registry/types";
+import { realLibiHome } from "../../../helpers/tracking-env";
 
 /**
  * Regression guard for F5 (2026-08-16): every text overlay export on Linux
@@ -32,14 +33,18 @@ function coreDep(binary: string): BundledDependency {
 }
 
 describe("ffmpeg declares the capabilities libi actually depends on", () => {
-  it("ffmpeg asserts drawtext, not merely that it runs", () => {
+  // The export's drawtext spec places text with `y_align` (ffmpeg ≥ 6.1), so
+  // "has drawtext" is no longer enough: a 4.4 build (Ubuntu 22.04's) has
+  // drawtext and fails every text export on the unknown option. The probe is
+  // drawtext's own option list, and `y_align` in it proves BOTH that the
+  // filter exists and that it is new enough. "drawtext" itself is not a
+  // usable token here — "Unknown filter 'drawtext'" contains it.
+  it("ffmpeg asserts a drawtext new enough for y_align, not merely that it runs", () => {
     const dep = coreDep("ffmpeg");
     expect(dep.runCheck).toEqual(["-version"]);
     expect(dep.capabilityCheck).toBeDefined();
-    expect(dep.capabilityCheck!.mustContain).toContain("drawtext");
-    // The probe has to actually list filters — `-version` output never
-    // contains the word "drawtext", so probing it would pass vacuously.
-    expect(dep.capabilityCheck!.args).toEqual(["-filters"]);
+    expect(dep.capabilityCheck!.args).toEqual(["-h", "filter=drawtext"]);
+    expect(dep.capabilityCheck!.mustContain).toEqual(["y_align"]);
   });
 
   it("does not use johnvansickle on linux — that build has no drawtext", () => {
@@ -127,3 +132,46 @@ describe("a runnable-but-incapable binary does not verify green", () => {
     expect(missing).toEqual(["drawtext", "overlay"]);
   });
 });
+
+describe("the drawtext y_align probe against real-shaped output", () => {
+  let dir: string;
+  afterEach(() => {
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A fake ffmpeg answering `-h filter=drawtext` with the given text. */
+  function fakeHelp(helpOutput: string): string {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-cap-h-"));
+    const bin = path.join(dir, "ffmpeg");
+    fs.writeFileSync(
+      bin,
+      `#!/bin/sh\nif [ "$1" = "-h" ]; then\n  cat <<'EOF'\n${helpOutput}\nEOF\nfi\nexit 0\n`,
+    );
+    fs.chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  const check = () => coreDep("ffmpeg").capabilityCheck!;
+
+  it("a pre-6.1 drawtext (no y_align) is missing the capability", async () => {
+    if (process.platform === "win32") return;
+    const bin = fakeHelp("Filter drawtext\n  fontfile <string> ..FV..... set font file\n  y <string> ..FV..... set y expression");
+    // @ts-expect-error — private by design
+    expect(await DependencyManager.missingCapabilities(bin, check())).toEqual(["y_align"]);
+  });
+
+  it("a build without drawtext at all is missing it too", async () => {
+    if (process.platform === "win32") return;
+    const bin = fakeHelp("Unknown filter 'drawtext'.");
+    // @ts-expect-error — private by design
+    expect(await DependencyManager.missingCapabilities(bin, check())).toEqual(["y_align"]);
+  });
+
+  it("the provisioned ffmpeg passes (skipped when this machine has none)", async () => {
+    const real = path.join(realLibiHome(), "bin", process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg");
+    if (!fs.existsSync(real)) return;
+    // @ts-expect-error — private by design
+    expect(await DependencyManager.missingCapabilities(real, check())).toEqual([]);
+  });
+});
+

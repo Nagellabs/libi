@@ -108,14 +108,19 @@ jobs:
     steps:
       - name: Refuse to publish on a work day
         run: |
-          day=$(date -u +%u)   # 1=Mon … 5=Fri, 6=Sat, 7=Sun
-          echo "UTC day: $(date -u '+%A %Y-%m-%d') (day=$day)"
+          # The weekend policy is the OPERATOR's local day, not UTC: counting UTC days,
+          # a UTC+7 operator was refused for the first 7 hours of a real Friday and
+          # allowed through on local Sunday morning. RELEASE_TZ (repo variable)
+          # overrides the default zone.
+          export TZ="${{ vars.RELEASE_TZ || 'Asia/Bangkok' }}"
+          day=$(date +%u)   # 1=Mon … 5=Fri, 6=Sat, 7=Sun
+          echo "Local day ($TZ): $(date '+%A %Y-%m-%d') (day=$day)"
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             echo "dry run — window not enforced, no Release will be published."
             exit 0
           fi
           if [ "$day" != "5" ] && [ "$day" != "6" ]; then
-            echo "::error::Releases publish on Friday or Saturday. Today is $(date -u '+%A')."
+            echo "::error::Releases publish on Friday or Saturday. Today is $(date '+%A') in $TZ."
             exit 1
           fi
           echo "Weekend — proceeding."

@@ -19,6 +19,7 @@ import {
   saveStoryboardSnapshot,
   restoreStoryboardFromSnapshot,
 } from "@/lib/storyboard/snapshot";
+import { rethrowStoryboardBusyAsPartial } from "@/lib/storyboard/lock";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { EMPTY_MANIFEST } from "./persistence";
 import type { CompositionManifest } from "./persistence";
@@ -112,7 +113,9 @@ export async function commitDraft(
   // Promote draft to snapshot
   const draft = await loadManifest(pieceId);
   await saveCurrentSnapshot(pieceId, draft);
-  await saveStoryboardSnapshot(pieceId);
+  // The draft is already promoted (and history pushed) by now: a busy lock here
+  // is a PARTIAL commit, not a clean "retry" (lib/storyboard/lock.ts).
+  await saveStoryboardSnapshot(pieceId).catch(rethrowStoryboardBusyAsPartial);
 
   // Clear hasDraft + store the new summary and commit timestamp on the piece row
   const now = new Date();
@@ -142,7 +145,8 @@ export async function discardDraft(pieceId: string): Promise<void> {
   } else {
     await saveManifest(pieceId, snap);
   }
-  await restoreStoryboardFromSnapshot(pieceId);
+  // The composition is already reset by now — see commitDraft.
+  await restoreStoryboardFromSnapshot(pieceId).catch(rethrowStoryboardBusyAsPartial);
   await db.update(pieces).set({ hasDraft: false, updatedAt: new Date() }).where(eq(pieces.id, pieceId));
   logger.info({ tag: "snapshot", op: "discard_draft", pieceId }, "discarded draft");
   navigationEmitter.emit("refresh_query", { queryKey: "piece-state", pieceId });

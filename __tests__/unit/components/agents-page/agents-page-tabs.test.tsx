@@ -19,6 +19,8 @@ vi.mock("next/navigation", () => ({
 }));
 const setLastSessionId = vi.fn();
 const setActiveSessionId = vi.fn();
+const trackEvent = vi.fn();
+vi.mock("@/lib/analytics/client", () => ({ trackEvent: (...a: unknown[]) => trackEvent(...a) }));
 vi.mock("@/lib/editor-state-context", () => ({
   useEditorState: () => ({
     setLastSessionId,
@@ -61,6 +63,35 @@ beforeEach(() => {
   push.mockClear();
   setLastSessionId.mockClear();
   setActiveSessionId.mockClear();
+  trackEvent.mockClear();
+});
+
+describe("AgentsPage — agents_tab_viewed", () => {
+  it("reports the tab the page opened on, once, and each tab shown after — never a re-render", () => {
+    search = "tab=global-setup";
+    const { rerender } = renderPage();
+    expect(trackEvent.mock.calls).toEqual([["agents_tab_viewed", { tab: "global-setup" }]]);
+    const qc = new QueryClient();
+    act(() =>
+      rerender(
+        <QueryClientProvider client={qc}>
+          <AgentsPage />
+        </QueryClientProvider>,
+      ),
+    );
+    expect(trackEvent).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("tab", { name: "Providers" }));
+    expect(trackEvent.mock.calls).toEqual([
+      ["agents_tab_viewed", { tab: "global-setup" }],
+      ["agents_tab_viewed", { tab: "providers" }],
+    ]);
+  });
+
+  it("a junk ?tab= reads as the default tab, so the param can never be an unbounded value", () => {
+    search = "tab=definitely-not-a-tab";
+    renderPage();
+    expect(trackEvent.mock.calls).toEqual([["agents_tab_viewed", { tab: "agents" }]]);
+  });
 });
 
 describe("parseAgentsPageParams", () => {

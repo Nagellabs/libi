@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { migrateDatabase, getDb, resetDbClient } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema/sqlite";
+import { DEFAULT_INDEX_BUDGET_BYTES } from "@/mcp/manual-sections";
 import { startMcpHttpChild } from "@/lib/server/lifecycle/mcp-http-child";
 import {
   spawnMcpHttpChild,
@@ -356,12 +357,12 @@ describe("HTTP MCP aggregator (real child, libi's tools only)", () => {
     expect(c.getInstructions()).toContain("libi.read_manual");
     expect(c.getInstructions()!.length).toBeLessThan(2048);
     // `read_manual` is sectioned: no argument returns the index + essentials
-    // (< 15 KB), not the ~87 KB manual a client would spool to disk.
+    // (under DEFAULT_INDEX_BUDGET_BYTES), not the ~87 KB manual a client would spool to disk.
     const index = await c.callTool({ name: "libi.read_manual", arguments: {} });
     const indexText = (index.content as Array<{ type: string; text: string }>)[0].text;
     expect(indexText).toContain("`mcp-tools`");
     expect(indexText).toContain('libi.read_manual({ section: "<key>" })');
-    expect(Buffer.byteLength(indexText, "utf8")).toBeLessThan(15_000);
+    expect(Buffer.byteLength(indexText, "utf8")).toBeLessThan(DEFAULT_INDEX_BUDGET_BYTES);
     const manual = await c.callTool({
       name: "libi.read_manual",
       arguments: { section: "mcp-tools" },

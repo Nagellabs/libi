@@ -28,6 +28,7 @@ import {
 } from "./paths";
 import { migrateRawCardSketches } from "./migrate-sketches";
 import { DEFAULT_ROUGH_RENDER } from "./default-render-unit";
+import { withStoryboardLock } from "./lock";
 
 /** Lazy, idempotent migration: lift legacy single-file artifacts into the
  *  versioned clips list + keyframeGen spec. A card that already has `clips`
@@ -74,7 +75,11 @@ export async function loadStoryboard(pieceId: string): Promise<Storyboard | null
   return { ...manifest, cards };
 }
 
-export async function saveStoryboard(pieceId: string, sb: Storyboard): Promise<void> {
+/** Unlocked full write: every card.json + the manifest, and removal of card dirs
+ *  not in `sb`. Only ever call it while holding the piece's storyboard lock with
+ *  an `sb` loaded under that same hold — a stale `sb` overwrites every card and
+ *  deletes any card added since it was loaded. */
+async function writeStoryboard(pieceId: string, sb: Storyboard): Promise<void> {
   const storage = await getStorage();
   const manifest: StoryboardManifest = {
     version: 2,
@@ -117,6 +122,50 @@ export async function saveStoryboard(pieceId: string, sb: Storyboard): Promise<v
   );
 }
 
+/** Blind overwrite of the whole storyboard with `sb` (e.g. restoring a
+ *  snapshot). Serialized with every other storyboard write, but `sb` is written
+ *  as given — for a read-modify-write use `mutateStoryboard`, which loads under
+ *  the lock. */
+export async function saveStoryboard(pieceId: string, sb: Storyboard): Promise<void> {
+  await withStoryboardLock(pieceId, () => writeStoryboard(pieceId, sb));
+}
+
+/** What a mutation callback returns: `result` goes back to the caller; `next`,
+ *  when present, is written. Omit `next` for a no-op (nothing is rewritten). */
+export type Mutation<S, T> = { next?: S; result: T };
+
+/** The one way to read-modify-write the WHOLE storyboard: load → `fn` → save,
+ *  all under the piece's storyboard lock (see `./lock` — it serializes the Next
+ *  server and the MCP child, which both write storyboard storage). `fn` gets the
+ *  board as it is on disk NOW (null when the piece has none). Keep `fn` to pure
+ *  mutation plus small local file writes — never renders, generation or network,
+ *  and never call another locking repo function from inside it. */
+export async function mutateStoryboard<T>(
+  pieceId: string,
+  fn: (sb: Storyboard | null) => Promise<Mutation<Storyboard, T>> | Mutation<Storyboard, T>,
+): Promise<T> {
+  return withStoryboardLock(pieceId, async () => {
+    const { next, result } = await fn(await loadStoryboard(pieceId));
+    if (next) await writeStoryboard(pieceId, next);
+    return result;
+  });
+}
+
+/** Per-card read-modify-write under the same lock as `mutateStoryboard` (a card
+ *  write must not interleave with a whole-board write either). `fn` gets the
+ *  card as it is on disk now, or null when it doesn't exist. Same rules for `fn`. */
+export async function mutateCard<T>(
+  pieceId: string,
+  cardId: string,
+  fn: (card: StoryboardCard | null) => Promise<Mutation<StoryboardCard, T>> | Mutation<StoryboardCard, T>,
+): Promise<T> {
+  return withStoryboardLock(pieceId, async () => {
+    const { next, result } = await fn(await loadCard(pieceId, cardId));
+    if (next) await writeCard(pieceId, next);
+    return result;
+  });
+}
+
 export async function loadCard(pieceId: string, cardId: string): Promise<StoryboardCard | null> {
   const storage = await getStorage();
   if (!(await storage.exists(pieceId, cardJsonPath(cardId)))) return null;
@@ -129,7 +178,13 @@ export async function loadCard(pieceId: string, cardId: string): Promise<Storybo
   );
 }
 
+/** Blind overwrite of one card.json, serialized with every other storyboard
+ *  write. For a read-modify-write use `mutateCard`. */
 export async function saveCard(pieceId: string, card: StoryboardCard): Promise<void> {
+  await withStoryboardLock(pieceId, () => writeCard(pieceId, card));
+}
+
+async function writeCard(pieceId: string, card: StoryboardCard): Promise<void> {
   const storage = await getStorage();
   await storage.save(
     pieceId,
@@ -148,19 +203,19 @@ export async function attachCardArtifact(
   fileId: string,
   costUsd?: number,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  if (artifact === "keyframe") {
-    card.keyframeFileId = fileId;
-    card.stage = "keyframe";
-    if (costUsd !== undefined) card.cost = { ...card.cost, keyframeUsd: costUsd };
-  } else {
-    card.clipFileId = fileId;
-    card.stage = "clip";
-    if (costUsd !== undefined) card.cost = { ...card.cost, clipUsd: costUsd };
-  }
-  await saveCard(pieceId, card);
-  return card;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    if (artifact === "keyframe") {
+      card.keyframeFileId = fileId;
+      card.stage = "keyframe";
+      if (costUsd !== undefined) card.cost = { ...card.cost, keyframeUsd: costUsd };
+    } else {
+      card.clipFileId = fileId;
+      card.stage = "clip";
+      if (costUsd !== undefined) card.cost = { ...card.cost, clipUsd: costUsd };
+    }
+    return { next: card, result: card };
+  });
 }
 
 /** Authorable fields for a brand-new card (the bootstrap path). Everything
@@ -190,50 +245,54 @@ export async function addStoryboardCard(
   input: NewCardInput,
   manifestFields?: { overview?: string; budgetUsd?: number },
 ): Promise<StoryboardCard> {
-  const sb: Storyboard =
-    (await loadStoryboard(pieceId)) ?? {
-      version: 2,
-      cardOrder: [],
-      updatedAt: new Date().toISOString(),
-      cards: [],
+  return mutateStoryboard(pieceId, async (loaded) => {
+    const sb: Storyboard =
+      loaded ?? {
+        version: 2,
+        cardOrder: [],
+        updatedAt: new Date().toISOString(),
+        cards: [],
+      };
+    const order = sb.cards.length;
+    const id = input.id?.trim() || `card_${order + 1}`;
+    if (sb.cards.some((c) => c.id === id)) {
+      throw new Error(`card id already exists: ${id}`);
+    }
+    const render: RenderUnitRef = input.render ?? { kind: "canvas", file: "sketches/sk_1/unit.jsx" };
+    const card: StoryboardCard = {
+      id,
+      order,
+      durationSec: input.durationSec ?? 5,
+      role: input.role ?? "scene",
+      kind: input.kind ?? "ai-video",
+      title: input.title,
+      description: input.description,
+      voiceover: input.voiceover,
+      sketches: [{ id: "sk_1", role: "start", paramKey: "start_frame", render }],
+      blocks: input.blocks,
+      camera: input.camera ?? { shot: "medium" },
+      promptFragment: input.promptFragment ?? input.description ?? input.title,
+      stage: "schematic",
+      approvals: {},
     };
-  const order = sb.cards.length;
-  const id = input.id?.trim() || `card_${order + 1}`;
-  if (sb.cards.some((c) => c.id === id)) {
-    throw new Error(`card id already exists: ${id}`);
-  }
-  const render: RenderUnitRef = input.render ?? { kind: "canvas", file: "sketches/sk_1/unit.jsx" };
-  const card: StoryboardCard = {
-    id,
-    order,
-    durationSec: input.durationSec ?? 5,
-    role: input.role ?? "scene",
-    kind: input.kind ?? "ai-video",
-    title: input.title,
-    description: input.description,
-    voiceover: input.voiceover,
-    sketches: [{ id: "sk_1", role: "start", paramKey: "start_frame", render }],
-    blocks: input.blocks,
-    camera: input.camera ?? { shot: "medium" },
-    promptFragment: input.promptFragment ?? input.description ?? input.title,
-    stage: "schematic",
-    approvals: {},
-  };
-  // Write the render unit BEFORE saveStoryboard so the watcher (fired by the
-  // card.json write) finds it and renders schematic.png on the first save.
-  // Only write a default when no unit file exists (a caller may pre-author one).
-  const storage = await getStorage();
-  const unitRel = cardRenderPath(id, render.file);
-  if (!(await storage.exists(pieceId, unitRel))) {
-    await storage.save(pieceId, unitRel, Buffer.from(DEFAULT_ROUGH_RENDER), "text/plain");
-  }
-  await saveStoryboard(pieceId, {
-    ...sb,
-    overview: manifestFields?.overview ?? sb.overview,
-    budgetUsd: manifestFields?.budgetUsd ?? sb.budgetUsd,
-    cards: [...sb.cards, card],
+    // Write the render unit BEFORE the storyboard write so the watcher (fired by
+    // the card.json write) finds it and renders schematic.png on the first save.
+    // Only write a default when no unit file exists (a caller may pre-author one).
+    const storage = await getStorage();
+    const unitRel = cardRenderPath(id, render.file);
+    if (!(await storage.exists(pieceId, unitRel))) {
+      await storage.save(pieceId, unitRel, Buffer.from(DEFAULT_ROUGH_RENDER), "text/plain");
+    }
+    return {
+      next: {
+        ...sb,
+        overview: manifestFields?.overview ?? sb.overview,
+        budgetUsd: manifestFields?.budgetUsd ?? sb.budgetUsd,
+        cards: [...sb.cards, card],
+      },
+      result: card,
+    };
   });
-  return card;
 }
 
 /** Whitelisted card fields the UI/agent may PATCH. */
@@ -243,39 +302,39 @@ export type CardPatch = Partial<Pick<StoryboardCard,
 export async function updateCardFields(
   pieceId: string, cardId: string, patch: CardPatch,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  // Explicitly pick ONLY whitelisted keys so a raw HTTP PATCH cannot overwrite
-  // ladder-owned fields (id, stage, approvals, keyframeFileId, clipFileId,
-  // cost, sceneId, etc.).
-  const ALLOWED_KEYS = [
-    "title", "description", "promptFragment", "blocks",
-    "camera", "durationSec", "voiceover", "role",
-  ] as const;
-  const next: StoryboardCard = { ...card };
-  for (const key of ALLOWED_KEYS) {
-    if (patch[key] !== undefined) {
-      // @ts-expect-error key is a valid StoryboardCard field
-      next[key] = patch[key];
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    // Explicitly pick ONLY whitelisted keys so a raw HTTP PATCH cannot overwrite
+    // ladder-owned fields (id, stage, approvals, keyframeFileId, clipFileId,
+    // cost, sceneId, etc.).
+    const ALLOWED_KEYS = [
+      "title", "description", "promptFragment", "blocks",
+      "camera", "durationSec", "voiceover", "role",
+    ] as const;
+    const next: StoryboardCard = { ...card };
+    for (const key of ALLOWED_KEYS) {
+      if (patch[key] !== undefined) {
+        // @ts-expect-error key is a valid StoryboardCard field
+        next[key] = patch[key];
+      }
     }
-  }
-  await saveCard(pieceId, next);
-  return next;
+    return { next, result: next };
+  });
 }
 
 export async function updateManifestLayout(
   pieceId: string, layout: { positions: Record<string, { x: number; y: number }> },
 ): Promise<void> {
-  const sb = await loadStoryboard(pieceId);
-  if (!sb) return;
-  await saveStoryboard(pieceId, { ...sb, layout });
+  await mutateStoryboard(pieceId, (sb) => (sb ? { next: { ...sb, layout }, result: undefined } : { result: undefined }));
 }
 
 /** Remove all storyboard files for a piece (used by discard when there is no
  *  committed storyboard snapshot to restore). */
 export async function clearStoryboard(pieceId: string): Promise<void> {
-  const storage = await getStorage();
-  await fs.rm(storage.localPath(pieceId, STORYBOARD_DIR), { recursive: true, force: true });
+  await withStoryboardLock(pieceId, async () => {
+    const storage = await getStorage();
+    await fs.rm(storage.localPath(pieceId, STORYBOARD_DIR), { recursive: true, force: true });
+  });
 }
 
 export async function setCardGeneration(
@@ -284,12 +343,12 @@ export async function setCardGeneration(
   tier: "keyframe" | "clip",
   spec: GenSpec,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const next: StoryboardCard =
-    tier === "keyframe" ? { ...card, keyframeGen: spec } : { ...card, clipGen: spec };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const next: StoryboardCard =
+      tier === "keyframe" ? { ...card, keyframeGen: spec } : { ...card, clipGen: spec };
+    return { next, result: next };
+  });
 }
 
 /** Set or clear a single generation param on a tier's spec, stamping editedAt
@@ -303,18 +362,18 @@ export async function updateGenParam(
   paramKey: string,
   value: GenParamValue | null,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const spec = tier === "keyframe" ? card.keyframeGen : card.clipGen;
-  if (!spec) return null;
-  const params = { ...spec.params };
-  if (value === null) delete params[paramKey];
-  else params[paramKey] = value;
-  const nextSpec: GenSpec = { ...spec, params, editedAt: Date.now() };
-  const next: StoryboardCard =
-    tier === "keyframe" ? { ...card, keyframeGen: nextSpec } : { ...card, clipGen: nextSpec };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const spec = tier === "keyframe" ? card.keyframeGen : card.clipGen;
+    if (!spec) return { result: null };
+    const params = { ...spec.params };
+    if (value === null) delete params[paramKey];
+    else params[paramKey] = value;
+    const nextSpec: GenSpec = { ...spec, params, editedAt: Date.now() };
+    const next: StoryboardCard =
+      tier === "keyframe" ? { ...card, keyframeGen: nextSpec } : { ...card, clipGen: nextSpec };
+    return { next, result: next };
+  });
 }
 
 /** Append a generated clip as the next vN take. Auto-selects it if no take is
@@ -325,24 +384,24 @@ export async function appendClipTake(
   fileId: string,
   costUsd?: number,
 ): Promise<GeneratedClip | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const clips = card.clips ?? [];
-  const n = clips.length + 1;
-  const take: GeneratedClip = {
-    id: `take_${cardId}_${n}`,
-    fileId,
-    label: `v${n}`,
-    createdAt: Date.now(),
-  };
-  const next: StoryboardCard = {
-    ...card,
-    clips: [...clips, take],
-    selectedClipId: card.selectedClipId ?? take.id,
-    cost: costUsd !== undefined ? { ...card.cost, clipUsd: costUsd } : card.cost,
-  };
-  await saveCard(pieceId, next);
-  return take;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const clips = card.clips ?? [];
+    const n = clips.length + 1;
+    const take: GeneratedClip = {
+      id: `take_${cardId}_${n}`,
+      fileId,
+      label: `v${n}`,
+      createdAt: Date.now(),
+    };
+    const next: StoryboardCard = {
+      ...card,
+      clips: [...clips, take],
+      selectedClipId: card.selectedClipId ?? take.id,
+      cost: costUsd !== undefined ? { ...card.cost, clipUsd: costUsd } : card.cost,
+    };
+    return { next, result: take };
+  });
 }
 
 export async function selectClipTake(
@@ -350,11 +409,11 @@ export async function selectClipTake(
   cardId: string,
   takeId: string,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card || !card.clips?.some((c) => c.id === takeId && !c.hidden)) return null;
-  const next = { ...card, selectedClipId: takeId };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card || !card.clips?.some((c) => c.id === takeId && !c.hidden)) return { result: null };
+    const next = { ...card, selectedClipId: takeId };
+    return { next, result: next };
+  });
 }
 
 /** Soft-hide a take. If the hidden take was selected, reselect the newest
@@ -364,17 +423,17 @@ export async function hideClipTake(
   cardId: string,
   takeId: string,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card?.clips) return null;
-  const clips = card.clips.map((c) => (c.id === takeId ? { ...c, hidden: true } : c));
-  let selectedClipId = card.selectedClipId;
-  if (selectedClipId === takeId) {
-    const visible = clips.filter((c) => !c.hidden);
-    selectedClipId = visible.length ? visible[visible.length - 1].id : undefined;
-  }
-  const next = { ...card, clips, selectedClipId };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card?.clips) return { result: null };
+    const clips = card.clips.map((c) => (c.id === takeId ? { ...c, hidden: true } : c));
+    let selectedClipId = card.selectedClipId;
+    if (selectedClipId === takeId) {
+      const visible = clips.filter((c) => !c.hidden);
+      selectedClipId = visible.length ? visible[visible.length - 1].id : undefined;
+    }
+    const next = { ...card, clips, selectedClipId };
+    return { next, result: next };
+  });
 }
 
 export async function setCardReference(
@@ -383,14 +442,14 @@ export async function setCardReference(
   paramKey: string,
   ref: InheritedRef,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const next = {
-    ...card,
-    inheritedRefs: { ...card.inheritedRefs, [paramKey]: ref },
-  };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const next = {
+      ...card,
+      inheritedRefs: { ...card.inheritedRefs, [paramKey]: ref },
+    };
+    return { next, result: next };
+  });
 }
 
 /** Remove a single inherited-reference link. No-op (returns the card) if absent. */
@@ -399,14 +458,14 @@ export async function clearCardReference(
   cardId: string,
   paramKey: string,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  if (!card.inheritedRefs?.[paramKey]) return card;
-  const inheritedRefs = { ...card.inheritedRefs };
-  delete inheritedRefs[paramKey];
-  const next = { ...card, inheritedRefs };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    if (!card.inheritedRefs?.[paramKey]) return { result: card };
+    const inheritedRefs = { ...card.inheritedRefs };
+    delete inheritedRefs[paramKey];
+    const next = { ...card, inheritedRefs };
+    return { next, result: next };
+  });
 }
 
 /** Absolute on-disk paths the agent edits directly (file-as-source-of-truth). */
@@ -445,24 +504,24 @@ export async function addSketch(
   cardId: string,
   input: { role: SketchRole; paramKey: string; label?: string },
 ): Promise<{ card: StoryboardCard; slot: SketchSlot } | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const id = nextSketchId(card);
-  const slot: SketchSlot = {
-    id,
-    role: input.role,
-    paramKey: input.paramKey,
-    label: input.label,
-    render: { kind: "canvas", file: `sketches/${id}/unit.jsx` },
-  };
-  const storage = await getStorage();
-  const unitRel = slotUnitPath(cardId, slot);
-  if (!(await storage.exists(pieceId, unitRel))) {
-    await storage.save(pieceId, unitRel, Buffer.from(DEFAULT_ROUGH_RENDER), "text/plain");
-  }
-  const next: StoryboardCard = { ...card, sketches: [...card.sketches, slot] };
-  await saveCard(pieceId, next);
-  return { card: next, slot };
+  return mutateCard(pieceId, cardId, async (card) => {
+    if (!card) return { result: null };
+    const id = nextSketchId(card);
+    const slot: SketchSlot = {
+      id,
+      role: input.role,
+      paramKey: input.paramKey,
+      label: input.label,
+      render: { kind: "canvas", file: `sketches/${id}/unit.jsx` },
+    };
+    const storage = await getStorage();
+    const unitRel = slotUnitPath(cardId, slot);
+    if (!(await storage.exists(pieceId, unitRel))) {
+      await storage.save(pieceId, unitRel, Buffer.from(DEFAULT_ROUGH_RENDER), "text/plain");
+    }
+    const next: StoryboardCard = { ...card, sketches: [...card.sketches, slot] };
+    return { next, result: { card: next, slot } };
+  });
 }
 
 /** Remove a sketch slot and its on-disk unit dir + rendered png. Leaves the
@@ -472,20 +531,22 @@ export async function removeSketch(
   cardId: string,
   slotId: string,
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  if (!card.sketches.some((s) => s.id === slotId)) return card; // no-op on unknown slot
-  const next: StoryboardCard = { ...card, sketches: card.sketches.filter((s) => s.id !== slotId) };
-  await saveCard(pieceId, next);
-  const storage = await getStorage();
-  // Only the slot's CANONICAL per-slot artifacts are removed: the `sketches/<id>/`
-  // unit dir and the `sketches/<id>.png` render. We deliberately do NOT derive the
-  // dir from slotUnitPath — a legacy slot whose render file sits at the card root
-  // (e.g. `render.jsx`) would resolve to the card dir, and a recursive rm there
-  // would destroy card.json. Leaving such a stray unit file is the safe trade-off.
-  await fs.rm(storage.localPath(pieceId, `${cardSketchesDir(cardId)}/${slotId}`), { recursive: true, force: true });
-  await fs.rm(storage.localPath(pieceId, slotSketchPath(cardId, slotId)), { force: true });
-  return next;
+  return withStoryboardLock(pieceId, async () => {
+    const card = await loadCard(pieceId, cardId);
+    if (!card) return null;
+    if (!card.sketches.some((s) => s.id === slotId)) return card; // no-op on unknown slot
+    const next: StoryboardCard = { ...card, sketches: card.sketches.filter((s) => s.id !== slotId) };
+    await writeCard(pieceId, next);
+    const storage = await getStorage();
+    // Only the slot's CANONICAL per-slot artifacts are removed: the `sketches/<id>/`
+    // unit dir and the `sketches/<id>.png` render. We deliberately do NOT derive the
+    // dir from slotUnitPath — a legacy slot whose render file sits at the card root
+    // (e.g. `render.jsx`) would resolve to the card dir, and a recursive rm there
+    // would destroy card.json. Leaving such a stray unit file is the safe trade-off.
+    await fs.rm(storage.localPath(pieceId, `${cardSketchesDir(cardId)}/${slotId}`), { recursive: true, force: true });
+    await fs.rm(storage.localPath(pieceId, slotSketchPath(cardId, slotId)), { force: true });
+    return next;
+  });
 }
 
 /** Reorder a card's sketch slots to match `order` (a permutation of slot ids).
@@ -495,18 +556,18 @@ export async function reorderSketches(
   cardId: string,
   order: string[],
 ): Promise<StoryboardCard | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const byId = new Map(card.sketches.map((s) => [s.id, s]));
-  const ordered: SketchSlot[] = [];
-  for (const id of order) {
-    const s = byId.get(id);
-    if (s) { ordered.push(s); byId.delete(id); }
-  }
-  for (const s of card.sketches) if (byId.has(s.id)) ordered.push(s);
-  const next: StoryboardCard = { ...card, sketches: ordered };
-  await saveCard(pieceId, next);
-  return next;
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const byId = new Map(card.sketches.map((s) => [s.id, s]));
+    const ordered: SketchSlot[] = [];
+    for (const id of order) {
+      const s = byId.get(id);
+      if (s) { ordered.push(s); byId.delete(id); }
+    }
+    for (const s of card.sketches) if (byId.has(s.id)) ordered.push(s);
+    const next: StoryboardCard = { ...card, sketches: ordered };
+    return { next, result: next };
+  });
 }
 
 /** Re-key/edit an existing sketch slot: change its `paramKey` (to the model's real
@@ -520,24 +581,24 @@ export async function editSketch(
   slotId: string,
   patch: { paramKey?: string; role?: SketchRole; label?: string; imageFileId?: string | null },
 ): Promise<{ card: StoryboardCard; slot: SketchSlot } | null> {
-  const card = await loadCard(pieceId, cardId);
-  if (!card) return null;
-  const idx = card.sketches.findIndex((s) => s.id === slotId);
-  if (idx === -1) return null; // unknown slot — caller surfaces the error
-  const prev = card.sketches[idx];
-  const slot: SketchSlot = {
-    ...prev,
-    ...(patch.paramKey !== undefined ? { paramKey: patch.paramKey } : {}),
-    ...(patch.role !== undefined ? { role: patch.role } : {}),
-    ...(patch.label !== undefined ? { label: patch.label } : {}),
-  };
-  if (patch.imageFileId !== undefined) {
-    if (patch.imageFileId === null) delete slot.imageFileId;
-    else slot.imageFileId = patch.imageFileId;
-  }
-  const sketches = card.sketches.slice();
-  sketches[idx] = slot;
-  const next: StoryboardCard = { ...card, sketches };
-  await saveCard(pieceId, next);
-  return { card: next, slot };
+  return mutateCard(pieceId, cardId, (card) => {
+    if (!card) return { result: null };
+    const idx = card.sketches.findIndex((s) => s.id === slotId);
+    if (idx === -1) return { result: null }; // unknown slot — caller surfaces the error
+    const prev = card.sketches[idx];
+    const slot: SketchSlot = {
+      ...prev,
+      ...(patch.paramKey !== undefined ? { paramKey: patch.paramKey } : {}),
+      ...(patch.role !== undefined ? { role: patch.role } : {}),
+      ...(patch.label !== undefined ? { label: patch.label } : {}),
+    };
+    if (patch.imageFileId !== undefined) {
+      if (patch.imageFileId === null) delete slot.imageFileId;
+      else slot.imageFileId = patch.imageFileId;
+    }
+    const sketches = card.sketches.slice();
+    sketches[idx] = slot;
+    const next: StoryboardCard = { ...card, sketches };
+    return { next, result: { card: next, slot } };
+  });
 }

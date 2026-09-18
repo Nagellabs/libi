@@ -50,8 +50,9 @@ Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export`, `overla
 Every one of these has broken something. Do not relax one without evidence.
 
 **Booting**
-- **Never `next dev`.** `bin/libi.js` runs Category A (bundled MCPs, ffmpeg/ffprobe,
-  Chromium, models) *before* Next starts. Skip it and the agent has no tools.
+- **Never `next dev`.** `bin/libi.js` runs Category A (node, ffmpeg/ffprobe — everything
+  else is on demand) and resolves LIBI_HOME and the ports *before* Next starts. Skip it and
+  the agent's tools fail.
 - **Inside a git worktree, boot dev from that worktree.** Booting from the canonical
   checkout serves *that* code — you will "verify" a fix that isn't running. The dev entry
   points auto-detect the worktree (own `LIBI_HOME`, port, and an **empty DB** — recreate
@@ -332,7 +333,10 @@ The split is load-bearing, not organisational. While they were one workflow the 
 could run only after an irreversible npm publish, so **every bug in a shell cost a version
 number to discover** — two did, in one afternoon on 2026-08-28. Because the electron half
 now takes the version as input, `dry_run: true` builds both shells and uploads their
-artifacts while publishing nothing, so a shell can be debugged for free. The release
+artifacts while publishing nothing, so a shell can be debugged for free. One caveat: the
+bundle's CONTENTS come from npm by version, so a dry run against the PREVIOUS version
+measures that version's dependency tree (on 0.1.14 it failed the size ceiling
+spuriously) — the shells can't be meaningfully rehearsed before their own npm publish. The release
 cadences themselves are in an internal runbook; `scripts/release-npm.js` and
 `scripts/release-electron.js` hold the actual mechanics.
 

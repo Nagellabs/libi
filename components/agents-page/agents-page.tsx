@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Bot, Globe, ServerIcon, Sparkles, Plug } from "lucide-react";
+import { trackEvent } from "@/lib/analytics/client";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { SearchInput } from "./search-input";
 import { SkillsView } from "./skills-view";
@@ -24,6 +25,13 @@ import { isAgentsTab, useAgentsPageParams } from "./use-agents-page-params";
 export function AgentsPage() {
   const { tab, setTab, agent, provider, extension, from } = useAgentsPageParams();
   const [skillsSearch, setSkillsSearch] = useState("");
+
+  // Once per tab shown, the one the page opened on included: `page_view`
+  // sees only `/agents`, the tab being a query param. `tab` is the bounded
+  // `AgentsTab` union — junk in the URL already read as the default above.
+  useEffect(() => {
+    trackEvent("agents_tab_viewed", { tab });
+  }, [tab]);
 
   return (
     <div className="mx-auto max-w-4xl p-6">

@@ -10,6 +10,11 @@ import {
   type ExportDefaultsValue,
 } from "@/lib/queries/export-defaults";
 import { pickDirectory, hasElectronBridge } from "@/lib/shell/client";
+import {
+  DEFAULT_GRAPHICS_QUALITY,
+  GRAPHICS_SHARPNESS_WARNING,
+  graphicsLosesSharpness,
+} from "@/lib/export/quality";
 
 export function ExportTab() {
   const { data, isLoading } = useExportDefaults();
@@ -23,6 +28,9 @@ export function ExportTab() {
   const [quality, setQuality] = useState<ExportDefaultsValue["quality"]>(
     data?.quality ?? "source",
   );
+  const [graphicsQuality, setGraphicsQuality] = useState<
+    ExportDefaultsValue["graphicsQuality"]
+  >(data?.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY);
 
   // Mirror fresh server data into the form during render (React's
   // previous-state pattern) — React Query's structural sharing keeps `data`
@@ -35,11 +43,12 @@ export function ExportTab() {
       setFolder(data.folder);
       setFormat(data.format);
       setQuality(data.quality);
+      setGraphicsQuality(data.graphicsQuality);
     }
   }
 
   const handleSave = async () => {
-    await update.mutateAsync({ folder, format, quality });
+    await update.mutateAsync({ folder, format, quality, graphicsQuality });
   };
 
   const handlePickFolder = async () => {
@@ -61,7 +70,10 @@ export function ExportTab() {
 
   const effectiveFolder = folder ?? data.osDefaultFolder;
   const dirty =
-    folder !== data.folder || format !== data.format || quality !== data.quality;
+    folder !== data.folder ||
+    format !== data.format ||
+    quality !== data.quality ||
+    graphicsQuality !== data.graphicsQuality;
 
   return (
     <div className="space-y-6">
@@ -126,11 +138,11 @@ export function ExportTab() {
       </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">Default quality</label>
+        <label className="text-sm font-medium">Videos & images</label>
         <div className="flex w-full overflow-hidden rounded-md border border-input bg-background sm:w-80">
           {(
             [
-              ["source", "Source"],
+              ["source", "Original"],
               ["1080p", "1080p"],
               ["1440p", "1440p"],
               ["4k", "4K"],
@@ -152,9 +164,40 @@ export function ExportTab() {
           ))}
         </div>
         <p className="text-xs text-muted-foreground">
-          &quot;Source&quot; preserves the composition&apos;s native dimensions — the safe default.
-          Higher presets are useful when you need a fixed delivery resolution.
+          Original keeps each video and image at its own size.
         </p>
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-sm font-medium">Text, code & 3D</label>
+        <div className="flex w-full overflow-hidden rounded-md border border-input bg-background sm:w-80">
+          {(
+            [
+              ["1080p", "1080p"],
+              ["1440p", "1440p"],
+              ["4k", "4K"],
+            ] as const
+          ).map(([v, label]) => (
+            <button
+              key={v}
+              type="button"
+              onClick={() => setGraphicsQuality(v)}
+              className={
+                "flex-1 cursor-pointer px-3 py-1.5 text-xs font-medium transition-colors " +
+                (graphicsQuality === v
+                  ? "bg-primary text-primary-foreground"
+                  : "text-foreground hover:bg-muted/40")
+              }
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {graphicsLosesSharpness(graphicsQuality) && (
+          <p className="text-xs text-muted-foreground">
+            {GRAPHICS_SHARPNESS_WARNING}
+          </p>
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-2 border-t border-border pt-4">

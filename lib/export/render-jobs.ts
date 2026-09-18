@@ -61,6 +61,13 @@ export interface RenderJobInit {
 export interface RenderJobSuccess {
   tempFilePath: string;
   durationSeconds: number;
+  /** Overlays the render page's `exportVideo()` skipped because their draw
+   *  threw (see lib/engine/types.ts ExportResult.droppedOverlays). Forwarded
+   *  verbatim from the render page's postback. */
+  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Uploaded fonts the render page failed to load, with why; that text drew
+   *  in a fallback face. */
+  unloadedFonts?: Array<{ fontFileId: string; reason: string }>;
 }
 
 export interface RenderJobHandle {

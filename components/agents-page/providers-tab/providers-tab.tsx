@@ -27,7 +27,7 @@ import {
 import { explainSetupCommand } from "@/lib/agents/setup/explain";
 import { isSetupAgentId, SETUP_AGENTS, setupAgentName } from "@/lib/agents/setup/registry";
 import { trackEvent } from "@/lib/analytics/client";
-import type { AnalyticsProviderAgent } from "@/lib/analytics/events";
+import type { AnalyticsProviderAgent, AnalyticsSurface } from "@/lib/analytics/events";
 import { commandNeedsKey, PROVIDER_CATALOG, type ProviderDef, type ProviderId } from "@/lib/providers/catalog";
 import type { DetectedMcp } from "@/lib/providers/detect";
 import { providerSetupSteps } from "@/lib/providers/setup-steps";
@@ -226,6 +226,11 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
   const rows = focused ? [focused] : REMOTE_PROVIDERS;
 
   const latestRun = useRef(0);
+  // The add, replace or sign-in whose success the tab is waiting to observe:
+  // counted once detection reads `connected` for that provider on that agent,
+  // never on the click (the wizard's connect step does the same). A newer
+  // command replaces the wait; a remove is never waited on.
+  const awaitingConnect = useRef<{ def: ProviderDef; agentId: SetupAgentId; surface: AnalyticsSurface } | null>(null);
   const run = (
     def: ProviderDef,
     agentId: SetupAgentId,
@@ -250,7 +255,10 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
       .then(() => {
         // Superseded by a newer action before its terminal existed: the host never shows it.
         if (runNumber !== latestRun.current) return;
-        trackEvent("provider_command_opened", { provider: def.id, agent: agentKey(agentId), surface: "providers" });
+        // Narrowed to one row by a `libi.suggest_provider` link: the suggestion is what is converting.
+        const surface: AnalyticsSurface = focused ? "suggestion" : "providers";
+        trackEvent("provider_command_opened", { provider: def.id, agent: agentKey(agentId), surface });
+        awaitingConnect.current = action === "provider-remove" ? null : { def, agentId, surface };
       })
       .catch(() => undefined);
   };
@@ -259,6 +267,16 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
   const loading = statusQuery.isLoading || providersQuery.isLoading;
   const statusUnreadable = !loading && !statusQuery.data;
   const providers = providersQuery.data;
+  // Detection now reads the awaited command's provider as connected on its agent: counted once,
+  // then forgotten. A last known (stale) state is not what the command did.
+  useEffect(() => {
+    const awaited = awaitingConnect.current;
+    if (!awaited) return;
+    const model = chipModel(awaited.def, awaited.agentId, statusQuery.data, providers);
+    if (model.state !== "connected" || model.stale) return;
+    awaitingConnect.current = null;
+    trackEvent("provider_connected", { provider: awaited.def.id, agent: agentKey(awaited.agentId), surface: awaited.surface });
+  }, [providers, statusQuery.data]);
   const detectionUnreadable = !loading && Boolean(providers?.error || (providersQuery.isError && !providers));
   // Codex's listing alone gave no fresh answer: its chips say Unknown (`unread`) or keep their last known state (`stale`).
   const codexListing = loading || detectionUnreadable || selected.id !== "codex" ? undefined : providers?.codex;

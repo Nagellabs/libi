@@ -89,7 +89,7 @@ export function buildProgram(): Command {
   // libi serve-mcp-http
   program
     .command("serve-mcp-http")
-    .description("Start the HTTP MCP aggregator (libi's tools + every enabled MCP) on one port")
+    .description("Serve libi's own MCP tools over HTTP on one local port")
     .option("-p, --port <port>", "Port (default: LIBI_MCP_PORT, else 3457)")
     .action(async (opts) => {
       await serveMcpHttp(opts.port);

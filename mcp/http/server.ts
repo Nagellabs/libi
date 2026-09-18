@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { mcpLogger as logger } from "@/lib/logger";
 import { surfaceFromHeaders, type AgentSurface } from "@/lib/mcp/agent-surface";
+import { trackCliSessionOpened } from "@/mcp/analytics";
 import { renderInstructionsCore } from "@/mcp/workspace";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
 import { createAggregateSession, type AggregateSession } from "./session";
@@ -268,6 +269,9 @@ export async function startMcpHttpServer(opts: {
             dialect,
             sessions: sessions.size,
           });
+          // The user's own CLI reached libi — the ground truth behind every
+          // connect flow. Reports nothing for an in-app session.
+          trackCliSessionOpened(surface, dialect);
         },
       });
       transport.onclose = () => {

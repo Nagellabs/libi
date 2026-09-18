@@ -213,7 +213,10 @@ then read back from it when you spend.
    legacy script is migrated to cards on the first read instead.)
 2. **Create the cards, then refine.** For each scene, call `libi.add_storyboard_card`
    with `title` + as much as you know (`role`, `durationSec`, `camera`, `promptFragment`,
-   `voiceover`). Set `overview`/`budgetUsd` on the first card. Each call bootstraps a
+   `voiceover`). **`voiceover.line` is the scene's spoken line — settle it at the voice-line
+   intake (`ai-asset-generation` Step 6.6, asked once per brief: a line, or no line + a music
+   bed offer) and write it on the card**, so the user reviews the words with the schematic.
+   Set `overview`/`budgetUsd` on the first card. Each call bootstraps a
    minimal rough-canvas scaffold for the `start` sketch slot (`kind: "canvas"`, injected
    `rough` context). **Refine the `start` slot into a full scene illustration by editing
    the unit file** — see `prompts/rough-illustration-unit.md` for the contract, the `rough`
@@ -291,7 +294,11 @@ then read back from it when you spend.
    clip from the prompt (text-to-video); set only the params the model actually requires.
    **Then re-read the card with `libi.storyboard_get` and build the actual generation
    request from the card's CURRENT spec** (it may carry the user's manual inline edits — see
-   "The card is the source of truth" above). Generate the clip with your video model's
+   "The card is the source of truth" above). **The card's `voiceover.line` is the clip
+   prompt's dialogue** (`She says: "…"` per the engine's guide, `generate_audio = true`); a card
+   with no line gets no dialogue and keeps native ambient audio, and a brief the user answered
+   "no line + music" gets its bed from `music-creation` once the takes are on the timeline.
+   Generate the clip with your video model's
    image-to-video endpoint from those params (delegate to `ai-video-models` for the engine's
    prompt grammar; your provider reference names the endpoint),
    upload, and

@@ -5,6 +5,7 @@ import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
 import { unionRect } from "@/lib/engine/three-content-bounds";
 import { projectSpatialQuadBboxUnclamped } from "@/lib/engine/overlay-quad-projection";
 import { fitRect, coverRect } from "./letterbox";
+import { drawWithBalancedState } from "./canvas-state";
 import { sampleTrackedOverlay } from "@/lib/engine/tracked-space";
 import type { Track, TrackFit } from "@/lib/tracking/types";
 import { elementTiming } from "./overlay-timing";
@@ -224,7 +225,16 @@ export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void
         const offY = qrect.y - expanded.y;
         const scratch = getScratchCanvas(qrect.width, qrect.height);
         scratch.ctx.clearRect(0, 0, scratch.canvas.width, scratch.canvas.height);
-        drawOverlayContent2D(overlay, { ...drawCtx, ctx: scratch.ctx }, { x: 0, y: 0, width: qrect.width, height: qrect.height });
+        // The scratch canvas is shared by every spatial overlay, every frame.
+        // The content draw clips/translates it (the code case never restores —
+        // on the main canvas drawOverlay's own save covers that), and a body
+        // can throw mid-draw: save first and let drawWithBalancedState pop it
+        // plus anything the draw left open, or the next clear and draw run
+        // clipped and offset.
+        drawWithBalancedState(scratch.ctx, () => {
+          scratch.ctx.save();
+          drawOverlayContent2D(overlay, { ...drawCtx, ctx: scratch.ctx }, { x: 0, y: 0, width: qrect.width, height: qrect.height });
+        });
         const gl = quad.render(scratch.canvas, spatial, flip, qrect.width, qrect.height, expanded.width, expanded.height, offX, offY);
         if (rollRad) {
           const cx = rect.x + rect.width / 2;

@@ -63,6 +63,7 @@ import {
 } from "@/components/ui/tooltip";
 import type { ManualAnchor, Track, TrackFit, TrackSmoothing } from "@/lib/tracking/types";
 import { ExportDialog } from "@/components/export/export-dialog";
+import { hasGraphicsOverlays } from "@/lib/export/quality";
 import { ExportSuccessToast } from "@/components/export/export-success-toast";
 import { revealFile } from "@/lib/shell/client";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
@@ -1516,7 +1517,7 @@ export default function PreviewPlayer({
             pieceName={pieceName ?? null}
             compositionWidth={composition?.width ?? 1920}
             compositionHeight={composition?.height ?? 1080}
-            hasOverlays={(composition?.overlays?.length ?? 0) > 0}
+            hasGraphics={hasGraphicsOverlays(composition?.overlays)}
             flow={exportFlow}
             hasSnapshot={hasSnapshot}
             hasDraft={hasDraft}

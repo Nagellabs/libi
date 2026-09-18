@@ -1,6 +1,7 @@
 // lib/storyboard/snapshot.ts
 import { getStorage } from "@/lib/storage";
 import { clearStoryboard, loadStoryboard, saveStoryboard } from "./repo";
+import { withStoryboardLock } from "./lock";
 import type { Storyboard } from "./types";
 
 /** Normalize a storyboard for divergence comparison: drop the volatile
@@ -29,7 +30,9 @@ const SNAPSHOT_PATH = "snapshots/storyboard-current.json";
  *  blob in the snapshot ring. Keeps the snapshot self-contained alongside
  *  composition.json without forcing the per-card file layout into the ring. */
 export async function saveStoryboardSnapshot(pieceId: string): Promise<void> {
-  const sb = await loadStoryboard(pieceId);
+  // Read under the storyboard lock so a commit never snapshots a board that
+  // another request is halfway through writing (cards first, manifest last).
+  const sb = await withStoryboardLock(pieceId, () => loadStoryboard(pieceId));
   const storage = await getStorage();
   await storage.save(
     pieceId,

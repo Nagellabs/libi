@@ -3,10 +3,11 @@ import { updateGenParam, loadCard } from "@/lib/storyboard/repo";
 import { getModelSchemaCache } from "@/lib/storyboard/model-schema-cache";
 import { validateParams } from "@/lib/storyboard/gen-schema";
 import type { GenParamValue } from "@/lib/storyboard/types";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
 type Body = { tier?: "keyframe" | "clip"; paramKey?: string; value?: GenParamValue | null };
 
-export async function PATCH(
+export const PATCH = withStoryboardBusy(async function PATCH(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string }> },
 ) {
@@ -39,4 +40,4 @@ export async function PATCH(
   const updated = await updateGenParam(pieceId, cardId, tier, paramKey, value ?? null);
   if (!updated) return NextResponse.json({ error: "card or spec not found" }, { status: 404 });
   return NextResponse.json({ card: updated });
-}
+});

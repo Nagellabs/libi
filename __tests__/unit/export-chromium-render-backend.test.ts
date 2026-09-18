@@ -110,6 +110,63 @@ describe("ChromiumRenderBackend", () => {
     expect(result.blob.size).toBe(4);
   });
 
+  it("forwards droppedOverlays from the render page into the ExportResult (QA 2026-09-18 B1)", async () => {
+    currentDriver = {
+      name: "electron",
+      runJob: async ({ jobId }: { jobId: string }) => {
+        const dir = await mkdtemp(join(tmpdir(), "test-render-"));
+        const filePath = join(dir, "out.mp4");
+        await writeFile(filePath, new Uint8Array([1, 2, 3, 4]));
+        const { getRenderJobTokenByJobId } = await import("@/lib/export/render-jobs");
+        const entry = getRenderJobTokenByJobId(jobId);
+        if (!entry) throw new Error("no entry");
+        resolveRenderJob(jobId, entry.token, {
+          tempFilePath: filePath,
+          durationSeconds: 1.25,
+          droppedOverlays: [{ id: "code-abc", message: "ctx is not defined" }],
+        });
+      },
+      shutdown: async () => {},
+    };
+    const be = new ChromiumRenderBackend();
+    const result = await be.run({
+      pieceId: "p1",
+      composition: { id: "c1" } as never,
+      payload: {
+        overlays: [],
+        audioClips: [],
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        files: [],
+      },
+      settings: { format: "mp4", codec: "avc", bitrate: 1_000_000, width: 1920, height: 1080, fps: 30 } as never,
+      onProgress: () => {},
+      signal: new AbortController().signal,
+    });
+    expect(result.droppedOverlays).toEqual([{ id: "code-abc", message: "ctx is not defined" }]);
+  });
+
+  it("omits droppedOverlays from the ExportResult when nothing was dropped", async () => {
+    const be = new ChromiumRenderBackend();
+    const result = await be.run({
+      pieceId: "p1",
+      composition: { id: "c1" } as never,
+      payload: {
+        overlays: [],
+        audioClips: [],
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        files: [],
+      },
+      settings: { format: "mp4", codec: "avc", bitrate: 1_000_000, width: 1920, height: 1080, fps: 30 } as never,
+      onProgress: () => {},
+      signal: new AbortController().signal,
+    });
+    expect(result.droppedOverlays).toBeUndefined();
+  });
+
   it("rejects the job when the driver throws", async () => {
     // The driver's `name` union is narrow (electron | playwright), but
     // here we want to assert the error message format. Use "electron" —

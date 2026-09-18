@@ -118,6 +118,68 @@ describe("exportRenderRunner", () => {
     );
   });
 
+  // QA 2026-09-18 B1: a dropped overlay must be visible beyond an info-level
+  // console line inside the headless render page. The render page reports it
+  // on its postback (RenderJobSuccess.droppedOverlays); this runner forwards
+  // it into its own result. The warn is logged by the `export` runner under
+  // the job id the agent holds (integration/export-runner-dropped-overlays).
+  it("forwards a droppedOverlays list from the render page", async () => {
+    const driver = {
+      name: "playwright" as const,
+      runJob: vi.fn(async ({ jobId }: { jobId: string; port: number }) => {
+        const tok = getRenderJobTokenByJobId(jobId);
+        if (!tok) throw new Error("no token");
+        resolveRenderJob(jobId, tok.token, {
+          tempFilePath: "/tmp/out.mp4",
+          durationSeconds: 3,
+          droppedOverlays: [{ id: "code-abc", message: "ctx is not defined" }],
+        });
+      }),
+      shutdown: vi.fn(async () => {}),
+    };
+    vi.mocked(pickDriver).mockReturnValue(driver);
+
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("export_render", {
+      pieceId: "p-dropped",
+      payload: PAYLOAD,
+      settings: SETTINGS,
+    }));
+    const result = await mgr.runToCompletion<{
+      tempFilePath: string;
+      durationSeconds: number;
+      droppedOverlays?: Array<{ id: string; message: string }>;
+    }>(jobId);
+
+    expect(result.droppedOverlays).toEqual([{ id: "code-abc", message: "ctx is not defined" }]);
+  });
+
+  it("omits droppedOverlays from the result when nothing was dropped", async () => {
+    const driver = {
+      name: "playwright" as const,
+      runJob: vi.fn(async ({ jobId }: { jobId: string; port: number }) => {
+        const tok = getRenderJobTokenByJobId(jobId);
+        if (!tok) throw new Error("no token");
+        resolveRenderJob(jobId, tok.token, { tempFilePath: "/tmp/out2.mp4", durationSeconds: 3 });
+      }),
+      shutdown: vi.fn(async () => {}),
+    };
+    vi.mocked(pickDriver).mockReturnValue(driver);
+
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("export_render", {
+      pieceId: "p-clean",
+      payload: PAYLOAD,
+      settings: SETTINGS,
+    }));
+    const result = await mgr.runToCompletion<{
+      tempFilePath: string;
+      durationSeconds: number;
+      droppedOverlays?: Array<{ id: string; message: string }>;
+    }>(jobId);
+    expect(result.droppedOverlays).toBeUndefined();
+  });
+
   it("propagates driver errors as job failure", async () => {
     const driver = {
       name: "playwright" as const,

@@ -44,6 +44,92 @@ describe("POST /api/export/render-result", () => {
     expect(written.length).toBe(mp4Bytes.length);
   });
 
+  it("parses droppedOverlays JSON and forwards it to the resolved job (QA 2026-09-18 B1)", async () => {
+    const job = createRenderJob({
+      pieceId: "p1",
+      payload: { id: "c1" } as unknown as RenderPayload,
+      settings: { format: "mp4" } as ExportSettings,
+    });
+
+    const fd = new FormData();
+    fd.append("jobId", job.jobId);
+    fd.append("token", job.token);
+    fd.append("durationSeconds", "2.5");
+    fd.append(
+      "droppedOverlays",
+      JSON.stringify([{ id: "code-abc", message: "ctx is not defined" }]),
+    );
+    fd.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "video/mp4" }), "out.mp4");
+
+    const req = new Request("http://localhost/api/export/render-result", {
+      method: "POST",
+      body: fd,
+    });
+    const res = await postResult(req);
+    expect(res.status).toBe(200);
+
+    const result = await job.done;
+    expect(result.droppedOverlays).toEqual([{ id: "code-abc", message: "ctx is not defined" }]);
+  });
+
+  // QA recheck N5: uploaded fonts the render page couldn't load are reported
+  // so the export runner can log them (the text fell back to a default face).
+  it("parses unloadedFonts and forwards it to the resolved job", async () => {
+    const job = createRenderJob({
+      pieceId: "p1",
+      payload: { id: "c1" } as unknown as RenderPayload,
+      settings: { format: "mp4" } as ExportSettings,
+    });
+    const fd = new FormData();
+    fd.append("jobId", job.jobId);
+    fd.append("token", job.token);
+    fd.append("durationSeconds", "2.5");
+    fd.append("unloadedFonts", JSON.stringify([{ fontFileId: "font-1", reason: "OTS parsing error" }, 7, { fontFileId: 3 }]));
+    fd.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "video/mp4" }), "out.mp4");
+    const res = await postResult(new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }));
+    expect(res.status).toBe(200);
+    expect((await job.done).unloadedFonts).toEqual([{ fontFileId: "font-1", reason: "OTS parsing error" }]);
+  });
+
+  it("omits droppedOverlays from the resolved job when the field is absent", async () => {
+    const job = createRenderJob({
+      pieceId: "p1",
+      payload: { id: "c1" } as unknown as RenderPayload,
+      settings: { format: "mp4" } as ExportSettings,
+    });
+    const fd = new FormData();
+    fd.append("jobId", job.jobId);
+    fd.append("token", job.token);
+    fd.append("durationSeconds", "2.5");
+    fd.append("file", new Blob([new Uint8Array([1])], { type: "video/mp4" }), "out.mp4");
+    const res = await postResult(
+      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }),
+    );
+    expect(res.status).toBe(200);
+    const result = await job.done;
+    expect(result.droppedOverlays).toBeUndefined();
+  });
+
+  it("ignores malformed droppedOverlays JSON rather than failing the postback", async () => {
+    const job = createRenderJob({
+      pieceId: "p1",
+      payload: { id: "c1" } as unknown as RenderPayload,
+      settings: { format: "mp4" } as ExportSettings,
+    });
+    const fd = new FormData();
+    fd.append("jobId", job.jobId);
+    fd.append("token", job.token);
+    fd.append("durationSeconds", "2.5");
+    fd.append("droppedOverlays", "{not json");
+    fd.append("file", new Blob([new Uint8Array([1])], { type: "video/mp4" }), "out.mp4");
+    const res = await postResult(
+      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }),
+    );
+    expect(res.status).toBe(200);
+    const result = await job.done;
+    expect(result.droppedOverlays).toBeUndefined();
+  });
+
   it("rejects with 404 when token is wrong", async () => {
     const job = createRenderJob({ pieceId: "p1", payload: {} as RenderPayload, settings: {} as ExportSettings });
     const fd = new FormData();

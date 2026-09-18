@@ -87,6 +87,33 @@ export interface ExportRenderResult {
   /** Absolute path to the rendered file on disk written by the render page. */
   tempFilePath: string;
   durationSeconds: number;
+  /** Overlays the render page skipped because their draw threw — see
+   *  RenderJobSuccess.droppedOverlays. Merged across chunks (deduped by
+   *  overlay id, bounded) when the render was chunked. */
+  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Uploaded fonts the render page failed to load (deduped across chunks). */
+  unloadedFonts?: Array<{ fontFileId: string; reason: string }>;
+}
+
+/** Cap on the merged dropped-overlays list — mirrors
+ *  lib/engine/export.ts MAX_DROPPED_OVERLAYS. A chunked render can otherwise
+ *  report the same broken overlay once per chunk. */
+const MAX_DROPPED_OVERLAYS = 20;
+
+/** Dedup (by overlay id, first message wins) and bound a list of per-chunk
+ *  droppedOverlays lists into one. */
+function mergeDroppedOverlays(
+  lists: Array<Array<{ id: string; message: string }> | undefined>,
+): Array<{ id: string; message: string }> {
+  const seen = new Map<string, string>();
+  for (const list of lists) {
+    if (!list) continue;
+    for (const { id, message } of list) {
+      if (seen.size >= MAX_DROPPED_OVERLAYS) break;
+      if (!seen.has(id)) seen.set(id, message);
+    }
+  }
+  return Array.from(seen, ([id, message]) => ({ id, message }));
 }
 
 export const exportRenderRunner: JobRunner<ExportRenderParams, ExportRenderResult> = {
@@ -143,10 +170,15 @@ export const exportRenderRunner: JobRunner<ExportRenderParams, ExportRenderResul
       "export.render_chunk_plan",
     );
 
-    if (!totalFrames || chunks.length <= 1) {
-      return runSingle(ctx, port);
-    }
-    return runChunked(ctx, port, totalFrames, chunks);
+    const result =
+      !totalFrames || chunks.length <= 1
+        ? await runSingle(ctx, port)
+        : await runChunked(ctx, port, totalFrames, chunks);
+
+    // A dropped overlay is logged (warn, op overlay_dropped) by the `export`
+    // runner, under the export job id the agent holds — this inner job's id
+    // means nothing to it.
+    return result;
   },
 };
 
@@ -221,7 +253,7 @@ async function runSingle(
   });
 
   try {
-    const { tempFilePath, durationSeconds } = await handle.done;
+    const { tempFilePath, durationSeconds, droppedOverlays, unloadedFonts } = await handle.done;
     // The render page emits a VIDEO-ONLY file (the canvas-source encoder has
     // no audio API). Mux the composition's audio onto it in a fast
     // stream-copy pass so multi-scene exports carry sound. No-ops (returns
@@ -235,7 +267,12 @@ async function runSingle(
       durationSeconds,
     });
     ctx.reportProgress(1, 1, "render");
-    return { tempFilePath: finalPath, durationSeconds };
+    return {
+      tempFilePath: finalPath,
+      durationSeconds,
+      ...(droppedOverlays?.length ? { droppedOverlays } : {}),
+      ...(unloadedFonts?.length ? { unloadedFonts } : {}),
+    };
   } finally {
     if (cancelPoll) {
       clearInterval(cancelPoll);
@@ -393,7 +430,16 @@ async function runChunked(
     });
 
     ctx.reportProgress(totalFrames, totalFrames, "frames");
-    return { tempFilePath: finalPath, durationSeconds };
+    const droppedOverlays = mergeDroppedOverlays(results.map((r) => r.droppedOverlays));
+    const unloadedFonts = [
+      ...new Map(results.flatMap((r) => r.unloadedFonts ?? []).map((f) => [f.fontFileId, f])).values(),
+    ];
+    return {
+      tempFilePath: finalPath,
+      durationSeconds,
+      ...(droppedOverlays.length ? { droppedOverlays } : {}),
+      ...(unloadedFonts.length ? { unloadedFonts } : {}),
+    };
   } finally {
     if (cancelPoll) {
       clearInterval(cancelPoll);

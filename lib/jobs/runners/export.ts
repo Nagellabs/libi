@@ -30,6 +30,7 @@ import type {
   Overlay,
 } from "@/lib/engine/types";
 import { exportLogger } from "@/lib/logger";
+import { cssFamilyForFontFile } from "@/lib/fonts/family";
 
 /**
  * Unified `export` job. One entry point covers all three server-side backends
@@ -68,6 +69,7 @@ const exportParamsSchema = z.object({
       height: z.number().int().positive(),
       fps: z.number().int().positive(),
       quality: z.enum(["source", "1080p", "1440p", "4k", "custom"]).optional(),
+      graphicsQuality: z.enum(["1080p", "1440p", "4k"]).optional(),
       audioBitrate: z.number().int().positive().optional(),
     })
     .passthrough(),
@@ -84,7 +86,22 @@ export interface ExportResult {
   backend: "stream-copy-trim" | "ffmpeg-overlay" | "chromium-render";
   width: number;
   height: number;
+  /** Overlays whose draw threw during the chromium-render pass and were
+   *  skipped (QA 2026-09-18 B1) — surfaced here so `libi.export_video`'s
+   *  response tells the agent which overlay(s) failed. The export still
+   *  succeeds; this is informational. Only the chromium-render backend can
+   *  produce this (stream-copy-trim / ffmpeg-overlay never run a code
+   *  overlay's draw function). */
+  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Uploaded fonts the chromium-render page could not load (Final QA F1):
+   *  their text rendered in a fallback face. The export still succeeds; the
+   *  agent tells the user which font and why. Bounded; absent when every
+   *  font loaded. `family` is the one libi.upload_font returned. */
+  unloadedFonts?: Array<{ fontFileId: string; family: string; reason: string }>;
 }
+
+/** Cap on the reported unloaded-fonts list. */
+const MAX_UNLOADED_FONTS = 20;
 
 export const exportRunner: JobRunner<ExportParams, ExportResult> = {
   kind: "export",
@@ -261,6 +278,8 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
 
       try {
         let durationSeconds = 0;
+        let droppedOverlays: Array<{ id: string; message: string }> | undefined;
+        let unloadedFonts: ExportResult["unloadedFonts"];
 
         if (shape === "stream-copy-trim") {
           const backend = new StreamCopyTrimBackend();
@@ -297,6 +316,29 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
             signal: ac.signal,
           });
           durationSeconds = result.duration;
+          droppedOverlays = result.droppedOverlays;
+          // Make a dropped overlay findable beyond the render page's own
+          // console line, keyed by the job id the agent was given (QA
+          // 2026-09-18 B1, O1).
+          if (droppedOverlays?.length) {
+            exportLogger.warn(
+              { op: "overlay_dropped", jobId: ctx.jobId, pieceId, droppedOverlays },
+              "export.overlay_dropped",
+            );
+          }
+          // An uploaded font the render page couldn't load drew in a default
+          // face (QA 2026-09-18 recheck N5). Not fatal, but never silent.
+          if (result.unloadedFonts?.length) {
+            unloadedFonts = result.unloadedFonts.slice(0, MAX_UNLOADED_FONTS).map((f) => ({
+              fontFileId: f.fontFileId,
+              family: cssFamilyForFontFile(f.fontFileId),
+              reason: f.reason,
+            }));
+            exportLogger.warn(
+              { op: "font_load_failed", jobId: ctx.jobId, pieceId, unloadedFonts },
+              "export.font_load_failed",
+            );
+          }
           // The chromium backend returned a Blob; write it to our claimed path.
           const buf = Buffer.from(await result.blob.arrayBuffer());
           await fs.writeFile(outputPath, new Uint8Array(buf));
@@ -325,6 +367,8 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
           backend: shape as ExportResult["backend"],
           width: resolvedSettings.width,
           height: resolvedSettings.height,
+          ...(droppedOverlays?.length ? { droppedOverlays } : {}),
+          ...(unloadedFonts?.length ? { unloadedFonts } : {}),
         };
       } catch (err) {
         // Clean up the claimed placeholder/partial file.
@@ -339,6 +383,8 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
             pieceId,
             outputPath,
             error: message,
+            // ffmpeg-overlay keeps a failed long graph's file for debugging.
+            ...graphFileOf(err),
           },
           `export.${isCancel ? "cancel" : "fail"}`,
         );
@@ -392,4 +438,10 @@ export function getPieceName(pieceId: string): string | null {
 /** Resolve the default OS temp dir for ad-hoc paths. Convenience export. */
 export function tempExportDir(): string {
   return os.tmpdir();
+}
+
+/** The filter-graph file a failed ffmpeg-overlay run kept, if any. */
+function graphFileOf(err: unknown): { graphFile?: string } {
+  const graphFile = (err as { graphFile?: unknown } | null)?.graphFile;
+  return typeof graphFile === "string" ? { graphFile } : {};
 }

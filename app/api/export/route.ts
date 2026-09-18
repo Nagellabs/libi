@@ -5,11 +5,13 @@ import { pieces } from "@/lib/db/schema";
 import { getJobManager } from "@/lib/jobs/manager";
 import { loadComposition } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
-import { resolveExportSettings } from "@/lib/export/quality";
+import { resolveExportSettings, hasGraphicsOverlays } from "@/lib/export/quality";
 import { resolveExportFolder, getExportDefaults } from "@/lib/db/settings";
 import { isFolderWritable, ensureFolderExists } from "@/lib/export/folder";
 import { exportLogger } from "@/lib/logger";
 import { chromiumInstalled, CHROMIUM_DOWNLOAD_MB } from "@/lib/export/ensure-chromium";
+
+const GRAPHICS_QUALITIES: ReadonlyArray<string> = ["1080p", "1440p", "4k"];
 
 /** Body accepted by POST /api/export. All fields except pieceId are optional —
  *  defaults come from the export-defaults settings + the piece's composition. */
@@ -19,6 +21,7 @@ interface Body {
   filename?: string;
   format?: "mp4" | "webm";
   quality?: "source" | "1080p" | "1440p" | "4k" | "custom";
+  graphicsQuality?: "1080p" | "1440p" | "4k";
   customWidth?: number;
   customHeight?: number;
   destFolder?: string;
@@ -46,11 +49,13 @@ export async function POST(req: Request): Promise<Response> {
   const source = body.source ?? "draft";
 
   // Load the composition just enough to derive native dimensions for the
-  // "source" quality preset. The runner re-loads inside the job for the
-  // actual encode.
+  // "source" quality preset, and its overlays to know whether any text/code/
+  // 3D graphics are present (drives the graphics-resolution comparison). The
+  // runner re-loads inside the job for the actual encode.
   let width: number;
   let height: number;
   let fps: number;
+  let hasGraphics: boolean;
   if (source === "snapshot") {
     const snap = await loadCurrentSnapshot(body.pieceId);
     if (!snap) {
@@ -59,16 +64,25 @@ export async function POST(req: Request): Promise<Response> {
     width = snap.width;
     height = snap.height;
     fps = snap.fps;
+    hasGraphics = hasGraphicsOverlays(snap.overlays);
   } else {
     const { manifest } = await loadComposition(body.pieceId);
     width = manifest.width;
     height = manifest.height;
     fps = manifest.fps;
+    hasGraphics = hasGraphicsOverlays(manifest.overlays);
   }
 
   const defaults = getExportDefaults();
   const format = body.format ?? defaults.format;
   const requestedQuality = body.quality ?? defaults.quality;
+  const requestedGraphicsQuality = body.graphicsQuality ?? defaults.graphicsQuality;
+  if (!GRAPHICS_QUALITIES.includes(requestedGraphicsQuality)) {
+    return NextResponse.json(
+      { error: `graphicsQuality must be one of ${GRAPHICS_QUALITIES.join(", ")}` },
+      { status: 400 },
+    );
+  }
   // The runner only understands settings.quality; "custom" needs explicit dims.
   if (requestedQuality === "custom" && (!body.customWidth || !body.customHeight)) {
     return NextResponse.json(
@@ -86,6 +100,8 @@ export async function POST(req: Request): Promise<Response> {
     codec: format === "webm" ? "vp9" : "avc",
     fps,
     quality: requestedQuality,
+    graphicsQuality: requestedGraphicsQuality,
+    hasGraphics,
     sourceWidth: width,
     sourceHeight: height,
     customWidth: body.customWidth,
@@ -172,6 +188,8 @@ export async function POST(req: Request): Promise<Response> {
       filename,
       format,
       quality: settings.quality,
+      graphicsQuality: settings.graphicsQuality,
+      hasGraphics,
       width: settings.width,
       height: settings.height,
       destFolder,
@@ -190,6 +208,7 @@ export async function POST(req: Request): Promise<Response> {
       height: settings.height,
       bitrate: settings.bitrate,
       quality: settings.quality,
+      graphicsQuality: settings.graphicsQuality,
     },
   });
 }

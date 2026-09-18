@@ -42,6 +42,15 @@ The piece's durable plan and review surface is the **Storyboard** (the Storyboar
 > just generate"), in which case go straight to generation. The gate fires for **every** AI
 > video, including a single-clip request (a one-shot clip is just a one-card board).
 
+> **Ask once, before the first AI video generation: does it speak?** `generate_audio` only
+> adds a soundtrack; a *voice* needs a spoken line in the prompt, and a brief that never mentions
+> audio otherwise comes back ambient-only. In ONE message, before any video spend, never per clip:
+> a spoken line (what it says, or "write it for me") — or none, and then a music bed (free
+> on-device `libi.generate_music`, or the user's music provider) or ambient only. The card's
+> `voiceover.line` holds it and becomes the clip's dialogue. If nobody can answer, default to a
+> drafted voice-over line — narration fits any shot, b-roll included — and say so in your reply;
+> "no line" is the user's call, never yours. Full rule: `ai-asset-generation` Step 6.6.
+
 > If that skill is not available in this session, tell the user in one line to install libi's skills — Agents → Global setup in libi, or `npx @nagellabs/libi connect` in the folder — then continue with these instructions.
 
 <!-- libi-agent:codex -->
@@ -734,7 +743,8 @@ also remove 2 overlays and 1 audio clip — proceed?") before calling
 
 ## Workflow
 
-1. Start by understanding what the user wants to create.
+1. Start by understanding what the user wants to create. For AI-generated video, that includes
+   the voice-line question — asked once, before the first generation (see "Planning workflow").
 2. Call `libi.list_pieces` to find the piece to work on (or `libi.create_piece` for a new one).
 3. Use `libi.get_composition` to see the existing layers (if any).
 4. Add layers with `libi.add_overlay` — `kind: "video"` for footage, `kind: "code"` for a hand-drawn graphic or full-frame backdrop, `kind: "text"` for titles and captions.

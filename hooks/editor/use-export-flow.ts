@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics/client";
+import type { GraphicsQuality } from "@/lib/engine/types";
+import { DEFAULT_GRAPHICS_QUALITY } from "@/lib/export/quality";
 
 export type ExportSource = "draft" | "snapshot";
 export type ExportQuality = "source" | "1080p" | "1440p" | "4k" | "custom";
@@ -13,6 +15,10 @@ export interface ExportStartParams {
   filename: string;
   format: ExportFormat;
   quality: ExportQuality;
+  /** Resolution text/code/3D overlays render at. Optional so callers that
+   *  never touch graphics (tests, older call sites) still compile; the
+   *  server falls back to the stored default ("4k") when omitted. */
+  graphicsQuality?: GraphicsQuality;
   customWidth?: number;
   customHeight?: number;
   destFolder?: string;
@@ -105,6 +111,7 @@ export function useExportFlow(): UseExportFlowResult {
             filename: params.filename,
             format: params.format,
             quality: params.quality,
+            graphicsQuality: params.graphicsQuality,
             customWidth: params.customWidth,
             customHeight: params.customHeight,
             destFolder: params.destFolder,
@@ -125,7 +132,11 @@ export function useExportFlow(): UseExportFlowResult {
 
       setJobId(enq.jobId);
       setStatus("running");
-      trackEvent("export_started", { format: params.format, quality: params.quality });
+      trackEvent("export_started", {
+        format: params.format,
+        quality: params.quality,
+        graphics_quality: params.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
+      });
       const es = new EventSource(`/api/jobs/${enq.jobId}/events`);
       eventSourceRef.current = es;
 

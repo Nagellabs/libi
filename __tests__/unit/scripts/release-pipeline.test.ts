@@ -215,12 +215,30 @@ describe("the release workflows: what must never drift", () => {
       const guard = stepsIn(wf, "window")
         .map((st) => String(st.run ?? ""))
         .join("\n");
-      expect(guard).toContain("date -u +%u");
+      // The operator's local day, not UTC (a UTC+7 operator was refused on a
+      // real Friday morning and let through on Sunday morning).
+      expect(guard).toContain("export TZ=");
+      expect(guard).toContain("date +%u");
+      expect(guard).not.toContain("date -u");
       expect(guard).toContain("Friday or Saturday");
       const inputs = Object.keys(wf.on.workflow_dispatch.inputs ?? {});
       expect(inputs).not.toContain("force");
       expect(inputs).not.toContain("skip_window");
     }
+  });
+
+  it("pushes the version commit and tag even when only the post-publish verify failed", () => {
+    // 0.1.14: npm accepted the package, the registry verifier gave up on a
+    // lagging CDN, the Publish step failed, and the push was skipped — a public
+    // version with no version commit and no tag. The script now reports
+    // `published=true` the moment npm accepts, and the push keys off it.
+    const push = stepsIn(npmWf, "npm").find((st) => st.name === "Push the version commit and tag");
+    expect(push?.if).toContain("steps.publish.outputs.published == 'true'");
+    expect(push?.if).toContain("!inputs.dry_run");
+    const script = readFileSync(path.join(ROOT, "scripts/release-npm.js"), "utf8");
+    const marker = script.indexOf("published=true");
+    expect(marker).toBeGreaterThan(script.indexOf('dryRun ? ["publish", "--dry-run"] : ["publish"]'));
+    expect(marker).toBeLessThan(script.indexOf("const VERIFY_ATTEMPTS"));
   });
 
   it("references exactly the secrets that exist in the `release` environment", () => {

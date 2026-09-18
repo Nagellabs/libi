@@ -3,6 +3,7 @@ import { getStorage } from "@/lib/storage";
 import { slotSketchPath } from "@/lib/storyboard/paths";
 import { loadCard, editSketch } from "@/lib/storyboard/repo";
 import { renderCardSketch } from "@/lib/storyboard/render-card";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
 function bad(seg: string): boolean {
   return seg.includes("/") || seg.includes("..") || seg.includes("\\");
@@ -10,7 +11,7 @@ function bad(seg: string): boolean {
 
 /** Set (or clear, with imageFileId:null) the imported image used AS this slot's
  *  sketch — the source for "import a sketch image" in the card's Add/import menu. */
-export async function PATCH(
+export const PATCH = withStoryboardBusy(async function PATCH(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string; slotId: string }> },
 ) {
@@ -25,7 +26,7 @@ export async function PATCH(
   const res = await editSketch(pieceId, cardId, slotId, { imageFileId: body.imageFileId ?? null });
   if (!res) return NextResponse.json({ error: "card or slot not found" }, { status: 404 });
   return NextResponse.json({ card: res.card });
-}
+});
 
 export async function GET(
   _req: Request,

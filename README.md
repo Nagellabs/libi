@@ -35,7 +35,7 @@ and if it ever moves, re-run `libi connect` to update the registration.
 
 - **Node.js 20.9+** (only for the npm package — the desktop app bundles its own runtime)
 - **A CLI coding agent you're already signed in to** — [Claude Code](https://claude.com/claude-code) or [Codex](https://developers.openai.com/codex). libi installs the adapters it needs; you bring the account.
-- **~1 GB of free disk** for what libi downloads on first run (ffmpeg/ffprobe, a Chromium for rendering, the agent adapter). Object tracking and background removal pull their models on demand, later.
+- **~1 GB of free disk** for what libi downloads as you use it. First launch fetches only ffmpeg/ffprobe; the agent adapter arrives when you set up your agent, and the Chromium used for rendering, object tracking and background removal come down the first time you use them.
 - **macOS or Windows** — Linux support is coming. The Windows installer is not
   code-signed yet, so Windows will warn on first launch; see below.
 
@@ -79,9 +79,10 @@ Useful flags and environment variables:
 | | |
 |---|---|
 | `npx @nagellabs/libi --port 4000` | Serve on a different port (default `3456`) |
-| `npx @nagellabs/libi connect [dir] [--global]` | **Use libi from your own CLI.** Registers libi's MCP endpoint with Claude Code (for that folder, or `--global`) and Codex, and copies libi's skills there. Codex is found on your PATH or, on macOS, inside the ChatGPT / Codex desktop app — the app's own MCP list picks it up after a restart. libi must be running — any way you run it, including the desktop app. Re-run it after upgrading libi (`npx @nagellabs/libi@latest`) to refresh the skills. |
+| `npx @nagellabs/libi connect [dir] [--global]` | **Use libi from your own CLI.** Registers libi's MCP endpoint for your whole Claude Code and Codex account, and installs libi's skills in that folder (or, with `--global`, for every folder). libi records the install and keeps the skills current on its own. Codex is found on your PATH or, on macOS, inside the ChatGPT / Codex desktop app — the app's own MCP list picks it up after a restart. libi must be running — any way you run it, including the desktop app. |
 | `npx @nagellabs/libi --no-open` | Don't launch a browser — just print the URL (also `LIBI_OPEN=0`) |
 | `LIBI_HOME=/path/to/dir` | Move the data directory somewhere other than `~/.libi` |
+| `LIBI_MCP_PORT=3500` | Serve libi's MCP endpoint somewhere other than `3457` (set it before `connect`) |
 | `LIBI_DEBUG=1` | Verbose MCP transport logging |
 
 ---
@@ -99,8 +100,8 @@ npm run dev:electron   # …and the desktop shell
 ```
 
 **Always start libi through `npm run dev` (i.e. `node bin/libi.js`), never `next dev`.** The
-CLI runs an install-and-probe phase before Next.js boots; skipping it leaves the bundled MCP
-servers uninstalled and the agent with no tools.
+CLI runs an install-and-probe phase before Next.js boots (ffmpeg/ffprobe, the data directory,
+the ports); skipping it leaves the studio half-wired and the agent's tools failing.
 
 ```bash
 npm test               # unit + integration (Vitest)

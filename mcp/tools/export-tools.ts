@@ -26,6 +26,7 @@ export interface ExportVideoParams {
   filename?: string;
   format?: "mp4" | "webm";
   quality?: "source" | "1080p" | "1440p" | "4k" | "custom";
+  graphicsQuality?: "1080p" | "1440p" | "4k";
   customWidth?: number;
   customHeight?: number;
   destFolder?: string;
@@ -43,6 +44,16 @@ export interface ExportVideoResult {
   /** True when this export began by downloading Chromium (first canvas
    *  export on this machine) — so the agent can explain the extra time. */
   chromiumDownloaded?: boolean;
+  /** Overlays whose draw threw during a chromium-render export and were
+   *  skipped (QA 2026-09-18 B1 — e.g. a code overlay with no/invalid body).
+   *  The export still succeeded; tell the user which overlay was dropped and
+   *  why, and offer to fix its draw function. Absent when nothing was
+   *  dropped. */
+  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Uploaded fonts a chromium-render export could not load (Final QA F1):
+   *  their text rendered in a fallback face. The export still succeeded; tell
+   *  the user which font and why. Absent when every font loaded. */
+  unloadedFonts?: Array<{ fontFileId: string; family: string; reason: string }>;
 }
 
 interface ExportEnqueueResp {
@@ -58,6 +69,7 @@ interface ExportEnqueueResp {
     height: number;
     bitrate: number;
     quality: string;
+    graphicsQuality?: string;
   };
 }
 

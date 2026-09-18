@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { selectClipTake, hideClipTake } from "@/lib/storyboard/repo";
 import { placeCardOverlay } from "@/lib/storyboard/place-overlay";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
-export async function POST(
+export const POST = withStoryboardBusy(async function POST(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string }> },
 ) {
@@ -13,9 +14,9 @@ export async function POST(
   if (!card) return NextResponse.json({ error: "card or take not found" }, { status: 404 });
   if (card.selectedClipId) await placeCardOverlay(pieceId, card);
   return NextResponse.json({ ok: true, selectedClipId: card.selectedClipId });
-}
+});
 
-export async function DELETE(
+export const DELETE = withStoryboardBusy(async function DELETE(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string }> },
 ) {
@@ -25,4 +26,4 @@ export async function DELETE(
   const card = await hideClipTake(pieceId, cardId, takeId);
   if (!card) return NextResponse.json({ error: "card not found" }, { status: 404 });
   return NextResponse.json({ ok: true, selectedClipId: card.selectedClipId });
-}
+});

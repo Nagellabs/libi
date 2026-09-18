@@ -12,6 +12,7 @@ import { createTestDb } from "@/__tests__/helpers/test-db";
 import { createAggregateSession, unwrapProxiedError } from "@/mcp/http/session";
 import { renderAgentInstructions } from "@/mcp/workspace";
 import { LIBI_MCP_ENTRY_NAME } from "@/lib/mcp/agent-surface";
+import { DEFAULT_INDEX_BUDGET_BYTES } from "@/mcp/manual-sections";
 
 async function connectClient(surface: "in-app" | "cli") {
   const session = await createAggregateSession({ surface, dialect: "claude", instructions: "HELLO-INSTRUCTIONS" });
@@ -97,7 +98,7 @@ describe("createAggregateSession", () => {
     expect(text).toContain('libi.read_manual({ section: "<key>" })');
     // …and it carries the workflow material needed before a first edit.
     expect(text).toContain("## Workflow");
-    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(15_000);
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThan(DEFAULT_INDEX_BUDGET_BYTES);
   });
 
   it("returns just the asked-for section, matching case- and punctuation-insensitively", async () => {

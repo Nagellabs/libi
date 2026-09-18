@@ -3,6 +3,7 @@ import { pieces } from "@/lib/db/schema";
 import { desc } from "drizzle-orm";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { trackServerEvent } from "@/lib/analytics/server";
+import { markAnalyticsMilestoneOnce } from "@/lib/db/settings";
 import { initializePieceManifest } from "@/lib/composition/new-piece-manifest";
 
 function formatPieceName(): string {
@@ -64,6 +65,15 @@ export async function POST() {
   await initializePieceManifest(piece.id);
 
   void trackServerEvent("piece_created", { source: "ui" });
+  // The funnel's first-piece step — mark-once, never a counter, through the
+  // same primitive `POST /api/analytics/milestone` wraps (which is how the
+  // agent's `libi.create_piece` reaches it). Wrapped: analytics must never
+  // fail a creation that already committed.
+  try {
+    if (markAnalyticsMilestoneOnce("first_piece")) trackServerEvent("first_piece_created");
+  } catch {
+    // best-effort; the piece row is already committed
+  }
 
   navigationEmitter.emit("refresh_query", { queryKey: "pieces" });
   navigationEmitter.emit("refresh_query", { queryKey: "piece", pieceId: piece.id });

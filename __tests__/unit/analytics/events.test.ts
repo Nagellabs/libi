@@ -16,8 +16,9 @@ describe("event taxonomy", () => {
     expect(EVENT_NAMES).toContain("provider_suggested");
   });
   it("no longer carries the retired setup-card, sign-in, Codex-connect and connect-panel events", () => {
+    // `provider_connected` is NOT in this list: the name came back with the
+    // Providers tab's observed-detection semantics (see events.ts).
     for (const retired of [
-      "provider_connected",
       "extension_install_started",
       "agent_setup_started",
       "agent_setup_command_copied",
@@ -32,14 +33,38 @@ describe("event taxonomy", () => {
     expect(EVENT_NAMES).toContain("agent_install_completed");
     expect(EVENT_NAMES).toContain("agent_install_failed");
   });
-  it("surfaces are the Agents page tabs, the chat card, and the editor's sidebar/chat/settings", () => {
-    const surfaces: AnalyticsSurface[] = ["sidebar", "chat", "settings", "agents", "global-setup", "libi-mcp", "providers", "chat-card"];
-    expect(new Set(surfaces).size).toBe(8);
+  it("surfaces are the three setup-terminal tabs of the Agents page plus the suggestion-narrowed Providers tab", () => {
+    const surfaces: AnalyticsSurface[] = ["agents", "global-setup", "providers", "suggestion"];
+    expect(new Set(surfaces).size).toBe(4);
     // @ts-expect-error — the onboarding takeover is gone
     const onboarding: AnalyticsSurface = "onboarding";
     // @ts-expect-error — the right-region connect panel is gone
     const panel: AnalyticsSurface = "provider-panel";
-    expect([onboarding, panel]).toHaveLength(2);
+    // @ts-expect-error — the Libi MCP tab owns no setup terminal (SetupSurface), so nothing ever reported it
+    const libiMcp: AnalyticsSurface = "libi-mcp";
+    // @ts-expect-error — the in-chat card only links to the Providers tab; the tab reports `suggestion`
+    const chatCard: AnalyticsSurface = "chat-card";
+    // @ts-expect-error — the editor's sidebar no longer initiates setup actions
+    const sidebar: AnalyticsSurface = "sidebar";
+    // @ts-expect-error — nor does the chat panel
+    const chat: AnalyticsSurface = "chat";
+    // @ts-expect-error — nor does the Settings page
+    const settings: AnalyticsSurface = "settings";
+    expect([onboarding, panel, libiMcp, chatCard, sidebar, chat, settings]).toHaveLength(7);
+  });
+  it("includes the 2026-09-18 audit's funnel additions", () => {
+    for (const n of [
+      "agent_auth_rejected",
+      "first_piece_created",
+      "agents_tab_viewed",
+      "libi_mcp_connected",
+      "mcp_cli_session_opened",
+      "dependency_installed",
+      "provider_connected",
+    ]) {
+      expect(EVENT_NAMES).toContain(n);
+      expect(isEventName(n)).toBe(true);
+    }
   });
   it("includes the Agents page setup wizard's step event", () => {
     expect(EVENT_NAMES).toContain("agent_wizard_step_completed");

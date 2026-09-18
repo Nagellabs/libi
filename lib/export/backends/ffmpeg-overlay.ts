@@ -1,17 +1,23 @@
 import fs from "fs";
-import { dirname } from "path";
+import { basename, dirname, join as joinPath, resolve as resolvePath } from "path";
+import { tmpdir } from "os";
+import { mkdtemp, rm } from "fs/promises";
 import { eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema/sqlite";
 import { getStorage } from "@/lib/storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
+import { filterGraphArgs, supportsFilterFileOption, INLINE_GRAPH_MAX } from "@/lib/ffmpeg/filter-script";
 import { probeMedia } from "@/lib/ffmpeg/probe";
 import { vpxAlphaDecodeArgs } from "@/lib/ffmpeg/alpha";
 import { exportLogger as logger } from "@/lib/logger";
 import { detectAvailableEncoders, pickEncoder } from "../hw-accel";
-import { drawtextSpecFor, assetOverlaySegments } from "../overlay-filter";
+import { drawtextSpecFor, assetOverlaySegments, textFaceOf } from "../overlay-filter";
+import { bundledFaceFor } from "@/lib/fonts/bundled";
+import { bundledFontFilePath } from "@/lib/fonts/register-server";
 import { buildAudioMixGraph } from "../audio-mix";
+import { resolveAudioBitrate } from "../quality";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "../duck-envelopes";
 import { baseTimeRange, resolveExportBase } from "../export-base";
@@ -152,6 +158,31 @@ export class FfmpegOverlayBackend implements ExportBackend {
       }
     }
 
+    // Every other text overlay in a family libi ships draws with the bundled
+    // file the preview's @font-face picks for its weight. `font=<family>` is a
+    // fontconfig lookup that carries no weight (bold exported regular) and,
+    // with no fontconfig config (the bundled macOS ffmpeg), not even the
+    // family (QA 2026-09-18 N3).
+    //
+    // The face is named by its bare filename and ffmpeg is spawned with the
+    // bundled-fonts dir as an EXPLICIT cwd (never an inherited one). An
+    // absolute path on every caption cue (~130 chars, more once a Windows
+    // path is escaped) pushed a captioned export past Windows' 32,767-char
+    // command line at ~85 cues. Every other path on the command line is
+    // resolved to absolute below, so the cwd can't redirect an input or the
+    // output.
+    let ffmpegCwd: string | undefined;
+    for (const o of overlays) {
+      if (o.kind !== "text" || fontPathByOverlayId.has(o.id)) continue;
+      const { family, weight } = textFaceOf(o);
+      const face = family ? bundledFaceFor(family, weight) : undefined;
+      if (!face) continue;
+      const p = bundledFontFilePath(face.file);
+      if (!fs.existsSync(p)) continue;
+      fontPathByOverlayId.set(o.id, basename(p));
+      ffmpegCwd = dirname(p);
+    }
+
     // `trim` selects a SOURCE range; `duration` is the TIMELINE length. The
     // preview shows whichever is shorter, so the export must cut there too.
     const { start, end, duration } = baseTimeRange(base);
@@ -260,14 +291,17 @@ export class FfmpegOverlayBackend implements ExportBackend {
     //   chain. Labels [vout] and [aout] are the outputs we map.
     const args: string[] = ["-y"];
     args.push("-ss", String(start), "-to", String(end));
-    args.push(...inputOptionArgs[0], "-i", inputPaths[0]);
+    args.push(...inputOptionArgs[0], "-i", resolvePath(inputPaths[0]));
     for (let i = 1; i < inputPaths.length; i++) {
-      args.push(...inputOptionArgs[i], "-i", inputPaths[i]);
+      args.push(...inputOptionArgs[i], "-i", resolvePath(inputPaths[i]));
     }
     const fullFilterChain = audioChainBuild.chain
       ? `${videoFilterChain};${audioChainBuild.chain}`
       : videoFilterChain;
-    args.push("-filter_complex", fullFilterChain);
+    // The graph's args are spliced in here inside the try below: a long graph
+    // (many caption cues) goes through a file when this ffmpeg can read one,
+    // keeping the command line clear of Windows' 32,767-char cap.
+    const graphArgsAt = args.length;
     args.push("-map", "[vout]");
     if (audioChainBuild.chain) {
       args.push("-map", "[aout]");
@@ -279,29 +313,49 @@ export class FfmpegOverlayBackend implements ExportBackend {
     args.push("-c:v", encoder);
     applyVideoQualityFlags(args, encoder, ctx.settings.bitrate);
     args.push("-c:a", audioCodec);
-    args.push("-b:a", String(ctx.settings.audioBitrate ?? 256_000));
+    args.push("-b:a", String(resolveAudioBitrate(ctx.settings.format, ctx.settings.audioBitrate)));
     args.push("-pix_fmt", "yuv420p");
     // `+faststart` is mp4-only — meaningless to webm and ffmpeg ignores it,
     // but cleaner to omit. Same for libvpx-vp9, which has its own moov-equivalent.
     if (!isWebm) {
       args.push("-movflags", "+faststart");
     }
-    args.push(ctx.outputPath);
+    args.push(resolvePath(ctx.outputPath));
 
     let ok = false;
+    let graphDir: string | undefined;
+    let keepGraph = false;
     try {
-      await runFfmpeg(args, {
-        op: "export_overlay_render",
-        context: {
-          compositionId: ctx.composition.id,
-          baseFileId: base.fileId,
-          overlayCount: overlays.length,
-          encoder,
-        },
-        totalDurationSeconds: duration,
-        onProgress: ctx.onProgress,
-        signal: ctx.signal,
-      });
+      const useFile = fullFilterChain.length > INLINE_GRAPH_MAX && (await supportsFilterFileOption());
+      if (useFile) graphDir = await mkdtemp(joinPath(tmpdir(), "libi-export-graph-"));
+      const graphArgs = await filterGraphArgs(fullFilterChain, graphDir ?? "", useFile);
+      args.splice(graphArgsAt, 0, ...graphArgs);
+      const graphFile = graphArgs[0] === "-/filter_complex" ? graphArgs[1] : undefined;
+
+      try {
+        await runFfmpeg(args, {
+          op: "export_overlay_render",
+          context: {
+            compositionId: ctx.composition.id,
+            baseFileId: base.fileId,
+            overlayCount: overlays.length,
+            encoder,
+          },
+          totalDurationSeconds: duration,
+          onProgress: ctx.onProgress,
+          signal: ctx.signal,
+          cwd: ffmpegCwd,
+        });
+      } catch (err) {
+        // A failed run keeps its graph file: the logged argv only names it,
+        // and it is the one thing needed to reproduce the failure. The export
+        // runner's fail line carries the path. A cancel still cleans up.
+        if (graphFile && !ctx.signal?.aborted && err instanceof Error) {
+          keepGraph = true;
+          Object.assign(err, { graphFile });
+        }
+        throw err;
+      }
 
       if (ctx.signal?.aborted) throw new Error("export aborted");
 
@@ -316,6 +370,7 @@ export class FfmpegOverlayBackend implements ExportBackend {
       if (!ok) {
         try { fs.unlinkSync(ctx.outputPath); } catch { /* ignore */ }
       }
+      if (graphDir && !keepGraph) await rm(graphDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 }
@@ -354,8 +409,12 @@ export function buildFilterChain(
      *  overflow — what a base-shaped video OVERLAY renders (`coverRect`). */
     baseFit?: "cover" | "contain";
   },
-  /** overlay.id → absolute font-file path for text overlays with an uploaded
-   *  custom font. When present, drawtext renders via `fontfile=`. */
+  /** overlay.id → font file for a text overlay: its uploaded custom font (an
+   *  absolute path), or the bundled face for its family + weight (a BARE
+   *  filename, which resolves only because `run()` spawns ffmpeg with
+   *  `cwd: ffmpegCwd` = the bundled-fonts dir — any other caller passing a
+   *  bare name must do the same). When present, drawtext renders via
+   *  `fontfile=`. */
   fontPathByOverlayId?: Map<string, string>,
 ): string {
   const W = composition.width;

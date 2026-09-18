@@ -4,20 +4,13 @@ import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { runFfmpeg, resolveFfmpegPath } from "@/lib/ffmpeg/exec";
+import { quoteFilterValue, escapeDrawtext } from "@/lib/ffmpeg/filter-escape";
 import { storeFile } from "@/mcp/tools/file-tools";
 import type { FileRecord } from "@/lib/db/schema/types";
 import type { ModelKind } from "./kb";
 
 // --- copied verbatim from mcp/dev/fake-ai-assets/tools.ts ---
 
-/** Sanitize for ffmpeg `drawtext`: escape backslash, single quote, colon, percent. */
-function escapeDrawtext(s: string): string {
-  return s
-    .replace(/\\/g, "\\\\")
-    .replace(/'/g, "\\'")
-    .replace(/:/g, "\\:")
-    .replace(/%/g, "\\%");
-}
 
 /**
  * Some ffmpeg builds (e.g. minimal homebrew installs) ship without
@@ -72,9 +65,11 @@ async function imagePlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
   const width = opts.width ?? 1024, height = opts.height ?? 1024;
   const filename = safeFilename(opts.prompt, "jpg", opts.filename);
   const tmp = path.join(os.tmpdir(), `fake-fal-${randomUUID()}.jpg`);
-  const text = escapeDrawtext(opts.prompt.slice(0, 80));
+  // Quoted for both filtergraph parsers — a one-level `'…'` let an
+  // apostrophe in the prompt end the quote and fail the placeholder.
+  const text = quoteFilterValue(escapeDrawtext(`[FAKE FAL] ${opts.prompt.slice(0, 80)}`));
   const args = ["-y", "-f", "lavfi", "-i", `color=c=#3b82f6:s=${width}x${height}`];
-  if (isDrawtextAvailable()) args.push("-vf", `drawtext=text='[FAKE FAL] ${text}':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=10`);
+  if (isDrawtextAvailable()) args.push("-vf", `drawtext=text=${text}:fontcolor=white:fontsize=36:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=10`);
   args.push("-frames:v", "1", tmp);
   const startedAt = new Date();
   await runFfmpeg(args, { op: "fake_ai_image" });
@@ -98,7 +93,9 @@ async function videoPlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
   const duration = opts.durationSeconds ?? 5;
   const filename = safeFilename(opts.prompt, "mp4", opts.filename);
   const tmp = path.join(os.tmpdir(), `fake-fal-${randomUUID()}.mp4`);
-  const text = escapeDrawtext(opts.prompt.slice(0, 80));
+  // Quoted for both filtergraph parsers — a one-level `'…'` let an
+  // apostrophe in the prompt end the quote and fail the placeholder.
+  const text = quoteFilterValue(escapeDrawtext(`[FAKE FAL] ${opts.prompt.slice(0, 80)}`));
   const args = [
     "-y",
     "-f", "lavfi", "-i", `color=c=#3b82f6:s=${width}x${height}:d=${duration}`,
@@ -108,7 +105,7 @@ async function videoPlaceholder(opts: PlaceholderOpts): Promise<FileRecord> {
     // test mode (extract_audio fails "Output file does not contain any stream").
     "-f", "lavfi", "-i", `sine=frequency=220:duration=${duration}`,
   ];
-  if (isDrawtextAvailable()) args.push("-vf", `drawtext=text='[FAKE FAL] ${text}':fontcolor=white:fontsize=36:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=10`);
+  if (isDrawtextAvailable()) args.push("-vf", `drawtext=text=${text}:fontcolor=white:fontsize=36:x=(w-text_w)/2:y=(h-text_h)/2:box=1:boxcolor=black@0.5:boxborderw=10`);
   args.push("-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30", "-c:a", "aac", "-shortest", tmp);
   const startedAt = new Date();
   await runFfmpeg(args, { op: "fake_ai_video" });

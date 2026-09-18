@@ -1,9 +1,10 @@
 import { NextResponse } from "next/server";
 import { setCardReference, clearCardReference } from "@/lib/storyboard/repo";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
 type Body = { paramKey?: string; fromCardId?: string | null };
 
-export async function PUT(
+export const PUT = withStoryboardBusy(async function PUT(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string }> },
 ) {
@@ -16,4 +17,4 @@ export async function PUT(
       : await setCardReference(pieceId, cardId, paramKey, { fromCardId });
   if (!card) return NextResponse.json({ error: "card not found" }, { status: 404 });
   return NextResponse.json({ card });
-}
+});

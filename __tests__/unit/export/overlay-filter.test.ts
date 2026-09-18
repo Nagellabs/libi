@@ -52,7 +52,7 @@ describe("drawtextSpecFor", () => {
     expect(spec).toContain("enable='between(t,1,3)'");
     expect(spec).toContain("text='Hello'");
     expect(spec).toContain("fontsize=48");
-    expect(spec).toContain("font=Inter");
+    expect(spec).toContain("font='Inter'");
     expect(spec).toContain("alpha=0.8");
     // center alignment x-expr
     expect(spec).toContain("x=10+(100-text_w)/2");
@@ -73,9 +73,14 @@ describe("drawtextSpecFor", () => {
     expect(drawtextSpecFor(structured, 0)).toContain("fontsize=28");
   });
 
+  it("names only the first family of a CSS list, unquoted, as a quoted filter value", () => {
+    expect(drawtextSpecFor({ ...text, font: "48px Montserrat, sans-serif" }, 0)).toContain(":font='Montserrat':");
+    expect(drawtextSpecFor({ ...text, font: "48px 'Playfair Display', serif" }, 0)).toContain(":font='Playfair Display':");
+  });
+
   it("honors a structured fontFamily over the shorthand family", () => {
     const structured: TextOverlayLike = { ...text, font: "48px Inter", fontFamily: "Anton" };
-    expect(drawtextSpecFor(structured, 0)).toContain("font=Anton");
+    expect(drawtextSpecFor(structured, 0)).toContain("font='Anton'");
   });
 
   it("keeps the shorthand size when no structured fields are set", () => {

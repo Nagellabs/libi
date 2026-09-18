@@ -62,6 +62,26 @@ describe("useExportFlow", () => {
     expect(result.current.result).toBeNull();
   });
 
+  it("start() sends graphicsQuality in the POST body", async () => {
+    const { result } = renderHook(() => useExportFlow());
+    await act(async () => {
+      await result.current.start({
+        pieceId: "p1",
+        source: "draft",
+        filename: "X",
+        format: "mp4",
+        quality: "source",
+        graphicsQuality: "1440p",
+      });
+    });
+    const fetchMock = (global as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
+    const exportCall = fetchMock.mock.calls.find(
+      (call: unknown[]) => call[0] === "/api/export",
+    );
+    const body = JSON.parse((exportCall?.[1] as RequestInit).body as string);
+    expect(body.graphicsQuality).toBe("1440p");
+  });
+
   it("start() enqueues then transitions through running → success when SSE emits completed", async () => {
     const { result } = renderHook(() => useExportFlow());
 

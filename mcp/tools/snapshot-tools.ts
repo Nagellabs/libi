@@ -1,6 +1,7 @@
 /** Snapshot / Draft MCP tool implementations */
 
 import { commitDraft, discardDraft, restoreSnapshot, getPieceState, compareStates } from "@/lib/composition/lifecycle";
+import { isStoryboardBusyError } from "@/lib/storyboard/lock";
 import { loadManifest, EMPTY_MANIFEST } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { findUnvalidatedGeneratedClips, type UnvalidatedClip } from "@/lib/composition/generated-asset-gate";
@@ -60,6 +61,7 @@ export async function commitDraftTool(params: CommitDraftParams): Promise<ToolRe
     const result = await commitDraft(params.pieceId, { summary, actor: "agent" });
     return { success: true, data: result };
   } catch (err) {
+    if (isStoryboardBusyError(err)) throw err; // makeError marks it partial / re-read state
     return { success: false, error: (err as Error).message };
   }
 }
@@ -72,6 +74,7 @@ export async function discardDraftTool(params: DiscardDraftParams): Promise<Tool
     await discardDraft(params.pieceId);
     return { success: true, data: { pieceId: params.pieceId } };
   } catch (err) {
+    if (isStoryboardBusyError(err)) throw err; // makeError marks it partial / re-read state
     return { success: false, error: (err as Error).message };
   }
 }

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { updateCardFields, type CardPatch } from "@/lib/storyboard/repo";
+import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
-export async function PATCH(
+export const PATCH = withStoryboardBusy(async function PATCH(
   req: Request,
   ctx: { params: Promise<{ pieceId: string; cardId: string }> },
 ) {
@@ -13,4 +14,4 @@ export async function PATCH(
   const card = await updateCardFields(pieceId, cardId, patch);
   if (!card) return NextResponse.json({ error: "card not found" }, { status: 404 });
   return NextResponse.json({ card });
-}
+});

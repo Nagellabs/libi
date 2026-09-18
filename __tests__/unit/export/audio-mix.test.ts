@@ -239,7 +239,18 @@ describe("buildRenderMuxArgs", () => {
     const j = args.join(" ");
     expect(j).toContain("-c:a libopus");
     expect(j).not.toContain("faststart");
-    expect(j).toContain("-b:a 256000"); // default bitrate
+    // Opus default, NOT the AAC one: libopus rejects >256k on a mono source.
+    expect(j).toContain("-b:a 256000");
+  });
+
+  it("defaults mp4 (aac) to 320k when no bitrate is passed", () => {
+    const args = buildRenderMuxArgs({
+      inputPaths: ["/tmp/out.mp4", "/s/clip.mp3"],
+      audioChain: "[1:a]volume=1[aout]",
+      format: "mp4",
+      outPath: "/tmp/out-audio.mp4",
+    });
+    expect(args.join(" ")).toContain("-b:a 320000");
   });
 });
 

@@ -78,6 +78,51 @@ export function isBundledFamily(family: string): boolean {
   return BUNDLED_FONTS.some((f) => f.family.toLowerCase() === needle);
 }
 
+/** A CSS `font-weight` value as a number. Keywords map per CSS; anything
+ *  unparseable (and `bolder`/`lighter`, which are relative) reads as 400. */
+export function cssFontWeight(weight: number | string | undefined): number {
+  if (typeof weight === "number") return weight;
+  if (weight === undefined) return 400;
+  const w = weight.trim().toLowerCase();
+  if (w === "bold") return 700;
+  const n = Number(w);
+  return Number.isFinite(n) && n >= 1 && n <= 1000 ? n : 400;
+}
+
+/** The first family of a CSS family list, one layer of quotes stripped —
+ *  `"'Playfair Display', serif"` → `Playfair Display`. */
+export function firstFamily(list: string): string {
+  return list.split(",")[0].trim().replace(/^(["'])(.*)\1$/, "$2");
+}
+
+/**
+ * The bundled face a browser's `@font-face` matching picks for `family` at
+ * `weight` — the CSS Fonts §5.2 weight rule over the weights we ship:
+ *   400–500 → heavier up to 500, then lighter, then heavier than 500;
+ *   below 400 → lighter, then heavier;  above 500 → heavier, then lighter.
+ * `family` may be a CSS family list; its first entry is used. Undefined when
+ * libi doesn't ship that family.
+ *
+ * The ffmpeg drawtext export draws with the returned file so it renders the
+ * SAME face the preview does — naming the family alone dropped the weight
+ * (QA 2026-09-18 N3).
+ */
+export function bundledFaceFor(
+  family: string,
+  weight: number | string | undefined,
+): BundledFontFace | undefined {
+  const first = firstFamily(family).toLowerCase();
+  const faces = BUNDLED_FONTS.filter((f) => f.family.toLowerCase() === first);
+  if (faces.length === 0) return undefined;
+  const want = cssFontWeight(weight);
+  const heavier = faces.filter((f) => f.weight >= want).sort((a, b) => a.weight - b.weight);
+  const lighter = faces.filter((f) => f.weight < want).sort((a, b) => b.weight - a.weight);
+  if (want > 500) return heavier[0] ?? lighter[0];
+  if (want < 400) return (heavier[0]?.weight === want ? heavier[0] : lighter[0]) ?? heavier[0];
+  const upTo500 = heavier.filter((f) => f.weight <= 500);
+  return upTo500[0] ?? lighter[0] ?? heavier[0];
+}
+
 /**
  * `@font-face` rules for every bundled face.
  *

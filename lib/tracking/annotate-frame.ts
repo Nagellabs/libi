@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { runFfmpeg, resolveFfmpegPath } from "@/lib/ffmpeg/exec";
+import { quoteFilterValue, escapeDrawtext } from "@/lib/ffmpeg/filter-escape";
 import { getLibiStorageDir } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 import { storeFile } from "@/mcp/tools/file-tools";
@@ -52,6 +53,23 @@ export function safeAnnotateColor(color: string | undefined): string {
   return "red";
 }
 
+/** The `-vf` graph: a box per candidate, plus its label when drawtext exists.
+ *  The label goes through the shared filter-escape helpers — stripping `'`
+ *  alone left a ':' free to split the drawtext option. */
+export function annotateFilter(boxes: AnnotateBox[], drawtext: boolean): string {
+  return boxes
+    .map((b) => {
+      const c = safeAnnotateColor(b.color);
+      const box = `drawbox=x=${Math.round(b.x)}:y=${Math.round(b.y)}:w=${Math.round(b.w)}:h=${Math.round(b.h)}:color=${c}@1.0:thickness=4`;
+      const txt =
+        b.label && drawtext
+          ? `,drawtext=text=${quoteFilterValue(escapeDrawtext(b.label))}:x=${Math.round(b.x)}:y=${Math.max(0, Math.round(b.y) - 24)}:fontcolor=${c}:fontsize=22`
+          : "";
+      return box + txt;
+    })
+    .join(",");
+}
+
 /** Extract ONE frame at `time` from a video and draw red boxes over it.
  *  Stores the result as a global image file; returns its FileRecord. */
 export async function annotateFrame(input: {
@@ -66,17 +84,7 @@ export async function annotateFrame(input: {
   const safe = input.name.replace(/[^a-z0-9-]+/gi, "-");
   const tmp = path.join("/tmp", `${safe}-${randomUUID().slice(0, 8)}.jpg`);
 
-  const draw = input.boxes
-    .map((b) => {
-      const c = safeAnnotateColor(b.color);
-      const box = `drawbox=x=${Math.round(b.x)}:y=${Math.round(b.y)}:w=${Math.round(b.w)}:h=${Math.round(b.h)}:color=${c}@1.0:thickness=4`;
-      const txt =
-        b.label && isDrawtextAvailable()
-          ? `,drawtext=text='${b.label.replace(/'/g, "")}':x=${Math.round(b.x)}:y=${Math.max(0, Math.round(b.y) - 24)}:fontcolor=${c}:fontsize=22`
-          : "";
-      return box + txt;
-    })
-    .join(",");
+  const draw = annotateFilter(input.boxes, isDrawtextAvailable());
 
   const args = ["-y", "-ss", String(input.time), "-i", src, "-frames:v", "1", "-vf", draw, tmp];
   logger.info({ tag: "tracking-ground", op: "ground_annotate", time: input.time, boxes: input.boxes.length }, "annotate_frame_start");

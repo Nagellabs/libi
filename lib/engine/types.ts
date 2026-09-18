@@ -392,6 +392,11 @@ export interface PlaybackState {
  *  ExportSettings. */
 export type ExportQuality = "source" | "1080p" | "1440p" | "4k" | "custom";
 
+/** Resolution tier for text/code/3D overlay rendering. No "source" (graphics
+ *  are rendered procedurally, not decoded from a file) and no "custom" — see
+ *  lib/export/quality.ts#resolveOutputDimensions. Default "4k". */
+export type GraphicsQuality = "1080p" | "1440p" | "4k";
+
 /** Export settings for video encoding. */
 export interface ExportSettings {
   format: "mp4" | "webm";
@@ -403,9 +408,15 @@ export interface ExportSettings {
   /** Target output height. */
   height: number;
   fps: number;
-  /** Quality preset; drives the bitrate ladder + scale stage. Defaults to "source". */
+  /** Quality preset (media: videos & images); drives the bitrate ladder +
+   *  scale stage. Defaults to "source". */
   quality?: ExportQuality;
-  /** Audio bitrate in bits/sec. Defaults to 256_000. */
+  /** Resolution tier for text/code/3D overlays. The output frame is the
+   *  larger (by pixel count) of this and `quality` when the piece has any
+   *  graphics overlay. Defaults to "4k". */
+  graphicsQuality?: GraphicsQuality;
+  /** Audio bitrate in bits/sec. Defaults per codec — 320k AAC (mp4), 256k
+   *  Opus (webm, also its ceiling); see `resolveAudioBitrate`. */
   audioBitrate?: number;
 }
 
@@ -414,6 +425,16 @@ export interface ExportResult {
   blob: Blob;
   duration: number;
   format: string;
+  /** Overlays whose draw threw during this export and were skipped — a
+   *  bounded, deduped (by overlay id) list so a silently-dropped overlay
+   *  (QA 2026-09-18 B1: a code overlay with an invalid body throwing
+   *  "ctx is not defined") is visible in the export result instead of only
+   *  an internal log line. Absent/empty when nothing was dropped. The export
+   *  still succeeds — this is informational, not a failure. */
+  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** chromium-render only: uploaded fonts the render page could not load, so
+   *  their text drew in a fallback face. Not fatal. */
+  unloadedFonts?: Array<{ fontFileId: string; reason: string }>;
 }
 
 /** Frame annotation — user-drawn region on a specific frame */

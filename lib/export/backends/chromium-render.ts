@@ -73,7 +73,7 @@ export class ChromiumRenderBackend implements ExportBackend {
       ctx.signal?.removeEventListener("abort", onAbort);
     }
 
-    const { tempFilePath, durationSeconds } = result;
+    const { tempFilePath, durationSeconds, droppedOverlays, unloadedFonts } = result;
     try {
       const bytes = await readFile(tempFilePath);
       const blob = new Blob([new Uint8Array(bytes)], {
@@ -83,6 +83,8 @@ export class ChromiumRenderBackend implements ExportBackend {
         blob,
         duration: durationSeconds,
         format: ctx.settings.format,
+        ...(droppedOverlays?.length ? { droppedOverlays } : {}),
+        ...(unloadedFonts?.length ? { unloadedFonts } : {}),
       };
     } finally {
       await rm(dirname(tempFilePath), { recursive: true, force: true }).catch(() => {});
