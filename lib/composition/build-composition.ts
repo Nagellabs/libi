@@ -1,11 +1,11 @@
 import type { Composition, Overlay, AudioClip } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { pickVideoUrl } from "@/lib/proxy/url";
-import { normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
+import { approxLegacyMeasure, normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
 
-/** Composition frame width used for legacy-rect normalization. Matches the
- *  hardcoded width in the returned Composition below. */
-const FRAME_WIDTH = 1920;
+/** Frame used when a caller has no manifest dims (a brand-new piece's
+ *  EMPTY_MANIFEST default). Real callers pass the piece's own dims. */
+const DEFAULT_FRAME = { width: 1920, height: 1080, fps: 30 } as const;
 
 export interface BuildCompositionOpts {
   /**
@@ -24,6 +24,16 @@ export interface BuildCompositionOpts {
    * Solid frame background (default "#000000"). Painted under every overlay.
    */
   backgroundColor?: string;
+  /**
+   * The piece's composition dimensions (manifest `width`/`height`/`fps`).
+   * Default 1920×1080/30. `width` is load-bearing beyond sizing: legacy text
+   * normalization stores `maxWidthPct = rect.width / width`, and the renderer
+   * wraps at `composition.width × maxWidthPct` — so this must be the width the
+   * composition will actually render at, or text wraps at the wrong place.
+   */
+  width?: number;
+  height?: number;
+  fps?: number;
 }
 
 /**
@@ -40,7 +50,7 @@ export function buildComposition(
   audioClips: AudioClip[] = [],
   opts: BuildCompositionOpts = {},
 ): Composition {
-
+  const frameWidth = opts.width ?? DEFAULT_FRAME.width;
   // Hydrate-time guard: when an overlay carries a transform3d, ensure the
   // deprecated legacy orientation fields (rotation/flipH/flipV) never leak
   // into the RUNTIME composition even if they survived on-disk (e.g. an
@@ -51,14 +61,13 @@ export function buildComposition(
     // Lazy legacy-rect normalization: a TEXT overlay missing `anchor` predates
     // the point-text rework — convert it to point text (mid-center + rect
     // center) so all downstream readers see one model. Idempotent. Uses the
-    // approximate server measurer (chars * fontSize * 0.5).
+    // approximate server measurer (chars * fontSize * 0.5) against the piece's
+    // real frame width — see BuildCompositionOpts.width. These are also the
+    // wrap inputs the ffmpeg export must reproduce: wrap `content` at
+    // `frameWidth × maxWidthPct` with the resolved font (undefined ⇒ no wrap).
     let o =
       raw.kind === "text"
-        ? normalizeLegacyTextOverlay(
-            raw,
-            FRAME_WIDTH,
-            (s: string) => s.length * ((raw as Extract<Overlay, { kind: "text" }>).fontSize ?? 48) * 0.5,
-          )
+        ? normalizeLegacyTextOverlay(raw, frameWidth, approxLegacyMeasure(raw))
         : raw;
     // Attach the runtime preview URL for VIDEO overlays — the scrub-friendly
     // proxy (1 keyframe/sec) when ready, else the original. Mirrors how video
@@ -113,9 +122,9 @@ export function buildComposition(
   return {
     id: "composition-1",
     name: "AI Composition",
-    width: 1920,
-    height: 1080,
-    fps: 30,
+    width: frameWidth,
+    height: opts.height ?? DEFAULT_FRAME.height,
+    fps: opts.fps ?? DEFAULT_FRAME.fps,
     overlays: runtimeOverlays,
     audioClips,
     backgroundColor: opts.backgroundColor ?? "#000000",

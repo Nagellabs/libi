@@ -90,7 +90,9 @@ async function runExport(text: Record<string, unknown>, extra = 0): Promise<void
       // Extra caption cues, for the argv-length check.
       ...Array.from({ length: extra }, (_, i) => ({
         id: `cue${i}`, kind: "text", startTime: i * 0.1, duration: 0.1, z: 2 + i, opacity: 1,
-        rect: { x: 90, y: 1500, width: 900, height: 200 }, content: `Caption cue number ${i} says hello`,
+        rect: { x: 90, y: 1500, width: 900, height: 200 }, // One line: a longer cue wraps (as the preview wraps it), and each
+        // line is its own drawtext — see drawtext-caption-fidelity.test.ts.
+        content: `Cue ${i} says hello`,
         font: "48px Inter", fontSize: 64, fontWeight: 700, color: "#ffffff", align: "center",
         stroke: { color: "#000000", width: 6 },
       })),
@@ -180,7 +182,7 @@ describe("FfmpegOverlayBackend — text draws with the bundled face the preview 
     await runExport({}, 400);
     const args = vi.mocked(runFfmpeg).mock.calls[0][0] as string[];
     expect(args).not.toContain("-filter_complex");
-    expect(graphInFile).toContain("drawtext=text='Caption cue number 399 says hello'");
+    expect(graphInFile).toContain("drawtext=text='Cue 399 says hello'");
     expect(args.join(" ").length).toBeLessThan(2_000);
     expect(fs.existsSync(fileSeen)).toBe(false);
   });

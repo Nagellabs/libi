@@ -10,6 +10,7 @@ import { hydrateOverlayCode, stripOverlayCode, stripRevealMirror } from "@/lib/o
 import { writeOverlayCode, listOverlayDirs, deleteOverlayDir } from "@/lib/overlays/code-files";
 import { recomputeTextOverlayRect } from "@/lib/captions/persist-rect";
 import { flattenCaption } from "@/lib/captions/flat-guard";
+import { approxLegacyMeasure, normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
 import type { TextOverlay } from "@/lib/engine/types";
 import { serverLogger as logger } from "@/lib/logger";
 import { unresolvedFamilies, familyFromFont } from "@/lib/fonts/resolve";
@@ -530,6 +531,23 @@ export async function updateOverlayInManifest(
   // off). A plain `JSON.stringify` would drop `undefined`, so callers must send
   // `null` (not `undefined`) to clear.
   const merged = { ...overlays[i], ...patch } as Record<string, unknown>;
+  // A text overlay with no anchor is un-migrated (add_overlay / legacy): the
+  // preview wraps it at the width BUILD-time normalization derives, which it
+  // stops deriving once an anchor is stored. So the FIRST anchor carries that
+  // width with it — for every caller (canvas drag, anchor pads, transform
+  // fields, update_overlay). Otherwise the caption stops wrapping. An explicit
+  // `maxWidthPct` in the patch (a value, or null to clear) wins.
+  const before = overlays[i] as Record<string, unknown>;
+  if (
+    before.kind === "text" &&
+    !before.anchor &&
+    patch.anchor != null &&
+    !("maxWidthPct" in patch)
+  ) {
+    const text = before as unknown as TextOverlay;
+    const wrap = normalizeLegacyTextOverlay(text, manifest.width || 1920, approxLegacyMeasure(text)).maxWidthPct;
+    if (wrap !== undefined) merged.maxWidthPct = wrap;
+  }
   for (const [k, v] of Object.entries(patch)) {
     if (v === null) delete merged[k];
   }

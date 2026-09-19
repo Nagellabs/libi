@@ -13,7 +13,20 @@ import { probeMedia } from "@/lib/ffmpeg/probe";
 import { vpxAlphaDecodeArgs } from "@/lib/ffmpeg/alpha";
 import { exportLogger as logger } from "@/lib/logger";
 import { detectAvailableEncoders, pickEncoder } from "../hw-accel";
-import { drawtextSpecFor, assetOverlaySegments, textFaceOf } from "../overlay-filter";
+import {
+  drawtextSpecFor,
+  assetOverlaySegments,
+  textFaceOf,
+  plateSpecFor,
+  shadowDrawtextSpecFor,
+  shadowLayerSegments,
+  shadowBandOf,
+  blurredShadowOf,
+  unionEnableExpr,
+} from "../overlay-filter";
+import { layoutTextForExport, type ExportTextLayout, type TextMeasurer } from "../text-export-layout";
+import { createServerTextMeasurer } from "../text-measure-server";
+import { textRunEnd } from "../text-runs";
 import { bundledFaceFor } from "@/lib/fonts/bundled";
 import { bundledFontFilePath } from "@/lib/fonts/register-server";
 import { buildAudioMixGraph } from "../audio-mix";
@@ -28,7 +41,52 @@ import type {
   ImageOverlay,
   VideoOverlay,
   AudioClip,
+  Composition,
 } from "@/lib/engine/types";
+
+/**
+ * Would this composition's overlay graph have to go INLINE on the command
+ * line past `INLINE_GRAPH_MAX`, because the resolved ffmpeg can't read
+ * `-/filter_complex <file>` (< 7.0)? Then the export belongs on the chromium
+ * renderer: a caption-heavy graph (~100k chars for 120 shadowed two-line cues)
+ * exceeds Windows' 32,767-char command line, and Linux's 128 KiB single-arg
+ * limit not far above. The length is estimated without the DB — bundled faces
+ * by name, uploaded fonts at a typical absolute-path length, the approximate
+ * measure — which is within a few percent of the real graph.
+ */
+export async function overlayGraphNeedsBrowser(
+  composition: Composition,
+  settings: { width: number; height: number },
+  supportsFile: () => Promise<boolean> = supportsFilterFileOption,
+): Promise<boolean> {
+  const base = resolveExportBase(composition);
+  if (!base) return false;
+  const overlays = (composition.overlays ?? [])
+    .filter((o) => o.id !== base.overlayId)
+    .sort((a, b) => a.z - b.z);
+  const assetIndex = new Map(
+    overlays.filter((o) => o.kind === "image" || o.kind === "video").map((o, n): [string, number] => [o.id, n + 1]),
+  );
+  const fonts = new Map<string, string>();
+  for (const o of overlays) {
+    if (o.kind !== "text") continue;
+    if (o.fontFileId) {
+      fonts.set(o.id, "/".repeat(120));
+      continue;
+    }
+    const { family, weight } = textFaceOf(o);
+    const face = family ? bundledFaceFor(family, weight) : undefined;
+    if (face) fonts.set(o.id, face.file);
+  }
+  const graph = buildFilterChain(overlays, assetIndex, {
+    width: composition.width,
+    height: composition.height,
+    targetWidth: settings.width,
+    targetHeight: settings.height,
+  }, fonts);
+  if (graph.length <= INLINE_GRAPH_MAX) return false;
+  return !(await supportsFile());
+}
 
 /**
  * FfmpegOverlayBackend — composites typed overlays (text/image/video) on
@@ -171,6 +229,9 @@ export class FfmpegOverlayBackend implements ExportBackend {
     // command line at ~85 cues. Every other path on the command line is
     // resolved to absolute below, so the cwd can't redirect an input or the
     // output.
+    // The line breaks and plate are measured with the SAME file drawtext
+    // loads, so this keeps each face's absolute path too.
+    const fontAbsPathByOverlayId = new Map(fontPathByOverlayId);
     let ffmpegCwd: string | undefined;
     for (const o of overlays) {
       if (o.kind !== "text" || fontPathByOverlayId.has(o.id)) continue;
@@ -180,6 +241,7 @@ export class FfmpegOverlayBackend implements ExportBackend {
       const p = bundledFontFilePath(face.file);
       if (!fs.existsSync(p)) continue;
       fontPathByOverlayId.set(o.id, basename(p));
+      fontAbsPathByOverlayId.set(o.id, p);
       ffmpegCwd = dirname(p);
     }
 
@@ -207,7 +269,8 @@ export class FfmpegOverlayBackend implements ExportBackend {
       // whichever the preview showed — a contain-padded export of a cover
       // overlay ships black bars where the user saw a full-bleed frame.
       baseFit: base.overlayId != null ? "cover" : "contain",
-    }, fontPathByOverlayId);
+    }, fontPathByOverlayId, (o) =>
+      o.kind === "text" ? createServerTextMeasurer(o, fontAbsPathByOverlayId.get(o.id)) : undefined);
 
     // Decide how to handle base audio. The inline AudioClip linked to the BASE
     // (by `linkedOverlayId`) represents the base's own audio track. If one
@@ -416,6 +479,10 @@ export function buildFilterChain(
    *  bare name must do the same). When present, drawtext renders via
    *  `fontfile=`. */
   fontPathByOverlayId?: Map<string, string>,
+  /** The font measure a text overlay's line breaks and plate are computed
+   *  with — the export passes one over the SAME file drawtext loads
+   *  (lib/export/text-measure-server.ts). Absent ⇒ the approximation. */
+  measurerFor?: (o: Overlay) => TextMeasurer | undefined,
 ): string {
   const W = composition.width;
   const H = composition.height;
@@ -455,43 +522,108 @@ export function buildFilterChain(
 
   const chain: string[] = [baseChain];
   let currentLabel = "base";
+  const layoutOf = (o: Overlay & { kind: "text" }): ExportTextLayout =>
+    layoutTextForExport(o, W, measurerFor?.(o));
 
-  for (let i = 0; i < overlays.length; i++) {
+  let i = 0;
+  while (i < overlays.length) {
     const o = overlays[i];
+
+    if (o.kind === "text") {
+      // A RUN of consecutive (in z) text overlays no two of which are on
+      // screen at once — a caption track. Within a run the draw order between
+      // members is invisible, so the run can be drawn as plates → shadow
+      // layers → fills, and a blurred shadow costs ONE layer per run rather
+      // than one per cue. Texts that do overlap in time start a new run, so
+      // their z-order holds exactly.
+      const j = textRunEnd(overlays, i);
+      const run = overlays.slice(i, j) as (Overlay & { kind: "text" })[];
+      const lastIdx = j - 1;
+      const outLabel = lastIdx === overlays.length - 1 ? "vout" : `v${lastIdx}`;
+      const layouts = run.map(layoutOf);
+      const fontOf = (m: Overlay) => fontPathByOverlayId?.get(m.id);
+      // timeOffset 0: the base is the full clip starting at composition t=0.
+      if (!run.some((m) => blurredShadowOf(m))) {
+        // No shadow layer: each member is its own segment (plate, then text).
+        run.forEach((m, k) => {
+          const isLastOfRun = k === run.length - 1;
+          const label = isLastOfRun ? outLabel : `v${i + k}`;
+          const plate = plateSpecFor(m, layouts[k], 0, scale);
+          const fill = drawtextSpecFor(m, 0, fontOf(m), scale, layouts[k]);
+          chain.push(`[${currentLabel}]${plate ? `${plate},` : ""}${fill}[${label}]`);
+          currentLabel = label;
+        });
+        i = j;
+        continue;
+      }
+      const plates = run.flatMap((m, k) => plateSpecFor(m, layouts[k], 0, scale) ?? []);
+      if (plates.length > 0) {
+        chain.push(`[${currentLabel}]${plates.join(",")}[tp${i}]`);
+        currentLabel = `tp${i}`;
+      }
+      // One layer per distinct (σ, colour, alpha × opacity) — the blur, the
+      // fill and the alpha scale are per layer. Each layer is cropped to the
+      // rows its members' shadows can reach.
+      const layers = new Map<
+        string,
+        { shadow: { sigma: number; color: string; alpha: number }; members: number[]; top: number; bottom: number }
+      >();
+      run.forEach((m, k) => {
+        const shadow = blurredShadowOf(m, scale);
+        const band = shadowBandOf(m, layouts[k], scale);
+        if (!shadow || !band) return;
+        const key = `${shadow.sigma}|${shadow.color}|${shadow.alpha}`;
+        const layer = layers.get(key) ?? { shadow, members: [], top: Infinity, bottom: -Infinity };
+        layer.members.push(k);
+        layer.top = Math.min(layer.top, band.top);
+        layer.bottom = Math.max(layer.bottom, band.bottom);
+        layers.set(key, layer);
+      });
+      [...layers.values()].forEach((layer, n) => {
+        // Even rows: the frame is 4:2:0, and an odd crop/overlay offset would
+        // shift chroma by half a row.
+        const top = Math.max(0, Math.floor(layer.top / 2) * 2);
+        const bottom = Math.min(TH, Math.ceil(layer.bottom / 2) * 2);
+        if (bottom <= top) return;
+        const silhouettes = layer.members.flatMap(
+          (k) => shadowDrawtextSpecFor(run[k], layouts[k], 0, fontOf(run[k]), scale, top) ?? [],
+        );
+        if (silhouettes.length === 0) return;
+        const label = `ts${i}_${n}`;
+        const enable = unionEnableExpr(layer.members.map((k) => run[k]), 0);
+        chain.push(
+          ...shadowLayerSegments(silhouettes, layer.shadow, { top, height: bottom - top }, enable, currentLabel, label, `${i}_${n}`),
+        );
+        currentLabel = label;
+      });
+      const fills = run.map((m, k) => drawtextSpecFor(m, 0, fontOf(m), scale, layouts[k]));
+      chain.push(`[${currentLabel}]${fills.join(",")}[${outLabel}]`);
+      currentLabel = outLabel;
+      i = j;
+      continue;
+    }
+
     const isLast = i === overlays.length - 1;
     const nextLabel = isLast ? "vout" : `v${i}`;
 
-    if (o.kind === "text") {
-      // timeOffset 0: the base is the full clip starting at composition t=0.
-      const fontFilePath = fontPathByOverlayId?.get(o.id);
-      chain.push(`[${currentLabel}]${drawtextSpecFor(o, 0, fontFilePath, scale)}[${nextLabel}]`);
-      currentLabel = nextLabel;
-      continue;
-    }
-
     if (o.kind === "image" || o.kind === "video") {
       const inputIdx = assetInputIndex.get(o.id);
-      if (inputIdx === undefined) continue;
-      // Scale the asset to its (target-scaled) overlay rect before compositing so
-      // large sources fit the rect cleanly without overflowing. timeOffset 0.
-      chain.push(...assetOverlaySegments(o, inputIdx, currentLabel, nextLabel, String(i), 0, scale));
-      currentLabel = nextLabel;
+      if (inputIdx !== undefined) {
+        // Scale the asset to its (target-scaled) overlay rect before compositing so
+        // large sources fit the rect cleanly without overflowing. timeOffset 0.
+        chain.push(...assetOverlaySegments(o, inputIdx, currentLabel, nextLabel, String(i), 0, scale));
+        currentLabel = nextLabel;
+      }
+      i++;
       continue;
     }
 
-    if (o.kind === "tracked") {
-      // Should not reach here — classifier gates tracked overlays to the
-      // chromium/canvas-source fallback. Emit a passthrough so we don't crash.
-      chain.push(`[${currentLabel}]copy[${nextLabel}]`);
-      currentLabel = nextLabel;
-      continue;
-    }
-
-    // `code` overlays should never reach this backend — the classifier gates
-    // them to canvas-source. If one slips through, emit a passthrough so we
-    // don't crash the pipeline.
+    // `tracked` and `code` overlays should never reach this backend — the
+    // classifier gates them to the chromium/canvas fallback. If one slips
+    // through, emit a passthrough so we don't crash the pipeline.
     chain.push(`[${currentLabel}]copy[${nextLabel}]`);
     currentLabel = nextLabel;
+    i++;
   }
 
   // Safety: ensure [vout] exists even if every overlay was skipped (e.g. all

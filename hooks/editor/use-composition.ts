@@ -120,21 +120,19 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
   const composition = useMemo(
     () => {
       if (!activePieceId) return null;
-      const base = buildComposition(filesById, overlays, audioClips, {
+      // Honor the piece's actual composition dimensions (set via
+      // libi.update_composition_dimensions) so the preview canvas sizes
+      // correctly, tracked-overlay coordinates (source-video pixel space) line
+      // up with the letterboxed base frame, and legacy text wraps at its
+      // authored width — normalization needs the width, so it goes IN, not
+      // patched on afterwards (QA 2026-09-18 recheck N4).
+      return buildComposition(filesById, overlays, audioClips, {
         knownFileIds,
         filesResolved,
+        width: manifestWidth,
+        height: manifestHeight,
+        fps: manifestFps,
       });
-      // `buildComposition` hardcodes 1920×1080/30 — honor the piece's actual
-      // composition dimensions (set via libi.update_composition_dimensions) so
-      // the preview canvas sizes correctly and tracked-overlay coordinates,
-      // which are in source-video pixel space, line up with the letterboxed
-      // base frame.
-      return {
-        ...base,
-        width: manifestWidth ?? base.width,
-        height: manifestHeight ?? base.height,
-        fps: manifestFps ?? base.fps,
-      };
     },
     [
       activePieceId,

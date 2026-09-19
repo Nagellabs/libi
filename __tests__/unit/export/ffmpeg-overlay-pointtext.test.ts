@@ -80,14 +80,16 @@ describe("ffmpeg drawtext — point-text positioning", () => {
     expect(parts[1]).toContain("x=760+(400-text_w)/2");
   });
 
-  it("skips an empty line but keeps its slot in the block", () => {
+  // The preview's wrapText drops an empty line entirely (no slot), so the
+  // export does too — it used to keep the slot and draw "b" a line lower.
+  it("drops an empty line, slot and all, like the preview", () => {
     const spec = drawtextSpecFor(
       { ...caption, rect: { x: 0, y: 0, width: 400, height: 10 }, content: "a\n\nb", lineHeight: 1 },
       0,
     );
     const parts = spec.split(",drawtext=");
     expect(parts).toHaveLength(2);
-    expect(parts[1]).toContain("y=96+48*font_a/(font_a+abs(font_d))");
+    expect(parts[1]).toContain("y=48+48*font_a/(font_a+abs(font_d))");
   });
 
   it("the QA case: 120px in a 300px rect sits 78px down, not at the top", () => {

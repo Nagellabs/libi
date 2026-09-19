@@ -2,8 +2,9 @@ import type { Composition, Overlay } from "@/lib/engine/types";
 import { resolveEffect } from "@/lib/effects/registry";
 import type { LayerEffects } from "@/lib/effects/types";
 import { textUsesThreeInstance } from "@/lib/overlays/three-d-mode";
-import { overlayHasKeyframes, overlayHasNonIdentityTransform } from "./overlay-predicates";
+import { overlayHasKeyframes, overlayHasNonIdentityTransform, textNeedsBrowserRender } from "./overlay-predicates";
 import { baseTimeRange, resolveExportBase, streamCopyPreservesFraming } from "./export-base";
+import { MAX_SHADOW_LAYERS, shadowLayerCount } from "./text-runs";
 
 export type ExportShape =
   | { tag: "stream-copy-trim" }
@@ -115,6 +116,11 @@ export function classifyExportShape(comp: Composition): ExportShape {
   const hasThreeDTextOverlay =
     Array.isArray(overlays) &&
     overlays.some((o) => o.kind === "text" && textUsesThreeInstance(o));
+  // Flat text drawtext can't draw as the preview does: an animated reveal,
+  // emoji, a well-rounded plate (see textNeedsBrowserRender).
+  const hasBrowserOnlyText =
+    Array.isArray(overlays) &&
+    overlays.some(textNeedsBrowserRender);
   const hasTransformedOverlay =
     Array.isArray(overlays) && overlays.some(overlayHasNonIdentityTransform);
   // Keyframed overlays animate rect/opacity/transform3d per-frame; the ffmpeg
@@ -171,6 +177,7 @@ export function classifyExportShape(comp: Composition): ExportShape {
       hasTrackedOverlay ||
       hasThreeOverlay ||
       hasThreeDTextOverlay ||
+      hasBrowserOnlyText ||
       hasTransformedOverlay ||
       hasKeyframedOverlay ||
       hasTrimmedAssetOverlay ||
@@ -187,6 +194,11 @@ export function classifyExportShape(comp: Composition): ExportShape {
     // dimensions. When it doesn't (or they're unknown), fall through to
     // ffmpeg-overlay, whose base chain scales the source to the composition —
     // one re-encode instead of a wrong-aspect-ratio file.
+    // Blurred caption shadows cost one layer per caption track; texts
+    // interleaved in time get one per cue. Past the cap, the renderer is the
+    // cheaper path (lib/export/text-runs.ts).
+    const zOrdered = [...compositedOverlays].sort((a, b) => a.z - b.z);
+    if (shadowLayerCount(zOrdered) > MAX_SHADOW_LAYERS) return fallbackShape();
     if (compositedOverlays.length > 0 || hasAudioTracks) return { tag: "ffmpeg-overlay" };
     return streamCopyPreservesFraming(base, comp)
       ? { tag: "stream-copy-trim" }

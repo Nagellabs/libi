@@ -184,6 +184,7 @@ describe("renderCompositionFrames — the payload the render page hydrates from"
       new Map(payload.files.map((f) => [f.id, f])),
       payload.overlays,
       payload.audioClips,
+      { width: payload.width, height: payload.height, fps: payload.fps },
     );
     const dims = Object.fromEntries(
       (built!.overlays ?? [])

@@ -304,14 +304,14 @@ export async function runRender({
     const filesMap = new Map<string, FileRecord>(
       payload.files.map((f) => [f.id, f]),
     );
-    const base = buildComposition(filesMap, payload.overlays, payload.audioClips);
-    if (!base) throw new Error("Composition is empty");
-    const composition: Composition = {
-      ...base,
+    // The export's own dims go INTO the build: legacy text normalization
+    // derives its wrap width from them (QA 2026-09-18 recheck N4).
+    const composition: Composition = buildComposition(filesMap, payload.overlays, payload.audioClips, {
       width: payload.width,
       height: payload.height,
       fps: payload.fps,
-    };
+    });
+    if (!composition) throw new Error("Composition is empty");
 
     // Build the per-overlay asset maps the unified renderer needs. All loaders
     // are individually robust — a missing image/track/video/code source logs a

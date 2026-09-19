@@ -13,7 +13,7 @@ import { resolveExportBase } from "@/lib/export/export-base";
 import { stripHiddenLayerArrays } from "@/lib/overlays/hidden";
 import { attachOverlaySourceDims } from "@/lib/export/source-dims";
 import { StreamCopyTrimBackend } from "@/lib/export/backends/stream-copy-trim";
-import { FfmpegOverlayBackend } from "@/lib/export/backends/ffmpeg-overlay";
+import { FfmpegOverlayBackend, overlayGraphNeedsBrowser } from "@/lib/export/backends/ffmpeg-overlay";
 import { ChromiumRenderBackend } from "@/lib/export/backends/chromium-render";
 import { resolveExportFolder } from "@/lib/db/settings";
 import { ensureFolderExists } from "@/lib/export/folder";
@@ -197,6 +197,17 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
       if (resolvedSettings.format !== "mp4" || !mp4Family) {
         shape = "ffmpeg-overlay";
       }
+    }
+
+    // An ffmpeg too old to read its graph from a file would take a
+    // caption-heavy graph on the command line, past what the OS accepts —
+    // render those in the browser instead.
+    if (shape === "ffmpeg-overlay" && (await overlayGraphNeedsBrowser(composition, resolvedSettings))) {
+      exportLogger.info(
+        { op: "graph_too_long_inline", jobId: ctx.jobId, pieceId },
+        "export.fallback — overlay graph too long for this ffmpeg's command line",
+      );
+      shape = "chromium-render";
     }
 
     // ── Step `ensure-chromium` ────────────────────────────────────────────

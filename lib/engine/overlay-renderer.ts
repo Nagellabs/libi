@@ -31,7 +31,7 @@ import {
   revealFraction,
 } from "./text-anim/caption-reveal";
 import { currentWord, typewriterRevealedText } from "./text-anim/caption-logic";
-import { layoutTextOverlay } from "@/lib/captions/layout";
+import { captionPlateRect, layoutTextOverlay } from "@/lib/captions/layout";
 import { anchorPointOf } from "@/lib/captions/anchor";
 import { contentFitOps, type ContentBox } from "@/lib/overlays/code-content-fit";
 
@@ -733,44 +733,10 @@ export function effectiveTextRect(
   return rect;
 }
 
-/**
- * Render a text overlay with structured caption styling + optional reveal.
- * Order: resolve font → wrap → background plate → shadow → per-line reveal
- * transform → strokeText (if any) then fillText → reset shadow. When no new
- * fields are present this collapses to the original single styled fillText
- * (font from composeFont, color + align honored).
- */
-/**
- * Pure geometry for a caption's background plate. The plate hugs the TEXT INK
- * box + padding — `inkTop`/`inkBottom` are the absolute composition-Y bounds of
- * the actually-drawn glyphs (from `measureText` actual-bounding-box metrics in
- * the caller). Earlier versions sized the plate to `lineHeight`/`fontSize`,
- * which over-reserved space below the glyphs (the "background overflows under
- * the caption" bug) — e.g. for 88px bold serif the real glyph descent is ~70px,
- * not 88. Extracted + exported so the geometry is unit-testable without a
- * canvas. `widest` is the measured width of the widest line (px).
- */
-export function captionPlateRect(params: {
-  rectX: number;
-  rectWidth: number;
-  inkTop: number;
-  inkBottom: number;
-  widest: number;
-  pad: number;
-  align: "left" | "center" | "right";
-}): { x: number; y: number; width: number; height: number } {
-  const { rectX, rectWidth, inkTop, inkBottom, widest, pad, align } = params;
-  const width = widest + pad * 2;
-  const height = Math.max(0, inkBottom - inkTop) + pad * 2;
-  const x =
-    align === "center"
-      ? rectX + rectWidth / 2 - width / 2
-      : align === "right"
-        ? rectX + rectWidth - width
-        : rectX;
-  const y = inkTop - pad;
-  return { x, y, width, height };
-}
+// `captionPlateRect` lives with the other pure text geometry in
+// lib/captions/layout.ts so the ffmpeg export can size the SAME plate without
+// importing the renderer; re-exported here for existing callers.
+export { captionPlateRect };
 
 /**
  * The LEFT x to start drawing a line at when painting word-by-word with
@@ -790,6 +756,13 @@ export function alignedLineStartX(
   return lineX;
 }
 
+/**
+ * Render a text overlay with structured caption styling + optional reveal.
+ * Order: resolve font → wrap → background plate → shadow → per-line reveal
+ * transform → strokeText (if any) then fillText → reset shadow. When no new
+ * fields are present this collapses to the original single styled fillText
+ * (font from composeFont, color + align honored).
+ */
 function drawTextOverlay(
   ctx: CanvasRenderingContext2D,
   overlay: TextOverlay,
@@ -919,10 +892,16 @@ function drawTextOverlay(
   // ── Shadow ──
   const hadShadow = !!overlay.shadow;
   if (overlay.shadow) {
+    // Canvas shadows ignore the context transform (they are in output-bitmap
+    // pixels), and this draw runs through the composition→backing scale — so
+    // an unscaled shadow changed size with the preview's display size and came
+    // out half-size in a 4K export. Scale it into composition space, like every
+    // other caption field; the ffmpeg export scales it the same way.
+    const k = contextScale(ctx);
     ctx.shadowColor = overlay.shadow.color;
-    ctx.shadowBlur = overlay.shadow.blur;
-    ctx.shadowOffsetX = overlay.shadow.dx ?? 0;
-    ctx.shadowOffsetY = overlay.shadow.dy ?? 0;
+    ctx.shadowBlur = overlay.shadow.blur * k;
+    ctx.shadowOffsetX = (overlay.shadow.dx ?? 0) * k;
+    ctx.shadowOffsetY = (overlay.shadow.dy ?? 0) * k;
   }
 
   // ── Stroke style ──
@@ -1039,6 +1018,15 @@ function drawTextOverlay(
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 0;
   }
+}
+
+/** The uniform scale of the context's current transform (1 when the context
+ *  can't report one — test doubles). */
+function contextScale(ctx: CanvasRenderingContext2D): number {
+  if (typeof ctx.getTransform !== "function") return 1;
+  const m = ctx.getTransform();
+  const k = Math.hypot(m.a, m.b);
+  return Number.isFinite(k) && k > 0 ? k : 1;
 }
 
 /** Best-effort px size from a CSS font shorthand (e.g. "700 64px Inter"). */

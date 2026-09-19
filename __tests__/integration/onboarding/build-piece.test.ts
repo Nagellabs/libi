@@ -197,7 +197,11 @@ async function renderFrameToCanvas(
   const filesById = new Map(fileRows.map((f) => [f.id, f]));
 
   const overlays = (manifest.overlays ?? []) as Overlay[];
-  const composition = buildComposition(filesById, overlays, []);
+  const composition = buildComposition(filesById, overlays, [], {
+    width: manifest.width,
+    height: manifest.height,
+    fps: manifest.fps,
+  });
 
   const compiled: Record<string, (ctx: DrawContext) => void> = {};
   for (const o of manifest.overlays ?? []) {

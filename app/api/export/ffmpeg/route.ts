@@ -10,7 +10,7 @@ import { classifyExportShape } from "@/lib/export/classifier";
 import { attachOverlaySourceDims } from "@/lib/export/source-dims";
 import { stripHiddenLayerArrays } from "@/lib/overlays/hidden";
 import { StreamCopyTrimBackend } from "@/lib/export/backends/stream-copy-trim";
-import { FfmpegOverlayBackend } from "@/lib/export/backends/ffmpeg-overlay";
+import { FfmpegOverlayBackend, overlayGraphNeedsBrowser } from "@/lib/export/backends/ffmpeg-overlay";
 import type { ExportBackend } from "@/lib/export/backend";
 import { exportLogger } from "@/lib/logger";
 
@@ -65,6 +65,15 @@ export async function POST(req: Request): Promise<Response> {
   if (serverShape.tag !== body.shape) {
     return NextResponse.json(
       { error: `Composition shape changed: client=${body.shape}, server=${serverShape.tag}` },
+      { status: 409 },
+    );
+  }
+
+  // A graph this ffmpeg can only take on the command line, past what the OS
+  // accepts, is the chromium renderer's (see overlayGraphNeedsBrowser).
+  if (body.shape === "ffmpeg-overlay" && (await overlayGraphNeedsBrowser(comp, body.settings))) {
+    return NextResponse.json(
+      { error: `Composition shape changed: client=${body.shape}, server=chromium-render` },
       { status: 409 },
     );
   }
