@@ -38,6 +38,20 @@ describe("formatToolId", () => {
       .toBe("Fal-ai Generate image");
   });
 
+  // ElevenLabs' hosted server (catalog entry `elevenlabs`, 2026-09-25) prefixes every creative tool with
+  // `creative_`; the chat reads "ElevenLabs Generate speech", not "Elevenlabs Creative generate speech".
+  it("labels ElevenLabs' hosted tools by what they do, under the provider's own spelling", () => {
+    expect(formatToolId(makeMcpToolId("elevenlabs", "creative_generate_speech"))).toBe("ElevenLabs Generate speech");
+    expect(formatToolId(makeMcpToolId("elevenlabs", "creative_get_flow_run_status"))).toBe("ElevenLabs Get flow run status");
+    expect(formatToolId(makeMcpToolId("elevenlabs", "creative_list_voices"))).toBe("ElevenLabs List voices");
+    // A user's own entry spelled `ElevenLabs` (and test mode's fake before 2026-09-25): the same labels.
+    expect(formatToolId(makeMcpToolId("ElevenLabs", "creative_generate_in_flow"))).toBe("ElevenLabs Generate in flow");
+    // An older local server's names keep reading as before.
+    expect(formatToolId(makeMcpToolId("elevenlabs", "text_to_speech"))).toBe("ElevenLabs Text to speech");
+    // Another server's `creative_` tool is not ElevenLabs'.
+    expect(formatToolId(makeMcpToolId("my_server", "creative_thing"))).toBe("My server Creative thing");
+  });
+
   it("uses the bundled display name for canonical bundled ids", () => {
     // fromAnyToolName canonicalizes bundled servers to their bundled id —
     // the label must come from the def's display name, not the raw id.

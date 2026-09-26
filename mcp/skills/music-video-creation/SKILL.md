@@ -117,7 +117,8 @@ After adding any overlay or text-bearing scene, call
 - Its `startTime + duration` covers the range you intended
 - For text overlays: the `text` field is non-empty and not the literal
   string `"undefined"`
-- For code overlays / scenes: the draw function source contains the
+- For code overlays: the file at its `codeFilePath` (get_composition
+  returns the path, not the source — read the file) contains the
   expected `ctx.fillText` (or other draw call) and references the
   variable you think it does
 

@@ -10,11 +10,14 @@ import LayersInspectorPanel from "@/components/preview/layers-inspector-panel";
 import type { AudioClip, Composition, TextOverlay } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { useWebAudioMaster } from "@/hooks/preview/use-web-audio-master";
+import type { UnplayableAudioClip } from "@/lib/audio/web-audio-engine";
+import { proxyStatusForFile } from "@/lib/proxy/expectation";
 import { useTransport } from "@/hooks/preview/use-transport";
 import { usePreviewAssets } from "@/hooks/editor/use-preview-assets";
-import { readyAhead, type VideoFrameSource } from "@/lib/engine/video-frame-source";
-import { computeVideoPriorities } from "@/lib/preview/track-priority";
-import { computeReadyState, type ReadyDecision } from "@/lib/preview/ready-state";
+import { useRenderDiagnostics } from "@/lib/preview/render-diagnostics";
+import type { VideoFrameSource } from "@/lib/engine/video-frame-source";
+import type { ReadyDecision } from "@/lib/preview/ready-state";
+import { probeReadyAhead } from "@/lib/preview/ready-probe";
 import {
   hiddenIdSetFromSignature,
   hiddenIdSignature,
@@ -58,7 +61,7 @@ import { buildLayersViewModel } from "@/lib/overlays/layers-view-model";
 import { reorderZByDrag } from "@/lib/preview/track-stack-view-model";
 import { overlayTrackLabel, overlayTrackTooltip } from "@/lib/preview/track-labels";
 import { useAddOverlay } from "@/lib/queries/overlays";
-import { useFileUpload } from "@/lib/queries/files";
+import { useFileUpload, useGlobalFiles } from "@/lib/queries/files";
 import { OverlayAssetPicker } from "@/components/preview/overlay-asset-picker";
 import {
   defaultOverlayInit,
@@ -135,95 +138,56 @@ export default function PreviewSurface({
   isCompositionFetching,
   onPendingSeekConsumed,
 }: PreviewSurfaceProps) {
-  // Audio-master engine + transport (playhead in a FrameStore).
-  const { control: audioMasterControl, engineRef: audioEngineRef } = useWebAudioMaster();
+  // Audio-master engine + transport (playhead in a FrameStore). A clip that
+  // has no playable audio source (its original can't be decoded or loaded,
+  // and there is no proxy stand-in) is said once, in-app — otherwise it is
+  // just silence. The file name is read through a ref so the engine's
+  // callback never changes identity.
+  const filesForAudioNoticeRef = useRef(files);
+  useEffect(() => {
+    filesForAudioNoticeRef.current = files;
+  }, [files]);
+  // The global library, for clips whose file isn't one of the piece's own
+  // (the same cached query use-composition resolves clips with).
+  const globalFiles = useGlobalFiles().data;
+  const globalFilesRef = useRef(globalFiles);
+  useEffect(() => {
+    globalFilesRef.current = globalFiles;
+  }, [globalFiles]);
+  const { control: audioMasterControl, engineRef: audioEngineRef } = useWebAudioMaster(
+    useCallback((info: UnplayableAudioClip) => {
+      const fileName = filesForAudioNoticeRef.current.find((f) => f.id === info.fileId)?.name;
+      const name = info.label ?? fileName;
+      toast.warning(name ? `No preview sound for “${name}”` : "An audio clip has no preview sound", {
+        id: `unplayable-audio-${info.fileId}`,
+        description:
+          info.cause === "unavailable"
+            ? "Its file couldn't be loaded. Check that it is still in the piece's assets."
+            : "Its audio format can't be decoded for preview playback. The clip is still in the piece, and export reads the original file.",
+      });
+    }, []),
+    // Whether a clip's file has a proxy to fall back to, and its revision:
+    // never asked for VPx-alpha video, nor for an audio file without one (an
+    // audio file gets one only when the preview can't play it); asked for once a
+    // pending one lands or a missing one is regenerated. A file in neither the
+    // piece's nor the global list is "unknown", tried once per play or seek.
+    useCallback(
+      (fileId: string) => proxyStatusForFile(fileId, filesForAudioNoticeRef.current, globalFilesRef.current),
+      [],
+    ),
+  );
 
   // ── Decode-readiness probe (backpressure) ────────────────────────────────
-  // The audio-master clock advances on its own; this probe is how the transport
-  // learns whether the video has the pixels yet. It returns the MIN decoded
-  // runway (seconds) across every video source ACTIVE at composition-second `t`,
-  // or `Infinity` when nothing gates (pure canvas comp). A source that can't even
-  // serve a live frame at `t` returns a negative runway so the gate trips
-  // decisively. Built stable (empty deps) and reads the latest sources +
-  // composition from a ref updated after usePreviewAssets — useTransport is
-  // called BEFORE the assets hook, so the ref bridges the cycle.
+  // See lib/preview/ready-probe.ts. Built stable (empty deps) and reads the
+  // latest sources + composition from a ref updated after usePreviewAssets —
+  // useTransport is called BEFORE the assets hook, so the ref bridges the cycle.
   const readyProbeRef = useRef<{
     sources: Record<string, VideoFrameSource>;
     composition: Composition | null;
   }>({ sources: {}, composition: null });
   const getReadyAhead = useCallback((t: number): ReadyDecision => {
     const { sources, composition: comp } = readyProbeRef.current;
-    if (!comp) return { allCanPaint: true, dominantId: null, dominantRunway: Infinity };
-    const compArea = Math.max(1, comp.width * comp.height);
-
-    // One entry per ACTIVE video source at `t`, carrying both its paint/runway
-    // state (for the gate/re-buffer decision) and its geometry (for priority).
-    interface Active {
-      id: string;
-      area: number; // on-screen area fraction 0..1
-      z: number;
-      opacity: number;
-      duration: number;
-      canPaint: boolean;
-      runway: number;
-    }
-    const actives: Active[] = [];
-    const consider = (
-      id: string,
-      src: VideoFrameSource | undefined,
-      localT: number,
-      area: number,
-      z: number,
-      opacity: number,
-      duration: number,
-    ) => {
-      // An ACTIVE video whose source isn't registered yet (the startup race right
-      // after a piece loads / a source attaches) must read as BLACK (canPaint
-      // false) so the gate HOLDS — otherwise the first getFrame hits an empty ring
-      // with no last-good frame → a BLACK flash (the count-0-but-black cold start).
-      if (!src) {
-        actives.push({ id, area, z, opacity, duration, canPaint: false, runway: -1 });
-        return;
-      }
-      // No live frame at the playhead = the exact condition that snaps a frame →
-      // negative runway. But if the source has a last-good it can still PAINT
-      // (hold) without going black — that distinction is what lets a secondary
-      // drop frames without re-buffering the comp.
-      const live = src.isReadyAt ? src.isReadyAt(localT) : true;
-      const runway = live ? readyAhead(src, localT) : -1;
-      const canPaint = live || src.lastGoodFrame?.() != null;
-      actives.push({ id, area, z, opacity, duration, canPaint, runway });
-    };
-    // Sequential video scenes (source-local time = trim.start + offset). A base
-    // scene is full-frame (area 1) and sits BEHIND overlays (z -1).
-    // Scenes are canvas-only and decode no video — every gated source is an
-    // overlay.
-    // Video / tracked-video overlays. Include trim.start for `video` so the gate
-    // probes the SAME source-time the renderer draws + warm() decodes — else a
-    // trimmed/cut clip reads not-ready at its real in-point and the gate holds (the
-    // mid-play buffer at a cut). Tracked-video draws at absolute time (no trim).
-    for (const o of comp.overlays ?? []) {
-      const area = Math.max(0, Math.min(1, (o.rect.width * o.rect.height) / compArea));
-      if (o.kind === "video") {
-        if (t < o.startTime || t >= o.startTime + o.duration) continue;
-        consider(o.id, sources[o.id], t - o.startTime + (o.trim?.start ?? 0), area, o.z, o.opacity, o.duration);
-      } else if (o.kind === "tracked" && o.content.kind === "video") {
-        if (t < o.startTime || t >= o.startTime + o.duration) continue;
-        consider(o.id, sources[o.id], t - o.startTime, area, o.z, o.opacity, o.duration);
-      }
-    }
-
-    if (actives.length === 0) {
-      return { allCanPaint: true, dominantId: null, dominantRunway: Infinity };
-    }
-    // Score by visibility (area/z/duration/opacity) so the gate + re-buffer key
-    // off the DOMINANT (most-visible) source — the drop-frames model.
-    const priorities = computeVideoPriorities(
-      actives.map((a) => ({ id: a.id, areaFraction: a.area, z: a.z, opacity: a.opacity, durationSec: a.duration })),
-    );
-    return computeReadyState(
-      actives.map((a) => ({ id: a.id, canPaint: a.canPaint, runway: a.runway, priority: priorities.get(a.id) ?? 0 })),
-    );
+    return probeReadyAhead(comp, sources, t);
   }, []);
 
   const transport = useTransport({
@@ -681,12 +645,17 @@ export default function PreviewSurface({
     [setPreviewTimelineSplit],
   );
 
+  // Body-layer failures for THIS piece, debounced to the server so the agent
+  // sees them through libi.get_piece_state (spec §4.7). Declared before
+  // usePreviewAssets so the store exists before the sandbox's effects report.
+  const previewDiagnostics = useRenderDiagnostics(pieceId);
+
   const {
     videoSources,
     videoErrors,
     images: overlayImages,
-    compiledDrawFns: overlayCompiledFns,
-    codeContentBoxes: overlayCodeContentBoxes,
+    layers: overlayLayers,
+    loadedBodies: overlayLoadedBodies,
     threeScenes: overlayThreeScenes,
     spatialQuads: overlaySpatialQuads,
     overlayErrors: compileErrors,
@@ -701,6 +670,7 @@ export default function PreviewSurface({
     transport.speed,
     transport.frameStore,
     transport.seekSignal,
+    previewDiagnostics,
   );
 
   // Feed the latest sources + composition to the (stable) readiness probe the
@@ -716,7 +686,7 @@ export default function PreviewSurface({
   // server-side storage watcher the instant an agent saves broken overlay
   // code, BEFORE the client has refetched + recompiled the composition.
   // Scoped to THIS piece. Once the preview recompiles the overlay cleanly
-  // (it appears in compiledDrawFns/threeScenes and is absent from the
+  // (its body loaded in the sandbox / it has a 3D-text instance, and is absent from the
   // Task-12 compileErrors map) the SSE error is cleared — a subsequent
   // successful compile wins. A still-broken overlay shows the (fresher)
   // compileErrors message via the union below.
@@ -740,7 +710,7 @@ export default function PreviewSurface({
       const next: Record<string, string> = {};
       for (const [id, msg] of Object.entries(prev)) {
         const compiledClean =
-          (overlayCompiledFns[id] != null || overlayThreeScenes[id] != null) &&
+          (overlayLoadedBodies.has(id) || overlayThreeScenes[id] != null) &&
           compileErrors[id] == null;
         if (compiledClean) {
           changed = true;
@@ -750,7 +720,7 @@ export default function PreviewSurface({
       }
       return changed ? next : prev;
     });
-  }, [overlayCompiledFns, overlayThreeScenes, compileErrors]);
+  }, [overlayLoadedBodies, overlayThreeScenes, compileErrors]);
 
   // Union: SSE errors (early signal) + compile errors (post-recompile, fresher
   // message + authoritative for still-broken overlays). Restricted to live
@@ -1073,8 +1043,7 @@ export default function PreviewSurface({
                   videoSources={videoSources}
                   videoErrors={videoErrors}
                   images={overlayImages}
-                  compiledDrawFns={overlayCompiledFns}
-                  codeContentBoxes={overlayCodeContentBoxes}
+                  layers={overlayLayers ?? undefined}
                   threeScenes={overlayThreeScenes}
                   spatialQuads={overlaySpatialQuads}
                   overlayErrors={overlayErrors}

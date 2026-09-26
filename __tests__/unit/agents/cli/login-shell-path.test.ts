@@ -353,3 +353,54 @@ describe("loginShellPathDirs", () => {
     expectCountsOnlyLogs();
   });
 });
+
+// Provider detection asks "is this launcher on the user's PATH?" every few seconds while a setup terminal is
+// open. It must never spawn a shell for that, so it reads the last PATH a probe actually delivered — and a
+// probe that gave nothing (timeout, no markers, spawn error) is "not known", never an empty PATH.
+describe("lastLoginShellPathDirs", () => {
+  it("is null until a probe delivers a PATH, then that PATH — without spawning anything itself", async () => {
+    const m = await import("@/lib/agents/cli/login-shell-path");
+    expect(m.lastLoginShellPathDirs()).toBeNull();
+    expect(spawnMock).not.toHaveBeenCalled();
+    const child = Object.assign(new FakeChild(), { pid: 900_201 });
+    spawnMock.mockReturnValue(child);
+    killSpy.mockImplementation((() => errno("ESRCH")) as unknown as typeof process.kill);
+    const p = m.loginShellPathDirs({ platform: "darwin" });
+    child.stdout.emit("data", Buffer.from("__LIBI_PATH_START__/opt/x/bin:/usr/bin__LIBI_PATH_END__"));
+    child.emit("close", 0);
+    await p;
+    expect(m.lastLoginShellPathDirs()).toEqual(["/opt/x/bin", "/usr/bin"]);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("a later probe that delivers nothing keeps the last good PATH; a clear forgets it", async () => {
+    const m = await import("@/lib/agents/cli/login-shell-path");
+    const good = Object.assign(new FakeChild(), { pid: 900_202 });
+    spawnMock.mockReturnValueOnce(good);
+    killSpy.mockImplementation((() => errno("ESRCH")) as unknown as typeof process.kill);
+    let now = 0;
+    const p = m.loginShellPathDirs({ platform: "darwin", now: () => now });
+    good.stdout.emit("data", Buffer.from("__LIBI_PATH_START__/opt/x/bin__LIBI_PATH_END__"));
+    good.emit("close", 0);
+    await p;
+    now = 60_000; // past the probe's own memo, so the next call spawns again
+    const bad = new FakeChild();
+    spawnMock.mockReturnValueOnce(bad);
+    const q = m.loginShellPathDirs({ platform: "darwin", now: () => now });
+    bad.stdout.emit("data", Buffer.from("__LIBI_PATH_START__/half"));
+    bad.emit("close", 0);
+    expect(await q).toEqual([]);
+    expect(m.lastLoginShellPathDirs()).toEqual(["/opt/x/bin"]);
+    m.__clearLoginShellPathMemo();
+    expect(m.lastLoginShellPathDirs()).toBeNull();
+  });
+
+  it("a probe that only ever failed leaves it null", async () => {
+    spawnMock.mockImplementation(() => {
+      throw new Error("spawn EACCES");
+    });
+    const m = await import("@/lib/agents/cli/login-shell-path");
+    expect(await m.loginShellPathDirs({ platform: "darwin" })).toEqual([]);
+    expect(m.lastLoginShellPathDirs()).toBeNull();
+  });
+});

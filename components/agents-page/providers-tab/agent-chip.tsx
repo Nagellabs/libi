@@ -30,8 +30,23 @@ export interface AgentChipProps {
   note?: string;
   /** This agent's add asks for a key (`takesKey` in providers-tab.tsx): a connected chip says how to change it. */
   keyed?: boolean;
+  /** `cant-start` only: the launcher that can't be found, as its bare name (`uvx`). */
+  missingCommand?: string;
+  /**
+   * libi's server runs on Windows (the shell flavor is PowerShell exactly then). There libi and the agents it
+   * starts keep the PATH they started with, so a `cant-start` chip adds that a launcher just installed needs a
+   * restart of libi.
+   */
+  windowsHost?: boolean;
   /** `sign-in-unknown` only: the line saying why libi can't tell whether it is ready. */
   signInHint?: string;
+  /**
+   * `connected` only: its launcher was installed after this agent's process in libi started, which can't run it
+   * (detection's `launcherAfterStart`). The chip says to restart libi instead of Connected.
+   */
+  launcherAfterStart?: boolean;
+  /** Test mode only: why this agent's add is not offered, or why its entry has to go. Shown in every layout. */
+  testModeNote?: string;
   /** Codex only: `state` is from codex's last good listing, not a fresh one. The tab says why. */
   stale?: boolean;
   /**
@@ -39,6 +54,11 @@ export interface AgentChipProps {
    * steps, each with its own action, instead of one action beside its name.
    */
   steps?: ProviderSetupSteps;
+  /**
+   * This chip's command is in the tab's terminal AND the user pressed Enter there. Until then a running step says to
+   * press Enter; only after it does it say what the command is doing (a browser sign-in).
+   */
+  terminalSubmitted?: boolean;
   onAdd?: () => void;
   onReplace?: () => void;
   onRemove?: () => void;
@@ -52,6 +72,7 @@ const LABEL: Record<ChipState, string> = {
   "needs-sign-in": "Sign in needed",
   "sign-in-unknown": "Added · sign in to use",
   disabled: "Disabled",
+  "cant-start": "Can't start",
   "not-added": "Not added",
   "agent-not-ready": "Not set up",
   unknown: "Unknown",
@@ -63,6 +84,7 @@ const DOT: Record<ChipState, string> = {
   "needs-sign-in": "bg-amber-400",
   "sign-in-unknown": "bg-amber-400",
   disabled: "bg-muted-foreground",
+  "cant-start": "bg-destructive",
   "not-added": "bg-muted-foreground/40",
   "agent-not-ready": "bg-muted-foreground/40",
   unknown: "bg-destructive",
@@ -75,7 +97,9 @@ const noteClass = "text-[11px] leading-relaxed text-muted-foreground";
  * terminal; the user reads it and decides whether to press Enter.
  */
 export function AgentChip(props: AgentChipProps) {
-  const { providerId, agentId, agentName, state, scope, scopeUnreadable, note, keyed, signInHint, stale, steps, onRemove } = props;
+  const { providerId, providerName, agentId, agentName, state, scope, scopeUnreadable, note, keyed, signInHint, stale, steps, missingCommand, windowsHost = false, launcherAfterStart = false, testModeNote, onReplace, onRemove } =
+    props;
+  const restartToUse = state === "connected" && launcherAfterStart;
   return (
     <div
       data-testid={`chip-${providerId}-${agentId}`}
@@ -84,8 +108,16 @@ export function AgentChip(props: AgentChipProps) {
       <div className="flex min-h-8 flex-wrap items-center justify-between gap-x-3 gap-y-2">
         {/* The switch above the rows already names the agent, so the chip starts with its state. */}
         <div className="flex min-w-0 flex-wrap items-center gap-x-1.5 text-sm text-foreground">
-          <span aria-hidden className={cn("size-2 shrink-0 rounded-full", DOT[state])} />
-          <span>{LABEL[state]}</span>
+          <span aria-hidden className={cn("size-2 shrink-0 rounded-full", restartToUse ? "bg-amber-400" : DOT[state])} />
+          {restartToUse ? (
+            <span>Added · restart libi to use</span>
+          ) : state === "cant-start" && missingCommand ? (
+            <span>
+              {LABEL[state]}: <code className="font-mono text-[0.9em]">{missingCommand}</code> can&apos;t be found
+            </span>
+          ) : (
+            <span>{LABEL[state]}</span>
+          )}
           {scope ? <span className="text-muted-foreground">· {scope} scope</span> : null}
           {stale ? (
             <span data-testid={`chip-${providerId}-${agentId}-stale`} className="text-muted-foreground">
@@ -100,6 +132,11 @@ export function AgentChip(props: AgentChipProps) {
           </div>
         )}
       </div>
+      {testModeNote ? (
+        <p data-testid={`chip-${providerId}-${agentId}-test-mode`} className={noteClass}>
+          {testModeNote}
+        </p>
+      ) : null}
       {steps ? (
         <SteppedSetup {...props} steps={steps} />
       ) : (
@@ -108,7 +145,18 @@ export function AgentChip(props: AgentChipProps) {
             <p className={noteClass}>Couldn&apos;t read its scope, so there is no safe command to remove it yet.</p>
           ) : null}
           {state === "disabled" ? <p className={noteClass}>Enable it in your Codex config.</p> : null}
+          {state === "cant-start" && !scopeUnreadable ? (
+            <p data-testid={`chip-${providerId}-${agentId}-cant-start`} className={noteClass}>
+              {cantStartText(providerName, agentName, missingCommand, Boolean(onReplace), Boolean(onRemove), windowsHost)}
+            </p>
+          ) : null}
           {state === "sign-in-unknown" && signInHint && !scopeUnreadable ? <p className={noteClass}>{signInHint}</p> : null}
+          {restartToUse ? (
+            <p data-testid={`chip-${providerId}-${agentId}-restart-to-use`} className={noteClass}>
+              libi&apos;s {agentName} was started before the program that runs {providerName}&apos;s MCP server was on its
+              PATH, so its chats here can&apos;t start it yet. Restart libi to use it.
+            </p>
+          ) : null}
           {/* Nothing reads whether a saved key still works, and there is no key field: a new key is a new add. */}
           {state === "connected" && keyed && onRemove ? (
             <p data-testid={`chip-${providerId}-${agentId}-change-key`} className={noteClass}>
@@ -121,6 +169,28 @@ export function AgentChip(props: AgentChipProps) {
       )}
     </div>
   );
+}
+
+/** Why a `cant-start` chip's agent has none of the provider's tools, and the way out the chip offers. */
+function cantStartText(
+  providerName: string,
+  agentName: string,
+  command: string | undefined,
+  canAddAgain: boolean,
+  canRemove: boolean,
+  windowsHost: boolean,
+): string {
+  const why = command
+    ? `${agentName} can't run ${providerName}'s MCP server without ${command}, and libi can't find ${command} on this computer, so its tools won't show up in your chats.`
+    : `${agentName} can't start ${providerName}'s MCP server, so its tools won't show up in your chats.`;
+  // Windows: libi and the agents it starts keep the PATH they started with, so a launcher installed since needs a restart.
+  const restart = command && windowsHost ? ` If you just installed ${command}, restart libi.` : "";
+  const way = canAddAgain
+    ? ` Add it again to use libi's current setup for ${providerName}, or remove it.`
+    : canRemove
+      ? ` Remove it from ${agentName}.`
+      : "";
+  return `${why}${restart}${way}`;
 }
 
 /**
@@ -177,16 +247,22 @@ function combinedView(stepIds: SetupStepId[], props: AgentChipProps): CombinedAc
   };
 }
 
-/** While a step's command is live in the terminal: what is left to do there, or in the browser. */
-const RUNNING_TEXT: Record<SetupStepId, string> = {
-  add: "Press Enter in the terminal below to run it.",
-  "sign-in": "Finish signing in in your browser. If it didn't open, or you stopped it, sign in again:",
+/**
+ * While a step's command is live in the terminal: what is left to do there, or in the browser. Before the user has
+ * pressed Enter nothing has run, so the line says to press it; a browser sign-in is only claimed after.
+ */
+const RUNNING_TEXT: Record<SetupStepId, { waiting: string; submitted: string }> = {
+  add: { waiting: "Press Enter in the terminal below to run it.", submitted: "Running in the terminal below." },
+  "sign-in": {
+    waiting: "Press Enter in the terminal below to run it; your browser then opens to sign in.",
+    submitted: "Finish signing in in your browser. If it didn't open, or you stopped it, sign in again:",
+  },
 };
 
 function stepView(step: SetupStep, props: AgentChipProps): SetupStepView {
-  const { providerName, agentName, state, actionsEnabled, note, signInHint, steps, onAdd, onSignIn } = props;
+  const { providerName, agentName, state, actionsEnabled, note, signInHint, steps, terminalSubmitted, onAdd, onSignIn } = props;
   const done = step.status === "done";
-  const runningText = RUNNING_TEXT[step.id];
+  const runningText = RUNNING_TEXT[step.id][terminalSubmitted ? "submitted" : "waiting"];
   if (step.id === "add") {
     return {
       id: step.id,
@@ -216,7 +292,8 @@ function stepView(step: SetupStep, props: AgentChipProps): SetupStepView {
     status: step.status,
     title,
     description: done ? `${agentName} keeps the sign-in.` : "Your browser opens to sign in. Then start a new chat.",
-    details: !done && state === "sign-in-unknown" && signInHint ? [signInHint] : undefined,
+    // While the sign-in runs, the step says what to do in the browser; "didn't say" would contradict it.
+    details: !done && step.status !== "running" && state === "sign-in-unknown" && signInHint ? [signInHint] : undefined,
     runningText,
     action: {
       label: `Sign in on ${agentName}`,
@@ -249,7 +326,7 @@ function ChipAction({
       </Link>
     );
   }
-  if ((state === "connected" || state === "needs-key" || state === "sign-in-unknown") && scopeUnreadable) {
+  if ((state === "connected" || state === "needs-key" || state === "sign-in-unknown" || state === "cant-start") && scopeUnreadable) {
     return onRetry ? (
       <Button variant="outline" size="sm" className="cursor-pointer" onClick={() => onRetry()}>
         Retry
@@ -268,6 +345,23 @@ function ChipAction({
       <Button size="sm" className="cursor-pointer" disabled={!actionsEnabled} onClick={() => onReplace()}>
         Replace on {agentName}
       </Button>
+    );
+  }
+  // Its launcher is missing: add it again with the catalog's current command (the replace flow), or remove it.
+  if (state === "cant-start") {
+    return (
+      <>
+        {onReplace ? (
+          <Button size="sm" className="cursor-pointer" disabled={!actionsEnabled} onClick={() => onReplace()}>
+            Add again on {agentName}
+          </Button>
+        ) : null}
+        {onRemove ? (
+          <Button variant="outline" size="sm" className="cursor-pointer" disabled={!actionsEnabled} onClick={() => onRemove()}>
+            Remove from {agentName}
+          </Button>
+        ) : null}
+      </>
     );
   }
   // Not signed in, or libi can't tell: Sign in, and Remove beside it, so a sign-in the user interrupted or

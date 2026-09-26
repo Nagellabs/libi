@@ -39,6 +39,8 @@ import { lifecycleEvents } from "./events";
 import { startMcpHttpChild, type McpHttpChildHandle } from "./mcp-http-child";
 import { getMcpHttpChild as getMcpHttp, setMcpHttpChild as setMcpHttp } from "./mcp-http-handle";
 import { serverLogger } from "@/lib/logger";
+import { detectIsPackaged } from "@/lib/runtime/registry-url";
+import { resolveOverlaySandboxMode } from "@/lib/sandbox/mode";
 import fs from "node:fs";
 import type { CategoryBStepId } from "./types";
 
@@ -482,6 +484,15 @@ export async function runCategoryB(
     }
   })();
 
+  // Say so, once per boot, when the dev-only escape hatch is on — the same
+  // decision the root layout's meta hands the preview (lib/sandbox/mode.ts).
+  if (resolveOverlaySandboxMode(process.env, detectIsPackaged()) === "in-origin") {
+    serverLogger.warn(
+      { tag: "overlay-sandbox", op: "in_origin_mode" },
+      "overlay-sandbox: LIBI_OVERLAY_SANDBOX=0 — overlay bodies run IN the app origin (dev-only diagnostic mode, no isolation)",
+    );
+  }
+
   // Reclaim disk libi allocated and no longer needs: superseded Playwright
   // browser revisions (1.6 GB across three, measured 2026-09-08) and the 572 MB
   // MobileCLIP encoder the tracking installer downloads only to export
@@ -499,6 +510,22 @@ export async function runCategoryB(
     }
   })();
 
+  // Fetch libi's own Python (~25 MB) a minute after boot when uv is already
+  // installed, so the first uv feature after an upgrade does not have to —
+  // and does not fail offline for want of it. Once per Python version,
+  // silent on failure, never awaited (lib/uv-env/python-prefetch.ts).
+  void (async () => {
+    try {
+      const { schedulePythonPrefetch } = await import("@/lib/uv-env/python-prefetch");
+      schedulePythonPrefetch();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "uv-env", op: "python_prefetch_schedule_failed", err },
+        "could not schedule the Python prefetch; features will fetch it on first use",
+      );
+    }
+  })();
+
   void (async () => {
     try {
       const { sweepBackfillHasAlpha } = await import("@/lib/proxy/backfill-alpha");
@@ -510,12 +537,61 @@ export async function runCategoryB(
       );
     }
     try {
+      // First: proxies a quit left at `generating` (review round 4, M-b). The
+      // sweeps below then share, never repeat, those regenerations.
+      const { sweepStaleGeneratingProxies } = await import("@/lib/proxy/regen-once");
+      await sweepStaleGeneratingProxies();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "stale_generating_phase_failed", err },
+        "stale generating-proxy recovery threw; a proxy a quit interrupted may stay pending",
+      );
+    }
+    try {
       const { sweepRegenLegacy720pProxies } = await import("@/lib/proxy/regen-720p");
       sweepRegenLegacy720pProxies();
     } catch (err) {
       serverLogger.warn(
         { tag: "proxy", op: "sweep_regen_720p_phase_failed", err },
         "Legacy 720p proxy regen sweep threw; some proxies may stay at old resolution",
+      );
+    }
+    try {
+      const { sweepRegenMkvStreamProxies } = await import("@/lib/proxy/regen-mkv-streams");
+      await sweepRegenMkvStreamProxies();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "sweep_regen_mkv_streams_phase_failed", err },
+        "MKV stream-choice proxy regen sweep threw; some MKV proxies may carry a track the preview no longer plays",
+      );
+    }
+    try {
+      // Transcripts made before extractAudio padded an audio lead (review round 4, M-f).
+      const { sweepRetimeAudioLeadTranscripts } = await import("@/lib/analysis/retime-audio-lead");
+      await sweepRetimeAudioLeadTranscripts();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "analysis", op: "transcript_retime_phase_failed", err },
+        "transcript re-timing sweep threw; a transcript of a file whose audio starts late may stay early",
+      );
+    }
+    try {
+      const { sweepRegenLateStartProxies } = await import("@/lib/proxy/regen-stream-lead");
+      await sweepRegenLateStartProxies();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "sweep_regen_stream_lead_phase_failed", err },
+        "late-start proxy regen sweep threw; a proxy of a file whose streams start late may play early",
+      );
+    }
+    try {
+      // Audio files the preview can't play itself get an AAC proxy (review round 4).
+      const { sweepAudioPreviewProxies } = await import("@/lib/proxy/regen-audio-preview");
+      await sweepAudioPreviewProxies();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "sweep_audio_preview_phase_failed", err },
+        "audio preview proxy sweep threw; an audio file the preview can't play itself may stay silent there",
       );
     }
   })();

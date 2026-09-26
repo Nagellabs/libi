@@ -89,6 +89,18 @@ function pruneBackups(codexHome: string): void {
  * failing to take a backup must not fail the registration the user asked for.
  */
 export function backupCodexConfig(codexHome: string): string | null {
+  const r = ensureCodexConfigBackup(codexHome);
+  return r?.created ? r.path : null;
+}
+
+/**
+ * Like `backupCodexConfig`, but also names the copy when no new one was
+ * needed: `{ created: false }` is the newest backup, which already holds these
+ * exact bytes. Either way `path` is a copy of what codex is about to rewrite —
+ * which is what `libi connect` reads to warn about what the rewrite drops.
+ * `null` only when there is nothing to protect or the copy failed. NEVER throws.
+ */
+export function ensureCodexConfigBackup(codexHome: string): { path: string; created: boolean } | null {
   const configPath = path.join(codexHome, "config.toml");
   try {
     if (!fs.existsSync(configPath)) return null;
@@ -98,7 +110,7 @@ export function backupCodexConfig(codexHome: string): string | null {
     const newest = listCodexConfigBackups(codexHome)[0];
     if (newest) {
       try {
-        if (fs.readFileSync(newest).equals(current)) return null;
+        if (fs.readFileSync(newest).equals(current)) return { path: newest, created: false };
       } catch {
         // Unreadable backup — fall through and write a fresh one.
       }
@@ -113,13 +125,18 @@ export function backupCodexConfig(codexHome: string): string | null {
     for (let n = 1; fs.existsSync(backupPath); n++) {
       backupPath = path.join(codexHome, `${BACKUP_PREFIX}${stamp}-${n}`);
     }
-    fs.writeFileSync(backupPath, current);
+    // Owner-only: codex keeps config.toml at 0600 because it can hold
+    // `bearer_token` / `http_headers`, and the copy must be no more readable
+    // than the original. `mode` only applies on create and is masked by the
+    // umask, so chmod explicitly too (a no-op for POSIX bits on Windows).
+    fs.writeFileSync(backupPath, current, { mode: 0o600 });
+    fs.chmodSync(backupPath, 0o600);
     logger.info(
       { tag: LOG_TAG, op: "backup_created", path: backupPath },
       "copied config.toml aside before codex rewrote it",
     );
     pruneBackups(codexHome);
-    return backupPath;
+    return { path: backupPath, created: true };
   } catch (err) {
     logger.warn(
       { tag: LOG_TAG, op: "backup_failed", err: (err as Error).message },

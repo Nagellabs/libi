@@ -46,6 +46,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { buildUvEnv, trackingVenvDir } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { downloadToFileWithStallGuard } from "@/lib/security/download-verify";
 import {
   uvPath,
@@ -456,6 +457,8 @@ export async function ensureBuiltModel(
     }));
   } catch (e) {
     const err = e as Error & { stdout?: string; stderr?: string };
+    const offline = uvNetworkFailureMessage("object tracking", err.stderr ?? "");
+    if (offline) throw new Error(offline, { cause: e });
     const detail = (err.stderr ?? err.stdout ?? err.message ?? "").slice(-2000);
     throw new Error(
       `local ONNX export for ${entry.dest} failed: ${err.message}\n${detail}`,
@@ -529,17 +532,26 @@ export async function runTrackingPyenvInstall(): Promise<void> {
   // read-only package. It also turns "someone edited pyproject.toml without
   // re-running `uv lock`" into a loud install-time error instead of a silent
   // drift between the lockfile we ship and the env we build.
-  await pexec(uvPath(), ["sync", "--locked"], {
-    cwd: proj,
-    windowsHide: true,
-    timeout: 10 * 60_000, // first sync resolves torch + boxmot + opencv
-    maxBuffer: 32 * 1024 * 1024,
-    // buildUvEnv prepends `~/.libi/bin` so uv-spawned subprocesses (python,
-    // pip) find the libi-managed binaries, and pins every uv state location
-    // under LIBI_HOME. In a packaged Electron app, bootstrapPath() has
-    // already augmented PATH for Homebrew etc., which is inherited here.
-    env: buildUvEnv({ UV_PROJECT_ENVIRONMENT: venv, NO_COLOR: "1" }),
-  });
+  try {
+    await pexec(uvPath(), ["sync", "--locked"], {
+      cwd: proj,
+      windowsHide: true,
+      timeout: 10 * 60_000, // first sync resolves torch + boxmot + opencv
+      maxBuffer: 32 * 1024 * 1024,
+      // buildUvEnv prepends `~/.libi/bin` so uv-spawned subprocesses (python,
+      // pip) find the libi-managed binaries, and pins every uv state location
+      // under LIBI_HOME. In a packaged Electron app, bootstrapPath() has
+      // already augmented PATH for Homebrew etc., which is inherited here.
+      env: buildUvEnv({ UV_PROJECT_ENVIRONMENT: venv, NO_COLOR: "1" }),
+    });
+  } catch (err) {
+    // Offline, the install chip and the tracking_engine_install job say so in
+    // one sentence instead of relaying uv's "Caused by:" wall (which is logged).
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+    const offline = uvNetworkFailureMessage("object tracking", stderr);
+    if (offline) throw new Error(offline, { cause: err });
+    throw err;
+  }
   logger.info(
     { tag: "tracking-pyenv", op: "uv_sync_done", proj },
     "uv sync complete",

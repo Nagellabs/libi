@@ -69,8 +69,9 @@ const USABLE_INSTALL_STATUS = new Set(["installed", "not_required"]);
  *
  * Two ways to already have one:
  *   - the user CONNECTED it to their own agent (`status: "connected"`; a
- *     `needs-key` or `disabled` row is exactly what the add command fixes, so
- *     it stays in `suggested`);
+ *     `needs-key` or `disabled` row is exactly what the add command fixes, and a
+ *     `cant-start` row — its launcher is missing — has no working tools either,
+ *     so each stays in `suggested`);
  *   - it is one of libi's own extensions and its dependencies are in place.
  *     An extension that is not installed yet is still a legitimate offer — the
  *     card's whole job for it is the download.

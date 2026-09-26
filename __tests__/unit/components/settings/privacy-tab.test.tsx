@@ -24,6 +24,11 @@ let analyticsState: { data?: { enabled: boolean }; isLoading: boolean; isError: 
 let analyticsMutationError = false;
 let crashReportMutationError = false;
 
+// The catalog view (a dev build's catalog switch) is not under test here: the build's own site's links, no view.
+vi.mock("@/lib/queries/templates-catalog", async () => {
+  const { LEGAL_LINKS } = await import("@/lib/legal-links");
+  return { useLegalLinks: () => LEGAL_LINKS, useTemplatesCatalog: () => ({ data: undefined }) };
+});
 vi.mock("@/lib/queries/analytics-settings", () => ({
   useAnalyticsSettings: () => analyticsState,
   useSetAnalyticsEnabled: () => ({ mutate: analyticsMutate, isError: analyticsMutationError }),

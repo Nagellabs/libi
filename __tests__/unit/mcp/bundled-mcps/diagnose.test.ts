@@ -12,17 +12,17 @@ vi.mock("@/mcp/bundled-mcps/aux-checks", async () => {
   );
   return {
     ...actual,
-    checkBinary: vi.fn(async (name: string) => {
-      if (name === "yt-dlp") {
-        return { name: "yt-dlp", ok: true, detail: "/usr/local/bin/yt-dlp (180ms cold start)" };
-      }
-      return { name, ok: false, detail: `${name} not found on PATH` };
-    }),
+    checkBinary: vi.fn(async (name: string) => ({ name, ok: false, detail: `${name} not found on PATH` })),
+    checkYtDlp: vi.fn(async () => ({
+      name: "yt-dlp",
+      ok: true,
+      detail: "/h/.libi/bin/yt-dlp → /h/.libi/uv/tools/yt-dlp/bin/yt-dlp — 2026.09.20 (180ms cold start)",
+    })),
   };
 });
 
 import { diagnoseMcp } from "@/mcp/bundled-mcps/diagnose";
-import { checkBinary } from "@/mcp/bundled-mcps/aux-checks";
+import { checkBinary, checkYtDlp } from "@/mcp/bundled-mcps/aux-checks";
 
 describe("diagnoseMcp", () => {
   let db: ReturnType<typeof createTestDb>;
@@ -31,6 +31,7 @@ describe("diagnoseMcp", () => {
     vi.mocked(getDb).mockReturnValue(db as never);
     seedDatabase(db as never);
     vi.mocked(checkBinary).mockClear();
+    vi.mocked(checkYtDlp).mockClear();
   });
   afterEach(() => {
     resetTestDb();
@@ -53,6 +54,9 @@ describe("diagnoseMcp", () => {
     expect(Array.isArray(result.spawn.envKeys)).toBe(true);
     expect(result.auxiliary.length).toBeGreaterThan(0);
     expect(result.auxiliary[0].name).toContain("yt-dlp");
+    // libi's launcher check, never a bare PATH lookup (always "not found" on Windows).
+    expect(checkYtDlp).toHaveBeenCalledTimes(1);
+    expect(checkBinary).not.toHaveBeenCalled();
   });
 
   it("reports inCurrentSession=false for a failed row (filtered out)", async () => {

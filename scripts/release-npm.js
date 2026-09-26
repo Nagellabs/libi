@@ -43,6 +43,7 @@
  */
 const { spawnSync } = require("node:child_process");
 const { existsSync, readFileSync, rmSync } = require("node:fs");
+const crypto = require("node:crypto");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
 const { recordGatesPassed } = require("./lib/gate-provenance");
@@ -51,6 +52,16 @@ const {
   decideBump,
   needsVersionPush,
 } = require("./lib/release-preflight");
+const {
+  VERIFY_ATTEMPTS,
+  VERIFY_DELAY_MS,
+  TARBALL_VERIFY_ATTEMPTS,
+  TARBALL_VERIFY_DELAY_MS,
+  shouldLogAttempt,
+  describeVerifyTimeout,
+  classifyTarballAttempt,
+  curlGetSucceeded,
+} = require("./lib/release-verify");
 
 const ROOT = path.resolve(__dirname, "..");
 const PKG_NAME = "@nagellabs/libi";
@@ -404,8 +415,9 @@ if (process.env.GITHUB_OUTPUT) {
 //
 // Poll instead, and lead with the per-version document — it is authoritative
 // and updates first. Only give up after the packument has had time to catch up.
-const VERIFY_ATTEMPTS = 20;
-const VERIFY_DELAY_MS = 15_000;
+// VERIFY_ATTEMPTS/VERIFY_DELAY_MS and the decisions below live in
+// ./lib/release-verify.js so they're testable as pure functions (0.1.14 and
+// 0.1.15 both took longer than the old 20×15s budget to clear).
 function versionDocExists() {
   const res = spawnSync(
     "curl",
@@ -415,6 +427,47 @@ function versionDocExists() {
   );
   return res.stdout.trim() === "200";
 }
+// GET (never HEAD) the per-version document body, so we can read its
+// `dist.integrity` once it exists.
+function fetchVersionDoc() {
+  const res = spawnSync(
+    "curl",
+    ["-fs", `https://registry.npmjs.org/${encodeURIComponent(PKG_NAME)}/${version}`],
+    { encoding: "utf-8" },
+  );
+  if (!curlGetSucceeded(res)) return null;
+  try {
+    return JSON.parse(res.stdout);
+  } catch {
+    return null;
+  }
+}
+// GET (never HEAD) the actual tarball bytes and compare their computed
+// integrity against the registry's own `dist.integrity`. A HEAD request only
+// proves the CDN answers 200; it cannot catch a CDN edge serving 200 with
+// truncated or wrong bytes, which is exactly the failure mode this guards.
+//
+// A failed/empty GET is reported as `getSucceeded: false` rather than folded
+// into a false "mismatch" — classifyTarballAttempt (release-verify.js) is
+// what turns this into match/mismatch/inconclusive, and only a completed GET
+// can ever be a "mismatch".
+function verifyTarballIntegrity(doc) {
+  const tarballUrl = doc?.dist?.tarball;
+  const expected = doc?.dist?.integrity;
+  if (!tarballUrl || !expected) return { checked: false };
+  const res = spawnSync("curl", ["-fsSL", tarballUrl], {
+    encoding: "buffer",
+    maxBuffer: 200 * 1024 * 1024,
+  });
+  const getSucceeded = curlGetSucceeded(res);
+  if (!getSucceeded) {
+    return { checked: true, getSucceeded: false, expected, actual: null };
+  }
+  const [algo] = expected.split("-");
+  const digest = crypto.createHash(algo).update(res.stdout).digest("base64");
+  const actual = `${algo}-${digest}`;
+  return { checked: true, getSucceeded: true, expected, actual };
+}
 let served = null;
 let latest = null;
 for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
@@ -422,27 +475,90 @@ for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
   latest = capture("npm", ["view", PKG_NAME, "dist-tags.latest"]);
   if (served === version && latest === version) break;
   const doc = versionDocExists();
-  console.log(
-    `  [${attempt}/${VERIFY_ATTEMPTS}] packument ${served ?? "404"} · ` +
-      `version document ${doc ? "200 (published ✓)" : "not yet"} — waiting for the CDN…`,
-  );
+  if (shouldLogAttempt(attempt, VERIFY_ATTEMPTS, VERIFY_DELAY_MS)) {
+    console.log(
+      `  [${attempt}/${VERIFY_ATTEMPTS}] packument ${served ?? "404"} · ` +
+        `version document ${doc ? "200 (published ✓)" : "not yet"} — waiting for the CDN…`,
+    );
+  }
   if (attempt === VERIFY_ATTEMPTS) {
-    if (doc) {
-      console.log(
-        `\n✅ ${PKG_NAME}@${version} IS published — registry.npmjs.org serves its\n` +
-          "   version document. Only the aggregated packument is still catching up,\n" +
-          "   which is normal for a first publish and needs no action.",
-      );
+    const outcome = describeVerifyTimeout({
+      pkgName: PKG_NAME,
+      version,
+      versionDocServed: doc,
+      attempts: VERIFY_ATTEMPTS,
+      delayMs: VERIFY_DELAY_MS,
+      whatIsMissing: "still isn't being served",
+    });
+    if (outcome.exitCode === 0) {
+      console.log(outcome.message);
       break;
     }
-    console.error(
-      `❌ ${PKG_NAME}@${version} is not being served, and its version document is\n` +
-        "   absent too — this is a real failure, not CDN lag. Check\n" +
-        "   ~/.npm/_logs for the PUT status before announcing or re-publishing.",
-    );
-    process.exit(1);
+    console.error(outcome.message);
+    process.exit(outcome.exitCode);
   }
   sleepSync(VERIFY_DELAY_MS);
+}
+// Only reached once the version document is confirmed live (either the
+// packument caught up, or the final attempt above confirmed a 200) — never on
+// the timeout-with-nothing-visible path, which already exited.
+//
+// The tarball GET gets its own small retry budget (TARBALL_VERIFY_ATTEMPTS):
+// a failed/empty GET is a transient attempt failure, not evidence of
+// corruption, and must be retried rather than reported as one. Only a
+// completed GET whose digest disagrees with dist.integrity — "mismatch" —
+// is a real corruption signal; that fails loudly and immediately. If the
+// retry budget runs out still unable to complete a GET, that is unresolved
+// CDN/network flakiness, reported with the same "npm already accepted this,
+// don't re-dispatch" wording as the doc-poll timeout above, not corruption.
+for (let attempt = 1; attempt <= TARBALL_VERIFY_ATTEMPTS; attempt++) {
+  const versionDoc = fetchVersionDoc();
+  const tarballCheck = versionDoc ? verifyTarballIntegrity(versionDoc) : { checked: false };
+  if (tarballCheck.checked) {
+    const status = classifyTarballAttempt({
+      getSucceeded: tarballCheck.getSucceeded,
+      actual: tarballCheck.actual,
+      expected: tarballCheck.expected,
+    });
+    if (status === "match") {
+      console.log(`  tarball integrity: verified (${tarballCheck.expected})`);
+      break;
+    }
+    if (status === "mismatch") {
+      console.error(
+        `\n❌ ${PKG_NAME}@${version}'s tarball does not match its registry-declared\n` +
+          `   dist.integrity.\n` +
+          `   expected: ${tarballCheck.expected}\n` +
+          `   actual  : ${tarballCheck.actual}\n` +
+          "   This is a real corruption signal, not CDN lag — investigate before\n" +
+          "   telling anyone the release is out.",
+      );
+      process.exit(1);
+    }
+    // "inconclusive": the GET itself failed (or the doc's dist fields
+    // weren't there yet) — fall through to the retry below.
+  }
+  if (attempt === TARBALL_VERIFY_ATTEMPTS) {
+    // Its own budget/wording — NOT the doc-poll's VERIFY_ATTEMPTS/
+    // VERIFY_DELAY_MS. The version document is already confirmed live by the
+    // time this loop runs; only the tarball GET itself kept failing.
+    const outcome = describeVerifyTimeout({
+      pkgName: PKG_NAME,
+      version,
+      versionDocServed: false,
+      attempts: TARBALL_VERIFY_ATTEMPTS,
+      delayMs: TARBALL_VERIFY_DELAY_MS,
+      whatIsMissing: "its tarball still couldn't be confirmed by a successful GET",
+    });
+    console.error(
+      "\n  This is unresolved GET/network flakiness, not a confirmed corrupt tarball —\n" +
+        "  a corruption verdict only ever comes from a completed GET whose digest\n" +
+        "  disagrees with dist.integrity, which never happened here.\n" +
+        outcome.message,
+    );
+    process.exit(outcome.exitCode);
+  }
+  sleepSync(TARBALL_VERIFY_DELAY_MS);
 }
 const shellApi = capture("npm", ["view", PKG_NAME, "libi.shellApiVersion"]);
 console.log(`\n  registry serves : ${served}\n  dist-tags.latest: ${latest}\n  shellApiVersion : ${shellApi}`);

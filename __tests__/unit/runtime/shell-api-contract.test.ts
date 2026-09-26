@@ -38,6 +38,9 @@ const REQUIRED_EXPORTS = [
   "bindNotifier",
   "reportNativeCrash",
   "startNextServer",
+  // Also feature-detected: an older shell never calls it, and the runtime
+  // falls back to a private 0600 file (lib/social/token-store.ts).
+  "registerSecretCipher",
 ] as const;
 
 describe("shell API contract", () => {

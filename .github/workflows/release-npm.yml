@@ -151,7 +151,10 @@ jobs:
     name: Publish to npm
     needs: gates
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Headroom over the registry-verify poll alone (~25 min: 100×15s, see
+    # scripts/lib/release-verify.js), plus the build/test/publish steps ahead
+    # of it and the tarball-integrity GET after it.
+    timeout-minutes: 75
     environment: release
     permissions:
       contents: write   # push the version commit and tag

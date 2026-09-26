@@ -45,14 +45,30 @@ async function send(payload: Record<string, unknown>): Promise<boolean> {
 
 export const notify = {
   navigate(event: {
-    target: "piece" | "asset" | "preview" | "storyboard" | "folder";
-    /** Required for piece/asset/preview/storyboard/folder targets. */
+    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+    /** Required for piece/asset/preview/storyboard/folder/posting targets. */
     pieceId?: string;
     fileId?: string;
-    /** Optional id for special targets. */
+    /** Optional id for special targets — for `posting`, a provider post id to
+     *  open in the composer for review. */
     id?: string;
   }): void {
     send({ type: "navigate", ...event });
+  },
+  /**
+   * `navigate`, but awaitable: resolves true only when the studio accepted the
+   * POST. For the one caller whose RESULT claims a screen changed —
+   * `libi.post_piece` / `libi.social_link_post` report `navigated`, and the
+   * agent tells the user "it is open in the Posting tab" — that claim has to be
+   * true, the same reason `navigateAgents` hands its promise back.
+   */
+  navigateAwaited(event: {
+    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+    pieceId?: string;
+    fileId?: string;
+    id?: string;
+  }): Promise<boolean> {
+    return send({ type: "navigate", ...event });
   },
   refreshQuery(event: { queryKey: string; pieceId?: string; fileId?: string; trackId?: string }): void {
     send({ type: "refresh_query", ...event });
@@ -66,6 +82,11 @@ export const notify = {
   instructionsChanged(): void {
     send({ type: "instructions_changed" });
   },
+  /** A piece was deleted in THIS process (the MCP child): drop what the
+   *  studio holds in memory for it (its render diagnostics). */
+  pieceDeleted(pieceId: string): void {
+    send({ type: "piece_deleted", pieceId });
+  },
   analysisChanged(event: { fileId: string }): void {
     send({ type: "analysis_changed", ...event });
   },
@@ -74,6 +95,10 @@ export const notify = {
    *  report "navigated" only when the POST landed. */
   navigateAgents(event: { tab: "agents" | "libi-mcp" | "providers"; extensionId?: string; provider?: string }): Promise<boolean> {
     return send({ type: "navigate_agents", ...event });
+  },
+  /** Send the user to the Templates page; resolves true only when the POST landed. */
+  navigateTemplates(event: { templateId?: string }): Promise<boolean> {
+    return send({ type: "navigate_templates", ...event });
   },
   /** Flash an inspector field for an overlay (guided edit). */
   highlight(event: {

@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { createCanvas, loadImage, type Image } from "@napi-rs/canvas";
 import { ensureBundledFontsRegistered } from "@/lib/fonts/register-server";
-import { renderCompositionFrames } from "@/lib/render/frame-capture";
+import { FrameTimesOutOfRangeError, renderCompositionFrames } from "@/lib/render/frame-capture";
 import { detectEdgeOverflow } from "@/lib/render/overflow-detect";
 import { loadComposition } from "@/lib/composition/persistence";
 import { overlaysActiveAt } from "@/lib/engine/overlays";
@@ -34,9 +34,10 @@ const CONTACT_SHEET_JPEG_QUALITY = 85; // @napi-rs/canvas jpeg quality is 0-100,
  * N round trips. ceil(sqrt(n)) columns, cells scaled to fit a 1600px-wide
  * sheet (uniform aspect ratio assumed — all cells come from the same
  * composition), each cell labelled with its timestamp so the grid stays
- * readable when the whole point of looking is to check timing.
+ * readable when the whole point of looking is to check timing — and with the
+ * frame it drew, which is what a diagnostic's `frame` is matched against.
  */
-function buildContactSheetJpeg(cells: { time: number; img: Image }[]): Promise<Buffer> {
+function buildContactSheetJpeg(cells: { time: number; frame: number; img: Image }[]): Promise<Buffer> {
   ensureBundledFontsRegistered();
   const n = cells.length;
   const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
@@ -59,7 +60,7 @@ function buildContactSheetJpeg(cells: { time: number; img: Image }[]): Promise<B
     ctx.drawImage(cell.img, x, y, cellWidth, cellHeight);
 
     // Timestamp label — an unlabelled grid is unreadable when checking timing.
-    const label = `${cell.time.toFixed(2)}s`;
+    const label = `${cell.time.toFixed(2)}s · f${cell.frame}`;
     ctx.font = "600 20px Inter";
     const labelW = ctx.measureText(label).width + 12;
     const labelH = 26;
@@ -129,21 +130,25 @@ export async function POST(req: Request): Promise<Response> {
         cx.drawImage(img, 0, 0);
         const { data } = cx.getImageData(0, 0, img.width, img.height);
         const overflow = detectEdgeOverflow(data, img.width, img.height);
-        return { time: f.time, path: f.path, overflow, img };
+        return { time: f.time, frame: f.frame, path: f.path, overflow, img };
       }),
     );
-    // The per-frame response shape (time/path/overflow) is unchanged; `img`
-    // above exists only to build the contact sheet below without re-decoding.
-    const frames = rendered.map((r) => ({ time: r.time, path: r.path, overflow: r.overflow }));
+    // Per frame: the time asked for, the absolute `frame` drawn for it (so a
+    // diagnostic's frame can be matched, and a time that lands on a
+    // neighbouring frame is visible), the PNG and its overflow. `img` above
+    // exists only to build the contact sheet below without re-decoding.
+    const frames = rendered.map((r) => ({ time: r.time, frame: r.frame, path: r.path, overflow: r.overflow }));
 
     // unresolvedFonts: ALWAYS present (empty when clean) — a field that only
     // sometimes exists is a field an agent forgets to check. Only fonts on
-    // text overlays LIVE at one of the requested times count; a family used
-    // only outside the rendered window is not actionable noise.
+    // text overlays LIVE on a frame that was drawn count — at that frame's
+    // own time, not the time asked for (4.99 s draws the frame at 4.967 s,
+    // and the text on it is what must resolve); a family used only outside
+    // the rendered frames is not actionable noise.
     const overlays = (manifest.overlays ?? []) as Overlay[];
     const liveFonts = new Set<string>();
-    for (const t of atTimes) {
-      for (const overlay of overlaysActiveAt(overlays, t)) {
+    for (const { frameTime } of captured) {
+      for (const overlay of overlaysActiveAt(overlays, frameTime)) {
         if (overlay.kind === "text") liveFonts.add(overlay.font);
       }
     }
@@ -161,6 +166,16 @@ export async function POST(req: Request): Promise<Response> {
 
     return NextResponse.json({ frames, unresolvedFonts, ...(contactSheet ? { contactSheet } : {}) });
   } catch (err) {
+    if (err instanceof FrameTimesOutOfRangeError) {
+      logger.info(
+        { tag: "render-verify", op: "route.past_end", pieceId: body.pieceId, times: err.errors.map((e) => e.time) },
+        "render frames: times past the end of the piece refused",
+      );
+      return NextResponse.json(
+        { error: err.message, errors: err.errors, duration: err.duration, lastValidTime: err.lastValidTime },
+        { status: 400 },
+      );
+    }
     const message = err instanceof Error ? err.message : String(err);
     logger.error(
       { tag: "render-verify", op: "route", pieceId: body.pieceId, err: message },

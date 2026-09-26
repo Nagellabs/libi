@@ -17,15 +17,20 @@ if (!globalForNav.__navEmitter) {
 export const navigationEmitter = globalForNav.__navEmitter;
 
 export interface NavigateEvent {
-  target: "piece" | "asset" | "preview" | "storyboard" | "folder";
-  /** Required for piece/asset/preview/storyboard/folder targets. */
+  target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+  /** Required for piece/asset/preview/storyboard/folder/posting targets. */
   pieceId?: string;
   fileId?: string;
-  /** Optional id for special targets. */
+  /** Optional id for special targets — for `posting`, a provider post id to
+   *  open in the composer for review. */
   id?: string;
 }
 
 export interface RefreshQueryEvent {
+  /** One of the keys `dispatchRefreshQueryData` knows (`pieces`, `files`,
+   *  `piece`, `social`, …). `social` invalidates every social query; its
+   *  `pieceId` is a hint about which piece caused it, never a narrower
+   *  target. */
   queryKey: string;
   pieceId?: string;
   /** Optional hint identifying the scene that was just created/updated/deleted.
@@ -59,6 +64,12 @@ export interface NavigateAgentsEvent {
   extensionId?: string;
   /** Providers tab: the provider row to focus. */
   provider?: string;
+}
+
+/** Send the user to the Templates page (`libi.show_templates`). The client
+ *  pushes `/templates?tab=mine` and, when given, `&template=<id>`. */
+export interface NavigateTemplatesEvent {
+  templateId?: string;
 }
 
 /** Guided-edit highlight: flash an inspector field for an overlay (from the

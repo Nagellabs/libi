@@ -65,6 +65,22 @@ describe("MCP row edit tools after providers", () => {
     expect(notify.refreshMcpConfig).toHaveBeenCalledTimes(1);
   });
 
+  // Only the user lowers a gate: an agent that could turn an extension's card
+  // off would switch off the very prompt meant to stop it (and this core tool
+  // raises no card of its own in `auto` mode).
+  it("refuses requireApproval: false — the agent may only raise protection", async () => {
+    db.update(mcpServers).set({ requireApproval: true }).where(eq(mcpServers.id, "libi-tracking")).run();
+    const res = await updateMcpServer({ id: "libi-tracking", requireApproval: false });
+    expect(res.success).toBe(false);
+    expect(res.error).toBe("user_only");
+    expect(res.data).toMatchObject({ message: expect.stringContaining("Agents → Libi MCP") });
+    // Neutral: it must not steer the agent into asking the user to lower the gate.
+    expect((res.data as { message: string }).message).toMatch(/don't ask the user to switch it off/);
+    const row = db.select().from(mcpServers).where(eq(mcpServers.id, "libi-tracking")).get();
+    expect(row!.requireApproval).toBe(true);
+    expect(notify.refreshMcpConfig).not.toHaveBeenCalled();
+  });
+
   it("rejects every other field", async () => {
     const res = await updateMcpServer({ id: "libi-tracking", command: "evil" } as never);
     expect(res.success).toBe(false);

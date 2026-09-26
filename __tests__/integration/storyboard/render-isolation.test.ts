@@ -94,7 +94,7 @@ describe("storyboard render isolation (RC-C)", () => {
   // model (not the denylist), so the body throws ERR_ACCESS_DENIED, the promise
   // rejects, and the sentinel file is never created. This proves the wiring: the
   // worker is genuinely spawned with the fs-write-denying flags.
-  it("permission-model backstop e2e: a denylist-bypassing write is blocked through renderUnitToPng", async () => {
+  it("a denylist-bypassing write is blocked through renderUnitToPng (by the worker lock, before the permission model)", async () => {
     const target = tmpFile();
     // Reaches fs WITHOUT any denylisted token: `this` is globalThis inside the
     // sloppy-mode `new Function` body; the split string "pro"+"cess" dodges both
@@ -111,8 +111,13 @@ describe("storyboard render isolation (RC-C)", () => {
     // re-proving the denylist, not the permission model).
     expect(validateDrawFunction(body).valid).toBe(true);
 
+    // Since the worker locks itself before a body runs (lock-runtime.ts), the
+    // body is stopped one layer EARLIER than the permission model: the `process`
+    // it reaches is a data-only stand-in with no getBuiltinModule, so it never
+    // gets `fs` at all. The permission model is still proven directly by the
+    // next test, under the worker's exact flags.
     await expect(renderUnitToPng("canvas", body, FRAME)).rejects.toThrow(
-      /WRITE_BLOCKED:ERR_ACCESS_DENIED/,
+      /getBuiltinModule is not a function/,
     );
     expect(fs.existsSync(target)).toBe(false);
   });

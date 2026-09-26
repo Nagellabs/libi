@@ -131,10 +131,15 @@ export function isNonDecodingOverlay(o: {
   kind?: string;
   hidden?: boolean;
   missing?: boolean;
+  /** Set on an applied template's unfilled media slot — there is no file to decode. */
+  unfilledSlot?: string;
   /** `string` on text overlays, `{ kind }` on tracked — typed loose to accept `Overlay`. */
   content?: unknown;
 }): boolean {
   if (o.hidden === true) return true;
+  // An unfilled template slot paints its "add media" placeholder and, like a
+  // missing file, must never mount a decoder the renderer will not advance.
+  if (o.kind === "video" && o.unfilledSlot !== undefined) return true;
   if (o.missing !== true) return false;
   if (o.kind === "video") return true;
   return (

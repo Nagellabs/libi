@@ -31,6 +31,11 @@ export interface SetupTerminalEntry {
    */
   gone: boolean;
   /**
+   * The user pressed Enter in this terminal: the waiting command was submitted, so it is running (or ran). Until
+   * then nothing has happened, and a hint must say to press Enter rather than what the command then does.
+   */
+  submitted: boolean;
+  /**
    * Where on its surface the terminal is shown, as the opener named it. The
    * Providers tab shows its one terminal inside the row whose action opened
    * it, and a tab switch unmounts the tab while the terminal lives on here —
@@ -66,6 +71,8 @@ export interface SetupTerminalHostValue {
   markExited: (surface: SetupSurface, terminalId: string, exitCode: number) => void;
   /** Ignored unless `terminalId` is still the surface's terminal. */
   markGone: (surface: SetupSurface, terminalId: string) => void;
+  /** The user pressed Enter in the terminal. Ignored unless `terminalId` is still the surface's terminal. */
+  markSubmitted: (surface: SetupSurface, terminalId: string) => void;
 }
 
 const Ctx = createContext<SetupTerminalHostValue | null>(null);
@@ -132,6 +139,7 @@ export function SetupTerminalHost({ children }: { children: React.ReactNode }) {
           exited: false,
           exitCode: null,
           gone: false,
+          submitted: false,
           ...(anchor === undefined ? {} : { anchor }),
           ...(explanation === undefined ? {} : { explanation }),
           ...(scripts === undefined ? {} : { scripts }),
@@ -185,6 +193,14 @@ export function SetupTerminalHost({ children }: { children: React.ReactNode }) {
     [patchEntry],
   );
 
+  const markSubmitted = useCallback<SetupTerminalHostValue["markSubmitted"]>(
+    (surface, terminalId) => {
+      if (terminalsRef.current[surface]?.submitted) return;
+      patchEntry(surface, terminalId, { submitted: true });
+    },
+    [patchEntry],
+  );
+
   // Leaving /agents (unmount) and leaving the page entirely (pagehide) both
   // delete every live setup terminal; the server's idle reaper is the backstop.
   useEffect(() => {
@@ -201,8 +217,8 @@ export function SetupTerminalHost({ children }: { children: React.ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ terminals, open, close, markExited, markGone }),
-    [terminals, open, close, markExited, markGone],
+    () => ({ terminals, open, close, markExited, markGone, markSubmitted }),
+    [terminals, open, close, markExited, markGone, markSubmitted],
   );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

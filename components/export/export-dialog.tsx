@@ -1,6 +1,10 @@
 "use client";
 
+import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
 import { useCallback, useMemo, useState } from "react";
+import Link from "next/link";
+import { openPostingTab } from "@/hooks/social/use-posting-intent";
+import { useSocialStatus } from "@/lib/queries/social";
 import {
   Dialog,
   DialogContent,
@@ -30,6 +34,7 @@ import {
   graphicsLosesSharpness,
 } from "@/lib/export/quality";
 import { revealFile, pickDirectory, hasElectronBridge } from "@/lib/shell/client";
+import { droppedClipsNote, type DroppedOverlay } from "@/lib/export/dropped-overlays";
 
 /** The dialog offers no Custom UI (removed — API-only now), so its media
  *  quality state never takes the "custom" value. Narrowing the local state
@@ -96,17 +101,28 @@ export function ExportDialog(props: ExportDialogProps) {
       if (!next && isTerminalFlow) {
         flow.reset();
       }
-      // Update internal state only when UNcontrolled; always fire onOpenChange
-      // as a notification so a parent can observe open/close even without
-      // taking over the open state (the post-close success toast relies on
-      // knowing whether the dialog was closed when the export finished).
-      if (openOverride === undefined) setInnerOpen(next);
+      // Always keep the internal state in sync, even while `openOverride` is
+      // driving `open` — a caller (preview-player.tsx) that only overrides
+      // `open` WHILE true (undefined once closed, so the trigger reappears)
+      // needs `innerOpen` to already read `false` the moment control reverts
+      // to uncontrolled, or the dialog reopens itself showing a freshly reset
+      // form instead of closing. Found live: clicking "Post…" reset the flow
+      // (terminal → idle) and called onOpenChange(false), which flipped
+      // `openOverride` to undefined next render — but `innerOpen` was still
+      // stuck at `true` from before control took over, so `open` (`??`)
+      // resolved true again and the dialog "reopened" onto its own idle form.
+      setInnerOpen(next);
+      // Always fire onOpenChange as a notification so a parent can observe
+      // open/close even without taking over the open state (the post-close
+      // success toast relies on knowing whether the dialog was closed when
+      // the export finished).
       onOpenChange?.(next);
     },
-    [isTerminalFlow, flow, openOverride, onOpenChange],
+    [isTerminalFlow, flow, onOpenChange],
   );
 
   const { data: defaults } = useExportDefaults();
+  const socialStatus = useSocialStatus();
 
   // Lazy initializers seed from whatever is already known at mount; the
   // previous-state blocks below fold in later arrivals during render (React's
@@ -183,8 +199,9 @@ export function ExportDialog(props: ExportDialogProps) {
 
   // null until the first real tick → the running button shows its indeterminate
   // shimmer instead of a frozen 0% fill.
+  const exportWaiting = isExportWaiting(flow.progress);
   const exportPercent =
-    flow.progress && flow.progress.total > 0
+    !exportWaiting && flow.progress && flow.progress.total > 0
       ? Math.max(0, Math.min(100, Math.round((flow.progress.done / flow.progress.total) * 100)))
       : null;
 
@@ -276,7 +293,7 @@ export function ExportDialog(props: ExportDialogProps) {
                 {isRunning ? (
                   <>
                     <ExportSpinner />
-                    Exporting {exportPercent != null ? `${exportPercent}%` : "…"}
+                    {exportWaiting ? "Waiting for another export…" : <>Exporting {exportPercent != null ? `${exportPercent}%` : "…"}</>}
                   </>
                 ) : (
                   <>
@@ -425,7 +442,17 @@ export function ExportDialog(props: ExportDialogProps) {
         ) : null}
 
         {flow.status === "success" && flow.result ? (
-          <SuccessView result={flow.result} onReveal={handleReveal} />
+          <SuccessView
+            result={flow.result}
+            onReveal={handleReveal}
+            pieceId={pieceId ?? ""}
+            socialReady={socialStatus.data ? !!socialStatus.data.providerId : null}
+            onPost={() => {
+              if (!pieceId || !flow.result) return;
+              openPostingTab({ pieceId, exportPath: flow.result.filePath });
+              setOpen(false);
+            }}
+          />
         ) : null}
 
         {flow.status === "failed" ? (
@@ -532,15 +559,21 @@ function ProgressView({
   // null until the first real tick → the bar renders its indeterminate
   // shimmer (so "Preparing…/encoding" never looks frozen). Once progress
   // arrives we drive the determinate filmstrip fill off the actual %.
+  const waiting = isExportWaiting(progress);
   const percent =
-    progress && progress.total > 0
+    !waiting && progress && progress.total > 0
       ? Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)))
       : null;
-  const eta = progress?.etaMs != null ? `~${formatEta(progress.etaMs)} left` : null;
+  const eta = !waiting && progress?.etaMs != null ? `~${formatEta(progress.etaMs)} left` : null;
 
   return (
     <div className="flex flex-col gap-3">
       <ExportProgressBar percent={percent} etaLabel={eta} />
+      {waiting && (
+        <p role="status" className="text-xs text-muted-foreground" data-testid="export-waiting">
+          {EXPORT_WAITING_MESSAGE}
+        </p>
+      )}
       <Button
         variant="outline"
         size="sm"
@@ -556,6 +589,9 @@ function ProgressView({
 function SuccessView({
   result,
   onReveal,
+  pieceId,
+  onPost,
+  socialReady,
 }: {
   result: {
     filePath: string;
@@ -564,16 +600,23 @@ function SuccessView({
     backend: string;
     width: number;
     height: number;
+    droppedOverlays?: DroppedOverlay[];
   };
   onReveal: () => Promise<void>;
+  pieceId: string;
+  onPost: () => void;
+  /** `null` while `/api/social/status` hasn't answered yet — render nothing
+   *  rather than guess whether posting is set up. */
+  socialReady: boolean | null;
 }) {
   const filename = result.filePath.split(/[\\/]/).pop() ?? result.filePath;
+  const droppedNote = droppedClipsNote(result.droppedOverlays);
   return (
     // min-w-0: as a grid item of DialogContent's `grid`, this card's min-content
     // would otherwise be driven by the no-wrap full file path below, forcing the
     // grid track (and the whole dialog) wider than max-w-md and spilling the
     // footer past the rounded corner. min-w-0 caps the track so the path truncates.
-    <div className="flex min-w-0 flex-col gap-2 rounded bg-emerald-500/10 p-3 text-xs">
+    <div className="flex min-w-0 flex-col gap-2 rounded bg-emerald-500/10 p-3 text-xs" data-piece-id={pieceId}>
       <div className="break-words font-medium text-emerald-700 dark:text-emerald-400">
         Saved {filename}
       </div>
@@ -583,14 +626,34 @@ function SuccessView({
       <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
         {result.filePath}
       </div>
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => void onReveal()}
-        className="cursor-pointer self-start"
-      >
-        Show in folder
-      </Button>
+      {droppedNote && (
+        <div
+          role="status"
+          data-testid="export-dropped-clips"
+          className="break-words rounded bg-amber-500/10 px-2 py-1.5 text-amber-700 dark:text-amber-300"
+        >
+          {droppedNote} Check that the file still plays, or replace the clip, then export again.
+        </div>
+      )}
+      <div className="flex items-center gap-3">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void onReveal()}
+          className="cursor-pointer self-start"
+        >
+          Show in folder
+        </Button>
+        {socialReady === null ? null : socialReady ? (
+          <Button variant="default" size="sm" className="cursor-pointer self-start" onClick={onPost} data-testid="export-post-button">
+            Post…
+          </Button>
+        ) : (
+          <Link href="/social" className="text-xs underline cursor-pointer" data-testid="export-setup-social">
+            Set up social posting
+          </Link>
+        )}
+      </div>
     </div>
   );
 }

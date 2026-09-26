@@ -17,14 +17,21 @@ export const TEST_MODE_BANNER = `
 > 🧪 **TEST MODE ACTIVE** — \`LIBI_TEST_MODE=1\` is set. The \`fal-ai\` MCP
 > is present but runs as a sandboxed fake: it exposes the real fal tool surface
 > (\`recommend_model\`, \`run_model\`, \`submit_job\`, etc.) but returns
-> deterministic ffmpeg placeholder files at zero cost. The \`ElevenLabs\` MCP is
-> ALSO a sandboxed fake: \`text_to_speech\`, \`voice_clone\`, \`compose_music\`,
-> \`text_to_sound_effects\`, \`isolate_audio\`, and \`speech_to_text\` return
-> deterministic placeholder audio/transcripts at zero cost (no API key needed).
+> deterministic ffmpeg placeholder files at zero cost. The \`elevenlabs\` MCP is
+> ALSO a sandboxed fake of ElevenLabs' hosted creative tools
+> (\`creative_list_voices\`, \`creative_generate_speech\`,
+> \`creative_generate_in_flow\`, \`creative_get_flow_run_status\`, uploads and
+> transcription): runs and polls work as they do there, and the output URLs serve
+> deterministic placeholder audio/transcripts at zero cost (no sign-in needed).
+> The \`zernio\` MCP is a sandboxed fake too: the same curated tool surface, an
+> in-memory store, and nothing ever reaches a real social account. Its curated
+> convenience tools answer prose and its full REST surface is reached through
+> \`call_tool\`, exactly as the real server behaves.
 > This is a development environment for testing libi itself — do NOT promise the
-> user "real" AI output. Use the normal \`fal-ai\` / \`ElevenLabs\` tools as you
-> would in production; the placeholder outputs confirm the pipeline end-to-end
-> without spending credits.
+> user "real" AI output, and never tell them a post actually went out. Use the
+> normal \`fal-ai\` / \`elevenlabs\` / \`zernio\` tools as you would in
+> production; the placeholder outputs confirm the pipeline end-to-end without
+> spending credits.
 `;
 
 /**
@@ -46,10 +53,15 @@ export const INSTRUCTIONS_CORE_MIN_SLACK = 150;
 
 /**
  * The same fact as `TEST_MODE_BANNER`, condensed for the TIERED instructions
- * core (`renderInstructionsCore`) — the full 818-character version does not
- * fit in what is left of `INSTRUCTIONS_CORE_CAP`. It carries the one thing the
- * agent must not get wrong (the output is a placeholder, not real AI) and
- * defers the detail to `libi.read_manual`.
+ * core (`renderInstructionsCore`) — the full version does not fit in what is
+ * left of `INSTRUCTIONS_CORE_CAP`. It carries the one thing the agent must not
+ * get wrong (the output is a placeholder, not real AI) and defers the detail
+ * to `libi.read_manual`.
+ *
+ * Every word here is one the instructions cannot spend elsewhere. Naming a
+ * THIRD fake (`zernio`) took the slack to 3 characters over the floor, which
+ * is the state this assertion exists to prevent — so the wording was cut back
+ * at the same time, and now leaves MORE room than the two-fake version did.
  *
  * Built from the fakes ACTUALLY attached, and `null` when there are none: a
  * skill-eval scenario with `mcps: []` gets no fake fal and no fake ElevenLabs
@@ -58,11 +70,15 @@ export const INSTRUCTIONS_CORE_MIN_SLACK = 150;
  */
 export function testModeCoreBanner(fakeNames: readonly string[]): string | null {
   if (fakeNames.length === 0) return null;
-  const names = fakeNames.map((n) => `\`${n}\``).join(" and ");
+  // `a`, `b` and `c` — the Oxford comma is dropped on purpose: the core is
+  // rendered into a 2,048-character budget and every character here is one the
+  // instructions cannot spend elsewhere (INSTRUCTIONS_CORE_MIN_SLACK).
+  const quoted = fakeNames.map((n) => `\`${n}\``);
+  const names = quoted.length <= 2 ? quoted.join(" and ") : `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
   const verb = fakeNames.length === 1 ? "is a sandboxed fake" : "are sandboxed fakes";
   return (
-    `> 🧪 **TEST MODE** — ${names} ${verb}: the real tool surface, ` +
-    `placeholder media, zero cost. Use them as in production; never promise real AI output.`
+    `> 🧪 **TEST MODE** — ${names} ${verb}: real tool surface, ` +
+    `placeholder output, zero cost. Never promise real AI output.`
   );
 }
 

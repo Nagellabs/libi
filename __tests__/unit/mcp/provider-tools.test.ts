@@ -351,7 +351,7 @@ describe("libi.list_providers", () => {
     const res = await listProviders();
     const data = res.data as { connected: unknown[]; catalog: Array<Record<string, unknown>> };
     expect(data.connected).toHaveLength(1);
-    expect(data.catalog).toHaveLength(6);
+    expect(data.catalog).toHaveLength(7);
     for (const c of data.catalog) {
       expect(Object.keys(c).sort()).toEqual(["id", "kind", "kinds", "name"]);
     }

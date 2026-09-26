@@ -26,6 +26,23 @@ export async function renderOverlayFrames(
       signal: AbortSignal.timeout(300_000),
     });
 
+    if (resp.status === 400) {
+      // A refused request says why in full — above all a time past the end of
+      // the piece, which names the duration and the last valid time per time.
+      const txt = await resp.text().catch(() => "");
+      let body: { error?: string; errors?: unknown; duration?: number; lastValidTime?: number } = {};
+      try {
+        body = JSON.parse(txt);
+      } catch {
+        // not JSON: fall through to the raw text
+      }
+      return {
+        success: false,
+        error: `render_overlay_frames refused: ${body.error ?? txt.slice(0, 300)}`,
+        ...(body.errors ? { data: { errors: body.errors, duration: body.duration, lastValidTime: body.lastValidTime } } : {}),
+      };
+    }
+
     if (!resp.ok) {
       const txt = await resp.text().catch(() => "");
       return {
@@ -37,6 +54,8 @@ export async function renderOverlayFrames(
     const data = (await resp.json()) as {
       frames: {
         time: number;
+        /** The absolute composition frame drawn for `time`. */
+        frame: number;
         path: string;
         overflow: { touchesEdge: boolean; edges: string[] };
       }[];

@@ -170,12 +170,31 @@ export function applyHistory(
     (m) => m.role === "agent" && m.isStreaming,
   );
   if (last && last.role === "agent" && hasStreamingLive) {
+    const dropped = state.live.filter((m) => m.role === "agent" && m.isStreaming);
     const live = state.live.filter(
       (m) => !(m.role === "agent" && m.isStreaming),
     );
+    // A pending approval card the live stream delivered but the snapshot was
+    // taken just before (the request landed between the server building the
+    // history and the client applying it) would vanish with the dropped live
+    // message, and nothing re-sends it until the next reconnect. Carry it
+    // into the adopted message — unless the history already has that card.
+    const inHistory = new Set(
+      fetched.flatMap((m) =>
+        m.parts.flatMap((p) => (p.type === "permission-request" ? [p.pendingId] : [])),
+      ),
+    );
+    const carried = dropped.flatMap((m) =>
+      m.parts.filter(
+        (p) =>
+          p.type === "permission-request" &&
+          p.status === "pending" &&
+          !inHistory.has(p.pendingId),
+      ),
+    );
     return {
       cached: fetched,
-      live: [...live, { ...last, isStreaming: true }],
+      live: [...live, { ...last, parts: [...last.parts, ...carried], isStreaming: true }],
       currentAgentMessageId: last.id,
     };
   }
@@ -259,6 +278,9 @@ export function applyAgentEvent(
 
     case "agent-tool-args":
       return { state: applyToolArgs(state, event) };
+
+    case "agent-tool-title":
+      return { state: applyToolTitle(state, event) };
 
     case "agent-subagent-refine":
       return { state: applySubagentRefine(state, event) };
@@ -476,6 +498,13 @@ function appendPermissionRequest(
   event: Extract<AgentEvent, { type: "agent-permission-request" }>,
   deps: ChatStreamDeps,
 ): ChatStreamState {
+  // Idempotent on pendingId: the SSE (re)connect re-announces every pending
+  // approval (app/api/agent/events/route.ts), and a client that already shows
+  // the card — pending or answered — must not get a second one.
+  const shown = [...state.cached, ...state.live].some((m) =>
+    m.parts.some((p) => p.type === "permission-request" && p.pendingId === event.pendingId),
+  );
+  if (shown) return state;
   const part: AgentMessagePart = {
     type: "permission-request",
     pendingId: event.pendingId,
@@ -628,6 +657,26 @@ function applyToolArgs(
         if (incoming <= known) return p;
         return { ...p, args: event.args };
       },
+    ),
+  ).state;
+}
+
+/** A built-in tool call's real title ("Write <path>" replacing the
+ *  "Preparing file…" placeholder) — the live half of the cache's
+ *  `adoptToolCallTitle`. Built-in rows only, as on the server. */
+function applyToolTitle(
+  state: ChatStreamState,
+  event: Extract<AgentEvent, { type: "agent-tool-title" }>,
+): ChatStreamState {
+  if (typeof event.rawTitle !== "string" || event.rawTitle.trim() === "") return state;
+  return patchMessagesEverywhere(state, (msg) =>
+    patchPartInMessage(
+      msg,
+      (p) => p.type === "tool-call" && p.toolCallId === event.toolCallId,
+      (p) =>
+        p.type === "tool-call" && p.toolId == null && p.rawTitle !== event.rawTitle
+          ? { ...p, rawTitle: event.rawTitle }
+          : p,
     ),
   ).state;
 }

@@ -77,3 +77,48 @@ describe("loadManifest — lazy snapshot init", () => {
     expect(snap?.overlays?.[0].displayName).toBe("snapshot");
   });
 });
+
+// Final review P3: an editor still open on a piece the user just deleted asks for its
+// composition once more, and the lazy init used to write `snapshots/current.json` — re-creating
+// the storage folder the piece DELETE had just removed.
+describe("loadManifest — a deleted piece", () => {
+  afterEach(() => { resetTestDb(); cleanupTempDir(); });
+
+  it("writes no snapshot and re-creates no folder once the piece row is gone", async () => {
+    vi.resetModules();
+    createTempStorageDir();
+    const db = createTestDb();
+    const { loadManifest: lm } = await import("@/lib/composition/persistence");
+    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
+    const { pieces: pt } = await import("@/lib/db/schema/sqlite");
+
+    const [piece] = await db.insert(pt).values({ name: "doomed" }).returning();
+    await lm(piece.id); // open: the lazy init writes the first snapshot
+    const dir = path.join(gsd(), piece.id);
+    expect(fs.existsSync(path.join(dir, "snapshots/current.json"))).toBe(true);
+
+    // What the piece DELETE route does: row, then folder.
+    await db.delete(pt).where(eq(pt.id, piece.id));
+    fs.rmSync(dir, { recursive: true, force: true });
+
+    const m = await lm(piece.id);
+    expect(m.overlays ?? []).toEqual([]);
+    expect(m.width).toBe(1920);
+    expect(fs.existsSync(dir)).toBe(false);
+  });
+
+  it("still initialises the snapshot of a brand-new piece that has no folder yet", async () => {
+    vi.resetModules();
+    createTempStorageDir();
+    const db = createTestDb();
+    const { loadManifest: lm } = await import("@/lib/composition/persistence");
+    const { loadCurrentSnapshot: lcs } = await import("@/lib/composition/snapshots");
+    const { getLibiStorageDir: gsd } = await import("@/lib/libi-home");
+    const { pieces: pt } = await import("@/lib/db/schema/sqlite");
+
+    const [piece] = await db.insert(pt).values({ name: "fresh" }).returning();
+    expect(fs.existsSync(path.join(gsd(), piece.id))).toBe(false);
+    await lm(piece.id);
+    expect(await lcs(piece.id)).not.toBeNull();
+  });
+});

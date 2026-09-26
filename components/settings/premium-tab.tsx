@@ -6,7 +6,6 @@ import {
   DatabaseBackup,
   Gauge,
   TrendingUp,
-  CalendarClock,
   Sparkles,
 } from "lucide-react";
 import { WaitlistCard } from "@/components/premium/waitlist-card";
@@ -44,18 +43,20 @@ const INCLUDED: Feature[] = [
   },
 ];
 
+/**
+ * NOT a parking lot for anything unfinished — everything here is a CLOUD
+ * service the membership will carry. "Posting scheduler & analytics" was on
+ * this list until 0.1.16, when social posting shipped as part of the free app
+ * (Social page, a piece's Posting tab, `lib/social/`). It was removed rather
+ * than reworded: a feature already in the box must never read as something a
+ * membership buys.
+ */
 const COMING_LATER: Feature[] = [
   {
     icon: TrendingUp,
     name: "Viral DB",
     description:
       "A continuously-updated database of trending videos with structured analyses your agent can search by topic, hook, or format.",
-  },
-  {
-    icon: CalendarClock,
-    name: "Posting scheduler & analytics",
-    description:
-      "Auto-publish to TikTok, Instagram, YouTube Shorts, X, and Reddit on a schedule, then feed engagement data back so the agent can iterate.",
   },
 ];
 

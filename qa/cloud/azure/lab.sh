@@ -944,9 +944,18 @@ doctor() {
   fi
   echo
   echo "— quota for $LIBI_AZ_WIN_SIZE family in $LIBI_AZ_LOCATION —"
-  az vm list-usage --location "$LIBI_AZ_LOCATION" \
-    --query "[?contains(name.value,'standardDSv5Family')].{name:localName, used:currentValue, limit:limit}" \
-    -o table 2>/dev/null || echo "  (could not read quota)"
+  # The family comes from the configured size, never a hardcoded name: the
+  # default size changes when a family's quota does (see LIBI_AZ_WIN_SIZE).
+  local family
+  family=$(az vm list-skus --location "$LIBI_AZ_LOCATION" --size "$LIBI_AZ_WIN_SIZE" \
+    --resource-type virtualMachines --query "[0].family" -o tsv 2>/dev/null)
+  if [ -n "$family" ]; then
+    az vm list-usage --location "$LIBI_AZ_LOCATION" \
+      --query "[?name.value=='$family'].{name:localName, used:currentValue, limit:limit}" \
+      -o table 2>/dev/null || echo "  (could not read quota)"
+  else
+    echo "  (could not resolve the family of $LIBI_AZ_WIN_SIZE)"
+  fi
   echo
   status
 }

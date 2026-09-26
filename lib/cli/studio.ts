@@ -110,8 +110,9 @@ async function runProductionServer(port: string, dir: string): Promise<void> {
 
   // Loopback by default. A bare listen(port, cb) binds 0.0.0.0, which serves
   // the studio — including every GET route — to anyone on the same network.
-  // The request guard does NOT cover that: it exempts safe methods before
-  // its loopback-host check. LIBI_HOST exists for the rare deliberate case
+  // The request guard's loopback-Host check (every /api method) stops a LAN
+  // BROWSER, but not a LAN script: any non-browser client can send
+  // `Host: 127.0.0.1`. Only the bind address keeps it out. LIBI_HOST exists for the rare deliberate case
   // (a VM, a container); it is never the default.
   // `||`, not `??`: an empty LIBI_HOST="" would pass `??` and Node binds "" to `::`.
   const host = process.env.LIBI_HOST || "127.0.0.1";

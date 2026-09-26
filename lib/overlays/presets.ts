@@ -35,9 +35,20 @@ export function extractPresetFields(overlay: Record<string, unknown>): Record<st
   return out;
 }
 
-/** The merge patch to apply a preset onto a target overlay. */
+/** Keys a preset's fields may never write, on top of the per-instance ones a
+ *  preset never captures: `version` is the edit store's reconciliation counter,
+ *  and the rest of the list is `PRESET_EXCLUDED_KEYS`. */
+const NEVER_APPLIED = new Set<string>([...PRESET_EXCLUDED_KEYS, "version"]);
+
+/** The merge patch to apply a preset onto a target overlay. Filtered here, not
+ *  only at capture: a preset file can come from somewhere other than
+ *  `extractPresetFields` (a template's caption style, a hand-edited JSON), and a
+ *  `kind` / `id` / `sceneFunction` in its fields would otherwise rewrite the
+ *  layer it is applied to — a text overlay into an unvalidated three overlay. */
 export function applyPresetPatch(preset: OverlayPreset): Record<string, unknown> {
-  return { ...preset.fields };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(preset.fields)) if (!NEVER_APPLIED.has(k)) out[k] = v;
+  return out;
 }
 
 /** Order-insensitive deep stringify: recursively sorts object keys so two
@@ -84,7 +95,7 @@ export function matchPreset(
   return bestId;
 }
 
-const SLUG = /^[a-z0-9][a-z0-9-]{0,48}$/;
-export function isValidPresetSlug(s: string): boolean {
-  return SLUG.test(s);
-}
+// The slug rule is defined in lib/templates/scaffold-schema.ts — a template's
+// caption styles are validated with it, and that file (copied byte-for-byte by
+// libi-site) may import nothing but zod. One rule, re-exported here.
+export { isValidPresetSlug } from "@/lib/templates/scaffold-schema";

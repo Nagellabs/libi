@@ -1,7 +1,16 @@
+import { fallbackOrigin, ifSettled, originFromTiming, retryServerTiming, serverTiming, type ServerTiming } from "@/lib/engine/source-time-origin";
+import { primaryVideoTrack } from "@/lib/engine/primary-track";
+import { attributeMediaLogs } from "@/lib/engine/sps-diagnostics";
 import { Input, UrlSource, ALL_FORMATS, CanvasSink } from "mediabunny";
-import type { VideoFrameSource } from "./video-frame-source";
+import type { VideoFrameSource, VideoFrameSourceFailure } from "./video-frame-source";
 import { FrameRing } from "@/lib/preview/frame-ring";
 import { mediaFetchRetryDelay } from "./media-fetch-retry";
+import {
+  classifyMediaLoadError,
+  mediaErrorMessage,
+  TRANSIENT_RETRY_DELAYS_SEC,
+  UnplayableMediaError,
+} from "./media-load-failure";
 import { pumpDecision } from "@/lib/preview/decode-ahead";
 import {
   RING_CAPACITY,
@@ -32,6 +41,11 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
   );
   private input: Input | null = null;
   private sink: CanvasSink | null = null;
+  /** Raw timestamp of `sink`'s source time 0 (sourceTimeOrigin, Review M6).
+   *  Every request adds it and every decoded frame subtracts it, so the ring
+   *  and the caller speak source time from the file's start, as the proxy and
+   *  the export do. */
+  private sinkOrigin = 0;
   private pumpAbort: AbortController | null = null;
   private lastGoodCanvas: HTMLCanvasElement | OffscreenCanvas | null = null;
   /** Most recent source-local time the consumer asked for (drives the throttle). */
@@ -82,13 +96,173 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
     this.label = label;
   }
 
-  constructor(url: string, private readonly maxDecodeHeight: number) {
-    this.ready = this.init(url);
-    // startPump/prime await `this.ready` inside try/catch + null-sink guards, so
-    // a failed init (e.g. an undecodable URL) is handled there. Attach a no-op
-    // catch so it never surfaces as an unhandled promise rejection when neither
-    // has run yet (e.g. a source created then disposed before any decode).
-    void this.ready.catch(() => {});
+  // ── Load failure handling (T3, 2026-09-25) ──────────────────────────────────
+  // A clip that can't be played must SAY so, not buffer forever. See
+  // lib/engine/media-load-failure.ts for the permanent/transient split.
+  /** URLs to try in order: the preview URL (usually the proxy), then — when it
+   *  differs — the original, tried ONCE if the first fails permanently. */
+  private readonly urls: string[];
+  private urlIndex = 0;
+  /** The URL whose server timing this source asked for, and whether it answered. */
+  private timingUrl: string | null = null;
+  private timingAnswered = false;
+  /** Transient retries spent on the current URL (bounded by
+   *  TRANSIENT_RETRY_DELAYS_SEC). */
+  private transientRetries = 0;
+  /** Cancels a pending transient retry (dispose). */
+  private cancelRetry: (() => void) | null = null;
+  /** Non-null once the source has given up — see `failure()`. */
+  private failed: VideoFrameSourceFailure | null = null;
+  /** Decode errors already logged, so a pump that keeps restarting into the same
+   *  error prints one line, not one per restart. */
+  private loggedDecodeErrors = new Set<string>();
+
+  /**
+   * @param opts.fallbackUrl the ORIGINAL, when `url` is a proxy — tried once if
+   *   the proxy fails permanently (a 4xx, a codec, a demux error).
+   */
+  constructor(
+    url: string,
+    private readonly maxDecodeHeight: number,
+    opts: { fallbackUrl?: string } = {},
+  ) {
+    this.urls = opts.fallbackUrl && opts.fallbackUrl !== url ? [url, opts.fallbackUrl] : [url];
+    this.ready = this.load();
+  }
+
+  /** Why this source gave up, or null while it is (or may yet become) playable. */
+  failure(): VideoFrameSourceFailure | null {
+    return this.failed;
+  }
+
+  /** Start loading the current URL. A failure is routed through `onLoadFailed`,
+   *  which REPLACES `this.ready` (fallback / retry) or marks the source failed;
+   *  `awaitReady` follows the replacement. */
+  private load(): Promise<void> {
+    const url = this.urls[this.urlIndex];
+    const p = this.init(url).catch((err: unknown) => {
+      this.onLoadFailed(url, err);
+      throw err;
+    });
+    // startPump/prime go through `awaitReady` inside try/catch, so a failed
+    // load is handled there. Attach a no-op catch so it never surfaces as an
+    // unhandled rejection when neither has run yet (created then disposed).
+    void p.catch(() => {});
+    return p;
+  }
+
+  private onLoadFailed(url: string, err: unknown): void {
+    if (this.disposed || this.failed) return;
+    this.teardownInput();
+    const kind = classifyMediaLoadError(err);
+    const message = mediaErrorMessage(err);
+    if (kind === "permanent") {
+      if (this.urlIndex + 1 < this.urls.length) {
+        this.urlIndex++;
+        this.transientRetries = 0;
+        console.warn(
+          `[MediaBunnyFrameSource] ${this.label || url}: ${url} can't be played (${message}); trying ${this.urls[this.urlIndex]}`,
+        );
+        this.ready = this.load();
+        return;
+      }
+      this.fail("permanent", message);
+      return;
+    }
+    if (this.transientRetries < TRANSIENT_RETRY_DELAYS_SEC.length) {
+      const delaySec = TRANSIENT_RETRY_DELAYS_SEC[this.transientRetries++];
+      const waited = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          this.cancelRetry = null;
+          resolve();
+        }, delaySec * 1000);
+        this.cancelRetry = () => {
+          clearTimeout(timer);
+          reject(new Error("retry cancelled: source disposed"));
+        };
+      });
+      const next = waited.then(() => this.load());
+      void next.catch(() => {});
+      this.ready = next;
+      return;
+    }
+    this.fail("transient", message);
+  }
+
+  /** Give up: stop decoding, tell the owner to repaint (the renderer draws the
+   *  placeholder), and say so ONCE. */
+  private fail(kind: VideoFrameSourceFailure["kind"], message: string): void {
+    this.failed = { kind, message };
+    this.pumpAbort?.abort();
+    this.pumpFrom = null;
+    this.ring.clear();
+    this.lastGoodCanvas = null;
+    console.warn(
+      `[MediaBunnyFrameSource] ${this.label || this.urls[this.urlIndex]} can't be played (${kind}): ${message}`,
+    );
+    for (const fn of this.frameListeners) fn();
+  }
+
+  /** Dispose the current mediabunny Input/sink (a failed load, or dispose()). */
+  private teardownInput(): void {
+    if (this.decoderLive) {
+      this.decoderLive = false;
+      recordPreviewEvent({ t: performance.now(), type: "decoder", src: this.label, label: "dispose" });
+    }
+    this.input?.dispose();
+    this.input = null;
+    this.sink = null;
+  }
+
+  /**
+   * Wait for the source to be decodable. Follows a `ready` that was REPLACED
+   * while waiting (proxy→original fallback, transient retry), so a pump or
+   * prime started before the failure carries on once the replacement loads.
+   * False when the source failed, was disposed, or has no sink.
+   */
+  private async awaitReady(): Promise<boolean> {
+    for (;;) {
+      const current = this.ready;
+      try {
+        await current;
+        return !this.disposed && !this.failed && this.sink !== null;
+      } catch {
+        if (this.disposed || this.failed || this.ready === current) return false;
+      }
+    }
+  }
+
+  /** A decode error mid-stream. A permanent one (decoder rejection) is handled
+   *  like a failed load — fall back once, else fail; anything else is logged
+   *  once per distinct message.
+   *
+   *  `from` is the sink the failing decode was reading. When it is no longer
+   *  the live sink, the input was torn down under it (a fallback / retry /
+   *  failure triggered by ANOTHER decode) and the error is that teardown's
+   *  InputDisposedError — expected, not worth a line, and must not be judged as
+   *  a failure of the replacement. */
+  private onDecodeError(where: "pump" | "prime", err: unknown, from: CanvasSink): void {
+    if (this.disposed || this.failed || this.sink !== from) return;
+    // NOTE: a WebCodecs EncodingError mid-stream can also be a GPU/decoder
+    // hiccup rather than bad data; it is still treated as permanent here (one
+    // fallback, then the placeholder). A remount (reopen the piece, change the
+    // preview quality) builds a fresh source and clears it.
+    if (classifyMediaLoadError(err) === "permanent") {
+      this.onLoadFailed(this.urls[this.urlIndex], err);
+      if (!this.failed) void this.resumeAfterReload();
+      return;
+    }
+    const message = mediaErrorMessage(err);
+    if (this.loggedDecodeErrors.has(message)) return;
+    this.loggedDecodeErrors.add(message);
+    console.warn(`[MediaBunnyFrameSource] ${where} decode failed`, message);
+  }
+
+  /** After a mid-stream fallback, pick decoding back up where the consumer is. */
+  private async resumeAfterReload(): Promise<void> {
+    if (!(await this.awaitReady())) return;
+    if (this.decodeAhead) this.startPump(this.lastRequestedT, "reload");
+    else void this.prime(this.lastRequestedT);
   }
 
   private async init(url: string): Promise<void> {
@@ -99,10 +273,39 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
       formats: ALL_FORMATS,
     });
     this.input = input;
-    const track = await input.getPrimaryVideoTrack();
-    if (!track) throw new Error("MediaBunnyFrameSource: no video track found in " + url);
+    // Asked for at once, never waited on: until the server's answer lands the
+    // source uses mediabunny's own origin (source-time-origin.ts, review I1).
+    const timing = serverTiming(url);
+    this.timingAnswered = false;
+    this.timingUrl = url;
+    // Reading the first timestamp lists the tracks; listing them and reading
+    // the decoder config is where mediabunny parses an HEVC SPS (in MPEG-TS
+    // already while listing). All of it runs in one attribution region, so an
+    // unparsable SPS is reported once, naming this file (sps-diagnostics.ts).
+    const { fallback, track } = await attributeMediaLogs(url, async () => {
+      const first = await fallbackOrigin(input);
+      const t = await primaryVideoTrack(input);
+      if (t) await t.getDecoderConfig();
+      return { fallback: first, track: t };
+    });
+    if (!track) throw new UnplayableMediaError("no video track found in " + url);
+    // A codec this browser can't decode (e.g. HEVC without platform support)
+    // would otherwise fail inside every pump. Say so up front — permanent.
+    // Caveat: mediabunny's canDecode() also answers false when its
+    // getDecoderConfig() hit a (possibly transient) read error, so a network
+    // blip here reads as "can't be decoded". Accepted: the proxy→original
+    // fallback still runs, and a remount builds a fresh source.
+    if (!(await track.canDecode())) {
+      throw new UnplayableMediaError(`the ${(await track.getCodec()) ?? "unknown"} codec can't be decoded here`);
+    }
+    const displayHeight = await track.getDisplayHeight();
+    if (this.disposed) throw new Error("disposed during init");
+    const early = await ifSettled(timing, null);
+    if (early) this.timingAnswered = true;
+    this.sinkOrigin = originFromTiming(early) ?? fallback;
+    if (early === null) void timing.then((t) => this.takeTiming(input, t));
     this.sink = new CanvasSink(track, {
-      height: resolveDecodeHeight(track.displayHeight, this.maxDecodeHeight),
+      height: resolveDecodeHeight(displayHeight, this.maxDecodeHeight),
       poolSize: RING_CAPACITY + 2,
       // Transparent canvases so VP9-alpha WebM cutouts composite for real in
       // the preview. Mediabunny decodes the WebM alpha side-band (second
@@ -116,6 +319,42 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
     // so it emits no create and no dispose — keeping the concurrency count honest.
     this.decoderLive = true;
     recordPreviewEvent({ t: performance.now(), type: "decoder", src: this.label, label: "create" });
+  }
+
+  /** A (late) answer from the server: take its origin, if it gives one. */
+  private takeTiming(input: Input, t: ServerTiming | null): void {
+    if (!t || this.input !== input) return;
+    this.timingAnswered = true;
+    const origin = originFromTiming(t);
+    if (origin !== null) this.applyOrigin(origin);
+  }
+
+  /**
+   * On play and on a user seek: ask the server again when the lookup failed
+   * and its back-off has passed (retryServerTiming bounds the attempts).
+   * Never waited on.
+   */
+  private retryTiming(): void {
+    const input = this.input;
+    if (!input || this.timingAnswered || !this.timingUrl) return;
+    const again = retryServerTiming(this.timingUrl);
+    if (again) void again.then((t) => this.takeTiming(input, t));
+  }
+
+  /**
+   * The server's origin landed after the source started on its fallback: take
+   * it and re-decode from where the consumer is. It differs only for a file
+   * whose first timestamp isn't ffmpeg's start (a subtitle stream starting
+   * before the video, say).
+   */
+  private applyOrigin(origin: number): void {
+    if (this.disposed || Math.abs(origin - this.sinkOrigin) < 1e-6) return;
+    this.sinkOrigin = origin;
+    this.lastServedTs = -Infinity;
+    this.ring.clear();
+    if (!this.sink || this.failed) return;
+    if (this.playing) this.startPump(this.lastRequestedT, "origin");
+    else void this.prime(this.lastRequestedT);
   }
 
   /** Single-in-flight guard for `prime()`. A paused SCRUB fires prime() per
@@ -138,6 +377,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
   /** (Re)start the decode-ahead pump from `fromSec`, cancelling any prior pump.
    *  `reason` is telemetry-only (why the restart fired). */
   private startPump(fromSec: number, reason = "?"): void {
+    if (this.failed || this.disposed) return;
     recordPreviewEvent({
       t: performance.now(),
       type: "pump",
@@ -150,13 +390,17 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
     this.pumpAbort = ac;
     this.pumpFrom = fromSec;
     let firstPush = true;
+    let sink: CanvasSink | null = null;
     void (async () => {
       try {
-        await this.ready;
+        if (!(await this.awaitReady())) return;
         if (!this.sink || ac.signal.aborted || this.disposed) return;
-        for await (const wrapped of this.sink.canvases(fromSec)) {
+        sink = this.sink;
+        const origin = this.sinkOrigin;
+        for await (const wrapped of sink.canvases(fromSec + origin)) {
           if (ac.signal.aborted || this.disposed) return;
-          this.ring.push(wrapped.timestamp, wrapped.canvas);
+          const ts = wrapped.timestamp - origin;
+          this.ring.push(ts, wrapped.canvas);
           if (firstPush) {
             firstPush = false;
             for (const fn of this.frameListeners) fn();
@@ -172,7 +416,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
             this.decodeAhead &&
             !ac.signal.aborted &&
             !this.disposed &&
-            wrapped.timestamp > this.lastRequestedT + LOOKAHEAD_SEC
+            ts > this.lastRequestedT + LOOKAHEAD_SEC
           ) {
             await sleep(16);
           }
@@ -182,9 +426,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
         // Same teardown race as prime(): canvases() can reject when the Input
         // is disposed mid-iteration (InputDisposedError). Swallow while
         // shutting down / aborting; surface anything genuinely unexpected.
-        if (!this.disposed && !ac.signal.aborted) {
-          console.warn("[MediaBunnyFrameSource] decode pump failed", (err as Error)?.message);
-        }
+        if (!this.disposed && !ac.signal.aborted && sink) this.onDecodeError("pump", err, sink);
       } finally {
         if (this.pumpAbort === ac) this.pumpFrom = null;
       }
@@ -290,6 +532,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
     // paints): tight ahead-tolerance while playing — a far-ahead-only ring reads
     // as NOT ready so a SUSTAINED lag trips the buffering gate instead of serving
     // a future frame; generous while paused so a scrub lands.
+    if (this.failed) return false;
     return this.ring.frameAtOrNearestAhead(t, this.serveTolerance()) != null;
   }
 
@@ -323,6 +566,15 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
    * advance; only from the transport's user-seek signal (see useVideoSources).
    */
   hardSeek(t: number): void {
+    this.retryTiming();
+    // A user seek is a discrete intent — the one thing that gives a source whose
+    // TRANSIENT retries ran out (server was down) a fresh try. A permanent
+    // failure stays failed: the same request would fail the same way.
+    if (this.failed?.kind === "transient" && !this.disposed) {
+      this.failed = null;
+      this.transientRetries = 0;
+      this.ready = this.load();
+    }
     this.lastRequestedT = t;
     this.lastServedTs = -Infinity;
     this.ring.clear();
@@ -342,6 +594,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
 
   async prime(t: number): Promise<void> {
     this.lastRequestedT = t;
+    if (this.failed) return;
     if (this.priming) {
       // A decode is already in flight — just record the LATEST position; the live
       // chain will chase it when the current decode finishes. This is what makes a
@@ -363,18 +616,21 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
       while (target !== null && !this.disposed) {
         const cur = target;
         this.pendingPrimeT = null;
+        let sink: CanvasSink | null = null;
         try {
           // `await this.ready` MUST be inside the try: a source disposed before
           // its init resolves (StrictMode unmount, piece switch, source-swap)
           // rejects `ready` with InputDisposedError, and prime() is
           // fire-and-forget — an unguarded await surfaces as an unhandled
           // rejection.
-          await this.ready;
+          if (!(await this.awaitReady())) break;
           if (!this.sink || this.disposed) break;
-          const wrapped = await this.sink.getCanvas(cur);
+          sink = this.sink;
+          const origin = this.sinkOrigin;
+          const wrapped = await sink.getCanvas(cur + origin);
           if (this.disposed) break;
           if (wrapped) {
-            this.ring.push(wrapped.timestamp, wrapped.canvas);
+            this.ring.push(wrapped.timestamp - origin, wrapped.canvas);
             // Notify so the owner repaints — this is what makes a SEEK-WHILE-PAUSED
             // update the canvas to the landed frame (the renderer's own pump may
             // have been aborted by the budget's pause(); prime() is the reliable
@@ -386,9 +642,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
           // mid-init or mid-decode → `ready`/getCanvas rejects
           // (InputDisposedError). prime() MUST never reject — so resolve quietly.
           // A dispose race is expected; log anything else.
-          if (!this.disposed) {
-            console.warn("[MediaBunnyFrameSource] prime decode failed", (err as Error)?.message);
-          }
+          if (!this.disposed && sink) this.onDecodeError("prime", err, sink);
         }
         // Chase the latest position requested while this decode was in flight.
         target = this.pendingPrimeT;
@@ -399,6 +653,7 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
   }
 
   play(): void {
+    this.retryTiming();
     this.playing = true;
     this.decodeAhead = true;
     this.ensureCovers(this.lastRequestedT);
@@ -468,13 +723,9 @@ export class MediaBunnyFrameSource implements VideoFrameSource {
     this.ring.clear();
     this.lastGoodCanvas = null;
     this.frameListeners.clear();
-    if (this.decoderLive) {
-      this.decoderLive = false;
-      recordPreviewEvent({ t: performance.now(), type: "decoder", src: this.label, label: "dispose" });
-    }
-    this.input?.dispose();
-    this.input = null;
-    this.sink = null;
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    this.teardownInput();
   }
 }
 

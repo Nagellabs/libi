@@ -35,6 +35,7 @@ import fs from "fs";
 import path from "path";
 import pino from "pino";
 import { ensureLibiDirs, getLibiLogDir } from "@/lib/libi-home";
+import { redactLiveSecrets } from "@/lib/security/secret-scrub";
 
 /**
  * ## Where the log file is resolved, and when
@@ -213,6 +214,34 @@ const REDACT_KEYS = [
   "password",
   "credential",
   "cookie",
+  // libi's own OAuth grant for a social provider (lib/social/token-store.ts).
+  // pino matches WHOLE key names, so "token" above does not cover
+  // "access_token" and "secret" does not cover "client_secret" — without the
+  // names below the backstop simply does not apply to the one credential libi
+  // writes to disk. "blob" is the encrypted envelope's ciphertext field.
+  "access_token",
+  "refresh_token",
+  "client_secret",
+  "codeVerifier",
+  // The same secret under the wire name the OAuth token request uses, so a
+  // payload built from a request body is covered as well as one built from
+  // `StoredGrant`. Its sibling `code` is deliberately NOT listed: as a key it
+  // is far more often an errno or an OAuth error code (`errShape` logs one) —
+  // redacting those would blind every diagnostic in the tree to protect a
+  // single-use value that no call site logs. What actually protects the
+  // authorization code is that the OAuth paths log `err.name` and never
+  // `err.message` (`lib/social/errors.ts#errShape`): a secret quoted INSIDE a
+  // message string is text, and key-based redaction cannot reach it.
+  "code_verifier",
+  // Dynamic client registration answers with one alongside the client id, and
+  // it is stored in the grant's `client` object — a bearer credential for the
+  // registration endpoint, and the only secret in that object that `token`
+  // (a whole-key match) does not cover.
+  "registration_access_token",
+  "blob",
+  // A dev build's Vercel protection-bypass token (lib/templates/cloud/catalog-setting.ts),
+  // under the setting's field name; its header rides under `headers`, above.
+  "bypassToken",
 ];
 const redactPaths = REDACT_KEYS.flatMap((key) => [
   key,
@@ -230,6 +259,13 @@ const baseLogger = pino(
     redact: {
       paths: redactPaths,
       censor: "[redacted]",
+    },
+    hooks: {
+      // Value-based backstop for what key-path `redact` cannot reach: a secret
+      // quoted INSIDE a string, such as a failed query's message carrying its
+      // parameters. Masks every value registered with `registerLiveSecret`
+      // (the templates creator key) in the finished line.
+      streamWrite: redactLiveSecrets,
     },
   },
   lazyDestination,
@@ -291,29 +327,47 @@ export const scriptAnalysisLogger = baseLogger.child({ tag: "script-analysis" })
 // a crash in one shouldn't take down the SSE bus, the agent process, or
 // every active session. If the dev server's underlying state is genuinely
 // unrecoverable, Next.js will surface it via the route-level error boundary.
-process.on("uncaughtException", (err) => {
-  // Throwing from an uncaughtException handler is instantly fatal to the
-  // process (Node treats it as a double fault) — so a broken log
-  // destination must never escape this handler.
-  try {
-    baseLogger.fatal({ err }, "Uncaught exception (continuing)");
-  } catch {
-    try {
-      process.stderr.write(`[libi-logger] uncaught exception (log write failed): ${err?.stack ?? err}\n`);
-    } catch {
-      /* nothing left to report to */
-    }
-  }
-});
+//
+// Registered ONCE per process. The dev server re-evaluates this module on
+// every recompile of a route that imports it, and a module-scope
+// `process.on` added one more listener each time — MaxListenersExceeded after
+// ten, and one exception logged once per stale copy (QA 2026-09-25). The
+// guard lives on `globalThis` because that is the only thing the module
+// instances share; each evaluation re-points it at its own logger, so the
+// one pair of listeners always writes through the newest.
+const processHooks = globalThis as unknown as {
+  __libiLoggerProcessHooks?: { logger: typeof baseLogger };
+};
+if (processHooks.__libiLoggerProcessHooks) {
+  processHooks.__libiLoggerProcessHooks.logger = baseLogger;
+} else {
+  const hooks = { logger: baseLogger };
+  processHooks.__libiLoggerProcessHooks = hooks;
 
-process.on("unhandledRejection", (reason) => {
-  try {
-    baseLogger.fatal({ reason: String(reason) }, "Unhandled rejection (continuing)");
-  } catch {
+  process.on("uncaughtException", (err) => {
+    // Throwing from an uncaughtException handler is instantly fatal to the
+    // process (Node treats it as a double fault) — so a broken log
+    // destination must never escape this handler.
     try {
-      process.stderr.write(`[libi-logger] unhandled rejection (log write failed): ${String(reason)}\n`);
+      hooks.logger.fatal({ err }, "Uncaught exception (continuing)");
     } catch {
-      /* nothing left to report to */
+      try {
+        process.stderr.write(`[libi-logger] uncaught exception (log write failed): ${err?.stack ?? err}\n`);
+      } catch {
+        /* nothing left to report to */
+      }
     }
-  }
-});
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    try {
+      hooks.logger.fatal({ reason: String(reason) }, "Unhandled rejection (continuing)");
+    } catch {
+      try {
+        process.stderr.write(`[libi-logger] unhandled rejection (log write failed): ${String(reason)}\n`);
+      } catch {
+        /* nothing left to report to */
+      }
+    }
+  });
+}

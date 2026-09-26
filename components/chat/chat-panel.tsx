@@ -41,6 +41,11 @@ const SESSION_START_GRACE_MS = 10_000;
 const SHELL_ENV_WARNING =
   "libi couldn't load your shell environment (PATH and variables from your profile), so some tools may not work. If something doesn't work, restart libi.";
 
+/** Shown in place of a chat whose agent has no transcript for it any more (deleted or cleaned on
+ *  disk). Never the agent's raw error — that read "Resource not found: <id>". */
+export const HISTORY_MISSING_NOTE =
+  "This chat's history isn't on this computer any more, so it can't be continued. Start a new chat to keep going.";
+
 /** Shown at the top of the chat while libi's MCP endpoint is known not to be running. */
 const LIBI_TOOLS_UNAVAILABLE_WARNING = "libi's tools are unavailable right now.";
 /** The libi MCP tab of the Agents page, where the endpoint can be restarted. */
@@ -227,6 +232,8 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
   }
 
   const showNoSession = !sessionId && chat.messages.length === 0;
+  // The agent has no history for this chat: nothing to show and nothing a send can reach.
+  const historyMissing = !!sessionId && chat.historyMissing === true;
 
   // The readiness of the agent this chat is actually waiting on — not the
   // *active* agent per se, since `activeProviderId` can be an optimistic
@@ -469,11 +476,14 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
   // isDisabled covers connection-level blocking (no session, session initialising,
   // uploading files). It does NOT include chat.isLoading — streaming is handled
   // by the Stop button, and sending while streaming triggers the steering path.
-  const isDisabled = !!pendingMessage || showNoSession || isSubmitting;
+  // A chat without history is disabled outright: every send would come back refused, and a queued
+  // one would wait forever on a session that never becomes ready.
+  const isDisabled = !!pendingMessage || showNoSession || isSubmitting || historyMissing;
   const canSend =
     (!!inputValue.trim() || pendingFiles.length > 0) &&
     !isSubmitting &&
-    !showNoSession;
+    !showNoSession &&
+    !historyMissing;
 
   // Determine if the agent is streaming but has no text yet (show thinking indicator)
   const lastMessage = chat.messages[chat.messages.length - 1];
@@ -582,7 +592,14 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
           </div>
         )}
 
+        {historyMissing && chat.messages.length === 0 && (
+          <div className="flex h-full items-center justify-center">
+            <HistoryMissingNote onNewChat={onNewChat} />
+          </div>
+        )}
+
         {!showNoSession &&
+          !historyMissing &&
           !showSessionSkeleton &&
           !isLoadingHistory &&
           chat.messages.length === 0 &&
@@ -603,9 +620,17 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
               animate={!initialMessageIdsRef.current?.has(message.id)}
               sessionId={sessionId}
               onOpenAsset={onOpenAsset}
-              onRetry={chat.retryMessage}
+              onRetry={historyMissing ? undefined : chat.retryMessage}
             />
           ))}
+
+          {/* A send that found the history gone leaves its failed bubble on screen — the note
+              goes under it rather than replacing it. */}
+          {historyMissing && chat.messages.length > 0 && (
+            <div className="flex justify-center pt-2">
+              <HistoryMissingNote onNewChat={onNewChat} />
+            </div>
+          )}
 
           {pendingMessage && (
             <>
@@ -687,6 +712,23 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
         canSend={canSend}
         isStreaming={chat.isLoading}
       />
+    </div>
+  );
+}
+
+function HistoryMissingNote({ onNewChat }: { onNewChat?: () => void }) {
+  return (
+    <div
+      data-testid="history-missing-note"
+      role="status"
+      className="flex max-w-sm flex-col items-center gap-3 text-center"
+    >
+      <p className="text-sm text-muted-foreground">{HISTORY_MISSING_NOTE}</p>
+      {onNewChat && (
+        <Button type="button" className="cursor-pointer" onClick={onNewChat}>
+          Start a new chat
+        </Button>
+      )}
     </div>
   );
 }

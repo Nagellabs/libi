@@ -234,11 +234,19 @@ export function setupWorktreeHome(opts: SetupHomeOpts): void {
   }
 }
 
-/** Deterministic hash → port in [PORT_RANGE_START, PORT_RANGE_START + SIZE). */
-export function hashPort(worktreePath: string): number {
+/** A contiguous block of ports `[start, start + size)`. */
+export interface PortRange {
+  start: number;
+  size: number;
+}
+
+const DEV_PORT_RANGE: PortRange = { start: PORT_RANGE_START, size: PORT_RANGE_SIZE };
+
+/** Deterministic hash → port in [range.start, range.start + range.size). */
+export function hashPort(worktreePath: string, range: PortRange = DEV_PORT_RANGE): number {
   const buf = crypto.createHash("sha256").update(worktreePath).digest();
   const n = buf.readUInt32BE(0);
-  return PORT_RANGE_START + (n % PORT_RANGE_SIZE);
+  return range.start + (n % range.size);
 }
 
 function isPortFree(port: number): Promise<boolean> {
@@ -254,16 +262,20 @@ function isPortFree(port: number): Promise<boolean> {
 }
 
 /** Hashed port first; scan forward through the range on collision; throw
- *  when every port in the range is taken. */
-export async function pickPort(worktreePath: string): Promise<number> {
-  const start = hashPort(worktreePath);
-  for (let i = 0; i < PORT_RANGE_SIZE; i++) {
-    const offset = (start - PORT_RANGE_START + i) % PORT_RANGE_SIZE;
-    const port = PORT_RANGE_START + offset;
+ *  when every port in the range is taken. `range` defaults to the dev range —
+ *  tests pass an ephemeral one so they never contend with a running server. */
+export async function pickPort(
+  worktreePath: string,
+  range: PortRange = DEV_PORT_RANGE,
+): Promise<number> {
+  const start = hashPort(worktreePath, range);
+  for (let i = 0; i < range.size; i++) {
+    const offset = (start - range.start + i) % range.size;
+    const port = range.start + offset;
     if (await isPortFree(port)) return port;
   }
   throw new Error(
-    `worktree-bootstrap: all ports ${PORT_RANGE_START}..${PORT_RANGE_START + PORT_RANGE_SIZE - 1} are in use`,
+    `worktree-bootstrap: all ports ${range.start}..${range.start + range.size - 1} are in use`,
   );
 }
 

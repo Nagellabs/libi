@@ -18,6 +18,10 @@ Before any download step, tell the user (paraphrase, don't paste verbatim):
 >   `lib/music/models.ts:ACESTEP_GIT_SHA`.
 > - **Transitive deps**: torch, diffusers, spacy, transformers, etc.
 >   The first install will pull ~2 GB of Python wheels into uv's cache.
+> - **Python itself**: libi's own CPython 3.12 from **GitHub**
+>   (`astral-sh/python-build-standalone`, via the bundled `uv`) — ~25 MB
+>   download, ~70 MB into `~/.libi/uv/python/`. Once per machine, shared
+>   with libi's other on-device features; skipped if already there.
 > - **Model weights**: ACE-Step's `v1-3.5B` checkpoint from
 >   **HuggingFace** (`ACE-Step/ACE-Step-v1-3.5B`, ~8.3 GB into
 >   `~/.libi/models/ace-step/`).
@@ -132,7 +136,9 @@ INDEPENDENT and have their own gate.
 > generation one:
 >
 > - **Python lib**: `librosa==0.11.0` from PyPI (ISC license)
-> - **Disk hit**: ~50 MB of pure-Python wheels into uv's cache
+> - **Disk hit**: ~50 MB of pure-Python wheels into uv's cache, plus
+>   libi's own CPython 3.12 (~25 MB download, ~70 MB on disk) if no other
+>   on-device feature has fetched it yet
 > - **Time**: first call materializes via uv (~10s); subsequent calls ~1s
 > - **Cost**: free, on-device, no API key
 >

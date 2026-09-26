@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import { PauseIcon, PlayIcon, XIcon } from "lucide-react";
+import { playQuietly } from "@/lib/media/play-quietly";
 
 interface AudioChipProps {
   src?: string;
@@ -37,7 +38,7 @@ export function AudioChip({
       audioRef.current.pause();
       setPlaying(false);
     } else {
-      audioRef.current.play().catch(() => {});
+      void playQuietly(audioRef.current);
       setPlaying(true);
     }
   }

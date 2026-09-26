@@ -9,13 +9,13 @@ import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 import { ACP_AUTH_REQUIRED_CODE, isAuthRequiredError } from "@/lib/agents/agent-readiness";
 import { clearSignInConfirmation } from "@/lib/agents/sign-in-confirmation";
 import { getAgentSetup, isSetupAgentId } from "@/lib/agents/setup/registry";
-import { AgentSpawnRefusedError } from "@/lib/agents/spawn-refused-error";
+import { isAgentSpawnRefused } from "@/lib/agents/spawn-refused-error";
 import { isShellEnvLoaded, readShellEnvState } from "@/lib/runtime/shell-env-state";
 import { captureStandbyFreshness, staleStandbyReason, type StandbyFreshness } from "@/lib/sessions/standby-freshness";
 import { onSetupTerminalsSettled, setupActivity } from "@/lib/terminal/setup-activity";
 import type { SessionEntry, GlobalSessionEventListener, SystemEvent } from "./types";
 import { SessionEventHandler } from "@/lib/agents/session-event-handler";
-import { MAX_ACTIVE_SESSIONS } from "./types";
+import { isSessionMidTurn, markPermissionResolvedInCache, MAX_ACTIVE_SESSIONS } from "./types";
 import { getLibiAgentDir } from "@/lib/libi-home";
 import {
   getMcpServersForAcp,
@@ -49,6 +49,9 @@ import {
 import { getAgentModelId, setAgentModelId } from "@/lib/sessions/model-preferences";
 import { getSettings, updateSettings } from "@/lib/db/settings";
 import { trackServerEvent } from "@/lib/analytics/server";
+import { SessionRestartError, type SessionRestartResult } from "@/lib/sessions/restart-error";
+import { AgentHistoryMissingError, isAgentHistoryMissingError } from "@/lib/sessions/history-missing";
+export { SessionRestartError, type SessionRestartFailureCode, type SessionRestartResult } from "@/lib/sessions/restart-error";
 import { toAgentEventId } from "@/lib/analytics/events";
 import type {
   SessionUsageState,
@@ -93,6 +96,68 @@ const SHELL_ENV_WATCH_INTERVAL_MS = 1_000;
  *  creates the standby anyway. A load on a live adapter has no timeout of its own; this reuses the
  *  bound the adapter already gets to answer `initialize`. */
 const REWARM_RESUME_WAIT_MS = ACP_INIT_TIMEOUT_MS;
+
+/** How a promise ended within a bound — or that it had not, when the bound ran out. */
+type Settled<T> = { kind: "ok"; value: T } | { kind: "error"; error: unknown } | { kind: "timed_out" };
+
+/** Wait for `p` for at most `ms`. Never rejects; a `p` still pending at the bound keeps running,
+ *  and its eventual rejection is absorbed here. */
+function settleWithin<T>(p: Promise<T>, ms: number): Promise<Settled<T>> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve({ kind: "timed_out" }), ms);
+    timer.unref?.();
+    p.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve({ kind: "ok", value });
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        resolve({ kind: "error", error });
+      },
+    );
+  });
+}
+
+/** What became of a `session/close`: answered, rejected, not answered within a restart's bound, or
+ *  never sent because the agent has no process. */
+export type AcpCloseOutcome = "closed" | "failed" | "timed_out" | "no_connection";
+
+/** How long a restart waits for the adapter to close the chat's session (and to take the cancel
+ *  of a running turn). Both adapters answer in well under a second when healthy: 3 ms and 105 ms
+ *  measured on 2026-09-25, a running prompt included. */
+export const RESTART_CLOSE_TIMEOUT_MS = 10_000;
+/** How long a restart waits for the chat to load again — its history replay included. Healthy
+ *  loads measured 0.8–0.9 s (Claude) and 40 ms (Codex); twice the adapter's `initialize` bound
+ *  leaves room for a long history on a slow machine. */
+export const RESTART_LOAD_TIMEOUT_MS = 2 * ACP_INIT_TIMEOUT_MS;
+/** After the process of an unresponsive adapter is replaced, how long to wait for the load that
+ *  was stuck on it to let go (killing the process closes its connection, which rejects it). */
+export const RESTART_STALE_SETTLE_MS = 5_000;
+/** The whole restart, however it goes. Each wait inside is bounded, but on the worst path they add
+ *  up to several minutes (a stuck activation, the close, a process restart, the stale load, the
+ *  load again); past this the user is told, the row's wait ends, and the run is abandoned at its
+ *  next step. 90 s covers a healthy restart many times over and one process replacement. */
+export const RESTART_DEADLINE_MS = 90_000;
+
+/** Thrown inside a restart run that its deadline already gave up on, to stop it at its next step. */
+class RestartAbandoned extends Error {}
+
+/** The part of an error worth showing the user: one line, bounded. An ACP error's `data` carries
+ *  the adapter's diagnosis (its `message` is often just "Internal error"), so it wins. */
+function plainReason(err: unknown): string {
+  const { data, message } = (typeof err === "object" && err !== null ? err : {}) as { data?: unknown; message?: unknown };
+  const text =
+    typeof data === "string" && data.trim()
+      ? data
+      : typeof message === "string"
+        ? message
+        : typeof err === "string"
+          ? err
+          : "";
+  const line = text.split("\n")[0]?.trim() ?? "";
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
+}
 
 /** Structural equality, so a repeated identical outcome doesn't re-broadcast. */
 function sameReadiness(a: AgentReadiness, b: AgentReadiness): boolean {
@@ -195,6 +260,14 @@ export class SessionManager {
    * returns the in-flight promise so both callers see the fully-replayed cache.
    */
   private activatingSessions = new Map<string, Promise<AgentMessage[]>>();
+
+  /** sessionId -> the user's restart of it in progress; a second request shares it. */
+  private restartingSessions = new Map<string, Promise<SessionRestartResult>>();
+
+  /** sessionId -> its restart RUN until the run has really ended. Outlives the entry above when the
+   *  deadline abandoned the run: an abandoned run stops only at its next step, and the next Restart
+   *  of the chat waits for that (`restartSession`). */
+  private restartRuns = new Map<string, Promise<unknown>>();
 
   /**
    * agentId -> how many chats are being opened on that agent's process right now (a
@@ -344,6 +417,7 @@ export class SessionManager {
         messageCache: [],
         currentAgentMessage: null,
         currentUserMessage: null,
+        promptsInFlight: 0,
         listeners: new Set(),
         pendingApprovals: new Map(),
         configOptions: [],
@@ -431,6 +505,7 @@ export class SessionManager {
           messageCache: [],
           currentAgentMessage: null,
           currentUserMessage: null,
+          promptsInFlight: 0,
           listeners: new Set(),
           pendingApprovals: new Map(),
           configOptions: [],
@@ -479,6 +554,7 @@ export class SessionManager {
       messageCache: [],
       currentAgentMessage: null,
       currentUserMessage: null,
+      promptsInFlight: 0,
       listeners: new Set(),
       pendingApprovals: new Map(),
       configOptions,
@@ -563,6 +639,57 @@ export class SessionManager {
             reason,
             err: retryErr,
           },
+          `Retry under a non-colliding MCP entry name also failed for ${agentId} — surfacing the original config error`,
+        );
+        throw err;
+      }
+    }
+  }
+
+  /**
+   * `conn.loadSession(...)`, with the same ONE-SHOT recovery `newAcpSession` has: a Codex chat
+   * created under `LIBI_MCP_FALLBACK_ENTRY_NAME` (the user's `[mcp_servers.libi]` is a stdio entry
+   * that libi's `libi` entry cannot merge into) is refused under `libi` on every resume too — so
+   * without this such a chat could never be opened again after an eviction, a crash or a restart.
+   * Same boundaries: only that error retries, once, calling the connection directly; if the retry
+   * fails too, the ORIGINAL error (the one naming `mcp_servers.libi`) propagates. History the
+   * refused attempt may have replayed is dropped before the retry replays it again.
+   */
+  private async loadAcpSession(
+    conn: ClientSideConnection,
+    agentId: string,
+    sessionId: string,
+    mcpServers: AcpMcpEntry[],
+  ): Promise<Awaited<ReturnType<ClientSideConnection["loadSession"]>>> {
+    const params = { sessionId, cwd: this.getAgentDir() };
+    try {
+      return await conn.loadSession({ ...params, mcpServers });
+    } catch (err) {
+      if (!isLibiMcpEntryConfigError(err)) throw err;
+      const fallback = getMcpServersForAcpFallback(agentId);
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "mcp_entry_collision_retry",
+          agentId,
+          sessionId,
+          reason: "load",
+          fallbackNames: fallback.map((m) => m.name),
+          err,
+        },
+        `${agentId} refused to load ${sessionId} because libi's MCP entry collided with an incompatible [mcp_servers.libi] in the user's own config — retrying once under a non-colliding name. libi's tools will appear twice in this session.`,
+      );
+      const entry = this.sessions.get(sessionId);
+      if (entry) {
+        entry.messageCache = [];
+        entry.currentAgentMessage = null;
+        entry.currentUserMessage = null;
+      }
+      try {
+        return await conn.loadSession({ ...params, mcpServers: fallback });
+      } catch (retryErr) {
+        logger.error(
+          { tag: "session-manager", op: "mcp_entry_collision_retry_failed", agentId, sessionId, reason: "load", err: retryErr },
           `Retry under a non-colliding MCP entry name also failed for ${agentId} — surfacing the original config error`,
         );
         throw err;
@@ -794,10 +921,22 @@ export class SessionManager {
     if (entry.active) return entry.messageCache;
 
     const opened = this.beginOpening(entry.agentId);
-    const promise = this.performActivation(sessionId, entry);
+    // The map holds the WHOLE activation, bookkeeping included, so a caller that waits on it (a
+    // restart waiting out a stale load) sees it settle only once it has left the map — a new
+    // activation started after that is its own, never a join of the finished one.
+    const promise = this.runActivation(sessionId, entry, opened, () => promise);
     this.activatingSessions.set(sessionId, promise);
+    return promise;
+  }
+
+  private async runActivation(
+    sessionId: string,
+    entry: SessionEntry,
+    opened: () => void,
+    self: () => Promise<AgentMessage[]>,
+  ): Promise<AgentMessage[]> {
     try {
-      return await promise;
+      return await this.performActivation(sessionId, entry);
     } catch (err) {
       // EVERY activation-failure exit publishes a terminal model snapshot.
       // Without this the client would have to infer "the wait is over" from a
@@ -810,7 +949,7 @@ export class SessionManager {
       this.emitTerminalModelSnapshot(sessionId, entry.configOptions);
       throw err;
     } finally {
-      this.activatingSessions.delete(sessionId);
+      if (this.activatingSessions.get(sessionId) === self()) this.activatingSessions.delete(sessionId);
       opened();
     }
   }
@@ -849,6 +988,12 @@ export class SessionManager {
     entry: SessionEntry,
   ): Promise<AgentMessage[]> {
     const agentId = entry.agentId;
+    // The agent already said it has no transcript for this chat. Asking again would spawn another
+    // resume that can only fail the same way — each chat open, and each send, would pay for it.
+    if (entry.historyMissing) {
+      this.emitForSession(sessionId, { type: "agent-status", status: "disconnected" });
+      throw new AgentHistoryMissingError(sessionId);
+    }
     if (!this.pm) throw new Error("No process manager set");
 
     // A resume that lands while the process restarts waits for the new connection; otherwise it
@@ -878,6 +1023,7 @@ export class SessionManager {
     entry.messageCache = [];
     entry.currentAgentMessage = null;
     entry.currentUserMessage = null;
+    this.retirePrompts(entry);
     entry.lastUsed = Date.now();
 
     this.pm.registerSessionId(agentId, sessionId);
@@ -905,15 +1051,13 @@ export class SessionManager {
     );
     // Mark the entry as replaying so the event handler ingests history WITHOUT
     // wall-clock timestamps/status — a replay-time Date.now() would be a lie
-    // (bogus tool-call timers after session re-activation).
+    // (bogus tool-call timers after session re-activation) — and builds it into the cache
+    // WITHOUT broadcasting it: the replay is not a turn, and an open chat shown it over the SSE
+    // was left with a streaming message nothing ends (`SessionEventHandler.handleSessionUpdate`).
     const replayEntry = this.sessions.get(sessionId);
     if (replayEntry) replayEntry.isReplaying = true;
     try {
-      const loadResult = await conn.loadSession({
-        sessionId,
-        cwd: this.getAgentDir(),
-        mcpServers,
-      });
+      const loadResult = await this.loadAcpSession(conn, agentId, sessionId, mcpServers);
       const resumedEntry = this.sessions.get(sessionId);
       if (resumedEntry && loadResult?.configOptions) {
         resumedEntry.configOptions = loadResult.configOptions;
@@ -929,6 +1073,27 @@ export class SessionManager {
         `Loaded session ${sessionId} (${Date.now() - loadStart}ms)`,
       );
     } catch (err) {
+      if (isAgentHistoryMissingError(err)) {
+        // Not a failure to retry: the transcript is gone (deleted, cleaned, or metadata only), and
+        // nothing libi does brings it back. Remembered on the entry so later opens and sends answer
+        // at once, and logged here, once. No `error` text on the status — that text rendered as a
+        // chat note ("Resource not found: <id>"); the chat renders its own explanation instead.
+        entry.historyMissing = true;
+        entry.messageCache = [];
+        logger.info(
+          {
+            tag: "session-manager",
+            op: "load_session_history_missing",
+            agentId,
+            sessionId,
+            durationMs: Date.now() - loadStart,
+            err,
+          },
+          `${agentId} has no history for ${sessionId} — the chat can't be continued`,
+        );
+        this.emitForSession(sessionId, { type: "agent-status", status: "disconnected" });
+        throw new AgentHistoryMissingError(sessionId, { cause: err });
+      }
       logger.warn(
         {
           tag: "session-manager",
@@ -1006,9 +1171,12 @@ export class SessionManager {
    * Close the ACP connection for a session. Preserves listeners as pending.
    * Clears cache to free memory. The session remains in the map as inactive.
    */
-  async deactivateSession(sessionId: string): Promise<void> {
+  async deactivateSession(
+    sessionId: string,
+    opts: { closeTimeoutMs?: number } = {},
+  ): Promise<AcpCloseOutcome | "not_active"> {
     const entry = this.sessions.get(sessionId);
-    if (!entry || !entry.active) return;
+    if (!entry || !entry.active) return "not_active";
 
     const agentId = entry.agentId;
 
@@ -1027,34 +1195,112 @@ export class SessionManager {
     this.resolveAllPendingAsCancelled(entry);
 
     // Preserve listeners as pending so they survive reactivation
-    if (entry.listeners.size > 0) {
-      let pending = this.pendingListeners.get(sessionId);
-      if (!pending) {
-        pending = new Set();
-        this.pendingListeners.set(sessionId, pending);
-      }
-      for (const cb of entry.listeners) pending.add(cb);
-    }
+    this.preserveListeners(entry);
 
     // Close ACP connection
+    let closed: AcpCloseOutcome = "no_connection";
     if (this.pm) {
-      const conn = this.pm.getConnection(agentId);
-      if (conn) {
-        try {
-          await conn.closeSession({ sessionId });
-        } catch {
-          /* agent may not support close */
-        }
-      }
+      closed = await this.closeAcpSession(agentId, sessionId, opts.closeTimeoutMs);
       this.pm.unregisterSessionId(agentId, sessionId);
     }
 
     // Clear cache but keep the entry
+    this.clearEntry(entry);
+    return closed;
+  }
+
+  /** Copy a session's listeners to the pending set, so they survive until it is active again. */
+  private preserveListeners(entry: SessionEntry): void {
+    if (entry.listeners.size === 0) return;
+    let pending = this.pendingListeners.get(entry.sessionId);
+    if (!pending) {
+      pending = new Set();
+      this.pendingListeners.set(entry.sessionId, pending);
+    }
+    for (const cb of entry.listeners) pending.add(cb);
+  }
+
+  /** Mark an entry inactive and drop what its ACP session had in memory; the entry itself stays. */
+  private clearEntry(entry: SessionEntry): void {
     entry.active = false;
     entry.messageCache = [];
     entry.currentAgentMessage = null;
     entry.currentUserMessage = null;
+    this.retirePrompts(entry);
     entry.listeners = new Set();
+  }
+
+  /**
+   * The ACP session is being dropped: every prompt still in flight on it is retired (it no longer
+   * counts, and its late answer can end nothing newer — `isStalePrompt`). If any of them had not
+   * settled — a cancelled one the silence bound stopped counting included — the chat is owed ONE
+   * `agent-complete` for that turn, or its message stays "streaming" until the next turn. It is
+   * sent (`endOwedTurn`) with the stop reason of the first retired prompt that still answers, so a
+   * turn that really finished reads as finished (the unviewed dot, readiness); as `cancelled` if
+   * none has by `RETIRED_TURN_GRACE_MS`, or before a new prompt starts, a restart reports its end,
+   * or — `now`, for a crash, whose prompts can never answer — right away.
+   * A prompt the adapter settled before the drop already sent its own and is in neither set.
+   * Every drop goes through here: deactivate (eviction, reload, restart, agent switch,
+   * /api/agent/stop), a crash, and the reset before a history replay.
+   */
+  private retirePrompts(entry: SessionEntry, opts: { now?: boolean } = {}): void {
+    const unsettled = [...(openPrompts.get(entry) ?? []), ...(releasedPrompts.get(entry) ?? [])].filter(
+      (t) => !t.settled,
+    );
+    resetPromptsInFlight(entry);
+    if (unsettled.length > 0) {
+      let owed = owedTurnEnds.get(entry);
+      if (!owed) {
+        const timer = setTimeout(() => this.endOwedTurn(entry, "cancelled"), RETIRED_TURN_GRACE_MS);
+        timer.unref?.();
+        owed = { tickets: new Set(), timer };
+        owedTurnEnds.set(entry, owed);
+      }
+      for (const ticket of unsettled) owed.tickets.add(ticket);
+    }
+    if (opts.now) this.endOwedTurn(entry, "cancelled");
+  }
+
+  /** Send the `agent-complete` a retirement owes the chat, once. False when none is owed. */
+  private endOwedTurn(entry: SessionEntry, stopReason: string): boolean {
+    const owed = owedTurnEnds.get(entry);
+    if (!owed) return false;
+    owedTurnEnds.delete(entry);
+    clearTimeout(owed.timer);
+    this.emitForSession(entry.sessionId, { type: "agent-complete", stopReason });
+    return true;
+  }
+
+  /**
+   * `session/close` for `sessionId` on `agentId`'s current connection. Without a bound it waits as
+   * long as the adapter takes (every caller but a restart); with one, an adapter that has not
+   * answered by then is reported `timed_out` and left to answer (or not) on its own — the pending
+   * request settles, harmlessly, when its connection closes. A rejection is `failed`: an adapter
+   * that does not hold the session (or does not support close) says so that way.
+   */
+  private async closeAcpSession(
+    agentId: string,
+    sessionId: string,
+    timeoutMs?: number,
+  ): Promise<AcpCloseOutcome> {
+    const conn = this.pm?.getConnection(agentId);
+    if (!conn) return "no_connection";
+    // A close that throws synchronously is a rejection like any other.
+    let closing: Promise<unknown>;
+    try {
+      closing = Promise.resolve(conn.closeSession({ sessionId }));
+    } catch (err) {
+      closing = Promise.reject(err);
+    }
+    const outcome =
+      timeoutMs === undefined
+        ? await closing.then(
+            (): Settled<unknown> => ({ kind: "ok", value: undefined }),
+            (error): Settled<unknown> => ({ kind: "error", error }),
+          )
+        : await settleWithin(closing, timeoutMs);
+    if (outcome.kind === "timed_out") return "timed_out";
+    return outcome.kind === "ok" ? "closed" : "failed";
   }
 
   // -------------------------------------------------------------------------
@@ -1079,6 +1325,7 @@ export class SessionManager {
       } catch {
         // Listener errors must not stop the drain.
       }
+      markPermissionResolvedInCache(entry, pendingId, { kind: "cancelled" });
       this.emitForSession(entry.sessionId, {
         type: "agent-permission-resolved",
         pendingId,
@@ -1109,18 +1356,82 @@ export class SessionManager {
     // Drain first so existing pending promises don't dangle if cancel throws.
     this.resolveAllPendingAsCancelled(entry);
 
+    // The prompts running NOW — a prompt sent after the cancel (the steer) is
+    // never released by it.
+    const cancelled = [...(openPrompts.get(entry) ?? [])];
+    // The ACP session this cancel is for. A cancel the adapter answers only after that session
+    // was dropped and loaded again (a restart gives up waiting on it) must not drain the
+    // approval cards of the reloaded one.
+    const epoch = entry.promptEpoch ?? 0;
+
     try {
       await conn.cancel({ sessionId });
       logger.info({ sessionId }, "Sent ACP session/cancel");
+      // Only a cancel the agent ACCEPTED starts the bound: after a failed one
+      // the prompt keeps running normally and must keep the chat busy.
+      if (cancelled.length > 0) this.boundCancelledPrompts(entry, cancelled, Date.now());
     } catch (err) {
       logger.warn({ sessionId, err }, "Failed to send session/cancel");
     } finally {
       // Post-drain: catches any `requestPermission` that arrived during the
       // cancel round-trip. Without this, a permission request that lands
       // mid-await would never resolve (it'd sit in `pendingApprovals` after
-      // cancelTurn returns). Runs on both success and failure paths.
-      this.resolveAllPendingAsCancelled(entry);
+      // cancelTurn returns). Runs on both success and failure paths — for the
+      // session it was sent to only.
+      if ((entry.promptEpoch ?? 0) === epoch) this.resolveAllPendingAsCancelled(entry);
     }
+  }
+
+  /**
+   * Stop counting cancelled prompts the adapter never settles — a hung adapter
+   * (process alive, prompt never answered) would otherwise pin the chat busy
+   * until teardown. Released only once the session has been SILENT (no agent
+   * update, `lastAgentActivityAt`) for CANCEL_SETTLE_TIMEOUT_MS since the
+   * cancel was accepted: an adapter still finishing a tool it could not
+   * interrupt keeps talking, and stays busy. Re-arms itself until the tickets
+   * settle, are reset, or are released; each release is exactly-once.
+   */
+  private boundCancelledPrompts(
+    entry: SessionEntry,
+    tickets: PromptTicket[],
+    cancelAcceptedAt: number,
+  ): void {
+    const check = () => {
+      if (!tickets.some((t) => t.counted)) return; // settled or reset meanwhile
+      const lastHeard = Math.max(cancelAcceptedAt, entry.lastAgentActivityAt ?? 0);
+      const silentFor = Date.now() - lastHeard;
+      if (silentFor < CANCEL_SETTLE_TIMEOUT_MS) {
+        const timer = setTimeout(check, CANCEL_SETTLE_TIMEOUT_MS - silentFor);
+        timer.unref?.();
+        return;
+      }
+      let released = 0;
+      for (const ticket of tickets) {
+        if (!releasePrompt(entry, ticket)) continue;
+        released++;
+        // Its turn is still open for the client until it answers — or a drop retires it.
+        let set = releasedPrompts.get(entry);
+        if (!set) releasedPrompts.set(entry, (set = new Set()));
+        set.add(ticket);
+      }
+      if (released === 0) return;
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "prompt_cancel_unsettled",
+          sessionId: entry.sessionId,
+          agentId: entry.agentId,
+          released,
+          silentMs: silentFor,
+        },
+        "a cancelled prompt did not settle; no longer counting it as in flight",
+      );
+      if (!isSessionMidTurn(entry)) {
+        this.emitForSession(entry.sessionId, { type: "agent-status", status: "connected" });
+      }
+    };
+    const timer = setTimeout(check, CANCEL_SETTLE_TIMEOUT_MS);
+    timer.unref?.();
   }
 
   // -------------------------------------------------------------------------
@@ -1164,6 +1475,9 @@ export class SessionManager {
 
     entry.lastUsed = Date.now();
     entry.currentUserMessage = null;
+    // A turn a drop retired and still owes its end is ended now, as cancelled — before this one
+    // starts, so its late answer cannot end this turn instead.
+    this.endOwedTurn(entry, "cancelled");
 
     // Build user message in cache. The `text` we receive from
     // /api/agent/send already has the `[Attached files]` block appended
@@ -1189,6 +1503,9 @@ export class SessionManager {
     entry.currentAgentMessage = agentMsg;
     entry.messageCache.push(agentMsg);
 
+    // In flight from here until `conn.prompt` settles (the `finally` below).
+    // Nothing awaits between this and the prompt going out.
+    const promptTicket = beginPrompt(entry);
     this.emitForSession(sessionId, {
       type: "agent-status",
       status: "thinking",
@@ -1200,6 +1517,18 @@ export class SessionManager {
         sessionId,
         prompt: [{ type: "text", text }],
       });
+      // The ACP session this prompt ran on was dropped before it answered (a restart, an
+      // eviction, a crash). Nothing here may touch the chat's state — a newer turn may be running on
+      // the reloaded session — except ending the retired turn, if that is still owed, with the
+      // reason it really ended (`retirePrompts`).
+      if (isStalePrompt(entry, promptTicket)) {
+        if (owedTurnEnds.get(entry)?.tickets.has(promptTicket)) {
+          const authRejected = this.authRejectedByTextTurn.delete(sessionId);
+          this.endOwedTurn(entry, result.stopReason);
+          if (!authRejected && result.stopReason !== "cancelled") this.markAgentReady(entry.agentId, "prompt");
+        }
+        return;
+      }
       entry.currentAgentMessage = null;
       // A turn that came back is proof the agent is signed in. A cancelled turn
       // may never have reached the model, so it proves nothing — and neither does
@@ -1228,6 +1557,11 @@ export class SessionManager {
         }
       }
     } catch (err) {
+      if (isStalePrompt(entry, promptTicket)) {
+        // A retired prompt failing (its connection closed under it) ended no differently than cancelled.
+        if (owedTurnEnds.get(entry)?.tickets.has(promptTicket)) this.endOwedTurn(entry, "cancelled");
+        return;
+      }
       this.authRejectedByTextTurn.delete(sessionId);
       entry.currentAgentMessage = null;
       this.emitForSession(sessionId, {
@@ -1254,6 +1588,10 @@ export class SessionManager {
       // so "that message" is a real thing on screen. The other two call sites
       // are session/new and take the "session-start" default.
       this.markAgentAuthFailure(entry.agentId, err, "prompt");
+    } finally {
+      promptTicket.settled = true;
+      releasePrompt(entry, promptTicket);
+      releasedPrompts.get(entry)?.delete(promptTicket);
     }
 
     // Sync session metadata (title may have changed) and notify clients once
@@ -1329,6 +1667,8 @@ export class SessionManager {
     if (target === null) {
       logger.warn(
         {
+          tag: "session-manager",
+          op: "approval_mode_unsupported_by_agent",
           agentId,
           mode,
           availableModes: modes?.map((m) => m.id),
@@ -1344,7 +1684,14 @@ export class SessionManager {
       await conn.setSessionMode({ sessionId, modeId: target });
     } catch (err) {
       logger.warn(
-        { err, agentId, sessionId, target },
+        {
+          tag: "session-manager",
+          op: "approval_mode_set_failed",
+          err,
+          agentId,
+          sessionId,
+          target,
+        },
         "approval.mode.set_failed",
       );
     }
@@ -1571,6 +1918,396 @@ export class SessionManager {
   }
 
   // -------------------------------------------------------------------------
+  // 8c. restartSession(sessionId) — the user's "Restart session"
+  // -------------------------------------------------------------------------
+
+  /**
+   * Restart a chat for the user (the session's right-click menu, `POST /api/sessions/:id/restart`):
+   * the conversation is kept, and the adapter builds the session again, so an MCP server added to
+   * the agent's config after the chat was created (`claude mcp add`, `codex mcp add`, the Providers
+   * tab) is in it afterwards, and a chat stuck on a dead or hung adapter comes back.
+   *
+   * CLOSE, then load — both are needed, for both adapters. A `session/load` of a session the
+   * adapter still holds does not re-read anything: claude-agent-acp returns early when the
+   * session's fingerprint (cwd + mcpServers) is unchanged, keeping its `claude` child and the MCP
+   * servers that child started with; codex-acp re-attaches to the live thread in its app-server.
+   * After `session/close` (claude: the session's child is killed; codex: `thread/unsubscribe`
+   * unloads the thread) the load starts a new `claude` child / resumes the thread from its
+   * rollout, and each reads the agent's config as it is now. Measured on 2026-09-25 (claude-agent-acp
+   * 0.75.1, codex-acp 1.10.0 driving codex-cli 0.155): a server added to the config after the
+   * session was created started on close + load and did not on load alone. Neither needs the
+   * adapter PROCESS restarted, so other chats on it are untouched. The in-app `mcpServers` are
+   * computed exactly as for a new chat (`getMcpServersForAcp`, via `activateSession`), and a
+   * standby the config change made stale is replaced, as when a chat is opened.
+   *
+   * Kept across the restart: the history (the adapter replays its own transcript, and the agent
+   * resumes from it), the piece the chat works on (libi's opened piece, `lib/editor-state`, plus
+   * what the transcript says — neither is part of the ACP session), and the model and approval
+   * mode (`activateSession` pushes both again). The permission mode is the approval mode's ACP
+   * half, pushed with it.
+   *
+   * A running turn is cancelled first, exactly as Stop does (approval cards resolve as
+   * cancelled); a turn the adapter has not settled by the time the session is closed is ended for
+   * the chat here, so its Stop button always goes away.
+   *
+   * Bounded: the close waits `RESTART_CLOSE_TIMEOUT_MS`, the load `RESTART_LOAD_TIMEOUT_MS`. An
+   * adapter that answers neither is not answering at all; its process is then replaced and the
+   * chat loaded on the new one — but only while no other chat on that process is working or
+   * being opened, since replacing it would kill that work. Idle chats that shared it lose only
+   * their ACP session and load again on their next message, as after an eviction.
+   *
+   * The chat learns all of it over the one SSE connection: `session-restart` started / done /
+   * failed (with the reason in plain words), around the usual status and history events.
+   */
+  restartSession(sessionId: string): Promise<SessionRestartResult> {
+    const inflight = this.restartingSessions.get(sessionId);
+    if (inflight) return inflight;
+    const run = { abandoned: false };
+    const restart = (async () => {
+      // A run the deadline abandoned may still be inside a step — a process replacement, a load.
+      // Running alongside it would close and load the chat on a process it is about to kill, or
+      // replace the process a second time; so this one starts only once that one has stopped. Each
+      // of its steps is bounded today; the wait has its own bound anyway, so a step that ever hangs
+      // fails this Restart (and the next) instead of wedging every later one. The deadline below is
+      // this run's own.
+      const unwinding = this.restartRuns.get(sessionId);
+      if (unwinding) {
+        const agentId = this.sessions.get(sessionId)?.agentId;
+        logger.info(
+          { tag: "session-manager", op: "session_restart_waits", agentId, sessionId },
+          `Restart of session ${sessionId} waits for the previous one to stop`,
+        );
+        if ((await settleWithin(unwinding, RESTART_DEADLINE_MS)).kind === "timed_out") {
+          const failure = new SessionRestartError(
+            "timed_out",
+            "The previous restart of this chat is still stuck, so libi didn't start another. Quit and reopen libi, then try again.",
+          );
+          logger.warn(
+            { tag: "session-manager", op: "session_restart_failed", agentId, sessionId, code: failure.code, reason: "previous_run_stuck" },
+            `Restart of session ${sessionId} failed: ${failure.message}`,
+          );
+          this.emitForSession(sessionId, { type: "session-restart", phase: "failed", error: failure.message });
+          throw failure;
+        }
+      }
+      const performing = this.performRestart(sessionId, run);
+      const ended: Promise<unknown> = performing
+        .catch(() => {})
+        .finally(() => {
+          if (this.restartRuns.get(sessionId) === ended) this.restartRuns.delete(sessionId);
+        });
+      this.restartRuns.set(sessionId, ended);
+      const outcome = await settleWithin(performing, RESTART_DEADLINE_MS);
+      if (outcome.kind === "ok") return outcome.value;
+      if (outcome.kind === "error") throw outcome.error;
+      // Past the deadline: say so and let go. Whatever the run is still waiting on keeps going and
+      // is harmless — the run stops at its next step and says nothing more. The chat is left as a
+      // later Restart or message expects it: inactive (loaded again on demand) or, if the load it
+      // was waiting on finishes after all, active.
+      run.abandoned = true;
+      const failure = new SessionRestartError(
+        "timed_out",
+        "The restart took longer than 90 seconds, so libi stopped waiting. Try Restart again; if it happens again, quit and reopen libi.",
+      );
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "session_restart_failed",
+          agentId: this.sessions.get(sessionId)?.agentId,
+          sessionId,
+          code: failure.code,
+          durationMs: RESTART_DEADLINE_MS,
+        },
+        `Restart of session ${sessionId} failed: ${failure.message}`,
+      );
+      const entry = this.sessions.get(sessionId);
+      if (entry) this.endOwedTurn(entry, "cancelled");
+      this.emitForSession(sessionId, { type: "session-restart", phase: "failed", error: failure.message });
+      throw failure;
+    })().finally(() => {
+      if (this.restartingSessions.get(sessionId) === restart) this.restartingSessions.delete(sessionId);
+    });
+    this.restartingSessions.set(sessionId, restart);
+    return restart;
+  }
+
+  /** Whether a restart of `sessionId` is under way — asked by a window whose SSE connection came
+   *  back mid-restart, to learn whether the `done` it may have missed is still to come. */
+  isRestarting(sessionId: string): boolean {
+    return this.restartingSessions.has(sessionId);
+  }
+
+  private async performRestart(
+    sessionId: string,
+    run: { abandoned: boolean },
+  ): Promise<SessionRestartResult> {
+    /** Stop here if the deadline already gave this run up. */
+    const checkpoint = () => {
+      if (run.abandoned) throw new RestartAbandoned();
+    };
+    const entry = this.sessions.get(sessionId);
+    if (!entry || !this.pm) {
+      logger.warn(
+        { tag: "session-manager", op: "session_restart_failed", sessionId, code: "not_found" },
+        `Restart of unknown session ${sessionId} refused`,
+      );
+      throw new SessionRestartError(
+        "not_found",
+        "libi doesn't have this chat open any more. Reload the page, then try again.",
+      );
+    }
+    const agentId = entry.agentId;
+    const start = Date.now();
+    logger.info(
+      {
+        tag: "session-manager",
+        op: "session_restart",
+        agentId,
+        sessionId,
+        active: entry.active,
+        midTurn: isSessionMidTurn(entry),
+        pendingApprovals: entry.pendingApprovals.size,
+      },
+      `Restarting session ${sessionId}`,
+    );
+    this.emitForSession(sessionId, { type: "session-restart", phase: "started" });
+    this.discardStaleStandby(agentId);
+
+    try {
+      let stuck = await this.closeForRestart(entry);
+      checkpoint();
+      if (!stuck) {
+        const loaded = await settleWithin(this.activateSession(sessionId), RESTART_LOAD_TIMEOUT_MS);
+        checkpoint();
+        if (loaded.kind === "error") throw this.restartLoadFailure(loaded.error);
+        if (loaded.kind === "timed_out") stuck = "load";
+      }
+      let processRestarted = false;
+      if (stuck) {
+        // Throws before a new process exists (refused, or restartProcess failed — see there).
+        const { stale } = await this.replaceUnresponsiveProcess(entry, stuck);
+        processRestarted = true;
+        try {
+          checkpoint();
+          await this.dropStaleActivation(entry, stale);
+          checkpoint();
+          const loaded = await settleWithin(this.activateSession(sessionId), RESTART_LOAD_TIMEOUT_MS);
+          checkpoint();
+          if (loaded.kind === "error") throw this.restartLoadFailure(loaded.error);
+          if (loaded.kind === "timed_out") {
+            throw new SessionRestartError(
+              "agent_unresponsive",
+              "The agent still isn't responding, even after libi restarted it. Quit and reopen libi, then try again.",
+            );
+          }
+        } finally {
+          // The standby went with the old process. It comes back on the new one however this chat's
+          // load ended — failed, timed out, or abandoned at the deadline — or "New chat" would stay
+          // on "Preparing a new chat session…" until something else started one. After the load,
+          // so its `session/new` never competes with the load on a process just come up.
+          this.createStandbySession().catch(() => {});
+        }
+      }
+      logger.info(
+        {
+          tag: "session-manager",
+          op: "session_restart_done",
+          agentId,
+          sessionId,
+          processRestarted,
+          durationMs: Date.now() - start,
+        },
+        `Restarted session ${sessionId} (${Date.now() - start}ms)`,
+      );
+      const agent = toAgentEventId(agentId);
+      if (agent) {
+        void trackServerEvent("session_restarted", {
+          agent,
+          scope: processRestarted ? "agent_process" : "session",
+        });
+      }
+      // A turn the restart cut short that has not answered by now is ended before the chat hears
+      // the restart is over (here, on `failed`, and at the deadline). One a run abandoned at the
+      // deadline retires only later is ended by the grace timer — still once, after the `failed`.
+      this.endOwedTurn(entry, "cancelled");
+      this.emitForSession(sessionId, { type: "session-restart", phase: "done" });
+      return { agentId, processRestarted };
+    } catch (err) {
+      if (run.abandoned) {
+        // The deadline already failed this restart for the chat; nothing more is said.
+        logger.info(
+          { tag: "session-manager", op: "session_restart_abandoned", agentId, sessionId, durationMs: Date.now() - start },
+          `Abandoned restart of session ${sessionId} stopped`,
+        );
+        throw err;
+      }
+      const failure =
+        err instanceof SessionRestartError ? err : this.restartLoadFailure(err);
+      logger.warn(
+        {
+          tag: "session-manager",
+          op: "session_restart_failed",
+          agentId,
+          sessionId,
+          code: failure.code,
+          durationMs: Date.now() - start,
+          err,
+        },
+        `Restart of session ${sessionId} failed: ${failure.message}`,
+      );
+      this.endOwedTurn(entry, "cancelled");
+      this.emitForSession(sessionId, { type: "session-restart", phase: "failed", error: failure.message });
+      throw failure;
+    }
+  }
+
+  private restartLoadFailure(err: unknown): SessionRestartError {
+    const reason = plainReason(err);
+    return new SessionRestartError(
+      "load_failed",
+      reason ? `The chat couldn't be loaded again: ${reason}` : "The chat couldn't be loaded again.",
+    );
+  }
+
+  /**
+   * The first half of a restart: cancel the running turn, then close the session on the adapter.
+   * Returns where the adapter stopped answering (`close`, or `load` for an activation that was
+   * already under way and never finished), or null when it answered.
+   */
+  private async closeForRestart(entry: SessionEntry): Promise<"close" | "load" | null> {
+    const { sessionId, agentId } = entry;
+
+    // The chat was being opened when the user asked: that load is waited out first, within the
+    // same bound. One that never finishes is exactly the stuck adapter a restart is for.
+    const opening = this.activatingSessions.get(sessionId);
+    if (opening) {
+      const opened = await settleWithin(opening, RESTART_LOAD_TIMEOUT_MS);
+      if (opened.kind === "timed_out") return "load";
+    }
+
+    if (!entry.active) {
+      // The adapter may still hold a session libi let go of (a close it never answered), and a
+      // load would return that early instead of building it again. "Session not found" is the
+      // usual answer, and it is fine.
+      const closed = await this.closeAcpSession(agentId, sessionId, RESTART_CLOSE_TIMEOUT_MS);
+      return closed === "timed_out" ? "close" : null;
+    }
+
+    // The running turn is cancelled the way Stop cancels it: its approval cards resolve as
+    // cancelled, and the adapter is told to stop.
+    if (isSessionMidTurn(entry) || entry.pendingApprovals.size > 0) {
+      await settleWithin(this.cancelTurn(sessionId), RESTART_CLOSE_TIMEOUT_MS);
+    }
+
+    // A turn the adapter did not settle on the close — including one sent from another window while
+    // the close was awaited — is ended by the deactivation itself (`retirePrompts`).
+    const closed = await this.deactivateSession(sessionId, { closeTimeoutMs: RESTART_CLOSE_TIMEOUT_MS });
+    return closed === "timed_out" ? "close" : null;
+  }
+
+  /**
+   * The adapter answered neither the close nor the load: replace its process, so the chat can load
+   * on a new one. Refused while another chat on that process is working or being opened — killing
+   * the process would kill that work. Idle chats on it lose their ACP session with it and are let
+   * go the way an eviction lets go of one; each loads again on its next message.
+   */
+  private async replaceUnresponsiveProcess(
+    entry: SessionEntry,
+    stage: "close" | "load",
+  ): Promise<{ stale: Promise<AgentMessage[]> | undefined }> {
+    const { agentId, sessionId } = entry;
+    const pm = this.pm;
+    const busy = this.otherChatBusy(agentId, sessionId);
+    if (busy) {
+      logger.warn(
+        { tag: "session-manager", op: "session_restart_process_skipped", agentId, sessionId, stage, reason: busy },
+        "The agent is not answering, but another chat on its process is working; not replacing the process",
+      );
+      throw new SessionRestartError(
+        "agent_busy",
+        "The agent isn't responding, and another chat is still working on it, so libi didn't restart it. Stop that chat (or let it finish), then restart this one again.",
+      );
+    }
+    if (!pm?.restartProcess) {
+      throw new SessionRestartError(
+        "agent_unresponsive",
+        "The agent isn't responding. Quit and reopen libi, then try again.",
+      );
+    }
+    logger.warn(
+      { tag: "session-manager", op: "session_restart_process", agentId, sessionId, stage },
+      `The agent did not answer the restart's ${stage}; replacing its process`,
+    );
+    for (const other of this.sessions.values()) {
+      if (other.agentId !== agentId || other.sessionId === sessionId || !other.active) continue;
+      this.resolveAllPendingAsCancelled(other);
+      this.preserveListeners(other);
+      pm.unregisterSessionId(agentId, other.sessionId);
+      this.clearEntry(other);
+    }
+    if (this.standbySession?.agentId === agentId) {
+      this.standbySession = null;
+      this.emitSystemEvent({ type: "standby-ready", ready: false });
+    }
+    const stale = this.activatingSessions.get(sessionId);
+    try {
+      await pm.restartProcess(agentId);
+    } catch (err) {
+      // The old process is gone and no new one came up, so there is no standby either. A refusal is
+      // an observed answer about the agent (readiness records it; installing or updating the CLI is
+      // the user's to do), so nothing is started again. Any other failure says nothing about the
+      // agent: start it once in the background, the way a failed shell-environment restart does.
+      this.markAgentSpawnRefused(agentId, err);
+      if (!isAgentSpawnRefused(err)) {
+        this.startAgainAfterFailedRestart(agentId, ++this.agentStartEpoch);
+      }
+      const reason = plainReason(err);
+      throw new SessionRestartError(
+        "agent_unresponsive",
+        `The agent wasn't responding, and libi couldn't start it again${reason ? `: ${reason}` : "."}`,
+      );
+    }
+    // Wrapped: an async function returning the promise itself would adopt it, awaiting the stale load.
+    return { stale };
+  }
+
+  /**
+   * After the process was replaced: wait out the activation that was stuck on the old one, and make
+   * sure nothing it loaded counts. Killing the old process closed its connection, which rejects the
+   * load that was stuck on it; until it lets go, a new load would only join it. A load that instead
+   * ANSWERED at the last moment did so on the process that is gone — the entry is active on a
+   * session the new process has never heard of, and the next activation would return that cache
+   * without loading — so it is let go the way the idle chats on the process were.
+   */
+  private async dropStaleActivation(entry: SessionEntry, stale: Promise<unknown> | undefined): Promise<void> {
+    if (!stale) return;
+    if ((await settleWithin(stale, RESTART_STALE_SETTLE_MS)).kind === "timed_out") {
+      throw new SessionRestartError(
+        "agent_unresponsive",
+        "The agent still isn't responding, even after libi restarted it. Quit and reopen libi, then try again.",
+      );
+    }
+    if (entry.active) {
+      this.resolveAllPendingAsCancelled(entry);
+      this.preserveListeners(entry);
+      this.pm?.unregisterSessionId(entry.agentId, entry.sessionId);
+      this.clearEntry(entry);
+    }
+  }
+
+  /** Why the process of `agentId` must not be replaced for `sessionId`'s restart: another chat on
+   *  it is working (a prompt or an approval card open) or being opened. Null when none is. */
+  private otherChatBusy(agentId: string, sessionId: string): "mid_turn" | "opening" | null {
+    for (const other of this.sessions.values()) {
+      if (other.agentId !== agentId || other.sessionId === sessionId || !other.active) continue;
+      if (isSessionMidTurn(other) || other.pendingApprovals.size > 0) return "mid_turn";
+    }
+    const ownOpening = this.activatingSessions.has(sessionId) ? 1 : 0;
+    if ((this.openingSessions.get(agentId) ?? 0) - ownOpening > 0) return "opening";
+    return null;
+  }
+
+  // -------------------------------------------------------------------------
   // 9. Standby methods
   // -------------------------------------------------------------------------
 
@@ -1790,15 +2527,16 @@ export class SessionManager {
         { tag: "session-manager", op: "shell_env_standby_refresh_failed", agentId, err },
         "Could not restart the agent after the shell environment loaded",
       );
-      if (!(err instanceof AgentSpawnRefusedError)) this.startAgainAfterFailedRestart(agentId, epoch);
+      if (!isAgentSpawnRefused(err)) this.startAgainAfterFailedRestart(agentId, epoch);
       return;
     }
     await this.createStandbySession();
   }
 
   /**
-   * One background start of `agentId` after its shell-environment restart failed for a reason other
-   * than a refusal. That restart left no process and no standby, and nothing else starts one until
+   * One background start of `agentId` after a restart of its process failed for a reason other
+   * than a refusal — the shell-environment restart, or a chat restart replacing an unresponsive
+   * process (`replaceUnresponsiveProcess`). That restart left no process and no standby, and nothing else starts one until
    * the user opens a chat or picks the agent again — meanwhile "New chat" stays disabled on
    * "Preparing a new chat session…", a state that would never finish.
    *
@@ -1962,9 +2700,9 @@ export class SessionManager {
     // with no event that explains why. And a generating session is the PRIME
     // LRU candidate precisely because it is working: `lastUsed` is stamped
     // once at prompt time (sendMessage), so a long turn only ages while it
-    // runs. `currentAgentMessage` is the in-flight signal — set when the
-    // prompt goes out and cleared on every terminal path.
-    const idleSessions = activeSessions.filter((s) => !s.currentAgentMessage);
+    // runs. `isSessionMidTurn` reads the prompt counter `sendMessage` keeps —
+    // not the assembly cursor, which late content re-creates after a turn.
+    const idleSessions = activeSessions.filter((s) => !isSessionMidTurn(s));
 
     // Sort by lastUsed ascending — oldest first
     idleSessions.sort((a, b) => a.lastUsed - b.lastUsed);
@@ -2016,10 +2754,12 @@ export class SessionManager {
       for (const cb of entry.listeners) cb(event);
     }
 
-    // Pending listeners (registered before session exists)
+    // Pending listeners (registered before session exists). A deactivation copies the listeners here
+    // BEFORE it awaits the close and drops them from the entry after, so in between a callback is in
+    // both sets — it still gets each event once.
     const pendingSet = this.pendingListeners.get(sessionId);
     if (pendingSet) {
-      for (const cb of pendingSet) cb(event);
+      for (const cb of pendingSet) if (!entry?.listeners.has(cb)) cb(event);
     }
 
     // Global listeners (SSE)
@@ -2238,12 +2978,13 @@ export class SessionManager {
   /**
    * The process manager REFUSED to spawn (no usable CLI, or no adapter). That
    * refusal is itself the readiness answer — the same `not-installed` the start
-   * route reports. Recognised by type only: any other failure, whatever its
+   * route reports. Recognised by the error's name only (`isAgentSpawnRefused` — the process
+   * manager may come from another route bundle than this one): any other failure, whatever its
    * message says, leaves readiness alone. Only a spawn can be refused, so this
    * belongs around `warmProcess`, never around `session/new`.
    */
   private markAgentSpawnRefused(agentId: string, err: unknown): void {
-    if (err instanceof AgentSpawnRefusedError) {
+    if (isAgentSpawnRefused(err)) {
       this.setReadiness(agentId, { state: "not-installed", reason: err.reason.message });
     }
   }
@@ -2426,6 +3167,9 @@ export class SessionManager {
         // promises must resolve so callers don't hang forever.
         this.resolveAllPendingAsCancelled(entry);
 
+        // The turn ends first, then the error says why — in that order the client finalizes the
+        // message and still shows the error (an agent-complete after it would clear it).
+        this.retirePrompts(entry, { now: true });
         this.emitForSession(sessionId, {
           type: "agent-status",
           status: "error",
@@ -2618,7 +3362,82 @@ export function refreshStandbyWhenSetupSettles(get: () => Pick<SessionManager, "
   });
 }
 
-const SM_GLOBAL_KEY = "__sessionManager_v3";
+/** How long a cancelled prompt may take to settle before it stops counting
+ *  as in flight. A hung adapter (process alive, prompt never answered) would
+ *  otherwise pin the session busy until teardown: Stop on every reconnect
+ *  that cannot end the turn, and LRU eviction skipping it. */
+export const CANCEL_SETTLE_TIMEOUT_MS = 30_000;
+
+/** One prompt `sendMessage` sent. `counted` is true while it contributes to
+ *  `entry.promptsInFlight`; it goes false exactly once — when the prompt
+ *  settles, when its session is torn down, or when a cancel outlives
+ *  `CANCEL_SETTLE_TIMEOUT_MS` — so no path can decrement twice. */
+interface PromptTicket {
+  epoch: number;
+  counted: boolean;
+  /** True once `conn.prompt` answered or failed. */
+  settled: boolean;
+}
+
+/** Each entry's prompts still counted. Module-level (not a SessionEntry field)
+ *  so the entry stays plain data. */
+const openPrompts = new WeakMap<SessionEntry, Set<PromptTicket>>();
+
+/** Cancelled prompts `CANCEL_SETTLE_TIMEOUT_MS` stopped counting before they answered. Not busy any
+ *  more, but their turn is still open for the client: it ends when one answers, or when a drop
+ *  retires them (`retirePrompts`). */
+const releasedPrompts = new WeakMap<SessionEntry, Set<PromptTicket>>();
+
+/** How long a turn whose prompts a drop retired waits for one of them to answer, so that its end is
+ *  reported with the real stop reason, before it is ended as `cancelled`. An adapter that settles a
+ *  prompt because its session closed does so within milliseconds of the close (measured 3 ms and
+ *  105 ms on 2026-09-25). */
+export const RETIRED_TURN_GRACE_MS = 2_000;
+
+/** A turn a drop retired whose `agent-complete` the chat is still owed (`retirePrompts`). */
+interface OwedTurnEnd {
+  tickets: Set<PromptTicket>;
+  timer: ReturnType<typeof setTimeout>;
+}
+const owedTurnEnds = new WeakMap<SessionEntry, OwedTurnEnd>();
+
+/** Count a prompt as in flight. */
+function beginPrompt(entry: SessionEntry): PromptTicket {
+  entry.promptsInFlight = (entry.promptsInFlight ?? 0) + 1;
+  const ticket: PromptTicket = { epoch: entry.promptEpoch ?? 0, counted: true, settled: false };
+  let open = openPrompts.get(entry);
+  if (!open) openPrompts.set(entry, (open = new Set()));
+  open.add(ticket);
+  return ticket;
+}
+
+/** Stop counting a prompt, once. A ticket from before a reset (its epoch is
+ *  stale) was already dropped from the count by that reset. */
+function releasePrompt(entry: SessionEntry, ticket: PromptTicket): boolean {
+  openPrompts.get(entry)?.delete(ticket);
+  if (!ticket.counted) return false;
+  ticket.counted = false;
+  if ((entry.promptEpoch ?? 0) !== ticket.epoch) return false;
+  entry.promptsInFlight = Math.max(0, (entry.promptsInFlight ?? 0) - 1);
+  return true;
+}
+
+/** The ACP session was dropped (deactivate, crash, replay): nothing it had
+ *  in flight can still be running. */
+function resetPromptsInFlight(entry: SessionEntry): void {
+  entry.promptsInFlight = 0;
+  entry.promptEpoch = (entry.promptEpoch ?? 0) + 1;
+  for (const ticket of openPrompts.get(entry) ?? []) ticket.counted = false;
+  openPrompts.get(entry)?.clear();
+  releasedPrompts.get(entry)?.clear();
+}
+
+/** A prompt whose ACP session was dropped (deactivate, crash, replay) before it settled. */
+function isStalePrompt(entry: SessionEntry, ticket: PromptTicket): boolean {
+  return (entry.promptEpoch ?? 0) !== ticket.epoch;
+}
+
+const SM_GLOBAL_KEY = "__sessionManager_v5";
 
 const globalForSM = globalThis as unknown as {
   [SM_GLOBAL_KEY]?: SessionManager;

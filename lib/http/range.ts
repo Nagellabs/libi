@@ -28,12 +28,27 @@ export interface ServeFileRangeOptions {
   cacheControl?: string;
   /** Request object — we read `Range` and `If-None-Match` from it. */
   request: Request;
+  /**
+   * Extra response headers, merged into EVERY status this helper can return
+   * (200, 206, 304 and 416). A caller that serves user-supplied bytes uses this
+   * for its hardening headers (`X-Content-Type-Options`, a per-file CSP) — and
+   * they have to ride along on the partial and the 416 too, since a `Range`
+   * request is just as navigable as a plain one.
+   */
+  extraHeaders?: Record<string, string>;
 }
 
 export function serveFileWithRange(options: ServeFileRangeOptions): Response {
-  const { filePath, contentType, etag, cacheControl, request } = options;
+  const { filePath, contentType, etag, cacheControl, request, extraHeaders } = options;
 
   const stat = statSync(filePath);
+  // A directory stats fine, and `createReadStream` on it fails only once the
+  // body is read — a 200 whose stream errors. Every caller resolves a name to a
+  // path, and a name can resolve to a folder (`.`, a stored-name collision), so
+  // the helper answers that itself rather than trusting each route to check.
+  if (!stat.isFile()) {
+    return new Response("Not found", { status: 404, headers: { ...extraHeaders } });
+  }
   const totalSize = stat.size;
 
   // ETag revalidation short-circuit — same behavior the original routes
@@ -44,6 +59,7 @@ export function serveFileWithRange(options: ServeFileRangeOptions): Response {
       return new Response(null, {
         status: 304,
         headers: {
+          ...extraHeaders,
           ETag: etag,
           "Cache-Control": cacheControl ?? "no-cache, must-revalidate",
         },
@@ -53,6 +69,7 @@ export function serveFileWithRange(options: ServeFileRangeOptions): Response {
 
   const rangeHeader = request.headers.get("range");
   const baseHeaders: Record<string, string> = {
+    ...extraHeaders,
     "Content-Type": contentType,
     "Accept-Ranges": "bytes",
     "Cache-Control": cacheControl ?? "no-cache, must-revalidate",
@@ -66,7 +83,7 @@ export function serveFileWithRange(options: ServeFileRangeOptions): Response {
       // Content-Range header so the client knows the valid extent.
       return new Response("Range not satisfiable", {
         status: 416,
-        headers: { "Content-Range": `bytes */${totalSize}` },
+        headers: { ...extraHeaders, "Content-Range": `bytes */${totalSize}` },
       });
     }
     const { start, end } = parsed;

@@ -4,6 +4,7 @@ import { and, desc, eq, like, or, ne } from "drizzle-orm";
 import { getOpenedPieceId, setOpenedPieceId } from "@/lib/editor-state";
 import { deletePieceCompletely } from "@/lib/pieces/delete-piece";
 import { initializePieceManifest } from "@/lib/composition/new-piece-manifest";
+import { notify } from "@/mcp/notify";
 import type { ToolResult } from "./types";
 
 /** Validator-safe blank canvas body — paints a full-frame dark background.
@@ -130,6 +131,9 @@ export async function deletePiece(params: { pieceId: string }): Promise<ToolResu
   const wasOpen = params.pieceId === getOpenedPieceId();
   const deleted = await deletePieceCompletely(params.pieceId);
   if (!deleted) return { success: false, error: "piece_not_found" };
+  // This runs in the MCP child: the studio's in-memory state for the piece
+  // (render diagnostics) is dropped by telling it.
+  notify.pieceDeleted(params.pieceId);
   if (wasOpen) setOpenedPieceId(null);
   return { success: true, data: { pieceId: params.pieceId, wasOpen } };
 }

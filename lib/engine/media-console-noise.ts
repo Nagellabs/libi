@@ -29,6 +29,10 @@
  * a real regression is still visible to anyone reading logs. Only the blocking
  * overlay card goes away.
  *
+ * mediabunny's "Error parsing HEVC SPS" line is not handled here: it is
+ * replaced in every environment by one line per file, naming it
+ * (`sps-diagnostics.ts`).
+ *
  * Deliberately narrow: match on exact upstream strings, one documented reason
  * each. This is not a general "quiet the console" hook, and nothing here should
  * ever cover a message libi itself emits.

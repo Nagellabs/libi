@@ -67,4 +67,35 @@ describe("addTrackedOverlay", () => {
     expect(overlay).toBeDefined();
     expect(overlay!.kind).toBe("tracked");
   });
+
+  it("returns an ABSOLUTE codeFilePath for code-kind content", async () => {
+    const { insertTrackRow } = await import("@/lib/tracking/repo");
+    await insertTrackRow(db, {
+      id: "t2", fileId: FILE_ID, method: "mediapipe-face",
+      framerate: 30, durationSec: 1, sampleCount: 30,
+    });
+
+    const { addTrackedOverlay } = await import("@/mcp/tools/tracking-tools");
+    const result = await addTrackedOverlay({
+      pieceId: PIECE_ID, trackId: "t2",
+      startTime: 0, duration: 5, rect: { x: 0, y: 0, width: 100, height: 100 },
+      z: 10, opacity: 1,
+      content: { kind: "code", drawFunction: "ctx.fillRect(0,0,10,10);" },
+      fit: "tight", scale: 1.0, smoothing: "linear",
+    });
+    expect(result.success).toBe(true);
+    if (!result.success) throw new Error("expected success");
+    const codeFilePath = result.data!.codeFilePath;
+    expect(codeFilePath).toBeTruthy();
+    // Absolute — the agent opens this directly with its own file tools, which
+    // have no notion of "relative to the piece's storage dir".
+    const { getStorage } = await import("@/lib/storage");
+    const { overlayCodeRelPath } = await import("@/lib/overlays/paths");
+    const storage = await getStorage();
+    expect(codeFilePath).toBe(
+      storage.localPath(PIECE_ID, overlayCodeRelPath(result.data!.overlayId, "content.jsx")),
+    );
+    const path = await import("node:path");
+    expect(path.isAbsolute(codeFilePath!)).toBe(true);
+  });
 });

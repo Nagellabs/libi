@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSessionManager } from "@/lib/sessions/session-manager";
+import { markPermissionResolvedInCache } from "@/lib/sessions/types";
+import { serverLogger as logger } from "@/lib/logger";
+import { browserOnlyRefusal } from "@/lib/security/request-guard";
 
 /**
  * POST /api/sessions/[sessionId]/permission
@@ -8,11 +11,23 @@ import { getSessionManager } from "@/lib/sessions/session-manager";
  * permission card; the chat client posts `{ pendingId, optionId }` here. We
  * resolve the held promise (so the agent can continue) and emit
  * `agent-permission-resolved` for any other clients watching this session.
+ *
+ * Takes the browser-only checks (`browserOnlyRefusal`): the card is answered
+ * from libi's own chat, never by a header-less loopback client. The
+ * `pendingId` rides the unauthenticated SSE stream, so without this an
+ * agent's own shell could approve its own card with one curl. A local program
+ * that deliberately forges the page's headers still passes — see the
+ * LIMITATIONS in lib/approval/extensions.ts (limit 1).
  */
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ sessionId: string }> },
 ): Promise<Response> {
+  const refused = browserOnlyRefusal(req);
+  if (refused) {
+    logger.warn({ tag: "session-manager", op: "permission_refused", reason: refused }, "approval card answer refused: not from libi's own page");
+    return NextResponse.json({ error: "libi couldn't confirm this answer came from its own chat page. Use an up-to-date browser, or the desktop app.", code: "browser_only" }, { status: 403 });
+  }
   const { sessionId } = await params;
   const sm = getSessionManager();
   const session = sm.getSession(sessionId);
@@ -56,6 +71,12 @@ export async function POST(
     outcome: { outcome: "selected", optionId: body.optionId },
   });
   session.pendingApprovals.delete(body.pendingId);
+  // The card is also in the session's history; close it there so a reload
+  // shows it answered, not answerable.
+  markPermissionResolvedInCache(session, body.pendingId, {
+    kind: "selected",
+    optionId: body.optionId,
+  });
 
   // `emitForSession` fans out to per-session, pending, AND global listeners,
   // so the SSE bridge picks this up and forwards to the chat UI.

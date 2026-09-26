@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
 /**
@@ -52,9 +53,11 @@ vi.mock("@/components/sessions/terminal-session-list", () => ({
 /** Session rows use SidebarMenuButton, which reads the sidebar context. */
 function renderList(List: React.ComponentType) {
   return render(
-    <SidebarProvider>
-      <List />
-    </SidebarProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <SidebarProvider>
+        <List />
+      </SidebarProvider>
+    </QueryClientProvider>,
   );
 }
 

@@ -91,4 +91,80 @@ describe("GET /api/files/by-id/[fileId]/proxy", () => {
     expect(res.status).toBe(304);
     expect(res.headers.get("ETag")).toBe(etag);
   });
+  // T1 (2026-09-25): a downloaded TikTok title ending in `...` stored its proxy
+  // as `…_...-proxy.mp4`; the old substring guard answered 400 and the editor
+  // sat on "Buffering…" forever.
+  it("serves a proxy whose name contains `...` (a title ending in dots)", async () => {
+    const name = "Morning_vibe_happyhippie_...-proxy.mp4";
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, name), Buffer.from("PROXY"));
+    testDb.insert(files).values({
+      id: FID, pieceId: PIECE, filename: "Morning_vibe_happyhippie_....mp4", name: "clip",
+      description: "", type: "video", storagePath: `${PIECE}/x.mp4`,
+      contentType: "video/mp4", size: 5,
+      proxyFilename: name, proxyStatus: "ready",
+    }).run();
+    const res = await GET(
+      new Request("http://localhost/api/files/by-id/f1/proxy"),
+      { params: Promise.resolve({ fileId: FID }) },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("serves a proxy whose name contains a literal `%` (fix round 1)", async () => {
+    const name = "50% off-proxy.mp4";
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, name), Buffer.from("PROXY"));
+    testDb.insert(files).values({
+      id: FID, pieceId: PIECE, filename: "50% off.mp4", name: "clip",
+      description: "", type: "video", storagePath: `${PIECE}/x.mp4`,
+      contentType: "video/mp4", size: 5,
+      proxyFilename: name, proxyStatus: "ready",
+    }).run();
+    const res = await GET(
+      new Request("http://localhost/api/files/by-id/f1/proxy"),
+      { params: Promise.resolve({ fileId: FID }) },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it.each(["../x-proxy.mp4", "..", "a/b-proxy.mp4", "a\\b-proxy.mp4"])(
+    "still refuses the traversal-shaped proxy name %j",
+    async (proxyFilename) => {
+      testDb.insert(files).values({
+        id: FID, pieceId: PIECE, filename: "clip.mp4", name: "clip",
+        description: "", type: "video", storagePath: `${PIECE}/clip.mp4`,
+        contentType: "video/mp4", size: 5, proxyFilename, proxyStatus: "ready",
+      }).run();
+      const res = await GET(
+        new Request("http://localhost/api/files/by-id/f1/proxy"),
+        { params: Promise.resolve({ fileId: FID }) },
+      );
+      expect(res.status).toBe(400);
+    },
+  );
+
+  // F14 (final review): a proxy that resolves outside the piece folder (a planted symlink) is a
+  // 404, never an unhandled throw (a 500 carrying the resolved path).
+  it("answers 404 when the proxy resolves outside the piece folder", async () => {
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    const outside = path.join(tempDir, "outside-secret.mp4");
+    fs.writeFileSync(outside, "SECRET");
+    fs.symlinkSync(outside, path.join(pdir, "clip-proxy.mp4"));
+    testDb.insert(files).values({
+      id: FID, pieceId: PIECE, filename: "clip.mp4", name: "clip",
+      description: "", type: "video", storagePath: `${PIECE}/clip.mp4`,
+      contentType: "video/mp4", size: 5,
+      proxyFilename: "clip-proxy.mp4", proxyStatus: "ready",
+    }).run();
+
+    const res = await GET(new Request("http://localhost/api/files/by-id/f1/proxy"), { params: Promise.resolve({ fileId: FID }) });
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain("SECRET");
+    expect(text).not.toContain(tempDir);
+  });
 });

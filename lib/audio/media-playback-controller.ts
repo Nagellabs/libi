@@ -1,3 +1,5 @@
+import { playQuietly } from "@/lib/media/play-quietly";
+
 /**
  * Tolerance while the element is PAUSED or scrubbing — snap tightly so a scrub
  * lands frame-accurate. A `currentTime` write here is cheap (the element isn't
@@ -90,7 +92,7 @@ export class MediaPlaybackController {
 
     // Re-check desired state — caller may have flipped it while we waited.
     if (this.desired.playing && this.el.paused) {
-      const p = this.el.play().catch(() => { /* autoplay may be blocked */ });
+      const p = playQuietly(this.el); // autoplay may be blocked
       this.pendingPlay = p.finally(() => { this.pendingPlay = null; });
     } else if (!this.desired.playing && !this.el.paused) {
       this.el.pause();

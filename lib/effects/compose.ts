@@ -12,7 +12,7 @@ import { inProgress, outProgress, loopPhase } from "./phase-timing";
  * animation. Merging the manifest defaults here makes every effect animate with
  * its declared defaults, matching what the inspector already shows.
  */
-function resolveParams(
+export function resolveParams(
   def: EffectDef,
   refParams: Record<string, number | string> | undefined,
 ): ResolvedParams {

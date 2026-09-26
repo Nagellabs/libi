@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveExportBase, isBaseShapedVideoOverlay } from "@/lib/export/export-base";
+import { resolveExportBase, isBaseShapedVideoOverlay, baseCut, streamCopyKeepsTimeline } from "@/lib/export/export-base";
 import type { Composition, Overlay } from "@/lib/engine/types";
 
 function comp(over: Partial<Composition> = {}): Composition {
@@ -134,5 +134,42 @@ describe("resolveExportBase", () => {
   it("returns null when the only video is an inset (no full-frame base)", () => {
     const pip = baseOverlay({ id: "pip", rect: { x: 100, y: 100, width: 480, height: 270 } });
     expect(resolveExportBase(comp({ overlays: [pip] }))).toBeNull();
+  });
+});
+
+// A stream that starts after the cut (docs-local/qa/2026-09-25-mediabunny-upgrade-report.md,
+// Export lead fix). Rendered with real ffmpeg in export-source-lead.test.ts.
+describe("baseCut", () => {
+  it("seeks the input as before when the video has started by the cut", () => {
+    expect(baseCut(1.37, 0.4)).toEqual({ inputSeek: 1.37, graphTrim: 0, videoLead: 0 });
+    expect(baseCut(0, 0)).toEqual({ inputSeek: 0, graphTrim: 0, videoLead: 0 });
+    expect(baseCut(2)).toEqual({ inputSeek: 2, graphTrim: 0, videoLead: 0 });
+  });
+  it("reads from the start and cuts the audio in the graph when the cut is inside the video's lead", () => {
+    // A seek would land on the video's first keyframe and drop the audio before it.
+    expect(baseCut(0, 0.4)).toEqual({ inputSeek: null, graphTrim: 0, videoLead: 0.4 });
+    const c = baseCut(0.2, 0.4);
+    expect(c.inputSeek).toBeNull();
+    expect(c.graphTrim).toBe(0.2);
+    expect(c.videoLead).toBeCloseTo(0.2, 9);
+  });
+  it("ignores a lead under a millisecond", () => {
+    expect(baseCut(0, 0.0005).inputSeek).toBe(0);
+  });
+});
+
+describe("streamCopyKeepsTimeline", () => {
+  it("copies when the video has started by the cut, an audio lead included", () => {
+    expect(streamCopyKeepsTimeline(1.37, { videoLead: 0.4, audioLead: 0.4 }, true)).toBe(true);
+    expect(streamCopyKeepsTimeline(0, { videoLead: 0, audioLead: 0.4 }, true)).toBe(true);
+    expect(streamCopyKeepsTimeline(0.2, {}, true)).toBe(true);
+  });
+  it("re-encodes a cut past 0 inside the video's lead (the seek drops audio)", () => {
+    expect(streamCopyKeepsTimeline(0.2, { videoLead: 0.4, audioLead: 0 }, true)).toBe(false);
+  });
+  it("at 0, copies a video lead only when the kept audio starts with the file", () => {
+    expect(streamCopyKeepsTimeline(0, { videoLead: 0.4, audioLead: 0 }, true)).toBe(true);
+    expect(streamCopyKeepsTimeline(0, { videoLead: 0.4, audioLead: 0.4 }, true)).toBe(false);
+    expect(streamCopyKeepsTimeline(0, { videoLead: 0.4, audioLead: 0 }, false)).toBe(false);
   });
 });

@@ -48,7 +48,8 @@ the engine actually looks at; trust that over any path in this document.
    > "The local tracking engine isn't installed yet. Installing it takes
    > **~10–20 minutes** on a cold machine and downloads **~2 GB** to your
    > machine (Python env + tracking models, incl. a one-time 572 MB
-   > export-input download that stays cached). Free, on-device, no API key.
+   > export-input download that stays cached, and libi's own CPython 3.11 —
+   > ~25 MB download, ~70 MB on disk). Free, on-device, no API key.
    > OK to start?"
 
    Wait for explicit approval. Do not start the install on an inferred yes.

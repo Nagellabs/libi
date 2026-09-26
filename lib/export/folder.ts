@@ -1,10 +1,24 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { getLibiHome } from "@/lib/libi-home";
+import { isTestMode } from "@/lib/test-mode";
 
-/** Default per-OS root for exported videos. Picked to match user
- *  expectations: macOS ships a Movies folder; Windows + Linux ship Videos. */
+/** Default root for exported videos.
+ *
+ *  In test mode (`LIBI_TEST_MODE=1`, which is what skill-eval boots) it is
+ *  `<LIBI_HOME>/exports`, so a hermetic run under a scratch home never writes
+ *  into the user's real Movies/Videos folder — eval runs did, before this.
+ *  (`LIBI_TEST_MODE=1 npx @nagellabs/libi` on the real home exports into
+ *  `~/.libi/exports` too.)
+ *
+ *  Otherwise it is the per-OS video folder, picked to match user expectations:
+ *  macOS ships a Movies folder; Windows + Linux ship Videos. That includes a
+ *  worktree dev boot, which is NOT test mode: deliberately so, because a
+ *  developer's worktree exports are real files they want to find where they
+ *  always look. */
 export function defaultExportFolder(): string {
+  if (isTestMode()) return path.join(getLibiHome(), "exports");
   const home = os.homedir();
   switch (process.platform) {
     case "darwin":

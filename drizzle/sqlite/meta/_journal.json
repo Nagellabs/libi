@@ -400,6 +400,118 @@
       "when": 1789293399407,
       "tag": "0056_flashy_pet_avengers",
       "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "6",
+      "when": 1789888212339,
+      "tag": "0057_lethal_virginia_dare",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "6",
+      "when": 1789897051945,
+      "tag": "0058_mysterious_revanche",
+      "breakpoints": true
+    },
+    {
+      "idx": 59,
+      "version": "6",
+      "when": 1789987384439,
+      "tag": "0059_handy_thaddeus_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 60,
+      "version": "6",
+      "when": 1790099865984,
+      "tag": "0060_modern_songbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 61,
+      "version": "6",
+      "when": 1790099883432,
+      "tag": "0061_templates_fts",
+      "breakpoints": true
+    },
+    {
+      "idx": 62,
+      "version": "6",
+      "when": 1790148714811,
+      "tag": "0062_familiar_gamora",
+      "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "6",
+      "when": 1790150848637,
+      "tag": "0063_nasty_betty_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "6",
+      "when": 1790156433556,
+      "tag": "0064_whole_captain_britain",
+      "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "6",
+      "when": 1790162578900,
+      "tag": "0065_big_lady_ursula",
+      "breakpoints": true
+    },
+    {
+      "idx": 66,
+      "version": "6",
+      "when": 1790167054109,
+      "tag": "0066_same_dracula",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "6",
+      "when": 1790176751681,
+      "tag": "0067_familiar_energizer",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "6",
+      "when": 1790177869656,
+      "tag": "0068_narrow_rick_jones",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "6",
+      "when": 1790177879984,
+      "tag": "0069_templates_cloud_source_backfill",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "6",
+      "when": 1790251042181,
+      "tag": "0070_dark_drax",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "6",
+      "when": 1790364088862,
+      "tag": "0071_bouncy_zaladane",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "6",
+      "when": 1790398030483,
+      "tag": "0072_goofy_dagger",
+      "breakpoints": true
     }
   ]
 }

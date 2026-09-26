@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema/sqlite";
 import { proxyLogger as logger } from "@/lib/logger";
-import { enqueueProxyGen } from "@/lib/proxy/enqueue";
+import { regenerateProxy } from "@/lib/proxy/regen-once";
 
 /**
  * One-shot startup sweep: regenerate proxies that predate the
@@ -59,7 +59,10 @@ export function sweepRegenLegacy720pProxies(): void {
       },
       "proxy.sweep_regen_720p",
     );
-    enqueueProxyGen(row.id, { pieceId: row.pieceId, regenerate: true });
+    // Through the sweeps' shared path (regen-once.ts): one regeneration per
+    // file at a time, so this and a later sweep never write one proxy together
+    // (review round 4, M-c). Not awaited, as before.
+    void regenerateProxy(row.id, row.pieceId);
     reenqueued++;
   }
 

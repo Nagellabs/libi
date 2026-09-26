@@ -1,0 +1,51 @@
+{
+  "account": {
+    "_id": "6aae6b468d284ffb211ade1e",
+    "platform": "instagram",
+    "username": "nagellabs",
+    "displayName": "Nagel Labs",
+    "profilePicture": "https://cdn.example/ig-avatar.jpg",
+    "profileUrl": "https://www.instagram.com/nagellabs/",
+    "isActive": true,
+    "enabled": true,
+    "needsReconnection": false,
+    "permissions": ["instagram_content_publish"],
+    "platformStatus": "active",
+    "platformStatusReason": null,
+    "tokenExpiresAt": "2026-11-18T11:00:22.425Z",
+    "followersCount": 4218,
+    "externalPostCount": 137,
+    "adsStatus": "connected",
+    "profileId": { "_id": "6aae6a1e8d284ffb211adc02", "name": "Nagel Labs" },
+    "metadata": { "profileData": { "extraData": { "accountType": "BUSINESS" } } }
+  },
+  "accountStringProfileId": {
+    "_id": "6aae6ba98d284ffb211ae03a",
+    "platform": "tiktok",
+    "username": "nagellabs",
+    "displayName": "Nagel Labs",
+    "profileUrl": "https://www.tiktok.com/@nagellabs",
+    "isActive": true,
+    "profileId": "6aae6a1e8d284ffb211adc02"
+  },
+  "health": {
+    "accountId": "6aae6b468d284ffb211ade1e",
+    "platform": "instagram",
+    "username": "nagellabs",
+    "displayName": "Nagel Labs",
+    "status": "healthy",
+    "tokenStatus": { "valid": true, "expiresAt": "2026-11-19T09:00:00.000Z", "expiresIn": 5184000, "needsRefresh": false },
+    "permissions": {
+      "posting": ["instagram_content_publish"],
+      "analytics": ["instagram_manage_insights"],
+      "optional": [],
+      "canPost": true,
+      "canFetchAnalytics": true,
+      "analyticsSupported": true,
+      "missingRequired": []
+    },
+    "issues": [],
+    "recommendations": [],
+    "messagingRestriction": null
+  }
+}

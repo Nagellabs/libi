@@ -10,10 +10,12 @@
  * Cancellation comes from the chat's existing Stop button (sends a job
  * cancel on the underlying jobId).
  */
+import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
 import { getCurrentPort } from "@/lib/libi-home";
 import { LibiServerUnavailableError } from "@/mcp/jobs-client";
 import { mcpLogger as logger } from "@/lib/logger";
 import { reportToolProgress } from "./tool-progress";
+import { frameDroppedOverlay, type FramedDroppedOverlay } from "./body-message";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
 import type {
   ServerRequest,
@@ -44,12 +46,16 @@ export interface ExportVideoResult {
   /** True when this export began by downloading Chromium (first canvas
    *  export on this machine) — so the agent can explain the extra time. */
   chromiumDownloaded?: boolean;
-  /** Overlays whose draw threw during a chromium-render export and were
-   *  skipped (QA 2026-09-18 B1 — e.g. a code overlay with no/invalid body).
-   *  The export still succeeded; tell the user which overlay was dropped and
-   *  why, and offer to fix its draw function. Absent when nothing was
-   *  dropped. */
-  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Overlays a chromium-render export went out without. The export still
+   *  succeeded; absent when nothing was dropped. Two kinds of entry:
+   *  - a body overlay whose draw threw (QA 2026-09-18 B1 — e.g. a code
+   *    overlay with no/invalid body): `message` is text the BODY produced,
+   *    bounded and marked `messageSource: "overlay body (untrusted)"`, like
+   *    `renderDiagnostics` — offer to fix its draw function;
+   *  - a video clip that could not be loaded (F13): `kind: "video"`, its
+   *    `fileId`, and libi's own `message` (`messageSource: "libi"`) — the
+   *    clip is missing from the file; check / replace it. */
+  droppedOverlays?: FramedDroppedOverlay[];
   /** Uploaded fonts a chromium-render export could not load (Final QA F1):
    *  their text rendered in a fallback face. The export still succeeded; tell
    *  the user which font and why. Absent when every font loaded. */
@@ -176,10 +182,12 @@ export async function exportVideo(
     };
   }
 
+  const { droppedOverlays, ...value } = result.value;
   return {
     success: true,
     data: {
-      ...result.value,
+      ...value,
+      ...(droppedOverlays?.length ? { droppedOverlays: droppedOverlays.map(frameDroppedOverlay) } : {}),
       jobId: enq.jobId,
       chromiumDownloaded: Boolean(enq.chromiumDownloadMb),
     },
@@ -252,7 +260,7 @@ async function waitForJobCompletion(
               progressToken,
               progress: done,
               total,
-              message: unit ? `${done}/${total} ${unit}` : `${done}/${total}`,
+              message: isExportWaiting(payload) ? EXPORT_WAITING_MESSAGE : unit ? `${done}/${total} ${unit}` : `${done}/${total}`,
             },
           }).catch(() => { /* ignore */ });
           continue;

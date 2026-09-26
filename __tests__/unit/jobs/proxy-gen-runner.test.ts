@@ -378,6 +378,36 @@ describe("proxyGenRunner", () => {
     expect(vi.mocked(runFfmpeg)).toHaveBeenCalled();
   });
 
+  it("an audio file (one the preview can't play: review round 4) gets an AAC proxy in an M4A, and no height", async () => {
+    seedPiece(db, { id: "pa", name: "pa" });
+    const pieceDir = path.join(tmp, "storage", "pa");
+    fs.mkdirSync(pieceDir, { recursive: true });
+    fs.writeFileSync(path.join(pieceDir, "radio.ogg"), Buffer.alloc(1024));
+    db.insert(files)
+      .values({
+        id: "fa", pieceId: "pa", filename: "radio.ogg", name: "radio", description: "", type: "audio",
+        storagePath: "pa/radio.ogg", contentType: "audio/ogg", size: 1024,
+      })
+      .run();
+    vi.mocked(runFfmpeg).mockImplementation(async () => {
+      fs.writeFileSync(path.join(pieceDir, "radio-proxy.m4a"), Buffer.alloc(256));
+      return { stdout: "", stderr: "" };
+    });
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("proxy_gen", { fileId: "fa" }));
+    const result = await mgr.runToCompletion<{ proxyFilename: string }>(jobId);
+    expect(result.proxyFilename).toBe("radio-proxy.m4a");
+    const args = vi.mocked(runFfmpeg).mock.calls.at(-1)![0] as string[];
+    expect(args).toContain("-vn");
+    expect(args).not.toContain("libx264");
+    expect(args[args.indexOf("-c:a") + 1]).toBe("aac");
+    expect(args.at(-1)).toBe(path.join(pieceDir, "radio-proxy.m4a"));
+    const row = db.select().from(files).where(eq(files.id, "fa")).all()[0];
+    expect(row.proxyStatus).toBe("ready");
+    expect(row.proxyFilename).toBe("radio-proxy.m4a");
+    expect(row.proxyHeight).toBeNull();
+  });
+
   it("non-video file throws", async () => {
     seedPiece(db, { id: "p", name: "p" });
     db.insert(files)

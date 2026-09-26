@@ -3,9 +3,12 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  catalogEnvFor,
   preambleFor,
   resolveFixturePlaceholders,
+  socialEnvFor,
   stageFixtures,
+  SKILL_EVAL_SOCIAL_SETTINGS,
 } from "@/scripts/skill-eval/harness";
 
 let home: string;
@@ -194,5 +197,31 @@ describe("resolveFixturePlaceholders", () => {
     expect(() =>
       resolveFixturePlaceholders("use {{fixture:missing.wav}}", ["/tmp/h/fixtures/jfk.wav"]),
     ).toThrow(/jfk\.wav/);
+  });
+});
+
+describe("socialEnvFor", () => {
+  /**
+   * `disconnected` must suppress the test-mode GRANT while leaving the fake
+   * running — unsetting `LIBI_SOCIAL_MCP_URL` would do the opposite (it is what
+   * makes the studio start the fake and write the grant in the first place).
+   */
+  it("sets the no-grant flag only for a disconnected scenario", () => {
+    expect(socialEnvFor({ social: "disconnected" })).toEqual({ LIBI_SOCIAL_TEST_NO_GRANT: "1" });
+    expect(socialEnvFor({ social: "connected" })).toEqual({});
+    expect(socialEnvFor({ social: "none" })).toEqual({});
+  });
+
+  it("the settings body names the provider the fake stands in for", () => {
+    expect(SKILL_EVAL_SOCIAL_SETTINGS.providerId).toBe("zernio");
+    expect(SKILL_EVAL_SOCIAL_SETTINGS.pollSeconds).toBe(30);
+  });
+});
+
+describe("catalogEnvFor", () => {
+  it("sets the test-mode catalog's creator status: the scenario's, or approved by default", () => {
+    expect(catalogEnvFor({ catalogCreator: "none" })).toEqual({ LIBI_TEST_CATALOG_CREATOR: "none" });
+    expect(catalogEnvFor({ catalogCreator: "rejected" })).toEqual({ LIBI_TEST_CATALOG_CREATOR: "rejected" });
+    expect(catalogEnvFor({})).toEqual({ LIBI_TEST_CATALOG_CREATOR: "approved" });
   });
 });

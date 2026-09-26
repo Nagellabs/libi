@@ -17,7 +17,7 @@ import {
 import { setClientAnalyticsEnabled, trackEvent } from "@/lib/analytics/client";
 import { useAnalyticsSettings, useSetAnalyticsEnabled } from "@/lib/queries/analytics-settings";
 import { useCrashReportSettings, useSetCrashReportsEnabled } from "@/lib/queries/crash-report-settings";
-import { LEGAL_LINKS } from "@/lib/legal-links";
+import { useLegalLinks } from "@/lib/queries/templates-catalog";
 
 /** Placeholder occupying one switch's slot while only THAT query is in flight. */
 function SwitchSkeleton() {
@@ -58,6 +58,7 @@ function SettingSaveError() {
 }
 
 export function PrivacyTab() {
+  const links = useLegalLinks();
   const { data, isLoading, isError } = useAnalyticsSettings();
   const setEnabled = useSetAnalyticsEnabled();
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -209,7 +210,7 @@ export function PrivacyTab() {
         <p className="text-sm text-muted-foreground">
           Full details are in our{" "}
           <a
-            href={LEGAL_LINKS.privacy}
+            href={links.privacy}
             target="_blank"
             rel="noreferrer"
             className="cursor-pointer font-medium text-primary hover:underline"
@@ -218,7 +219,7 @@ export function PrivacyTab() {
           </a>
           ,{" "}
           <a
-            href={LEGAL_LINKS.terms}
+            href={links.terms}
             target="_blank"
             rel="noreferrer"
             className="cursor-pointer font-medium text-primary hover:underline"
@@ -227,7 +228,7 @@ export function PrivacyTab() {
           </a>{" "}
           and{" "}
           <a
-            href={LEGAL_LINKS.license}
+            href={links.license}
             target="_blank"
             rel="noreferrer"
             className="cursor-pointer font-medium text-primary hover:underline"

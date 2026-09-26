@@ -13,7 +13,7 @@ vi.mock("@/lib/queries/effects-catalog", () => ({
   useCustomEffects: () => mockUseCustomEffects(),
 }));
 
-// compileCustomPayload needs real effect packages; stub it to a deterministic
+// customEffectDefsFromPayload needs real effect packages; stub it to a deterministic
 // def so the test exercises the REGISTRATION + subscription plumbing.
 const fakeDef = {
   meta: {
@@ -26,7 +26,7 @@ const fakeDef = {
   compose: () => ({}),
 };
 vi.mock("@/lib/effects/hydrate-custom-client", () => ({
-  compileCustomPayload: (custom: unknown) =>
+  customEffectDefsFromPayload: (custom: unknown) =>
     custom
       ? { defs: [fakeDef], customIds: new Set(["custom.wobble"]) }
       : { defs: [], customIds: new Set() },
@@ -48,7 +48,7 @@ describe("useRegisterCustomEffects", () => {
     expect(listEffects().some((e) => e.meta.id === "custom.wobble")).toBe(false);
   });
 
-  it("registers the compiled defs once the query succeeds", async () => {
+  it("registers the defs once the query succeeds", async () => {
     mockUseCustomEffects.mockReturnValue({
       data: { custom: [{ id: "custom.wobble" }] },
       isSuccess: true,

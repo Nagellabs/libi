@@ -1,0 +1,13 @@
+{
+  "creator": { "nickname": "nagellabs", "avatarUrl": "https://cdn.example/tt-avatar.jpg", "isVerified": false, "canPostMore": true },
+  "privacyLevels": [{ "value": "PUBLIC_TO_EVERYONE", "label": "Everyone" }],
+  "postingLimits": {
+    "maxVideoDurationSec": 600,
+    "interactionSettings": {
+      "allow_comment": { "enabled": true, "required": true, "default": false, "label": "Comments" },
+      "allow_duet": { "enabled": true, "required": true, "default": false, "label": "Duet" },
+      "allow_stitch": { "enabled": true, "required": true, "default": false, "label": "Stitch" }
+    }
+  },
+  "commercialContentTypes": [{ "value": "none", "label": "None" }]
+}

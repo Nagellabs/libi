@@ -17,6 +17,20 @@ async function postAndCapture(event: string, body: unknown) {
   }
 }
 
+describe("/api/notify navigate", () => {
+  it("forwards target: 'posting' with pieceId and id unchanged (no allowlist on this route)", async () => {
+    const { res, seen } = await postAndCapture("navigate", {
+      type: "navigate",
+      target: "posting",
+      pieceId: "p1",
+      id: "post_1",
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+    expect(seen).toEqual([{ target: "posting", pieceId: "p1", fileId: undefined, id: "post_1" }]);
+  });
+});
+
 describe("/api/notify navigate_agents", () => {
   it("emits navigate_agents with the tab and the optional ids", async () => {
     const mcp = await postAndCapture("navigate_agents", {
@@ -82,5 +96,19 @@ describe("/api/notify job_progress", () => {
     jobProgressEmitter.off("job_progress", h);
     expect(res.status).toBe(200);
     expect(seen).toEqual([expect.objectContaining({ jobId: "", toolName: "libi.sleep", message: "sleeping — 5/20s" })]);
+  });
+});
+
+describe("/api/notify piece_deleted (Task 11 fix M1)", () => {
+  it("drops the studio's render diagnostics for that piece — an MCP-driven delete runs in another process", async () => {
+    const store = await import("@/lib/render/render-diagnostics-store");
+    store.__resetRenderDiagnosticsForTests();
+    store.setRenderDiagnostics("gone", [{ overlayId: "a", kind: "code", phase: "render", message: "x", at: 1 }]);
+    store.setRenderDiagnostics("kept", [{ overlayId: "b", kind: "code", phase: "render", message: "x", at: 1 }]);
+    const res = await POST(new Request("http://x/api/notify", { method: "POST", body: JSON.stringify({ type: "piece_deleted", pieceId: "gone" }) }));
+    expect(res.status).toBe(200);
+    expect(store.getRenderDiagnostics("gone")).toEqual([]);
+    expect(store.getRenderDiagnostics("kept")).toHaveLength(1);
+    expect(store.__storedPieceIdsForTests()).toEqual(["kept"]);
   });
 });

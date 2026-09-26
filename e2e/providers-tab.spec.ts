@@ -1,9 +1,9 @@
 import { test, expect } from "./helpers/app";
 
-const PROVIDERS = ["fal", "higgsfield", "elevenlabs"] as const;
+const PROVIDERS = ["fal", "higgsfield", "zernio", "elevenlabs"] as const;
 
 test.describe("Agents — Providers tab", () => {
-  test("lists the three third-party providers and deep-links to one", async ({ page }) => {
+  test("lists the four third-party providers and deep-links to one", async ({ page }) => {
     await page.goto("/agents?tab=providers");
     for (const id of PROVIDERS) {
       await expect(page.getByTestId(`provider-row-${id}`)).toBeVisible({ timeout: 30_000 });

@@ -12,6 +12,13 @@ vi.mock("@/lib/shell/client", () => ({
   pickDirectory: vi.fn(async () => undefined),
   hasElectronBridge: () => false,
 }));
+// The dialog's success view reads social status for its "Post…" button —
+// mocked here (not exercised by this file's tests) so none of these renders
+// need a QueryClientProvider just to satisfy that one read.
+const socialStatus: { data: { providerId: string | null } | undefined } = { data: undefined };
+vi.mock("@/lib/queries/social", () => ({
+  useSocialStatus: () => socialStatus,
+}));
 
 import { ExportDialog } from "@/components/export/export-dialog";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
@@ -256,5 +263,15 @@ describe("ExportDialog quality hint — orientation-aware presets", () => {
     });
     fireEvent.click(within(mediaField()).getByRole("button", { name: "1080p" }));
     expect(screen.queryByText(/Videos and images are upscaled/)).not.toBeInTheDocument();
+  });
+});
+
+// Final review F7: an export queued behind another in the export lane.
+describe("ExportDialog — waiting for another export", () => {
+  it("names the wait in the progress view, never '0 %'", () => {
+    const flow = { ...idleFlow(), status: "running", progress: { done: 0, total: 1, unit: "waiting", etaMs: null } } as unknown as UseExportFlowResult;
+    renderDialog({ hasDraft: true, hasSnapshot: false, flow });
+    expect(screen.getByTestId("export-waiting").textContent).toBe("Waiting for another export to finish");
+    expect(screen.queryByText(/^0%$/)).toBeNull();
   });
 });

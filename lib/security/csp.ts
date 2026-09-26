@@ -1,4 +1,7 @@
+import { CATALOG_BUCKET_BASES } from "@/lib/templates/cloud/constants";
 import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
+import { socialMediaOrigins } from "@/lib/social/catalog";
+import { OVERLAY_RUNTIME_BUNDLE_PATH, OVERLAY_RUNTIME_PATH } from "@/lib/sandbox/paths";
 
 // Single source of truth for libi's Content-Security-Policy (RC-C part 2 / RC-G).
 //
@@ -6,10 +9,13 @@ import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
 // denylist bypass (RC-C) compiles and runs attacker-controlled JS, the CSP
 // prevents it from opening a network connection to any host other than the
 // app's own origin — so it cannot exfiltrate data off-machine, MODULO the
-// two narrow, deliberate allowlist relaxations below (the marketing site,
+// two narrow, deliberate `connect-src` relaxations below (the marketing site,
 // Sentry), each scoped to one specific host we operate rather than an
 // arbitrary attacker target. Read those trade-off blocks before assuming
-// `'self'` is the whole story.
+// `'self'` is the whole story. A third and a fourth relaxation (a social
+// provider's media origin, the public templates catalog's two bucket paths)
+// touch only `media-src`/`img-src` — display sinks, not connections — and are
+// documented with the others.
 //
 // GA4 analytics used to be a third relaxation here — script-src/connect-src/
 // img-src allowlisted the two GA4 web-stream hosts so client-side gtag.js
@@ -23,9 +29,26 @@ import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
 //
 // Several relaxations are REQUIRED for the app to function and must not be
 // removed:
-//   - `script-src 'unsafe-eval'` — the client renderer compiles draw/overlay
-//     (canvas / code / three) function bodies via `new Function`; without it
-//     every canvas scene and code overlay throws.
+//   - `script-src 'unsafe-eval'` — Next dev needs it (React uses `eval` in
+//     development for its debugging information; see Next's CSP guide in
+//     node_modules/next/dist/docs), and so does the one in-page
+//     `new Function` user left: the dev-only `LIBI_OVERLAY_SANDBOX=0` in-origin
+//     transport (lib/sandbox/in-origin-transport.ts), whose same-origin blob
+//     worker inherits this policy and compiles bodies in
+//     lib/sandbox/runtime/compile.ts. Overlay, three and effect bodies no
+//     longer compile in the page in any shipped mode — they run in the
+//     overlay sandbox under its own policy (buildOverlayRuntimeCsp below).
+//     `lib/ai/scene-validator.ts`'s `new Function` calls run server-side
+//     (the overlay watcher, template install, the Node storyboard worker's
+//     `createDrawFunction`) or inside the sandbox runtime
+//     (lib/sandbox/runtime/compile.ts and effect-curve.ts use its
+//     `createDrawFunction` / `createAnimateFunction` — which is how the
+//     in-origin transport reaches them), and `lib/engine/three-overlay.ts`
+//     only mentions it in a comment. Re-check with `grep -rn "new Function" lib components
+//     hooks` before tightening this. The directive is also sent in
+//     production, where neither of those applies — this list is one policy
+//     for both — so dropping it there is a separate change to verify on a
+//     packaged build, not something this comment establishes.
 //   - `worker-src blob:` — MediaBunny spawns its WebCodecs decode workers from
 //     blob URLs (timeline preview + canvas-source export).
 //   - `img-src`/`media-src data: blob:` — preview video frames and thumbnails
@@ -115,15 +138,82 @@ const CONNECT_SRC = ["'self'", TERMINAL_WS, SITE_CONNECT, SENTRY_CONNECT]
   .filter(Boolean)
   .join(" ");
 
+// THIRD DELIBERATE TRADE-OFF: a social provider's media origin is allowlisted
+// in `media-src` and `img-src` so a post's own video/image preview renders at
+// all. `media-src 'self' blob: data:` blocked every preview in the Posting
+// tab's detail sheet and every post-row thumbnail — an empty black player with
+// one console line and nothing in the UI, on the one screen whose job is to
+// show the user what is about to go out (QA 2026-09-21, finding 2).
+//
+// The origins come from `SOCIAL_PROVIDER_CATALOG` (`socialMediaOrigins()`),
+// never hardcoded here: a second provider is then a catalog entry rather than
+// an edit to this file, and the list is exactly the providers libi ships.
+//
+// Narrow by construction, and this is the whole of the widening: `connect-src`
+// is UNTOUCHED, so the anti-exfiltration guarantee above is intact — a
+// renderer-side bypass still cannot `fetch()` these hosts, only display a
+// resource from one. `media-src`/`img-src` are display sinks, not read-back
+// channels: a `<video>`/`<img>` gives the page no access to the bytes (canvas
+// tainting still applies, and there is no credential to carry — the URLs are
+// unauthenticated presigned objects). What an attacker gains is the ability to
+// make libi SHOW a media file from one named host, not to send anything to it.
+const SOCIAL_MEDIA_SRC = socialMediaOrigins().join(" ");
+
+// FOURTH DELIBERATE TRADE-OFF: the public templates catalog's two buckets are
+// allowlisted in `img-src` and `media-src` so a public template's poster and
+// hover-play example render on the Templates page. Same shape as the social
+// media origins above — a display sink, not a connection: `connect-src` is
+// untouched, so a renderer-side bypass still cannot `fetch()` the bucket, only
+// show an image or video from it.
+//
+// Scoped by PATH, never by origin. Every Google Cloud Storage bucket is served
+// from the one origin https://storage.googleapis.com — an attacker's bucket as
+// much as ours — so the bare origin would let any bucket's media render in
+// libi. CSP source expressions carry a path, and a path ending in `/` matches
+// everything under that directory and nothing else, so each source below is
+// exactly one bucket. Both are always listed (prod and dev), read from the
+// constants the cloud client itself uses
+// (lib/templates/cloud/constants.ts#CATALOG_BUCKET_BASES) rather than retyped.
+//
+// One caveat the path scope depends on: after a redirect, CSP matches the
+// origin alone and skips the path (CSP3, "Does url match expression in origin
+// with redirect count?" compares paths only at redirect count 0). So a
+// redirect from ANY source these directives admit into storage.googleapis.com
+// would reach every bucket. Checked 2026-09-23: GCS answers a public object
+// URL directly (200, or 404 — no redirect), and no libi route redirects to a
+// caller-chosen URL. A new route that did would re-open every bucket.
+//
+// A dev build's catalog switch (Production ⇄ a development site, even a
+// Vercel preview; lib/templates/cloud/catalog-setting.ts) needs NOTHING more
+// here: the renderer never talks to a catalog site (the Node server does,
+// through lib/templates/cloud/client.ts), and a development catalog's media is
+// in the dev bucket, already listed. Don't add `*.vercel.app` to any directive.
+const CATALOG_MEDIA_SRC = Object.values(CATALOG_BUCKET_BASES).join(" ");
+
 const CSP_DIRECTIVES: readonly string[] = [
   "default-src 'self'",
   `connect-src ${CONNECT_SRC}`,
-  "img-src 'self' data: blob:",
-  "media-src 'self' blob: data:",
+  `img-src 'self' data: blob: ${SOCIAL_MEDIA_SRC} ${CATALOG_MEDIA_SRC}`,
+  `media-src 'self' blob: data: ${SOCIAL_MEDIA_SRC} ${CATALOG_MEDIA_SRC}`,
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self' 'unsafe-eval' 'unsafe-inline'",
   "worker-src 'self' blob:",
   "frame-src 'self'",
+  // The overlay-sandbox iframe (lib/sandbox/iframe-transport.ts) is same-URL
+  // under an opaque origin; `frame-src 'self'` admits it and `child-src`
+  // mirrors that for UAs that consult the older directive.
+  "child-src 'self'",
+  // Nothing off-origin may frame the app (anti-clickjacking). `'self'`, not
+  // `'none'` (spec §4.10 said `'none'`; deliberately deviated): Chromium
+  // enforces frame-ancestors on `<embed>`, and this policy is stamped on every
+  // proxied response — so `'none'` on `/api/files/by-id/<id>/content` blanked
+  // the editor's same-origin PDF `<embed>` (asset-media-view.tsx; reproduced
+  // in Playwright Chromium). `'self'` still refuses every cross-origin framer,
+  // and the one same-origin document that could frame an app page, the
+  // opaque-origin overlay runtime, has `default-src 'none'` and no `frame-src`.
+  // The runtime page carries its own `frame-ancestors <studio>`
+  // (buildOverlayRuntimeCsp below; cspForPath picks one policy, never both).
+  "frame-ancestors 'self'",
   "object-src 'self'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -135,4 +225,46 @@ const CSP_DIRECTIVES: readonly string[] = [
  */
 export function buildCsp(): string {
   return CSP_DIRECTIVES.join("; ");
+}
+
+export { OVERLAY_RUNTIME_PATH, OVERLAY_RUNTIME_BUNDLE_PATH };
+
+/**
+ * The runtime page's own policy — stricter than the app's, and the reason the
+ * sandbox holds even if a body bypasses every denylist: no network at all
+ * (`connect-src 'none'`), no navigation targets, no forms, only the
+ * content-hashed bundle plus `'unsafe-eval'` (which `new Function` needs).
+ * A1: bodies run in a classic Web Worker spawned from a `blob:` URL, so
+ * `worker-src blob:` admits the worker and `script-src` also carries `blob:`
+ * (measured in the spike — round 2 "One finding that constrains the real
+ * implementation"). `studioOrigin` is the embedding page's origin
+ * (`http://127.0.0.1:<port>` or `http://localhost:<port>`), from the request's Host.
+ *
+ * `sandbox allow-scripts` makes the page opaque-origin however it is loaded
+ * (final security review, M2): the iframe's own `sandbox` attribute does that
+ * for the studio, but opened top-level — which `frame-ancestors` does not
+ * prevent — the page would run at the studio's origin, and a regression that
+ * dropped the attribute would go with it. The flags equal the attribute's, so
+ * the two together are exactly what the frame always had.
+ */
+export function buildOverlayRuntimeCsp(studioOrigin: string): string {
+  return [
+    "default-src 'none'",
+    `script-src ${studioOrigin}${OVERLAY_RUNTIME_BUNDLE_PATH} 'unsafe-eval' blob:`,
+    "img-src blob: data:",
+    "font-src data:",
+    "connect-src 'none'",
+    "worker-src blob:",
+    `frame-ancestors ${studioOrigin}`,
+    "base-uri 'none'",
+    "form-action 'none'",
+    "sandbox allow-scripts",
+  ].join("; ");
+}
+
+/** What `proxy.ts` puts on a response for `pathname`: the runtime page gets its
+ *  strict policy, everything else the app policy. Pure, so it is testable
+ *  without a NextRequest. */
+export function cspForPath(pathname: string, origin: string): string {
+  return pathname === OVERLAY_RUNTIME_PATH ? buildOverlayRuntimeCsp(origin) : buildCsp();
 }

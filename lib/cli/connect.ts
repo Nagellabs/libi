@@ -6,6 +6,7 @@ import { LIBI_MCP_ENTRY_NAME } from "@/lib/mcp/agent-surface";
 import type { SetupAgentId } from "@/lib/agents/setup/commands";
 import type { AddSkillInstallInput, SkillInstallView } from "@/lib/agents/skill-installs-types";
 import { AGENT_SKILL_TARGETS } from "@/lib/agents/skill-targets";
+import type { CodexMcpListEntry } from "@/lib/codex-config/codex-cli";
 
 /**
  * The name this writes into the user's own agent config — and, deliberately,
@@ -32,8 +33,18 @@ export function resolveConnectUrl(env: NodeJS.ProcessEnv, readPortFile: () => st
 export function claudeMcpAddArgs(url: string): string[] {
   return ["mcp", "add", "--transport", "http", "--scope", "user", MCP_SERVER_NAME, url];
 }
+
+/**
+ * The URL a codex registration targets — what `codex mcp add --url` writes, and so what
+ * `codexAlreadyConnected` must compare codex's listing against. Single-sourced so the add
+ * and the already-connected check can never drift apart (the add used to be the only
+ * writer, and the check pulled the same string back out of the argv by position).
+ */
+export function codexMcpUrl(url: string): string {
+  return `${url}?agent=codex`;
+}
 export function codexMcpAddArgs(url: string): string[] {
-  return ["mcp", "add", MCP_SERVER_NAME, "--url", `${url}?agent=codex`];
+  return ["mcp", "add", MCP_SERVER_NAME, "--url", codexMcpUrl(url)];
 }
 
 /** `fs.realpathSync`, falling back to a plain resolve for a path that isn't on disk. */
@@ -212,10 +223,100 @@ export interface ConnectDeps {
    * `codex mcp remove` does not put any of it back. libi cannot avoid that
    * (hand-editing the file is worse), so it takes a copy and SAYS SO here.
    */
-  run: (bin: string, args: string[], cwd: string) => Promise<{ ok: boolean; stderr: string; configBackup?: string | null }>;
+  run: (bin: string, args: string[], cwd: string) => Promise<RunOutcome>;
+  /**
+   * Codex's own listing (`codex mcp list --json`, read-only), asked before the
+   * codex add so an entry that already says the right thing is left alone —
+   * see `codexAlreadyConnected`. `null` (or a throw) is no information, and so
+   * is leaving it out: the add then runs as it always did.
+   */
+  listCodex?: (bin: string) => Promise<CodexMcpListEntry[] | null>;
   /** Record + write one install through the install service (`mcp/skills/installs.ts`). */
   installSkills: (input: AddSkillInstallInput) => Promise<SkillInstallView>;
   listInstalls: () => Promise<SkillInstallView[]>;
+  /**
+   * A line of user-facing progress, printed by `connectCommand` (this module stays pure —
+   * it never writes to stdout itself). Currently fired once, right before the codex listing
+   * read: that call is a real spawn (`codex mcp list --json`, bounded but not instant), and
+   * `libi connect` would otherwise sit silent between "Connecting …" and the codex step's
+   * own result line.
+   */
+  onProgress?: (message: string) => void;
+}
+
+type RunOutcome = {
+  ok: boolean;
+  stderr: string;
+  /** A NEW copy of `config.toml` taken before a codex write. */
+  configBackup?: string | null;
+  /** A copy holding the bytes codex was about to rewrite, new or from an earlier run. */
+  priorConfig?: string;
+};
+
+/** Same server URL, ignoring a trailing slash on the path. Unparseable → compared as written. */
+function sameMcpUrl(a: string, b: string): boolean {
+  const norm = (u: string): string => {
+    try {
+      const p = new URL(u.trim());
+      const pathname = p.pathname.length > 1 ? p.pathname.replace(/\/+$/, "") : p.pathname;
+      return `${p.protocol}//${p.host}${pathname}${p.search}`;
+    } catch {
+      return u.trim();
+    }
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * Does codex's listing already hold the registration `codex mcp add` would
+ * write — `libi`, enabled, HTTP (codex prints `streamable_http`), at `url`?
+ *
+ * Then `libi connect` must NOT re-add it. `codex mcp add` replaces the whole
+ * `[mcp_servers.libi]` entry and re-serializes `config.toml`, and QA measured
+ * (codex-cli 0.153.4, 2026-09-19) that a re-add over an identical entry drops
+ * its `[mcp_servers.libi.tools.<tool>] approval_mode` subtables — approvals the
+ * user set, gone for no change at all. Pure; reads codex's own answer, never
+ * the user's TOML.
+ */
+export function codexAlreadyConnected(entries: CodexMcpListEntry[] | null, url: string): boolean {
+  if (!Array.isArray(entries)) return false;
+  const e = entries.find((x) => x && typeof x === "object" && x.name === MCP_SERVER_NAME);
+  if (!e || e.enabled !== true) return false;
+  const t: unknown = e.transport;
+  if (!t || typeof t !== "object") return false;
+  const { type, url: registered } = t as { type?: unknown; url?: unknown };
+  return typeof type === "string" && /http/i.test(type) && typeof registered === "string" && sameMcpUrl(registered, url);
+}
+
+/** A `[mcp_servers.libi.tools.<tool>]` table (bare or quoted keys) — what a codex re-add drops. */
+const LIBI_TOOL_TABLE = new RegExp(String.raw`^\s*\[\s*mcp_servers\s*\.\s*"?${MCP_SERVER_NAME}"?\s*\.\s*"?tools"?\s*\.`, "m");
+
+/** Did the pre-write copy (libi's OWN backup — never `config.toml` itself) hold per-tool approvals for libi? */
+function hadLibiToolApprovals(copyPath: string | undefined | null): boolean {
+  if (!copyPath) return false;
+  try {
+    return LIBI_TOOL_TABLE.test(fs.readFileSync(copyPath, "utf-8"));
+  } catch {
+    return false;
+  }
+}
+
+async function registerCodex(found: UserCliSource, url: string, cwd: string, deps: ConnectDeps): Promise<ConnectStep> {
+  const args = codexMcpAddArgs(url);
+  if (found.kind === "user" && deps.listCodex) {
+    deps.onProgress?.("checking codex's current registration…");
+    let entries: CodexMcpListEntry[] | null = null;
+    try {
+      entries = await deps.listCodex(found.path);
+    } catch {
+      entries = null;
+    }
+    const target = codexMcpUrl(url);
+    if (codexAlreadyConnected(entries, target)) {
+      return { id: "codex", status: "done", detail: `codex: already connected at ${target} — left as is` };
+    }
+  }
+  return register("codex", found, args, cwd, deps);
 }
 
 async function register(id: "claude" | "codex", found: UserCliSource, args: string[], cwd: string, deps: ConnectDeps): Promise<ConnectStep> {
@@ -227,7 +328,7 @@ async function register(id: "claude" | "codex", found: UserCliSource, args: stri
         : `the only ${id} on your PATH is libi's bundled copy — install ${id} yourself, then run:`;
     return { id, status: "printed", detail: `${why}\n    ${printed}` };
   }
-  let res: { ok: boolean; stderr: string; configBackup?: string | null };
+  let res: RunOutcome;
   try {
     res = await deps.run(found.path, args, cwd);
   } catch (err) {
@@ -240,6 +341,13 @@ async function register(id: "claude" | "codex", found: UserCliSource, args: stri
       ? ` (Codex registrations are always user-wide)${
           res.configBackup
             ? `\n    codex rewrote your config.toml — a copy of the previous one is at ${res.configBackup}`
+            : ""
+        }${
+          // codex drops `[mcp_servers.libi.tools.*]` whenever it re-adds the
+          // entry, and libi may not put them back by hand — so say so, and
+          // where they are. Read from libi's own copy, never config.toml.
+          hadLibiToolApprovals(res.priorConfig ?? res.configBackup)
+            ? `\n    warning: codex dropped the per-tool approvals you had set for libi ([mcp_servers.libi.tools.*]) — they are in ${res.priorConfig ?? res.configBackup}`
             : ""
         }`
       : "";
@@ -325,7 +433,7 @@ async function installFor(agentId: SetupAgentId, name: string, opts: { dir: stri
 export async function runConnect(opts: { dir: string; global: boolean; url: string; running: boolean }, deps: ConnectDeps): Promise<ConnectStep[]> {
   const steps: ConnectStep[] = [];
   steps.push(await register("claude", await deps.findClaude(), claudeMcpAddArgs(opts.url), opts.dir, deps));
-  steps.push(await register("codex", await deps.findCodex(), codexMcpAddArgs(opts.url), opts.dir, deps));
+  steps.push(await registerCodex(await deps.findCodex(), opts.url, opts.dir, deps));
   for (const target of AGENT_SKILL_TARGETS) {
     steps.push(...(await installFor(target.agentId, target.name, opts, deps)));
   }

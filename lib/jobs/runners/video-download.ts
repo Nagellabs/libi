@@ -9,12 +9,16 @@ import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 import { assertPublicHttpUrl } from "@/lib/net/url-guard";
 import { MAX_BYTES } from "@/lib/net/fetch-and-store";
 import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
-import { getLibiBinDir } from "@/lib/libi-home";
 import { isWindows } from "@/lib/platform";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import { DependencyManager } from "@/mcp/registry/dependency-manager";
 import { storeFile, mimeFromExtension } from "@/mcp/tools/file-tools";
 import { serverLogger as logger } from "@/lib/logger";
+import {
+  parseYtDlpLauncherTarget,
+  ytDlpLauncherPath,
+  YT_DLP_UNAVAILABLE,
+} from "@/lib/video-download/launcher";
 
 /** The bundled extension def that carries the `uv` + `yt-dlp` deps — exact
  *  `mcp/registry/bundled.ts` strings. */
@@ -136,8 +140,28 @@ export function parseYtDlpProgress(line: string): YtDlpProgress | null {
  * user's own stale yt-dlp is never the one that runs.
  */
 export function ytDlpBinaryPath(): string {
-  return path.join(getLibiBinDir(), isWindows() ? "yt-dlp.cmd" : "yt-dlp");
+  return ytDlpLauncherPath();
 }
+
+/**
+ * yt-dlp could not be STARTED — as opposed to yt-dlp running and failing.
+ * Raised for a spawn `ENOENT` / `EACCES` (no launcher, or not executable),
+ * a Windows shim that cannot be read or parsed, and exit 126 / 127, which is
+ * what the Unix launcher's `exec` returns when the entry point it names is
+ * gone or unrunnable (yt-dlp itself only ever exits 0, 1, 2, 100 or 101).
+ * The runner answers it with ONE forced reinstall and ONE retry.
+ */
+export class YtDlpLaunchError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "YtDlpLaunchError";
+  }
+}
+
+/** Exit codes a shell uses for "could not execute" (126) and "not found"
+ *  (127) — never produced by yt-dlp itself. */
+const LAUNCH_FAILURE_EXIT_CODES = new Set([126, 127]);
+const LAUNCH_FAILURE_ERRNOS = new Set(["ENOENT", "EACCES"]);
 
 export interface YtDlpSpawn {
   command: string;
@@ -169,10 +193,18 @@ export function resolveYtDlpSpawn(
 ): YtDlpSpawn {
   const wrapper = ytDlpBinaryPath();
   if (!isWindows()) return { command: wrapper };
-  const text = readFile(wrapper);
-  const target = /^\s*"([^"]+)"\s/m.exec(text)?.[1];
+  let text: string;
+  try {
+    text = readFile(wrapper);
+  } catch (err) {
+    throw new YtDlpLaunchError(
+      `${wrapper} could not be read (${err instanceof Error ? err.message : String(err)})`,
+      { cause: err },
+    );
+  }
+  const target = parseYtDlpLauncherTarget(text);
   if (!target) {
-    throw new Error(
+    throw new YtDlpLaunchError(
       `${wrapper} is not the yt-dlp shim libi writes (no quoted target); reinstall the Video download extension`,
     );
   }
@@ -315,6 +347,28 @@ export function isPartialArtifact(name: string): boolean {
   );
 }
 
+const AUDIO_EXTS = new Set([".mp3", ".m4a", ".aac", ".opus", ".ogg", ".wav", ".flac"]);
+
+/**
+ * The name a finished download is STORED under. yt-dlp's
+ * `%(title).150s.%(ext)s` + `--restrict-filenames` keeps a title's literal
+ * dots, so a TikTok caption ending in `...` came out as `…_happyhippie_....mp4`
+ * (and its proxy `…_...-proxy.mp4`) — a name the file routes' old substring
+ * traversal guard refused, so the clip never played
+ * (docs-local/qa/2026-09-25-video-download-and-playback-plan.md T2; the routes
+ * themselves are fixed in lib/storage/safe-name.ts). Runs of dots collapse to
+ * one, trailing dots / underscores / spaces before the extension go (the 150-char
+ * cut can leave them too), leading dots go (no hidden files), and a title with
+ * nothing left becomes `video` / `audio`.
+ */
+export function normaliseDownloadName(name: string): string {
+  const ext = path.extname(name);
+  let base = ext ? name.slice(0, -ext.length) : name;
+  base = base.replace(/\.{2,}/g, ".").replace(/[.\s_]+$/, "").replace(/^[.\s]+/, "");
+  if (!base) base = AUDIO_EXTS.has(ext.toLowerCase()) ? "audio" : "video";
+  return `${base}${ext}`;
+}
+
 async function download(
   ctx: JobContext<VideoDownloadParams>,
   outDir: string,
@@ -387,7 +441,13 @@ async function download(
   let code: number;
   try {
     code = await new Promise<number>((resolve, reject) => {
-      child.once("error", reject);
+      child.once("error", (err: NodeJS.ErrnoException) => {
+        reject(
+          err.code && LAUNCH_FAILURE_ERRNOS.has(err.code)
+            ? new YtDlpLaunchError(`could not start ${ytDlp.command}: ${err.code}`, { cause: err })
+            : err,
+        );
+      });
       child.once("close", (c) => resolve(c ?? 1));
     });
   } finally {
@@ -396,6 +456,12 @@ async function download(
   }
 
   if (ctx.shouldCancel()) throw new Error("cancelled");
+  if (LAUNCH_FAILURE_EXIT_CODES.has(code)) {
+    const tail = stderr.trim().split("\n").slice(-2).join(" ");
+    throw new YtDlpLaunchError(
+      `the yt-dlp launcher ${ytDlp.command} could not run its entry point (exit ${code})${tail ? `: ${tail}` : ""}`,
+    );
+  }
   if (code !== 0) {
     logger.warn(
       { tag: "video-download", op: "ytdlp_failed", code, stderr: stderr.slice(0, 2000), capNotice },
@@ -448,9 +514,10 @@ async function download(
   // Registered as an asset the same way every other file-producing path does
   // — `storeFile` writes storage, ffprobes video/audio for duration and
   // dimensions, and inserts the `files` row.
+  const storedName = normaliseDownloadName(chosen.name);
   const record = await storeFile({
     pieceId,
-    filename: chosen.name,
+    filename: storedName,
     buffer,
     contentType: mimeFromExtension(chosen.name),
     description: `Downloaded from ${url}`,
@@ -468,7 +535,7 @@ async function download(
   return {
     fileId: record.id,
     filename: record.filename,
-    title: path.basename(chosen.name, path.extname(chosen.name)),
+    title: path.basename(storedName, path.extname(storedName)),
     bytes: buffer.length,
   };
 }
@@ -505,17 +572,20 @@ export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadRe
     // uv and yt-dlp are tier-2 deps: nothing installs them at boot, so a
     // fresh machine reaches this runner with an empty `~/.libi/bin`. `ensureDep`
     // (never `retryDep`) is a no-op once the dep is on disk with a matching
-    // token, so an installed machine pays nothing here. uv first: yt-dlp's
-    // custom installer shells out to it.
+    // token AND a launcher whose target exists, so an installed machine pays
+    // nothing here — and a launcher pointing at a vanished entry point
+    // (a deleted worktree, a wiped uv dir) is reinstalled here, before any
+    // spawn. uv first: yt-dlp's custom installer shells out to it.
     const dm = new DependencyManager();
     for (const binary of [UV_DEP_BINARY, YT_DLP_DEP_BINARY]) {
       try {
         await dm.ensureDep(YT_DLP_EXTENSION_ID, binary);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Installing ${binary} (needed to download videos) failed: ${msg}`, {
-          cause: err,
-        });
+        throw new Error(
+          `${YT_DLP_UNAVAILABLE} installing ${binary} (needed to download videos) failed: ${msg}`,
+          { cause: err },
+        );
       }
     }
 
@@ -523,7 +593,43 @@ export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadRe
     // line — spawn error, non-zero exit, cancel, cap, or a `storeFile` throw.
     const outDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "libi-ytdlp-"));
     try {
-      return await download(ctx, outDir);
+      try {
+        return await download(ctx, outDir);
+      } catch (err) {
+        if (!(err instanceof YtDlpLaunchError) || ctx.shouldCancel()) throw err;
+        // The launcher passed the file checks but still could not start
+        // yt-dlp. Repair ONCE — a forced reinstall rewrites the launcher, and
+        // with the uv tool already on disk that is seconds, not a download —
+        // then try ONCE more. Never a loop: a second launch failure is an
+        // install libi cannot fix from here, and says so.
+        logger.warn(
+          { tag: "video-download", op: "launcher_repair", err: err.message },
+          "yt-dlp could not be started; reinstalling it once and retrying",
+        );
+        try {
+          await dm.retryDep(YT_DLP_EXTENSION_ID, YT_DLP_DEP_BINARY);
+        } catch (repairErr) {
+          const msg = repairErr instanceof Error ? repairErr.message : String(repairErr);
+          throw new Error(
+            `${YT_DLP_UNAVAILABLE} yt-dlp could not be started (${err.message}) and reinstalling it failed: ${msg}`,
+            { cause: repairErr },
+          );
+        }
+        try {
+          const result = await download(ctx, outDir);
+          logger.info(
+            { tag: "video-download", op: "launcher_repaired" },
+            "yt-dlp launcher repaired; download succeeded on the retry",
+          );
+          return result;
+        } catch (retryErr) {
+          if (!(retryErr instanceof YtDlpLaunchError)) throw retryErr;
+          throw new Error(
+            `${YT_DLP_UNAVAILABLE} yt-dlp still could not be started after libi reinstalled it: ${retryErr.message}`,
+            { cause: retryErr },
+          );
+        }
+      }
     } finally {
       await rmQuiet(outDir);
     }

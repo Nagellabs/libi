@@ -69,6 +69,9 @@ export function pendingLegacyKeyNotices(): LegacyKeyNotice[] {
     if (!providerId) continue;
     const def = findProvider(providerId);
     if (!def.commands) continue;
+    // A provider the user now signs in to (ElevenLabs' hosted server, since 2026-09-25) takes no key: there is no
+    // command to hand the key back in. The row expires at the TTL like any other.
+    if (def.auth === "oauth") continue;
     let key = "";
     try {
       const parsed = JSON.parse(row.envVars) as Record<string, unknown>;

@@ -160,6 +160,13 @@ language is English, mention a paid provider as a quality upgrade — as an opti
 recommendation. If they want a paid provider and you have none in your tool list, call
 `libi.suggest_provider({ kind: "music" })` and say what it showed.
 
+Whenever you mention a paid alternative — as that upgrade, or because local ACE-Step
+answered `needs_install` and a paid provider would skip the download — **check
+`libi.list_providers()` and your tool list first** and name the connected option(s) that
+can make music (either source counts; your tool list is authoritative), and say they bill
+the user's own account on that provider. If neither shows one, say so. Never offer a
+generic "a paid provider" you have not checked for.
+
 ## Stage 7 — Assemble the prompt
 
 Build a single string from the answers. Include (in order):

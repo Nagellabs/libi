@@ -8,6 +8,7 @@ import {
 } from "@/lib/tts/synthesize";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { isInstalling } from "./in-flight";
 
 class TtsEnvInstallError extends Error {
@@ -77,7 +78,10 @@ export const ttsEnvVirtualDep: VirtualDep = {
         else
           reject(
             new TtsEnvInstallError(
-              `install exited ${code}: ${err.trim().slice(-2000)}`,
+              // Offline reads as one sentence on the chip; the raw uv text
+              // goes to the log (uv-env/uv_offline).
+              uvNetworkFailureMessage("voiceover", err) ??
+                `install exited ${code}: ${err.trim().slice(-2000)}`,
             ),
           );
       });

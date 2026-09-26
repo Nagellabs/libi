@@ -30,6 +30,45 @@ export async function readOverlayCode(pieceId: string, overlay: PersistedOverlay
 }
 
 /**
+ * Absolute path to an overlay's code file, or undefined for non-code overlays.
+ * Absolute because an agent opens/edits this path directly with its own file
+ * tools — it has no notion of "relative to the piece's storage dir", and a
+ * relative path like `overlays/<id>/draw.jsx` is not resolvable against the
+ * agent's own cwd.
+ */
+export async function overlayCodeFilePath(pieceId: string, overlay: PersistedOverlay): Promise<string | undefined> {
+  const file = overlayCodeFile(overlay);
+  if (!file) return undefined;
+  const storage = await getStorage();
+  return storage.localPath(pieceId, overlayCodeRelPath(overlay.id, file));
+}
+
+/**
+ * The overlay record as an agent-facing tool returns it (get_overlays,
+ * get_composition): the hydrated JS body is dropped — `drawFunction` /
+ * `sceneFunction`, and a tracked-code overlay's `content.drawFunction` — and
+ * the absolute `codeFilePath` is added instead. The agent reads/edits that
+ * file; there is no code-string tool. Non-code overlays pass through unchanged.
+ */
+export async function toAgentOverlayRecord(
+  pieceId: string,
+  overlay: PersistedOverlay,
+): Promise<Record<string, unknown>> {
+  const codeFilePath = await overlayCodeFilePath(pieceId, overlay);
+  const record: Record<string, unknown> = { ...overlay };
+  delete record.drawFunction;
+  delete record.sceneFunction;
+  const content = record.content;
+  if (content && typeof content === "object" && (content as Record<string, unknown>).kind === "code") {
+    const strippedContent: Record<string, unknown> = { ...(content as Record<string, unknown>) };
+    delete strippedContent.drawFunction;
+    record.content = strippedContent;
+  }
+  if (codeFilePath) record.codeFilePath = codeFilePath;
+  return record;
+}
+
+/**
  * List overlay ids that have a dir under overlays/.
  * Uses fs.readdir on the overlays/ subdirectory directly (storage.list() is
  * top-level-only, mirroring how storyboard lists cards/).

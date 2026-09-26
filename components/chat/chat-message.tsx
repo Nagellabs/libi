@@ -18,6 +18,8 @@ import {
   type ChatMediaPayload,
 } from "@/lib/chat/chat-media";
 import { ProviderSuggestionCard } from "./provider-suggestion-card";
+import { PublishRequestCard } from "./publish-request-card";
+import { extractPublishRequest, isPublishTemplateCall, type PublishRequestCardPayload } from "@/lib/chat/publish-request";
 import {
   extractProviderSuggestion,
   isSuggestProviderCall,
@@ -43,6 +45,7 @@ type GroupedPart =
   | { type: "tool-group"; entries: Array<{ call: ToolCallPart; result?: ToolResultPart }> }
   | { type: "chat-media"; payload: ChatMediaPayload }
   | { type: "provider-suggestion"; payload: ProviderSuggestionPayload }
+  | { type: "publish-request"; payload: PublishRequestCardPayload }
   | { type: "file-attachment"; fileId: string; filename: string; contentType: string | null; size: number }
   | { type: "subagent"; part: Extract<AgentMessagePart, { type: "subagent" }> }
   | { type: "permission-request"; part: Extract<AgentMessagePart, { type: "permission-request" }> };
@@ -136,6 +139,16 @@ function groupParts(parts: AgentMessagePart[]): GroupedPart[] {
         call: part,
         result: resultMap.get(part.toolCallId),
       });
+      // publish_template only prepares a publish: its chip stays, and once an
+      // "awaiting" result is in, the way to the review panel follows it.
+      if (isPublishTemplateCall(part)) {
+        const payload = extractPublishRequest(part, resultMap.get(part.toolCallId));
+        if (payload) {
+          groups.push({ type: "tool-group", entries: currentToolGroup });
+          currentToolGroup = null;
+          groups.push({ type: "publish-request", payload });
+        }
+      }
     }
   }
 
@@ -336,6 +349,10 @@ export default memo(function ChatMessage({ message, animate, sessionId, onOpenAs
 
         if (group.type === "chat-media") {
           return <ChatMediaCard key={i} payload={group.payload} />;
+        }
+
+        if (group.type === "publish-request") {
+          return <PublishRequestCard key={i} payload={group.payload} />;
         }
 
         if (group.type === "provider-suggestion") {

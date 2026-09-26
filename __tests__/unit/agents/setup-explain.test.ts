@@ -5,6 +5,7 @@ import { findProvider, KEY_PLACEHOLDER } from "@/lib/providers/catalog";
 const fal = findProvider("fal");
 const elevenlabs = findProvider("elevenlabs");
 const higgsfield = findProvider("higgsfield");
+const zernio = findProvider("zernio");
 const URL = "http://127.0.0.1:3457/mcp";
 const CLM_NOTE =
   " If your organization locks down PowerShell (Constrained Language Mode), this can't run; use the View script link below to do the same steps by hand.";
@@ -56,16 +57,40 @@ describe("explainSetupCommand", () => {
     );
   });
 
-  it("describes a keyed Claude add, a uv-based server, a replace, and a Claude remove in its scope", () => {
+  it("describes a keyed Claude add, a hosted sign-in add, a replace, and a Claude remove in its scope", () => {
     expect(explainSetupCommand({ action: "provider-add", agentId: "claude-code", provider: fal, flavor: "posix" })).toBe(
       "Asks for your fal.ai key without showing it, then adds the fal.ai MCP server with that key to Claude Code's user settings (~/.claude.json), so Claude Code can use fal.ai in libi and everywhere else. When it asks for the key, paste it (⌘V on a Mac, Ctrl+Shift+V on Linux) and press Enter; nothing shows as you paste.",
     );
-    expect(explainSetupCommand({ action: "provider-add", agentId: "codex", provider: elevenlabs, flavor: "posix" })).toMatch(/runs through uv/);
+    // ElevenLabs is its hosted server now: nothing to install, no key, a sign-in with the user's account.
+    const elCodex = explainSetupCommand({ action: "provider-add", agentId: "codex", provider: elevenlabs, flavor: "posix" });
+    expect(elCodex).toBe(
+      "Adds the ElevenLabs MCP server to Codex's config (~/.codex/config.toml), then opens your browser to sign in with your ElevenLabs account; the command waits until you finish. Codex keeps the sign-in, and libi never sees it. There is no key, and generations use your ElevenLabs credits.",
+    );
+    expect(elCodex).not.toMatch(/\buv\b/);
     expect(explainSetupCommand({ action: "provider-replace", agentId: "claude-code", provider: fal, flavor: "posix" })).toMatch(
       /^Replaces your current fal\.ai entry in Claude Code: it removes that entry first, then asks for your fal\.ai key/,
     );
-    expect(explainSetupCommand({ action: "provider-remove", agentId: "claude-code", provider: elevenlabs, flavor: "posix", scope: "project" })).toBe(
-      "Removes the ElevenLabs MCP server, with any key saved in its entry, from Claude Code's project-scope settings.",
+    expect(explainSetupCommand({ action: "provider-remove", agentId: "claude-code", provider: fal, flavor: "posix", scope: "project" })).toBe(
+      "Removes the fal.ai MCP server, with any key saved in its entry, from Claude Code's project-scope settings.",
+    );
+  });
+
+  it("removing an older LOCAL ElevenLabs entry says it removes the entry with its key, and claims no sign-out", () => {
+    expect(explainSetupCommand({ action: "provider-remove", agentId: "claude-code", provider: elevenlabs, flavor: "posix", scope: "user", transport: "stdio" })).toBe(
+      "Removes the ElevenLabs MCP server, with any key saved in its entry, from Claude Code's user settings (~/.claude.json).",
+    );
+    expect(explainSetupCommand({ action: "provider-remove", agentId: "codex", provider: elevenlabs, flavor: "posix", transport: "http" })).toMatch(/^Signs Codex out of ElevenLabs first/);
+  });
+
+  it("a replace for an entry that can't start says why, naming the missing command, then what the add does", () => {
+    const line = explainSetupCommand({ action: "provider-replace", agentId: "claude-code", provider: elevenlabs, flavor: "posix", missingCommand: "uvx" });
+    // The fix for an old `uvx elevenlabs-mcp` entry: remove it, then add the hosted server and sign in.
+    expect(line).toBe(
+      "Your ElevenLabs entry in Claude Code can't start because libi can't find uvx on this computer. This removes that entry, then adds the ElevenLabs MCP server to Claude Code's user settings (~/.claude.json), then opens your browser to sign in with your ElevenLabs account; the command waits until you finish. Claude Code keeps the sign-in, and libi never sees it. There is no key, and generations use your ElevenLabs credits.",
+    );
+    // Without a missing command the replace reads as it always did.
+    expect(explainSetupCommand({ action: "provider-replace", agentId: "claude-code", provider: elevenlabs, flavor: "posix" })).toMatch(
+      /^Replaces your current ElevenLabs entry in Claude Code/,
     );
   });
 
@@ -73,7 +98,7 @@ describe("explainSetupCommand", () => {
     const POSIX_HINT = "When it asks for the key, paste it (⌘V on a Mac, Ctrl+Shift+V on Linux) and press Enter; nothing shows as you paste.";
     const PS_HINT = "When it asks for the key, paste it with Ctrl+V or a right-click, then press Enter.";
     for (const agentId of ["claude-code", "codex"] as const) {
-      for (const provider of [fal, elevenlabs]) {
+      for (const provider of [fal]) {
         for (const action of ["provider-add", "provider-replace"] as const) {
           expect(explainSetupCommand({ action, agentId, provider, flavor: "posix" })).toContain(POSIX_HINT);
           const ps = explainSetupCommand({ action, agentId, provider, flavor: "powershell" });
@@ -82,6 +107,7 @@ describe("explainSetupCommand", () => {
         }
       }
       expect(explainSetupCommand({ action: "provider-add", agentId, provider: higgsfield, flavor: "powershell" })).not.toMatch(/paste/i);
+      expect(explainSetupCommand({ action: "provider-add", agentId, provider: elevenlabs, flavor: "posix" })).not.toMatch(/paste/i);
       expect(explainSetupCommand({ action: "provider-remove", agentId, provider: fal, flavor: "powershell" })).not.toMatch(/paste/i);
     }
   });
@@ -89,11 +115,11 @@ describe("explainSetupCommand", () => {
   it("Higgsfield: no key, a browser sign-in with the Higgsfield account, and generations on Higgsfield credits", () => {
     for (const flavor of ["posix", "powershell"] as const) {
       expect(explainSetupCommand({ action: "provider-add", agentId: "claude-code", provider: higgsfield, flavor })).toBe(
-        "Adds the Higgsfield MCP server to Claude Code's user settings (~/.claude.json). Then sign in with your Higgsfield account in your browser: use Sign in here, or run /mcp in Claude Code. There is no key, and generations use your Higgsfield credits." +
+        "Adds the Higgsfield MCP server to Claude Code's user settings (~/.claude.json), then opens your browser to sign in with your Higgsfield account; the command waits until you finish. Claude Code keeps the sign-in, and libi never sees it. There is no key, and generations use your Higgsfield credits." +
           clmSuffix(flavor),
       );
       expect(explainSetupCommand({ action: "provider-add", agentId: "codex", provider: higgsfield, flavor })).toBe(
-        "Adds the Higgsfield MCP server to Codex's config (~/.codex/config.toml), then opens your browser to sign in with your Higgsfield account; the command waits until you finish. There is no key, and generations use your Higgsfield credits." +
+        "Adds the Higgsfield MCP server to Codex's config (~/.codex/config.toml), then opens your browser to sign in with your Higgsfield account; the command waits until you finish. Codex keeps the sign-in, and libi never sees it. There is no key, and generations use your Higgsfield credits." +
           clmSuffix(flavor),
       );
       expect(explainSetupCommand({ action: "provider-remove", agentId: "codex", provider: higgsfield, flavor })).toBe(
@@ -118,6 +144,33 @@ describe("explainSetupCommand", () => {
         explainSetupCommand({ action: "provider-remove", agentId, provider: higgsfield, flavor: "posix" }),
       ];
       for (const line of lines) expect(line).not.toMatch(/Asks for your|key saved|FAL_KEY/);
+    }
+  });
+
+  it("Zernio: no key, a browser sign-in with the Zernio account, and never a credits or generation claim — it posts, it doesn't generate", () => {
+    for (const flavor of ["posix", "powershell"] as const) {
+      expect(explainSetupCommand({ action: "provider-add", agentId: "claude-code", provider: zernio, flavor })).toBe(
+        "Adds the Zernio MCP server to Claude Code's user settings (~/.claude.json), then opens your browser to sign in with your Zernio account; the command waits until you finish. Claude Code keeps the sign-in, and libi never sees it. There is no key." +
+          clmSuffix(flavor),
+      );
+      expect(explainSetupCommand({ action: "provider-add", agentId: "codex", provider: zernio, flavor })).toBe(
+        "Adds the Zernio MCP server to Codex's config (~/.codex/config.toml), then opens your browser to sign in with your Zernio account; the command waits until you finish. Codex keeps the sign-in, and libi never sees it. There is no key." +
+          clmSuffix(flavor),
+      );
+    }
+    expect(explainSetupCommand({ action: "provider-sign-in", agentId: "claude-code", provider: zernio })).toBe(
+      "Runs Claude Code's own MCP sign-in for Zernio: your browser opens to sign in with your Zernio account, and the command waits until you finish. Claude Code keeps the sign-in, and libi never sees it.",
+    );
+    expect(explainSetupCommand({ action: "provider-sign-in", agentId: "codex", provider: zernio })).toBe(
+      "Runs Codex's own MCP sign-in for Zernio: your browser opens to sign in with your Zernio account, and the command waits until you finish. Codex keeps the sign-in, and libi never sees it.",
+    );
+    for (const agentId of ["claude-code", "codex"] as const) {
+      const lines = [
+        explainSetupCommand({ action: "provider-add", agentId, provider: zernio, flavor: "posix" }),
+        explainSetupCommand({ action: "provider-replace", agentId, provider: zernio, flavor: "posix" }),
+        explainSetupCommand({ action: "provider-sign-in", agentId, provider: zernio }),
+      ];
+      for (const line of lines) expect(line).not.toMatch(/credit|generation/i);
     }
   });
 

@@ -46,6 +46,18 @@ afterEach(() => {
 });
 
 describe("pino redact backstop", () => {
+  it("redacts a dev build's Vercel bypass token — by key name, and by value once it is live", async () => {
+    const { serverLogger } = await import("@/lib/logger");
+    const { registerLiveSecret } = await import("@/lib/security/secret-scrub");
+    const token = "BypassLogRedact0123456789abcdef";
+    registerLiveSecret(token);
+    serverLogger.info({ tag: "test", op: "redact_probe_bypass", setting: { bypassToken: "bypass-by-key-0001" }, message: `quoted ${token}` }, `in the text ${token}`);
+    const body = await readLogEventually(home);
+    expect(body).toContain("redact_probe_bypass");
+    expect(body).not.toContain("bypass-by-key-0001");
+    expect(body).not.toContain(token);
+  });
+
   it("redacts an `env` object logged directly (no scrubSecrets pass)", async () => {
     const { serverLogger } = await import("@/lib/logger");
     serverLogger.info(
@@ -73,6 +85,34 @@ describe("pino redact backstop", () => {
     const body = await readLogEventually(home);
     expect(body).toContain("redact_probe_headers");
     expect(body).not.toContain("sk-LOGREDACT-2");
+  });
+
+  it("redacts the social grant's own carriers (access_token, client_secret, …)", async () => {
+    // pino matches WHOLE key names: "token" does not cover "access_token" and
+    // "secret" does not cover "client_secret", so libi's OAuth grant
+    // (lib/social/token-store.ts) was outside the backstop until these were
+    // listed. The store never logs a grant — this is the layer under that.
+    const { serverLogger } = await import("@/lib/logger");
+    serverLogger.info(
+      {
+        tag: "test",
+        op: "redact_probe_grant",
+        grant: {
+          tokens: { access_token: "sk-LOGREDACT-5", refresh_token: "sk-LOGREDACT-6" },
+          client: { client_secret: "sk-LOGREDACT-7" },
+          codeVerifier: "sk-LOGREDACT-8",
+        },
+        blob: "sk-LOGREDACT-9",
+        // The same secret under the OAuth wire name, as a payload built from a
+        // token request body would carry it.
+        body: { code_verifier: "sk-LOGREDACT-10" },
+      },
+      "carries a whole grant",
+    );
+
+    const body = await readLogEventually(home);
+    expect(body).toContain("redact_probe_grant");
+    for (const n of [5, 6, 7, 8, 9, 10]) expect(body).not.toContain(`sk-LOGREDACT-${n}`);
   });
 
   it("redacts a bare apiKey/token field", async () => {

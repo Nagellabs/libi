@@ -45,7 +45,7 @@ describe("music skill + instruction wiring", () => {
     const dir = "mcp/skills/music-creation/references/providers";
     expect(
       fs.readFileSync(path.resolve(dir, "elevenlabs.md"), "utf-8"),
-    ).toContain("compose_music");
+    ).toContain('`node_type: "music"`');
     expect(fs.readFileSync(path.resolve(dir, "fal.md"), "utf-8")).toMatch(
       /Stable Audio/i,
     );

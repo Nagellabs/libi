@@ -1,6 +1,7 @@
 import type { AudioClip } from "@/lib/engine/types";
 import { audioFadeSeconds } from "@/lib/effects/audio-envelope";
 import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
+import { ON_FILE_TIMELINE, onFileTimeline } from "@/lib/export/export-base";
 
 /**
  * Shared, pure builder for the audio half of an ffmpeg `filter_complex` graph.
@@ -14,6 +15,9 @@ import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
  *
  * Per-clip chain (matching the preview's audio policy in
  * `lib/audio/web-audio-engine.ts` + `lib/audio/active-clips.ts`):
+ *   - `aresample=async=1:first_pts=0` (`ON_FILE_TIMELINE`) — the track as it
+ *     sits on its file's timeline: silence from the file's start up to a track
+ *     that starts late. See below.
  *   - `atrim={trimStart}:{trimStart+duration}` + `asetpts=PTS-STARTPTS` —
  *     take the window of the SOURCE the clip actually plays (honours
  *     `clip.trimStart`; the preview seeks into the source the same way).
@@ -26,9 +30,14 @@ import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
  *
  * Output label: `[aout]`. Returns `{ chain: null }` when nothing is in play.
  */
+
 export interface AudioMixOptions {
-  /** Base audio from input `[0:a]` (single-video path). null = no base track. */
-  baseAudio?: { volume: number } | null;
+  /**
+   * Base audio from input `[0:a]` (single-video path). null = no base track.
+   * The input is already cut by `-ss`/`-to`, except by `trimStart` seconds when
+   * the backend had to read it from its start (`baseCut`).
+   */
+  baseAudio?: { volume: number; trimStart?: number } | null;
   /** Clips to mix; each must have an entry in `inputIndex`. */
   clips: AudioClip[];
   /** `clip.id` → ffmpeg input index. */
@@ -48,20 +57,113 @@ export interface AudioMixOptions {
    *    mux where there's no base and each clip is `adelay`ed onto the timeline.
    */
   mixDuration?: "first" | "longest";
+  /**
+   * ffmpeg input index → that input's audio channel count (ffprobe; absent =
+   * unknown). When given, the mix is made STEREO whenever any input may be
+   * stereo: a mono input is upmixed with a unity pan and every other input is
+   * pinned to stereo, before amix. Without it the graph leaves layout to
+   * ffmpeg, which is what the callers that don't probe still get.
+   *
+   * Why: amix negotiates ONE format for all of its inputs and takes the first
+   * input's layout, so a mono narration listed first made a whole mix of
+   * stereo clips mono. And ffmpeg's implicit mono→stereo conversion is -3 dB
+   * per side, while the preview (Web Audio "speakers" up-mix) copies a mono
+   * source to both sides at unity — hence the explicit pan, never an
+   * auto-inserted aresample.
+   * docs-local/qa/2026-09-25-dreams-audio-report.md (Fix round 1)
+   */
+  inputChannels?: Map<number, number | undefined>;
+  /**
+   * ffmpeg input index → the ffprobe index of the audio stream to read (the
+   * primary stream the preview plays). An input without an entry reads
+   * `[n:a]`, the first audio stream (Review M6).
+   */
+  inputAudioStream?: Map<number, number>;
+  /**
+   * ffmpeg input index → seconds to move a clip input's audio timestamps by
+   * before it is padded onto its file's timeline (`ProbedMedia.audioRead`:
+   * the start ffmpeg corrects on an Ogg or MPEG-TS read for its audio alone,
+   * a FLAC-in-MP4 cut read without its edit list). The input's own options
+   * (`audioRead.inputArgs`) are the caller's to add.
+   */
+  inputPtsShift?: Map<number, number>;
 }
+
+/** Unity mono → stereo: both sides carry the mono signal at full level, as the
+ *  preview plays it. */
+const UNITY_UPMIX = "pan=stereo|c0=c0|c1=c0";
+/** Stereo stays stereo (a no-op); more channels downmix the standard way. */
+const PIN_STEREO = "aformat=channel_layouts=stereo";
+/** For an input whose channel count is UNKNOWN (its probe failed): right for
+ *  mono AND stereo. Mono (FC) lands on both sides at unity, and stereo
+ *  (FL/FR) passes through untouched, whereas `aformat` would upmix mono at
+ *  -3 dB (Review M4). Rendered with real ffmpeg in
+ *  export-audio-stereo-mix.test.ts. */
+const MONO_OR_STEREO_TO_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC";
+/**
+ * After amix: a lookahead limiter at FULL SCALE (limit=1). It caps a mix only
+ * where summing clips pushes it past 0 dBFS, which is where the preview would
+ * hard-clip at the output.
+ * - Anything at or under full scale passes bit-transparently, a lone loud
+ *   source included. Measured with real ffmpeg: max sample difference 0, same
+ *   length, a 0.99-peak lone source is untouched. So the export stays
+ *   level-matched to the preview.
+ * - An earlier -1 dBFS (0.891) limit also cut a lone 0.95-peak music bed
+ *   whenever the piece had narration anywhere (Re-review R2). That changed a
+ *   source the user never overloaded.
+ * - level=0: no auto-gain. latency=1: the 5 ms lookahead is compensated, so
+ *   the audio stays in sync and keeps its tail.
+ * - `latency` needs ffmpeg 5.1 or later. libi requires 6.1 (drawtext
+ *   `y_align`, mcp/registry/bundled.ts), and CI's apt ffmpeg is 6.1.
+ * - It reserves no headroom for the lossy encoder's inter-sample overshoot,
+ *   just as a lone source's own export doesn't.
+ * - A single input (clip volume ≤ 1) can't pass full scale, so it gets none.
+ */
+const PEAK_GUARD = "alimiter=limit=1:attack=5:release=50:level=0:latency=1";
 
 export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | null } {
   const { clips, inputIndex } = opts;
   const envelopeIndex = opts.envelopeIndex ?? new Map<string, number>();
   const baseAudio = opts.baseAudio ?? null;
   const mixDuration = opts.mixDuration ?? "first";
+  const inputChannels = opts.inputChannels;
+  const audioIn = (idx: number): string => {
+    const stream = opts.inputAudioStream?.get(idx);
+    return stream !== undefined ? `[${idx}:${stream}]` : `[${idx}:a]`;
+  };
+
+  // Stereo whenever any input in play may be stereo — a ducked clip's
+  // multiply stage is stereo too. An all-mono mix is left as it was.
+  const inPlay: number[] = [];
+  if (baseAudio) inPlay.push(0);
+  for (const c of clips) {
+    const idx = inputIndex.get(c.id);
+    if (idx !== undefined) inPlay.push(idx);
+  }
+  const hasDuck = clips.some((c) => c.duck && inputIndex.has(c.id) && envelopeIndex.has(c.id));
+  const stereoMix =
+    inputChannels !== undefined &&
+    (hasDuck || inPlay.some((idx) => inputChannels.get(idx) !== 1));
+  /** The filter that brings input `idx` to stereo, or null when the mix isn't stereo. */
+  const toStereo = (idx: number): string | null => {
+    if (!stereoMix) return null;
+    const channels = inputChannels?.get(idx);
+    if (channels === undefined) return MONO_OR_STEREO_TO_STEREO;
+    return channels === 1 ? UNITY_UPMIX : PIN_STEREO;
+  };
 
   const amixInputs: string[] = [];
   const chainSegments: string[] = [];
 
   if (baseAudio) {
-    // The base input is already time-sliced by -ss/-to, so no atrim/adelay.
-    chainSegments.push(`[0:a]volume=${baseAudio.volume}[a_base]`);
+    // The base input is time-sliced by -ss/-to, so no adelay; `trimStart` is
+    // what the input seek didn't cut. The lead of a track that starts after
+    // the cut is padded with silence (ON_FILE_TIMELINE), as for a clip.
+    const up = toStereo(0);
+    const cut = baseAudio.trimStart && baseAudio.trimStart > 0
+      ? `atrim=start=${baseAudio.trimStart},asetpts=PTS-round(${baseAudio.trimStart}/TB),`
+      : "";
+    chainSegments.push(`${audioIn(0)}${cut}${ON_FILE_TIMELINE},volume=${baseAudio.volume}${up ? `,${up}` : ""}[a_base]`);
     amixInputs.push("a_base");
   }
 
@@ -73,7 +175,8 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
     const trimStart = Math.max(0, c.trimStart ?? 0);
     const delayMs = Math.max(0, Math.round(c.startTime * 1000));
     const segments: string[] = [
-      `[${idx}:a]atrim=${trimStart}:${trimStart + c.duration}`,
+      `${audioIn(idx)}${onFileTimeline(opts.inputPtsShift?.get(idx))}`,
+      `atrim=${trimStart}:${trimStart + c.duration}`,
       `asetpts=PTS-STARTPTS`,
       `volume=${c.volume}`,
     ];
@@ -91,6 +194,8 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
       // adelay needs a value per channel; `delays|delays` covers mono + stereo.
       segments.push(`adelay=${delayMs}|${delayMs}`);
     }
+    const up = toStereo(idx);
+    if (up) segments.push(up);
 
     const envelopeIdx = envelopeIndex.get(c.id);
     if (c.duck && envelopeIdx !== undefined) {
@@ -159,9 +264,12 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
   }
 
   const inputsJoined = amixInputs.map((l) => `[${l}]`).join("");
-  // normalize=0 preserves per-clip volume (ffmpeg's default 1/N dips the mix).
+  // normalize=0 preserves per-clip volume (ffmpeg's default 1/N dips the mix),
+  // so the export sums the clips at the level the preview plays them at, and a
+  // sum can pass full scale. PEAK_GUARD caps only that, instead of letting the
+  // AAC/Opus encode clip it (Review M3).
   chainSegments.push(
-    `${inputsJoined}amix=inputs=${amixInputs.length}:duration=${mixDuration}:dropout_transition=0:normalize=0[apre]`,
+    `${inputsJoined}amix=inputs=${amixInputs.length}:duration=${mixDuration}:dropout_transition=0:normalize=0,${PEAK_GUARD}[apre]`,
   );
   chainSegments.push(`[apre]${RESAMPLE}[aout]`);
   return { chain: chainSegments.join(";") };

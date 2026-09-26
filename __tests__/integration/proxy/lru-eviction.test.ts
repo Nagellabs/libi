@@ -56,6 +56,7 @@ describe("evictProxiesIfOverBudget — integration", () => {
     fileId: string,
     sizeBytes: number,
     generatedAtMs: number,
+    type: "video" | "audio" = "video",
   ): void {
     const dir = path.join(storageBaseDir, pieceId);
     fs.mkdirSync(dir, { recursive: true });
@@ -77,7 +78,7 @@ describe("evictProxiesIfOverBudget — integration", () => {
         name: fileId,
         description: "",
         storagePath: `${pieceId}/${fileId}.mp4`,
-        type: "video",
+        type,
         contentType: "video/mp4",
         size: sizeBytes * 5,
         proxyFilename: proxyName,
@@ -116,6 +117,17 @@ describe("evictProxiesIfOverBudget — integration", () => {
     expect(newRow.proxyFilename).toBe("new-proxy.mp4");
     expect(fs.existsSync(path.join(storageBaseDir, "p", "middle-proxy.mp4"))).toBe(true);
     expect(fs.existsSync(path.join(storageBaseDir, "p", "new-proxy.mp4"))).toBe(true);
+  });
+
+  it("never evicts an audio file's proxy: the only audio the preview can play for it (review round 4)", async () => {
+    makeProxy("p", "radio", 50, Date.now() - 30_000, "audio");
+    makeProxy("p", "clip", 50, Date.now() - 20_000);
+    makeProxy("p", "clip2", 50, Date.now() - 10_000);
+    const { evictProxiesIfOverBudget } = await import("@/lib/proxy/lru");
+    evictProxiesIfOverBudget({ byteBudget: 60, storageBaseDir, inUseFileIds: new Set() });
+    const db = vi.mocked(getDb)();
+    expect(db.select().from(files).where(eq(files.id, "radio")).all()[0].proxyFilename).toBe("radio-proxy.mp4");
+    expect(db.select().from(files).where(eq(files.id, "clip")).all()[0].proxyFilename).toBeNull();
   });
 
   it("no-op when under budget", async () => {

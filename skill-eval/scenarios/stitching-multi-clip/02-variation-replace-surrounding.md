@@ -2,7 +2,7 @@
 id: stitch-variation-replace-surrounding
 title: UGC stitch DEFAULT — replace the character-driven surrounding with new AI, reuse the identity-neutral product demo
 skills: [stitching-multi-clip, ugc-product-video, voiceover-production, ai-asset-generation, ai-video-models, using-character-library, realistic-image-generation]
-mcps: [fal-ai, ElevenLabs]
+mcps: [fal-ai, elevenlabs]
 agent: claude-code
 runs: 1
 timeoutSec: 600

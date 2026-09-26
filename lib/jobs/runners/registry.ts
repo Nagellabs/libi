@@ -19,6 +19,11 @@ import { trackingEngineInstallRunner } from "@/lib/jobs/runners/tracking-engine-
 import { agentInstallRunner } from "@/lib/jobs/runners/agent-install";
 import { devSlowRunner } from "@/lib/jobs/runners/dev-slow";
 import { onboardingPieceRunner } from "@/lib/jobs/runners/onboarding-piece";
+import { socialUploadRunner } from "@/lib/jobs/runners/social-upload";
+import { templatePublishRunner } from "@/lib/jobs/runners/template-publish";
+import { templatePublishPrepareRunner } from "@/lib/jobs/runners/template-publish-prepare";
+import { templateInstallRunner } from "@/lib/jobs/runners/template-install";
+import { templateExampleRunner } from "@/lib/jobs/runners/template-example";
 
 /**
  * Process-local runner registry. Populated lazily on first
@@ -92,6 +97,11 @@ export function registerBuiltinRunners(): void {
     agentInstallRunner,
     onboardingPieceRunner,
     devSlowRunner,
+    socialUploadRunner,
+    templatePublishRunner,
+    templatePublishPrepareRunner,
+    templateInstallRunner,
+    templateExampleRunner,
   ]) {
     if (!getRunner(r.kind)) {
       registerRunner(r as JobRunner<unknown, unknown>);

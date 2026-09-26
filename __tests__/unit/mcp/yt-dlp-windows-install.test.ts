@@ -43,11 +43,19 @@ afterEach(() => {
   vi.resetModules();
 });
 
-/** Write the shim the installer would write, plus a current token file. */
+/** Write the launcher the installer would write for `filename` — the .cmd
+ *  shim's quoted-target shape, or the Unix wrapper's `exec` — pointing at an
+ *  entry point that exists, plus a current token file. */
 async function seed(filename: string) {
   const { YT_DLP_UV_TOKEN, ytDlpTokenPath } = await import("@/mcp/registry/installers");
   const binDir = path.join(home, "bin");
-  writeFileSync(path.join(binDir, filename), "@echo off\r\n");
+  const entry = path.join(home, "uv", "tools", "yt-dlp", "Scripts", "yt-dlp.exe");
+  mkdirSync(path.dirname(entry), { recursive: true });
+  writeFileSync(entry, "");
+  const body = filename.endsWith(".cmd")
+    ? `@echo off\r\nif errorlevel 1 (\r\n  "${entry}" --no-playlist %*\r\n)\r\n`
+    : `#!/bin/bash\nexec "${entry}" --no-playlist "$@"\n`;
+  writeFileSync(path.join(binDir, filename), body);
   writeFileSync(ytDlpTokenPath(binDir), YT_DLP_UV_TOKEN);
 }
 

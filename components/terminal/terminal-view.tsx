@@ -20,13 +20,22 @@ interface TerminalViewProps {
    * to. Optional — without it the view just stops, as it always has.
    */
   onSessionGone?: () => void;
+  /** Fired the first time the user presses Enter in this view: a command waiting at the prompt was submitted. */
+  onSubmit?: () => void;
+  /**
+   * Asked about every key event before xterm handles it; `false` drops the key, as if it was never pressed. The
+   * setup terminal uses it to keep a stray Enter from submitting the command it just typed (`./setup-terminal.tsx`).
+   */
+  keyFilter?: (ev: KeyboardEvent) => boolean;
+  /** Fired whenever PTY output (or the attach snapshot) reaches the screen. */
+  onOutput?: () => void;
 }
 
 const RECONNECT_MAX_MS = 10_000;
 
 /**
  * xterm palettes that track the app's light/dark theme (the `dark` class on
- * <html>, see components/layout/theme-toggle.tsx). The dark background is the
+ * <html>, see components/settings/appearance-section.tsx). The dark background is the
  * deep terminal black we've always used; the light background matches the
  * app's `--background` (#f7f4ef). xterm's default ANSI palette is tuned for
  * dark backgrounds — bright colors wash out on white — so the light theme
@@ -110,13 +119,19 @@ function webglOptedIn(): boolean {
  * text frames are JSON control messages. On (re)connect the server sends a
  * serialized snapshot first, so reattach restores the exact screen.
  */
-export default function TerminalView({ terminalId, onExited, onSessionGone }: TerminalViewProps) {
+export default function TerminalView({ terminalId, onExited, onSessionGone, onSubmit, keyFilter, onOutput }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const onExitedRef = useRef(onExited);
   onExitedRef.current = onExited;
   const onSessionGoneRef = useRef(onSessionGone);
   onSessionGoneRef.current = onSessionGone;
+  const onSubmitRef = useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
+  const keyFilterRef = useRef(keyFilter);
+  keyFilterRef.current = keyFilter;
+  const onOutputRef = useRef(onOutput);
+  onOutputRef.current = onOutput;
   const [isDark, setIsDark] = useState(true);
   // Shared with the insert-text effect below. `wsRef` mirrors whichever
   // socket the connect effect currently owns (null while connecting/between
@@ -203,9 +218,15 @@ export default function TerminalView({ terminalId, onExited, onSessionGone }: Te
     });
     resizeObserver.observe(container);
 
+    let submitted = false;
     term.onData((data) => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: "input", data }));
+        // Enter, typed by the user (a paste carries its own newlines and is not a submit of the waiting command).
+        if (!submitted && data === "\r") {
+          submitted = true;
+          onSubmitRef.current?.();
+        }
       }
     });
 
@@ -214,6 +235,11 @@ export default function TerminalView({ terminalId, onExited, onSessionGone }: Te
     // reads like any other.
     const windows = isWindowsPlatform(navigator.platform);
     term.attachCustomKeyEventHandler((ev) => {
+      if (keyFilterRef.current && !keyFilterRef.current(ev)) {
+        // Dropped: neither xterm nor the helper textarea may act on it.
+        ev.preventDefault();
+        return false;
+      }
       const shortcut = terminalClipboardShortcut(ev, { windows, hasSelection: term.hasSelection() });
       // Without the async clipboard there is no copy to make, so Ctrl+C stays the interrupt.
       if (!shortcut || (shortcut === "copy" && !navigator.clipboard)) return true;
@@ -271,6 +297,7 @@ export default function TerminalView({ terminalId, onExited, onSessionGone }: Te
                 fit.fit();
                 sendResize();
               });
+              onOutputRef.current?.();
               // Only NOW — after the reset + replay above — is it safe to
               // land a queued insert. Doing it on `onopen` instead was tried
               // and reverted: the reset a few lines up would wipe it moments
@@ -287,6 +314,7 @@ export default function TerminalView({ terminalId, onExited, onSessionGone }: Te
             }
           } else {
             term.write(new Uint8Array(ev.data as ArrayBuffer));
+            onOutputRef.current?.();
           }
         };
         socket.onclose = (ev: CloseEvent) => {
@@ -359,8 +387,8 @@ export default function TerminalView({ terminalId, onExited, onSessionGone }: Te
     return () => window.removeEventListener(TERMINAL_INSERT_TEXT_EVENT, onInsert);
   }, []);
 
-  // Track the app's light/dark theme live. The toggle flips the `dark` class on
-  // <html> (theme-toggle.tsx); a MutationObserver repaints the live xterm and
+  // Track the app's light/dark theme live. Settings → Appearance flips the `dark` class on
+  // <html> (appearance-section.tsx); a MutationObserver repaints the live xterm and
   // the surrounding container without recreating the session.
   useEffect(() => {
     const apply = () => {

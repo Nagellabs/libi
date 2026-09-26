@@ -35,7 +35,7 @@ import { getJobManager } from "@/lib/jobs/manager";
 import { getAgentSetup } from "@/lib/agents/setup/registry";
 import { getAgentConfig } from "@/lib/agents/acp/agent-registry";
 import { serverLogger as logger } from "@/lib/logger";
-import { JobNotFoundError, snapshotFromRow, type JobStatusSnapshot } from "@/lib/jobs/types";
+import { isJobNotFoundError, snapshotFromRow, type JobStatusSnapshot } from "@/lib/jobs/types";
 
 const LOG_TAG = "agent-install-route";
 const JOB_KIND = "agent_install";
@@ -155,7 +155,7 @@ export async function DELETE(_req: Request, { params }: RouteParams): Promise<Re
     await mgr.cancel(job.id);
     return NextResponse.json({ accepted: true });
   } catch (err) {
-    if (err instanceof JobNotFoundError) {
+    if (isJobNotFoundError(err)) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
     return NextResponse.json(

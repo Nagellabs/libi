@@ -262,6 +262,77 @@ describe("stream-state: patches and notes", () => {
     expect(part).toMatchObject({ status: "resolved", outcome: { kind: "selected", optionId: "allow" } });
   });
 
+  // The SSE (re)connect re-announces every pending approval (the request is
+  // emit-only, so a reload would otherwise lose the card while the agent
+  // waits on it). On an EventSource reconnect the client already has the card:
+  // the repeat must not add a second one, nor reopen one already answered.
+  it("a repeated permission request (same pendingId) never shows a second card", () => {
+    const deps = makeDeps();
+    const request: AgentEvent = {
+      type: "agent-permission-request",
+      pendingId: "p-1",
+      toolCall: { toolCallId: "tc-1" } as never,
+      options: [],
+      reason: "acp",
+    };
+    let state = run([thinking, text("about to generate"), request, request], initialChatStreamState(), deps);
+    const cards = () =>
+      selectChatMessages(state).flatMap((m) => m.parts).filter((p) => p.type === "permission-request");
+    expect(cards()).toHaveLength(1);
+
+    state = run([
+      { type: "agent-permission-resolved", pendingId: "p-1", outcome: { kind: "selected", optionId: "allow" } },
+      request,
+    ], state, deps);
+    expect(cards()).toHaveLength(1);
+    expect(cards()[0]).toMatchObject({ status: "resolved" });
+  });
+
+  // The millisecond race (review of bug 3, re-review 2): the history snapshot
+  // is taken just BEFORE the approval request exists, but the request's live
+  // event reaches the client before the fetch response is applied. The
+  // history load replaces the streaming live message — which holds the card —
+  // and the card must survive it.
+  it("history loaded after a live approval card, from a snapshot without it, keeps the card", () => {
+    const deps = makeDeps();
+    let state = run([
+      { type: "agent-status", status: "streaming" },
+      {
+        type: "agent-permission-request",
+        pendingId: "p-race",
+        toolCall: { toolCallId: "tc-1" } as never,
+        options: [],
+        reason: "acp",
+      },
+    ], initialChatStreamState(), deps);
+    state = applyHistory(state, [
+      { id: "user_1", role: "user", parts: [{ type: "text", text: "go" }], timestamp: 1 },
+      { id: "agent_1", role: "agent", parts: [{ type: "text", text: "working" }], timestamp: 2 },
+    ]);
+    const cards = selectChatMessages(state).flatMap((m) => m.parts).filter((p) => p.type === "permission-request");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toMatchObject({ pendingId: "p-race", status: "pending" });
+  });
+
+  it("a history that already carries the card is not given a second copy", () => {
+    const deps = makeDeps();
+    const fields = {
+      pendingId: "p-dup",
+      toolCall: { toolCallId: "tc-1" } as never,
+      options: [],
+      reason: "acp" as const,
+    };
+    let state = run([{ type: "agent-permission-request", ...fields }], initialChatStreamState(), deps);
+    expect(
+      selectChatMessages(state).flatMap((m) => m.parts).filter((p) => p.type === "permission-request"),
+    ).toHaveLength(1);
+    state = applyHistory(state, [
+      { id: "agent_1", role: "agent", parts: [{ type: "permission-request", ...fields, status: "pending" }], timestamp: 2 },
+    ]);
+    const cards = selectChatMessages(state).flatMap((m) => m.parts).filter((p) => p.type === "permission-request");
+    expect(cards).toHaveLength(1);
+  });
+
   it("tool progress patches the matching call wherever it lives", () => {
     const deps = makeDeps();
     let state = run([thinking, toolCall("tc-1")], initialChatStreamState(), deps);

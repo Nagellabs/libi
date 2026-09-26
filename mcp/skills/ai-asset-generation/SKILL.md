@@ -122,6 +122,12 @@ track.
    size from the payload (~8.3 GB) and get approval**, then call
    `libi.get_install_plan({ mcpId: "local-music" })`, follow it (it calls
    `libi.music_download_model()`), and retry.
+   If you mention a paid alternative here (one that would skip the download),
+   **check `libi.list_providers()` and your tool list first** and name the
+   connected option(s) that can make music (either source counts; your tool
+   list is authoritative), and that they bill the user's own account on that
+   provider. If neither shows one, say so. Never offer a generic "a paid
+   provider" you have not checked for.
 3. If it returns `status: "confirm_duration"`, tell the user the
    `estimatedSeconds` and re-call with `confirm: true` (the job is
    cancellable).
@@ -182,8 +188,9 @@ Ask the user only the questions you don't already have answers to from prior tur
 - **Aspect ratio + resolution + duration** — for video: 9:16 vertical, 1:1 square, or 16:9 landscape; resolution; clip length in seconds.
 - **Continuity references** — if the user has a character, product, or style reference image, ask them to upload it (use `libi.upload_file`). A hosted model that takes image/audio inputs (`image_urls`, `audio_urls`) needs a **public `https` URL**, so a LOCAL libi file has to reach the provider's CDN first.
   - **Use your provider's own upload tool** (fal's `upload_file`, or whatever the provider documents) and pass the URL it returns. Your provider reference file, when this skill ships one for your provider, names the exact tool.
-  - **A REMOTE (HTTP) provider MCP cannot read a local path** — fal's hosted `upload_file` returns `Cannot read local files from a remote MCP server`. When that happens you have three honest options, in order: use a locally-running (stdio) provider MCP whose upload tool can read the path; pass a URL that is already public; or **tell the user you cannot get the local file to the provider and ask how they'd like to proceed**. Only public `https` URLs work as inputs.
+  - **A REMOTE (HTTP) provider MCP cannot read a local path** — fal's hosted `upload_file` returns `Cannot read local files from a remote MCP server`. When that happens you have these honest options, in order: use a locally-running (stdio) provider MCP whose upload tool can read the path; if the provider's own MCP tool hands you a presigned upload URL (ElevenLabs' `creative_create_asset_upload`), PUT the file there as its reference says; pass a URL that is already public; or **tell the user you cannot get the local file to the provider and ask how they'd like to proceed**. Only public `https` URLs work as inputs.
   - **NEVER do the upload yourself.** Do NOT read `FAL_KEY` (or any provider key) out of the database, env, settings, or shell; do NOT request a signed upload URL or `PUT`/`curl` bytes to provider storage; do NOT set an `Authorization` header. Provider credentials stay inside the provider's own MCP — handling raw keys yourself is a security breach, even with good intent.
+  - **The one exception:** when the provider's OWN MCP tool hands you a presigned upload URL (ElevenLabs' `creative_create_asset_upload`), `PUT` the file's bytes to exactly that URL, with only the `Content-Type` it names: no key, no `Authorization` header. Never ask for such a URL any other way, and never for fal.
 - **Negative prompts** — if the model supports them, ask what to avoid.
 
 ## Step 6.5 — Realistic images / keyframes → `realistic-image-generation`

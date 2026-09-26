@@ -18,7 +18,7 @@ function pickFontFileIds(overlays: Overlay[]): string[] {
  * API (idempotent, cached in `registry-client`). Returns a `version` counter
  * that bumps once a newly-registered font finishes loading so the player
  * repaints with the now-available family. Mirrors the shape of
- * `useOverlayImages` / `useOverlayCompiledFns`.
+ * `useOverlayImages`.
  */
 export function useOverlayFonts(composition: Composition | null): { version: number } {
   const registered = useRef<Set<string>>(new Set());

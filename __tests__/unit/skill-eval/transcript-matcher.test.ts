@@ -118,3 +118,52 @@ describe("transcript_contains any-of", () => {
     ).toThrow(/must not be an empty list/);
   });
 });
+
+describe("transcript_matches (regex)", () => {
+  const t = [
+    '[tool-call mcp__libi__libi_get_piece_state] {"pieceId":"p"}',
+    '[tool-result  ok] [{"type":"text","text":"{\\"renderDiagnostics\\":[{\\"time\\":0.067}]}"}]',
+    '[tool-call mcp__libi__libi_render_overlay_frames] {"pieceId":"p","atTimes":[0.067]}',
+  ].join("\n\n");
+
+  it("counts matches, and a backreference ties a later call to an earlier result", () => {
+    const re = String.raw`\\"time\\":([\d.]+)[\s\S]*?"atTimes":\[\1\]`;
+    const [r] = evaluate([], [{ transcript_matches: re, expect: "present" }], t);
+    expect(r.pass).toBe(true);
+    const [other] = evaluate([], [{ transcript_matches: re, expect: "present" }], t.replace("[0.067]}", "[1.5]}"));
+    expect(other.pass).toBe(false);
+    expect(other.reason).toContain("regex");
+  });
+
+  it("supports count expressions", () => {
+    const [r] = evaluate([], [{ transcript_matches: String.raw`\[tool-call mcp__libi__libi_\w+\]`, count: "==2" }], t);
+    expect(r.pass).toBe(true);
+  });
+
+  it("refuses a pattern that can match the empty string, which could never fail `present`", () => {
+    expect(() => evaluate([], [{ transcript_matches: "x*", expect: "present" }], t)).toThrow(/empty string/);
+    expect(() => evaluate([], [{ transcript_matches: "(?=tool)", expect: "present" }], t)).toThrow(/empty string/);
+    expect(() => evaluate([], [{ transcript_matches: "", expect: "present" }], t)).toThrow(/must not be empty/);
+  });
+
+  it("refuses an invalid pattern loudly", () => {
+    expect(() => evaluate([], [{ transcript_matches: "(", expect: "present" }], t)).toThrow(/not a valid regular expression/);
+  });
+
+  it("cannot be combined with transcript_contains or a trace selector", () => {
+    expect(() =>
+      evaluate([], [{ transcript_matches: "a", transcript_contains: "a", expect: "present" }], t),
+    ).toThrow(/transcript_matches cannot be combined/);
+    expect(() =>
+      evaluate([], [{ transcript_matches: "a", tool: "run_model", expect: "present" }], t),
+    ).toThrow(/transcript_matches cannot be combined/);
+  });
+
+  it("a failing absent/count regex quotes what it matched (it has no trace call to show)", () => {
+    const [r] = evaluate([], [{ transcript_matches: String.raw`\[tool-call mcp__libi__libi_render_overlay_frames\] \{[^\n]*`, expect: "absent" }], t);
+    expect(r.pass).toBe(false);
+    expect(r.reason).toContain('first: "[tool-call mcp__libi__libi_render_overlay_frames] {\\"pieceId\\":\\"p\\"');
+    const [c] = evaluate([], [{ transcript_matches: String.raw`\[tool-call`, count: "==1" }], t);
+    expect(c.reason).toContain('first: "[tool-call"');
+  });
+});

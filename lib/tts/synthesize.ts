@@ -6,6 +6,7 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import {
   KOKORO_ONNX_VERSION,
   KOKORO_MODEL_URL,
@@ -168,9 +169,10 @@ function runUv(args: string[], timeoutMs: number): Promise<string> {
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
+        const offline = uvNetworkFailureMessage("voiceover", err);
         reject(
           new KokoroSynthesizeError(
-            `kokoro exited ${code}: ${err.trim().slice(0, 500)}`,
+            offline ?? `kokoro exited ${code}: ${err.trim().slice(0, 500)}`,
           ),
         );
         return;

@@ -107,6 +107,15 @@ export class TerminalCapacityError extends Error {
   }
 }
 
+/**
+ * Whether `err` is a `TerminalCapacityError`, judged by its name. Not `instanceof`: the terminal
+ * manager is a process-wide singleton (`getTerminalManager`, on globalThis) built from whichever
+ * route bundle loaded it first, and each Next route bundle has its own copy of this module.
+ */
+export function isTerminalCapacityError(err: unknown): err is TerminalCapacityError {
+  return err instanceof Error && err.name === "TerminalCapacityError";
+}
+
 /** An `initialInput` still waiting to be typed — see `flushPendingInput`. */
 interface PendingInput {
   text: string;
@@ -157,8 +166,10 @@ export interface TerminalManagerOpts {
   maxSessions?: number;
   /** Called with the owning surface once a setup terminal is running. */
   onSetupTerminalOpen?: (surface: SetupSurface) => void;
-  /** Called with the owning surface whenever a setup terminal goes away. */
-  onSetupTerminalExit?: (surface: SetupSurface) => void;
+  /** Called with the owning surface, and the terminal's id, whenever a setup terminal goes away. */
+  onSetupTerminalExit?: (surface: SetupSurface, id: string) => void;
+  /** Called with every chunk a setup terminal's PTY prints, after its viewers have it. Must not throw. */
+  onSetupTerminalOutput?: (id: string, data: string) => void;
   /** Clock for the idle reaper; defaults to `Date.now`. */
   now?: () => number;
 }
@@ -319,6 +330,7 @@ export class TerminalManager {
       pty.onData((data) => {
         entry.headless.write(data);
         this.broadcastOutput(entry, data);
+        if (purpose === "setup") this.opts.onSetupTerminalOutput?.(id, data);
         // After the viewer has the output, so the prompt shows before the command.
         this.observePendingOutput(entry, data);
       });
@@ -758,7 +770,7 @@ export class TerminalManager {
     );
     this.emitListChanged();
     if (entry.meta.purpose === "setup" && entry.meta.surface) {
-      this.opts.onSetupTerminalExit?.(entry.meta.surface);
+      this.opts.onSetupTerminalExit?.(entry.meta.surface, id);
     }
   }
 

@@ -10,20 +10,21 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider  fal, higgsfield or elevenlabs
+#   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #
 # What it does:
-#   1. fal.ai and ElevenLabs: asks for your provider key without showing it as
-#      you type. Higgsfield has no key: you sign in with your Higgsfield
-#      account in your browser instead.
+#   1. fal.ai: asks for your provider key without showing it as you type.
+#      Higgsfield, Zernio and ElevenLabs have no key: you sign in with your
+#      account for that provider in your browser instead.
 #   2. Codex with fal.ai only: saves the key as FAL_KEY in your Windows user
 #      environment, because Codex reads that key from its environment when it
 #      starts.
-#   3. Runs the agent's own `mcp add`, which writes the agent's config. For
-#      Higgsfield, Codex then opens your browser to sign in and waits until
-#      you finish; for Claude Code, it says how to sign in afterwards.
+#   3. Runs the agent's own `mcp add`, which writes the agent's config. For a
+#      provider you sign in to, your browser then opens to sign in and this
+#      waits until you finish: Codex's add does that itself, and for Claude
+#      Code this runs Claude Code's own `mcp login` once the add worked.
 #
 # The key is never printed, and it exists only inside this script's process.
 
@@ -35,7 +36,8 @@ param([string]$Provider, [string]$Agent, [string]$Cli)
 switch -CaseSensitive ($Provider) {
   'fal'        { $name = 'fal.ai'; $auth = 'key'; $codexKeyEnv = 'FAL_KEY' }
   'higgsfield' { $name = 'Higgsfield'; $auth = 'oauth'; $codexKeyEnv = '' }
-  'elevenlabs' { $name = 'ElevenLabs'; $auth = 'key'; $codexKeyEnv = '' }
+  'zernio'     { $name = 'Zernio'; $auth = 'oauth'; $codexKeyEnv = '' }
+  'elevenlabs' { $name = 'ElevenLabs'; $auth = 'oauth'; $codexKeyEnv = '' }
   default      { [Console]::Error.WriteLine("add-provider.ps1: unknown provider '$Provider'"); exit 2 }
 }
 if ($Agent -cne 'claude' -and $Agent -cne 'codex') {
@@ -70,19 +72,42 @@ switch -CaseSensitive ("$Provider/$Agent") {
   'fal/codex'         { $addArgs = @('mcp', 'add', 'fal-ai', '--url', 'https://mcp.fal.ai/mcp', '--bearer-token-env-var', 'FAL_KEY') }
   'higgsfield/claude' { $addArgs = @('mcp', 'add', '--transport', 'http', '--scope', 'user', 'higgsfield', 'https://mcp.higgsfield.ai/mcp') }
   'higgsfield/codex'  { $addArgs = @('mcp', 'add', 'higgsfield', '--url', 'https://mcp.higgsfield.ai/mcp') }
-  'elevenlabs/claude' { $addArgs = @('mcp', 'add', '--scope', 'user', 'elevenlabs', '-e', "ELEVENLABS_API_KEY=$key", '--', 'uvx', 'elevenlabs-mcp') }
-  'elevenlabs/codex'  { $addArgs = @('mcp', 'add', 'elevenlabs', '--env', "ELEVENLABS_API_KEY=$key", '--', 'uvx', 'elevenlabs-mcp') }
+  'zernio/claude'     { $addArgs = @('mcp', 'add', '--transport', 'http', '--scope', 'user', 'zernio', 'https://mcp.zernio.com/mcp') }
+  'zernio/codex'      { $addArgs = @('mcp', 'add', 'zernio', '--url', 'https://mcp.zernio.com/mcp') }
+  'elevenlabs/claude' { $addArgs = @('mcp', 'add', '--transport', 'http', '--scope', 'user', 'elevenlabs', 'https://api.us.elevenlabs.io/v1/mcp') }
+  'elevenlabs/codex'  { $addArgs = @('mcp', 'add', 'elevenlabs', '--url', 'https://api.us.elevenlabs.io/v1/mcp') }
 }
-# Codex's add starts the browser sign-in itself; Claude Code signs in afterwards.
+# Codex's add starts the browser sign-in itself. Claude Code's add finishes
+# before any sign-in, so its own `mcp login` follows, only when the add worked.
+# The entry the add creates is named after the provider, as in the catalog.
+# For Claude Code, the two [libi sign-in ...] lines tell libi when the sign-in
+# starts and when it has ended, however it ended (Ctrl+C included): libi must
+# not ask Claude Code about the entry in between, or Claude Code may skip it
+# for 15 minutes.
+$signsIn = $auth -ceq 'oauth' -and $Agent -ceq 'claude'
 if ($auth -ceq 'oauth' -and $Agent -ceq 'codex') {
   Write-Host "Codex adds $name, then opens your browser to sign in with your $name account. This waits here until you finish signing in."
 }
-& $Cli @addArgs
-if ($?) {
-  if ($auth -ceq 'oauth' -and $Agent -ceq 'claude') {
-    Write-Host "Added. Now sign in with your $name account: click Sign in on libi's Providers tab, or open Claude Code, run /mcp, choose $Provider, then Authenticate."
-  }
-  exit 0
+if ($signsIn) {
+  Write-Host "Claude Code adds $name, then opens your browser to sign in with your $name account. This waits here until you finish signing in."
+  Write-Host "[libi sign-in start: $Provider]"
 }
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
-exit 1
+$code = 0
+try {
+  & $Cli @addArgs
+  if (-not $?) {
+    $code = 1
+    if ($LASTEXITCODE) { $code = $LASTEXITCODE }
+  } elseif ($signsIn) {
+    $loginArgs = @('mcp', 'login', '--', $Provider)
+    & $Cli @loginArgs
+    if (-not $?) {
+      $code = 1
+      if ($LASTEXITCODE) { $code = $LASTEXITCODE }
+    }
+  }
+} finally {
+  # [Console], not Write-Host: after Ctrl+C the pipeline is stopping, and Write-Host can throw and print nothing.
+  if ($signsIn) { [Console]::WriteLine("[libi sign-in end: $Provider]") }
+}
+exit $code

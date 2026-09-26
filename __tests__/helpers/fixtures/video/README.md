@@ -8,6 +8,7 @@ Committed binary fixtures used by the video-pipeline integration tests.
 | `clip-green-3s.mp4` | 3s, 320×240, solid green, H.264 + AAC (440 Hz sine at -20 dB) |
 | `tone-5s.m4a` | 5s mono AAC tone at 660 Hz (for audio-mix tests) |
 | `logo-64.png` | 64×64 solid blue PNG (for image-overlay tests) |
+| `unplayable-clip.mp4` | Text, not video, under an `.mp4` name — ffprobe and the export's decoder both refuse it. Written by hand, not by `generate.sh` (skill-eval `video-overlays/02-export-unplayable-clip.md`) |
 
 ## Regenerating
 

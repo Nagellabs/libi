@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "name": "Lower third",
+  "description": "A name card that slides in over the footage",
+  "tags": ["promo", "name-card"],
+  "canvas": { "width": 1080, "height": 1920, "fps": 30 },
+  "duration": 4,
+  "slots": [
+    { "key": "headline", "kind": "text", "label": "Headline", "hint": "The person's name, 1-3 words", "required": true },
+    { "key": "clip", "kind": "video", "label": "Background clip", "hint": "9:16 footage, at least 4 s", "required": false }
+  ],
+  "overlays": [
+    { "key": "background", "kind": "video", "startTime": 0, "duration": 4, "rect": { "x": 0, "y": 0, "width": 1080, "height": 1920 }, "z": 0, "opacity": 1, "displayName": "Background", "fit": "cover", "source": { "slot": "clip" } },
+    { "key": "logo", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 40, "y": 40, "width": 160, "height": 160 }, "z": 2, "opacity": 1, "displayName": "Logo", "source": { "assetRef": "logo" } },
+    { "key": "headline", "kind": "text", "startTime": 0.5, "duration": 3.5, "rect": { "x": 60, "y": 1500, "width": 960, "height": 160 }, "z": 3, "opacity": 1, "displayName": "Headline", "font": "700 72px Inter", "color": "#ffffff", "align": "left", "text": { "slot": "headline" } },
+    { "key": "sparkle", "kind": "code", "startTime": 0.5, "duration": 1, "rect": { "x": 0, "y": 1450, "width": 1080, "height": 260 }, "z": 1, "opacity": 1, "displayName": "Sparkle", "codeFile": "overlays/sparkle/draw.jsx" }
+  ],
+  "audioClips": [],
+  "assets": [{ "ref": "logo", "kind": "image", "file": "assets/logo.png" }],
+  "fonts": [],
+  "captionStyles": []
+}

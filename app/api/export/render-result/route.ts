@@ -4,8 +4,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getRenderJob, resolveRenderJob } from "@/lib/export/render-jobs";
 import { exportLogger } from "@/lib/logger";
+import { hasManifest, loadManifest } from "@/lib/composition/persistence";
+import { bodyHashesOf } from "@/lib/render/body-hashes";
+import { applyExportDiagnostics, parseExportDiagnosticsReport } from "@/lib/render/render-diagnostics-store";
+import { evaluateRequestOrigin } from "@/lib/security/request-guard";
 
 export async function POST(req: Request) {
+  // This route sits outside proxy.ts's matcher (multipart size — see the note
+  // there), so the CSRF/rebinding guard has to run here by hand, in addition to
+  // the per-job token below (spec §4.10). It runs before the body is read, so a
+  // refused request costs no multipart parse.
+  const verdict = evaluateRequestOrigin({
+    method: req.method,
+    secFetchSite: req.headers.get("sec-fetch-site"),
+    host: req.headers.get("host"),
+    origin: req.headers.get("origin"),
+    serverHost: req.headers.get("host"),
+  });
+  if (!verdict.allow) {
+    return NextResponse.json({ error: "forbidden_cross_origin", reason: verdict.reason }, { status: 403 });
+  }
+
   let form: FormData;
   try {
     form = await req.formData();
@@ -75,6 +94,43 @@ export async function POST(req: Request) {
       }
     } catch {
       // Malformed — ignore.
+    }
+  }
+
+  // Body-layer diagnostics from the sandboxed runtime (spec §4.7): failures,
+  // unattributed runtime errors and the frames each body rendered cleanly.
+  // Applied BEFORE the job resolves, so an agent that reads
+  // libi.get_piece_state right after libi.render_overlay_frames returns sees
+  // them. Judged against the piece's CURRENT draft bodies — a pass over an
+  // older body (a snapshot render, an edit mid-render) files nothing and
+  // clears nothing. Informational: never fails the postback.
+  const renderDiagnosticsRaw = form.get("renderDiagnostics");
+  if (typeof renderDiagnosticsRaw === "string") {
+    try {
+      const report = parseExportDiagnosticsReport(JSON.parse(renderDiagnosticsRaw));
+      // A piece deleted while it rendered has no manifest: `loadManifest` would
+      // WRITE an empty snapshot into an orphan piece dir, and the merge would
+      // bring back the store key `clearRenderDiagnostics` removed.
+      if (report && !(await hasManifest(entry.pieceId))) {
+        exportLogger.info({ event: "render_diagnostics_piece_gone", jobId, pieceId: entry.pieceId }, "export.render_diagnostics_piece_gone");
+      } else if (report) {
+        const manifest = await loadManifest(entry.pieceId);
+        const hashes = await bodyHashesOf(manifest.overlays ?? []);
+        applyExportDiagnostics(entry.pieceId, report, (id) => hashes.get(id));
+        exportLogger.info(
+          {
+            event: "render_diagnostics",
+            jobId,
+            pieceId: entry.pieceId,
+            failures: report.diagnostics.map((d) => ({ overlayId: d.overlayId, phase: d.phase, time: d.time })),
+            unattributed: report.unattributed.length,
+            clean: report.clean.length,
+          },
+          "export.render_diagnostics",
+        );
+      }
+    } catch (err) {
+      exportLogger.warn({ event: "render_diagnostics_rejected", jobId, err: (err as Error).message }, "export.render_diagnostics_rejected");
     }
   }
 

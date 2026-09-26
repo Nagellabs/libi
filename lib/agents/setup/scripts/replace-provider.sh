@@ -7,7 +7,7 @@
 #
 #   sh replace-provider.sh <provider> <agent> <cli> <entry> [<scope>]
 #
-#   provider  fal, higgsfield or elevenlabs
+#   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config now
@@ -17,8 +17,8 @@
 # What it does:
 #   1. Runs the agent's own `mcp remove` for the entry you have now.
 #   2. Only when that worked, runs add-provider.sh from this same folder, which
-#      adds the provider again: it asks for your key, or for Higgsfield, starts
-#      the sign-in with your Higgsfield account.
+#      adds the provider again: it asks for your key, or for a provider you
+#      sign in to (Higgsfield, Zernio, ElevenLabs), starts that sign-in.
 #
 # A FAL_KEY line libi saved for Codex is left alone in step 1, because step 2
 # replaces it. The entry's name goes after `--`, so a name that starts with `-`
@@ -34,7 +34,7 @@ scope=$5
 # follows a remove. A libi test keeps this list the same as the providers
 # add-provider.sh knows.
 case $provider in
-  fal | higgsfield | elevenlabs) ;;
+  fal | higgsfield | zernio | elevenlabs) ;;
   *) echo "replace-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in

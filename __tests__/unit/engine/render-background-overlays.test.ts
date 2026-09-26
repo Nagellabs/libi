@@ -2,6 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { renderFrame } from "@/lib/engine/renderer";
 import type { Composition } from "@/lib/engine/types";
+import { fakeBitmap, fakeLayers } from "@/__tests__/helpers/fake-layers";
 
 /**
  * Empty-scenes path: a video-less piece (scenes: []) must render a solid
@@ -69,16 +70,16 @@ describe("renderFrame with empty scenes", () => {
         },
       ],
     };
-    const { canvas, fillRectCalls } = mockCanvas();
-    const overlayDraw = vi.fn();
-    const compiled = { o1: overlayDraw };
+    const { canvas, mockCtx, fillRectCalls } = mockCanvas();
+    const layers = fakeLayers({ o1: fakeBitmap() });
     expect(() =>
-      renderFrame(canvas, comp, 0, {}, undefined, undefined, compiled),
+      renderFrame(canvas, comp, 0, {}, undefined, undefined, layers),
     ).not.toThrow();
     // Background filled with the comp's backgroundColor.
     expect(fillRectCalls.some((c) => c.fillStyle === "#123456")).toBe(true);
-    // Overlay draw path ran.
-    expect(overlayDraw).toHaveBeenCalledTimes(1);
+    // Overlay draw path ran: the body layer was requested once and drawn.
+    expect(layers.requests.filter((r) => r.overlayId === "o1")).toHaveLength(1);
+    expect(mockCtx.drawImage).toHaveBeenCalledTimes(1);
   });
 
   it("fills the default-black background with no overlays and does not throw", () => {

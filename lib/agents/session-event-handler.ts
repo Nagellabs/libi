@@ -5,6 +5,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
+import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "./types";
 import type { AgentMessage, AgentMessagePart } from "./message-types";
@@ -33,6 +34,8 @@ import {
   type McpToolId,
 } from "@/lib/agents/mcp-tool-id";
 import { LIBI_MCP_ENTRY_NAME } from "@/lib/mcp/agent-surface";
+import { socialRefreshForTool } from "@/lib/social/invalidation";
+import { navigationEmitter } from "@/lib/navigation-events";
 import {
   getJobKindToToolIdsMap,
   getRunner,
@@ -144,6 +147,10 @@ function updateMeta(update: unknown): unknown {
  * marked "requires approval" (`isApprovalRequiredExtensionTool`); it prompts
  * with reason `extension` so the card can say why. `auto-with-generations`
  * runs that too.
+ *
+ * Publishing a template is not gated here: `libi.publish_template` only
+ * prepares a request, and the user publishes it on the Templates page (see
+ * the LIMITATIONS in lib/approval/extensions.ts).
  */
 export async function decidePermissionAction(
   agentId: string,
@@ -184,15 +191,31 @@ export async function decidePermissionAction(
 //   - lookupSession — finds the SessionEntry for a given sessionId
 // ---------------------------------------------------------------------------
 
+/** The message content a `session/load` replay produces — kept off the SSE while it is applied
+ *  (see `handleSessionUpdate`). */
+const REPLAYED_CONTENT_EVENTS: ReadonlySet<AgentEvent["type"]> = new Set<AgentEvent["type"]>([
+  "agent-text",
+  "agent-tool-call",
+  "agent-tool-progress",
+  "agent-tool-status",
+  "agent-tool-args",
+  "agent-tool-title",
+  "agent-subagent-refine",
+  "agent-tool-result",
+]);
+
 export class SessionEventHandler {
   /** Removes the active job-progress subscription, if any. Set by
    *  `attachJobProgressBridge`; called automatically when the bridge is
    *  re-attached (HMR safety) so we don't accumulate stale listeners. */
   private detachJobProgress: (() => void) | null = null;
+  /** The session whose replayed `session/update` is being applied right now (synchronously), or
+   *  null. Read by `emit`. */
+  private replayingSessionId: string | null = null;
 
   constructor(
     private readonly msgCounter: { next: () => number },
-    private readonly emit: (sessionId: string, event: AgentEvent) => void,
+    private readonly emitEvent: (sessionId: string, event: AgentEvent) => void,
     private readonly lookupSession: (
       sessionId: string,
     ) => SessionEntry | undefined,
@@ -258,6 +281,27 @@ export class SessionEventHandler {
     } else if (old.type === "subagent") {
       agentMsg.parts[idx] = { ...old, progress: text };
     }
+  }
+
+  /**
+   * The canonical id recorded when this tool call OPENED.
+   *
+   * claude-agent-acp sends the MCP name only on the `tool_call`; the
+   * `tool_call_update` that completes it carries `title: undefined` and no
+   * MCP `rawInput`, so canonicalizing from the update alone answers null for
+   * every claude MCP call. Anything that must decide something ON COMPLETION
+   * has to read the id back off the cached call part instead.
+   */
+  private cachedCallToolId(
+    session: SessionEntry | undefined,
+    toolCallId: string,
+  ): McpToolId | null {
+    if (!session) return null;
+    const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
+    const part = agentMsg?.parts.find(
+      (p) => p.type === "tool-call" && p.toolCallId === toolCallId,
+    );
+    return part?.type === "tool-call" ? part.toolId : null;
   }
 
   /**
@@ -595,8 +639,37 @@ export class SessionEventHandler {
    * history replay.
    */
   handleSessionUpdate(sessionId: string, params: SessionNotification): void {
+    // A `session/load` replay builds the cache GET /api/agent/messages returns; it is not a turn.
+    // Broadcast, an open chat assembled it into a streaming message that its history fetch then
+    // adopted as in flight, with no `agent-complete` to end it (a stale "▍" on every chat opened
+    // after a server restart). Gated HERE, around the replay's own updates only: a job's progress
+    // tick or its one-time orphaned-row result can land during a load and must still go out.
+    if (this.lookupSession(sessionId)?.isReplaying !== true) {
+      this.applySessionUpdate(sessionId, params);
+      return;
+    }
+    const outer = this.replayingSessionId;
+    this.replayingSessionId = sessionId;
+    try {
+      this.applySessionUpdate(sessionId, params);
+    } finally {
+      this.replayingSessionId = outer;
+    }
+  }
+
+  /** Every server-side event goes out through here. While a replayed update of that session is
+   *  being applied, its message content is dropped; session context (commands, usage) still goes. */
+  private emit(sessionId: string, event: AgentEvent): void {
+    if (this.replayingSessionId === sessionId && REPLAYED_CONTENT_EVENTS.has(event.type)) return;
+    this.emitEvent(sessionId, event);
+  }
+
+  private applySessionUpdate(sessionId: string, params: SessionNotification): void {
     const update = params.update;
     const session = this.lookupSession(sessionId);
+    // The agent is alive and working — what the cancel bound in
+    // SessionManager.cancelTurn measures silence against. Replay is history.
+    if (session && session.isReplaying !== true) session.lastAgentActivityAt = Date.now();
 
     switch (update.sessionUpdate) {
       case "user_message_chunk": {
@@ -826,6 +899,7 @@ export class SessionEventHandler {
           // refinement for a dispatch. Caches it AND emits it, so the live row
           // stops showing `{}`.
           this.adoptToolCallArgs(sessionId, session, update.toolCallId, update.rawInput);
+          this.adoptToolCallTitle(sessionId, session, update.toolCallId, update.title);
 
           const refined = this.refineSubagentFromUpdate(
             session,
@@ -869,6 +943,7 @@ export class SessionEventHandler {
         // with, and the live row's last chance to stop showing `{}`.
         this.textProgressCalls.delete(update.toolCallId);
         this.adoptToolCallArgs(sessionId, session, update.toolCallId, update.rawInput);
+        this.adoptToolCallTitle(sessionId, session, update.toolCallId, update.title);
         const rawTitle = update.title ?? "";
         const toolId = toolIdForCall(rawTitle, update.rawInput, updateMeta(update));
         const result = update.rawOutput;
@@ -959,6 +1034,25 @@ export class SessionEventHandler {
           result,
           success: update.status === "completed",
         });
+
+        // A zernio write completed in this chat: the Social page and the
+        // Posting tab re-read the provider over the SSE stream that is already
+        // open — no polling, no second EventSource. Never on replay (a page
+        // refresh would fire one stale invalidation per historical call),
+        // never on failure.
+        //
+        // `toolId` above is resolved from THIS update, and claude's completion
+        // carries neither a title nor an MCP `rawInput` — verified live in the
+        // worktree, 2026-09-20: `mcp__zernio__posts_create` completes with
+        // `rawTitle: ""` and `toolId: null`. The canonical id was learned when
+        // the call OPENED, so read it back off the cached call part; resolving
+        // from the update alone leaves this hook dead on claude.
+        if (update.status === "completed" && session?.isReplaying !== true) {
+          const refresh = socialRefreshForTool(
+            toolId ?? this.cachedCallToolId(session, update.toolCallId),
+          );
+          if (refresh) navigationEmitter.emit("refresh_query", refresh);
+        }
 
         if (session) {
           const holder =
@@ -1117,12 +1211,15 @@ export class SessionEventHandler {
       return { outcome: { outcome: "selected", optionId: action.optionId } };
     }
 
+    // Stored AND shown: the permission route accepts only an offered option.
+    const options = params.options;
     return new Promise<RequestPermissionResponse>((resolve) => {
       const pendingId = randomUUID();
       session.pendingApprovals.set(pendingId, {
         pendingId,
         toolCall: params.toolCall,
-        options: params.options,
+        options,
+        reason: action.reason,
         resolve,
         createdAt: Date.now(),
       });
@@ -1130,9 +1227,35 @@ export class SessionEventHandler {
         type: "agent-permission-request",
         pendingId,
         toolCall: params.toolCall,
-        options: params.options,
+        options,
         reason: action.reason,
       });
+      // Part of the session's HISTORY, not only the live stream: a client
+      // that reloads mid-wait gets the card back from GET /api/agent/messages
+      // whatever order that and the SSE re-send arrive in. Every resolve path
+      // closes it via `markPermissionResolvedInCache`. Never allowed to stand
+      // between the agent and its answer: the request is already stored and
+      // on the wire above.
+      try {
+        this.ensureAgentMessage(session).parts.push({
+          type: "permission-request",
+          pendingId,
+          toolCall: params.toolCall,
+          options,
+          reason: action.reason,
+          status: "pending",
+        });
+      } catch (err) {
+        logger.warn(
+          {
+            tag: "session-event-handler",
+            op: "permission_cache_failed",
+            sessionId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "could not add the approval card to the session history",
+        );
+      }
     });
   }
 
@@ -1284,6 +1407,38 @@ export class SessionEventHandler {
   ): void {
     if (!this.fillToolCallArgsFromUpdate(session, toolCallId, rawInput)) return;
     this.emit(sessionId, { type: "agent-tool-args", toolCallId, args: rawInput });
+  }
+
+  /**
+   * Adopt a built-in tool call's refined title, in the cache AND on the wire.
+   *
+   * claude-agent-acp titles a Write "Preparing file…" (an Edit a bare "Edit")
+   * at content_block_start, before `file_path` has streamed, then sends
+   * "Write <path>" on the `tool_call_update` that carries the input. Only the
+   * input was ever adopted, so every Write row kept the placeholder — live and
+   * in the history a refresh serves. The adapter builds each update's title
+   * from the input it has so far, so the latest non-empty one is the best.
+   *
+   * Built-in calls only (`toolId === null`): an MCP row is named by its
+   * `toolId`, and its title is what `toolIdForCall` classified at ingest.
+   */
+  private adoptToolCallTitle(
+    sessionId: string,
+    session: SessionEntry | undefined,
+    toolCallId: string,
+    title: string | null | undefined,
+  ): void {
+    if (!session || typeof title !== "string" || title.trim() === "") return;
+    const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
+    if (!agentMsg) return;
+    const idx = agentMsg.parts.findIndex(
+      (p) => p.type === "tool-call" && p.toolCallId === toolCallId,
+    );
+    if (idx === -1) return;
+    const old = agentMsg.parts[idx] as Extract<AgentMessagePart, { type: "tool-call" }>;
+    if (old.toolId != null || old.rawTitle === title) return;
+    agentMsg.parts[idx] = { ...old, rawTitle: title };
+    this.emit(sessionId, { type: "agent-tool-title", toolCallId, rawTitle: title });
   }
 
   private refineSubagentFromUpdate(
@@ -1511,6 +1666,8 @@ function clearTransientStatus(
 export function formatJobProgressText(payload: JobProgressPayload): string {
   // A non-job tool's own line (mcp/tools/tool-progress.ts): shown verbatim.
   if (typeof payload.message === "string" && payload.message.trim() !== "") return payload.message.trim();
+  // An export waiting its turn behind another one (lib/export/export-waiting.ts).
+  if (isExportWaiting(payload)) return payload.progressLabel ? `${payload.progressLabel} — ${EXPORT_WAITING_MESSAGE}` : EXPORT_WAITING_MESSAGE;
   const pct =
     payload.total > 0 ? Math.floor((payload.done / payload.total) * 100) : 0;
   const eta = payload.etaMs != null ? formatEta(payload.etaMs) : null;

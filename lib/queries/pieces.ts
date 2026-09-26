@@ -73,6 +73,10 @@ export function usePieceComposition(pieceId: string, options?: { enabled?: boole
     queryFn: async (): Promise<{
       manifest: CompositionManifest;
       audioClips: AudioClipData[];
+      /** Legacy canvas scenes (libi 0.1.0/0.1.1) the file held; not loaded. */
+      legacyScenes?: number;
+      /** Whether the user has already been told about them (server-side, per piece). */
+      legacyScenesNoticed?: boolean;
     }> => {
       const res = await fetch(`/api/pieces/${pieceId}/composition`);
       if (!res.ok) {

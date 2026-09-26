@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import path from "node:path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+
+const HOME = "/tmp/libi-uv-env-test";
 
 function withPlatform<T>(platform: NodeJS.Platform, fn: () => T): T {
   const original = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -17,7 +20,7 @@ describe("buildUvEnv strips the user's Python environment", () => {
   let snapshot: NodeJS.ProcessEnv;
   beforeEach(() => {
     snapshot = { ...process.env };
-    process.env.LIBI_HOME = "/tmp/libi-uv-env-test";
+    process.env.LIBI_HOME = HOME;
     process.env.PYTHONHOME = "/opt/py";
     process.env.PYTHONPATH = "/opt/py/lib";
     process.env.VIRTUAL_ENV = "/opt/venv";
@@ -35,7 +38,8 @@ describe("buildUvEnv strips the user's Python environment", () => {
       expect(env[k], k).toBeUndefined();
     }
     expect(env.KEEP_ME).toBe("yes");
-    expect(env.UV_CACHE_DIR).toContain("/tmp/libi-uv-env-test");
+    // Joined by the host's `path`: `\tmp\libi-uv-env-test\…` on Windows.
+    expect(env.UV_CACHE_DIR).toContain(path.normalize(HOME));
   });
 
   it("matches names case-insensitively, as Windows environment names are", () => {

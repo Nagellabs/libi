@@ -16,15 +16,17 @@ describe("fake-elevenlabs recorder", () => {
 
   it("appends one JSON line per call to elevenlabs-calls.jsonl", async () => {
     const { recordCall, elevenlabsRecordPath } = await import("@/mcp/dev/fake-elevenlabs/recorder");
-    recordCall({ tool: "text_to_speech", voice_id: "v1", model_id: "eleven_multilingual_v2", output_path: "/tmp/a.wav", text: "hi" });
-    recordCall({ tool: "voice_clone", name: "Ava", voice_id: "fakevoiceXYZ" });
+    recordCall({ tool: "creative_generate_speech", input: { prompt: "hi", voice_id: "v1" }, voice_id: "v1", model_id: "eleven_multilingual_v2", generations_count: 4 });
+    recordCall({ tool: "creative_list_voices", input: { context: "pick a voice" } });
     const p = elevenlabsRecordPath();
     expect(existsSync(p)).toBe(true);
     const lines = readFileSync(p, "utf8").trim().split("\n");
     expect(lines).toHaveLength(2);
     const first = JSON.parse(lines[0]);
-    expect(first.tool).toBe("text_to_speech");
+    expect(first.tool).toBe("creative_generate_speech");
     expect(first.voice_id).toBe("v1");
+    expect(first.input).toEqual({ prompt: "hi", voice_id: "v1" });
+    expect(first.generations_count).toBe(4);
     expect(first.ts).toBeTypeOf("string");
   });
 
@@ -43,6 +45,6 @@ describe("fake-elevenlabs recorder", () => {
     const fileAsDir = join(home, "not-a-dir");
     writeFileSync(fileAsDir, "");
     process.env.LIBI_HOME = join(fileAsDir, "nested");
-    expect(() => recordCall({ tool: "compose_music", prompt: "x" })).not.toThrow();
+    expect(() => recordCall({ tool: "creative_generate_in_flow", prompt: "x" })).not.toThrow();
   });
 });

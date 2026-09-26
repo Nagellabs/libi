@@ -3,6 +3,7 @@ import path from "path";
 import { spawn } from "child_process";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { resolveWhisperModel, whisperModelsDir } from "@/lib/whisper/models";
 import type { SttTranscription } from "@/lib/analysis/types";
 import { hashSpec } from "@/lib/uv-env/hash-spec";
@@ -154,9 +155,10 @@ function runUv(
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code !== 0) {
+        const offline = uvNetworkFailureMessage("transcription", err);
         reject(
           new WhisperTranscribeError(
-            `whisper exited ${code}: ${err.trim().slice(0, 500)}`,
+            offline ?? `whisper exited ${code}: ${err.trim().slice(0, 500)}`,
           ),
         );
         return;

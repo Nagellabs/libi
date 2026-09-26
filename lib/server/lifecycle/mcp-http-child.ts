@@ -833,8 +833,8 @@ export async function startMcpHttpChild(deps: McpHttpChildDeps = {}): Promise<Mc
     // Not a reason for libi to stay up: the studio's own server keeps the
     // process alive, and whatever ends libi stops this child on the way out.
     for (const h of [c, c.stdin, c.stdout, c.stderr]) unrefHandle(h);
-    // Nothing is ever written, so the only error possible is on a pipe whose
-    // reader is gone, and that must not be an uncaught exception in libi.
+    // Nothing is ever written to the lifeline, so the only error possible is on a
+    // pipe whose reader is gone, and that must not be an uncaught exception in libi.
     c.stdin?.on("error", () => {});
     // Both pipes are drained. The entry writes nothing to stdout today, but an
     // undrained pipe fills its buffer and wedges the child. The last lines of

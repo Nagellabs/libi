@@ -22,6 +22,7 @@
 import type { ErrorEvent, EventHint, Log } from "@sentry/nextjs";
 import type * as Sentry from "@sentry/nextjs";
 
+import { redactLiveSecrets } from "../security/secret-scrub";
 import { shouldSendCrashReports } from "./enabled";
 
 // `SpanJSON` and `TransactionEvent` are real types in @sentry/core, but
@@ -43,7 +44,7 @@ const REDACTED = "[redacted]";
 // all match. Keep this list conservative-but-broad — over-redacting a value is
 // always safer than leaking a secret.
 const SECRET_KEY_PATTERN =
-  /(authorization|api[-_]?key|token|secret|password|passwd|credential|cookie|session[-_]?id|set-cookie|bearer|private[-_]?key|client[-_]?secret|dsn|sentry[-_]?auth|x-api-key|webhook|signature|salt|otp|mfa)/i;
+  /(authorization|api[-_]?key|token|secret|password|passwd|credential|cookie|session[-_]?id|set-cookie|bearer|private[-_]?key|client[-_]?secret|dsn|sentry[-_]?auth|x-api-key|webhook|signature|salt|otp|mfa|bypass)/i;
 
 // Value patterns that look like a secret even when the key name is innocent
 // (e.g. a token pasted into a free-text message). Conservative on purpose so we
@@ -169,7 +170,9 @@ export function redactPaths(value: string): string {
 }
 
 function redactString(value: string): string {
-  let out = value;
+  // Literal secrets this process holds (the templates creator key) first: no
+  // pattern below recognises a bare base64url value inside a message.
+  let out = redactLiveSecrets(value);
   for (const pattern of SECRET_VALUE_PATTERNS) {
     out = out.replace(pattern, REDACTED);
   }

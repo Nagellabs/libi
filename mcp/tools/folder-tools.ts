@@ -10,6 +10,7 @@ import {
 } from "@/lib/folders/repo";
 import { wouldCreateCycle } from "@/lib/folders/tree";
 import { deleteFolder } from "@/lib/folders/lifecycle";
+import { notify } from "@/mcp/notify";
 import { getDb } from "@/lib/db/client";
 import { pieces } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
@@ -76,7 +77,10 @@ export async function deleteFolderTool(params: {
   if (params.mode === "cascade" && params.confirm !== true) {
     return { success: false, error: "confirmation_required" };
   }
-  const result = await deleteFolder(params.folderId, params.mode);
+  const { removedPieceIds, ...result } = await deleteFolder(params.folderId, params.mode);
+  // This runs in the MCP child: the studio's in-memory state for each
+  // deleted piece (render diagnostics) is dropped by telling it.
+  for (const pieceId of removedPieceIds) notify.pieceDeleted(pieceId);
   return { success: true, data: { ...result } };
 }
 

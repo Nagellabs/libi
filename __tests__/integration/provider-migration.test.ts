@@ -207,18 +207,18 @@ describe("legacy key notice", () => {
     });
   });
 
-  it("substitutes an ElevenLabs key into both commands' placeholder", async () => {
+  // ElevenLabs moved to its hosted server (2026-09-25): the user signs in, and no command takes a key. A rescued
+  // key has nowhere to go, so it gets no notice (a command without it would read as if the key were in it); the
+  // row still expires at the TTL like every other.
+  it("shows no notice for a rescued ElevenLabs key: its add takes no key any more", async () => {
     raw
       .prepare(
         `INSERT INTO legacy_provider_keys (provider_id, env_vars, shown_at) VALUES ('elevenlabs', '{"ELEVENLABS_API_KEY":"el-key-9"}', NULL)`,
       )
       .run();
     const { pendingLegacyKeyNotices } = await import("@/lib/providers/legacy");
-    const el = pendingLegacyKeyNotices().find((n) => n.rowId === "elevenlabs");
-    expect(el?.providerId).toBe("elevenlabs");
-    expect(el?.commands.claude).toContain('"ELEVENLABS_API_KEY=el-key-9"');
-    expect(el?.commands.codex).toContain('"ELEVENLABS_API_KEY=el-key-9"');
-    expect(el?.commands.codex).not.toContain("export ");
+    expect(pendingLegacyKeyNotices().find((n) => n.rowId === "elevenlabs")).toBeUndefined();
+    expect(JSON.stringify(pendingLegacyKeyNotices())).not.toContain("el-key-9");
   });
 
   it("skips a rescued row the catalog has no command for", async () => {

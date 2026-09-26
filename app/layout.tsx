@@ -8,6 +8,8 @@ import { BundledFonts } from "@/components/providers/bundled-fonts";
 import { getCrashReportSettings } from "@/lib/db/settings";
 import { SENTRY_KILL_SWITCHED } from "@/lib/sentry/config";
 import { crashReportSeedScript } from "@/lib/sentry/seed-script";
+import { detectIsPackaged } from "@/lib/runtime/registry-url";
+import { OVERLAY_SANDBOX_MODE_META, resolveOverlaySandboxMode } from "@/lib/sandbox/mode";
 import "./globals.css";
 
 // The seed below reads the settings DB, so this layout is per-request. It
@@ -73,6 +75,10 @@ export default function RootLayout({
       <head>
         <meta name="theme-color" content="#16181a" media="(prefers-color-scheme: dark)" />
         <meta name="theme-color" content="#f7f4ef" media="(prefers-color-scheme: light)" />
+        {/* Dev-only escape hatch for the overlay sandbox (lib/sandbox/mode.ts);
+            always "sandbox" in a packaged build or a production server. Read by
+            use-overlay-layers. */}
+        <meta name={OVERLAY_SANDBOX_MODE_META} content={resolveOverlaySandboxMode(process.env, detectIsPackaged())} />
         {/*
           Seed the crash-report gate BEFORE any client JS runs. It has to be an
           inline head script rather than an effect or a fetch:

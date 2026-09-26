@@ -47,12 +47,13 @@ export function buildSpawnEnv(
   return {
     ...inherited,
     PATH: augmentedPath,
-    // Some bundled MCPs are spawned through `uvx` (elevenlabs-mcp), and the
-    // prewarm step deliberately runs them once just to populate caches. Pin
-    // uv's locations here too, or those children write gigabytes to
-    // `~/.cache/uv` and escape the isolation `lib/uv-env/spawn-env.ts`
-    // establishes for libi's own uv spawns. A child that has never heard of
-    // these variables simply ignores them.
+    // No bundled MCP is launched through `uvx` any more (ElevenLabs became a
+    // provider in the user's own agent config — `lib/providers/catalog.ts` —
+    // not a child libi spawns), but any child that runs uv or uvx (a probe, a
+    // bundled server's own Python step) must stay inside the isolation
+    // `lib/uv-env/spawn-env.ts` establishes for libi's own uv spawns, not write
+    // gigabytes to `~/.cache/uv`. A child that has never heard of these
+    // variables simply ignores them.
     ...uvEnvVars(),
     ...(sqliteBuildDir ? { LIBI_SQLITE_BINDING_DIR: sqliteBuildDir } : {}),
     ...userEnv,

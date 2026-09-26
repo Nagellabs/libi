@@ -87,8 +87,8 @@ describe("buildAudioFilterChain — duck", () => {
 
   it("still mixes both clips — the sidechain plays normally in its own right", () => {
     const { chain } = build([music, vo], inputIndex, new Map([["music", 3]]));
-    expect(chain).toContain("[1:a]atrim");
-    expect(chain).toContain("[2:a]atrim");
+    expect(chain).toContain("[1:a]aresample=async=1:first_pts=0,atrim");
+    expect(chain).toContain("[2:a]aresample=async=1:first_pts=0,atrim");
     expect(chain).toContain("amix=inputs=2");
   });
 });

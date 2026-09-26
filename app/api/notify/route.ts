@@ -9,6 +9,7 @@ import {
 import { invalidateMcpConfig } from "@/lib/mcp-config";
 import { regenerateAndRestart } from "@/mcp/workspace";
 import { serverLogger } from "@/lib/logger";
+import { clearRenderDiagnostics } from "@/lib/render/render-diagnostics-store";
 
 export async function POST(request: Request): Promise<Response> {
   let body: Record<string, unknown>;
@@ -62,6 +63,12 @@ export async function POST(request: Request): Promise<Response> {
       });
       break;
 
+    // An MCP-driven piece delete runs in the MCP child, whose in-memory
+    // render-diagnostics store is not the one the preview fills.
+    case "piece_deleted":
+      if (typeof body.pieceId === "string" && body.pieceId) clearRenderDiagnostics(body.pieceId);
+      break;
+
     // The retired `navigate_settings` and `right_region` types fall through to
     // the 400 below: nothing sends them any more.
     case "navigate_agents": {
@@ -73,6 +80,12 @@ export async function POST(request: Request): Promise<Response> {
       });
       break;
     }
+
+    case "navigate_templates":
+      navigationEmitter.emit("navigate_templates", {
+        ...(typeof body.templateId === "string" ? { templateId: body.templateId } : {}),
+      });
+      break;
 
     case "highlight":
       emitHighlight({

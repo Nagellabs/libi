@@ -6,21 +6,22 @@
 #
 #   sh add-provider.sh <provider> <agent> <cli>
 #
-#   provider  fal, higgsfield or elevenlabs
+#   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #
 # What it does:
-#   1. fal.ai and ElevenLabs: asks for your provider key without showing it as
-#      you type. Higgsfield has no key: you sign in with your Higgsfield
-#      account in your browser instead.
+#   1. fal.ai: asks for your provider key without showing it as you type.
+#      Higgsfield, Zernio and ElevenLabs have no key: you sign in with your
+#      account for that provider in your browser instead.
 #   2. Codex with fal.ai only: saves the key as FAL_KEY in your login shell
 #      profile, because Codex reads that key from its environment when it
 #      starts. A FAL_KEY line libi saved before is replaced, in that profile
 #      and in any other login profile. Nothing else in them changes.
-#   3. Runs the agent's own `mcp add`, which writes the agent's config. For
-#      Higgsfield, Codex then opens your browser to sign in and waits until
-#      you finish; for Claude Code, it says how to sign in afterwards.
+#   3. Runs the agent's own `mcp add`, which writes the agent's config. For a
+#      provider you sign in to, your browser then opens to sign in and this
+#      waits until you finish: Codex's add does that itself, and for Claude
+#      Code this runs Claude Code's own `mcp login` once the add worked.
 #
 # The key is never printed, and it exists only inside this script's process.
 # For Codex, libi passes ZDOTDIR from your shell, so a zsh config folder you
@@ -36,7 +37,8 @@ cli=$3
 case $provider in
   fal)        name='fal.ai';     auth='key';   codex_key_env='FAL_KEY' ;;
   higgsfield) name='Higgsfield'; auth='oauth'; codex_key_env='' ;;
-  elevenlabs) name='ElevenLabs'; auth='key';   codex_key_env='' ;;
+  zernio)     name='Zernio';     auth='oauth'; codex_key_env='' ;;
+  elevenlabs) name='ElevenLabs'; auth='oauth'; codex_key_env='' ;;
   *) echo "add-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in
@@ -63,10 +65,14 @@ add_to_agent() {
       "$cli" mcp add --transport http --scope user higgsfield https://mcp.higgsfield.ai/mcp ;;
     higgsfield/codex)
       "$cli" mcp add higgsfield --url https://mcp.higgsfield.ai/mcp ;;
+    zernio/claude)
+      "$cli" mcp add --transport http --scope user zernio https://mcp.zernio.com/mcp ;;
+    zernio/codex)
+      "$cli" mcp add zernio --url https://mcp.zernio.com/mcp ;;
     elevenlabs/claude)
-      "$cli" mcp add --scope user elevenlabs -e "ELEVENLABS_API_KEY=$key" -- uvx elevenlabs-mcp ;;
+      "$cli" mcp add --transport http --scope user elevenlabs https://api.us.elevenlabs.io/v1/mcp ;;
     elevenlabs/codex)
-      "$cli" mcp add elevenlabs --env "ELEVENLABS_API_KEY=$key" -- uvx elevenlabs-mcp ;;
+      "$cli" mcp add elevenlabs --url https://api.us.elevenlabs.io/v1/mcp ;;
   esac
 }
 
@@ -128,16 +134,32 @@ drop_saved_key_line() {
 # ---- same in add-provider.sh and remove-provider.sh: end ----
 
 # A provider you sign in to with your account: no key is asked for. Codex's
-# add starts the browser sign-in itself; Claude Code signs in afterwards.
+# add starts the browser sign-in itself. Claude Code's add finishes before any
+# sign-in, so its own `mcp login` follows here, only when the add worked. The
+# entry the add creates is named after the provider, as in the catalog.
+#
+# For Claude Code, the two [libi sign-in ...] lines tell libi when the sign-in
+# starts and when it has ended, however it ended (Ctrl-C included): libi must
+# not ask Claude Code about the entry in between, or Claude Code may skip it
+# for 15 minutes.
 if [ "$auth" = oauth ]; then
   if [ "$agent" = codex ]; then
     echo "Codex adds $name, then opens your browser to sign in with your $name account. This waits here until you finish signing in."
     add_to_agent
     exit
   fi
-  add_to_agent || exit
-  echo "Added. Now sign in with your $name account: click Sign in on libi's Providers tab, or open Claude Code, run /mcp, choose $provider, then Authenticate."
-  exit 0
+  echo "Claude Code adds $name, then opens your browser to sign in with your $name account. This waits here until you finish signing in."
+  printf '[libi sign-in start: %s]\n' "$provider"
+  trap 'printf "\n[libi sign-in end: %s]\n" "$provider"; exit 130' HUP INT TERM
+  add_to_agent
+  status=$?
+  if [ "$status" -eq 0 ]; then
+    "$cli" mcp login -- "$provider"
+    status=$?
+  fi
+  trap - HUP INT TERM
+  printf '[libi sign-in end: %s]\n' "$provider"
+  exit "$status"
 fi
 
 # Claude Code, and every provider without a saved Codex key: the key goes

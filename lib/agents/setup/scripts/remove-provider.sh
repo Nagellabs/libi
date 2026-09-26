@@ -4,23 +4,28 @@
 # libi's Providers tab types a call to this script into its setup terminal.
 # Nothing runs until you press Enter there.
 #
-#   sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>]
+#   sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>] [--no-sign-out]
 #
-#   provider  fal, higgsfield or elevenlabs
+#   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config
 #   scope     Claude Code only: the settings scope the entry is in
 #             (user, local or project)
+#   --no-sign-out  skip step 1: the entry is a local server with a key, not a
+#             sign-in (an older `uvx elevenlabs-mcp` entry)
 #
 # What it does:
-#   1. Higgsfield, which you sign in to with your account: runs the agent's own
-#      `mcp logout`, which clears the sign-in the agent stored for the entry.
+#   1. Higgsfield, Zernio and ElevenLabs, which you sign in to with your
+#      account: runs the agent's own `mcp logout`, which clears the sign-in the
+#      agent stored for the entry.
 #      It runs before the remove because both agents look that sign-in up
 #      through the entry: once the entry is gone they answer "No MCP server
 #      named ..." and clear nothing. With no sign-in stored it changes
 #      nothing, and a sign-out that fails never stops step 2. If step 2 then
 #      fails, the entry stays, signed out, and Sign in signs it in again.
+#      libi passes --no-sign-out for an older local ElevenLabs entry
+#      (`uvx elevenlabs-mcp`, with a key): it has no sign-in to clear.
 #   2. Runs the agent's own `mcp remove`, which deletes the entry, and any key
 #      saved in it, from the agent's config.
 #   3. Codex with fal.ai only, and only when step 2 worked: deletes the FAL_KEY
@@ -38,6 +43,10 @@ agent=$2
 cli=$3
 entry=$4
 scope=$5
+sign_out=yes
+# --no-sign-out comes last: after the scope for Claude Code, in its place for Codex.
+if [ "$agent" = codex ] && [ "$scope" = --no-sign-out ]; then scope=''; sign_out=no; fi
+if [ "${6-}" = --no-sign-out ]; then sign_out=no; fi
 
 # Provider details. A libi test keeps this table the same as libi's provider
 # catalog (lib/providers/catalog.ts).
@@ -45,7 +54,8 @@ scope=$5
 case $provider in
   fal)        name='fal.ai';     auth='key';   codex_key_env='FAL_KEY' ;;
   higgsfield) name='Higgsfield'; auth='oauth'; codex_key_env='' ;;
-  elevenlabs) name='ElevenLabs'; auth='key';   codex_key_env='' ;;
+  zernio)     name='Zernio';     auth='oauth'; codex_key_env='' ;;
+  elevenlabs) name='ElevenLabs'; auth='oauth'; codex_key_env='' ;;
   *) echo "remove-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in
@@ -53,7 +63,7 @@ case $agent in
   *) echo "remove-provider.sh: unknown agent '$agent'" >&2; exit 2 ;;
 esac
 if [ -z "$cli" ] || [ -z "$entry" ] || { [ "$agent" = claude ] && [ -z "$scope" ]; }; then
-  echo 'usage: sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>]' >&2
+  echo 'usage: sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>] [--no-sign-out]' >&2
   exit 2
 fi
 case $scope in
@@ -106,7 +116,7 @@ drop_saved_key_line() {
 # 1. A provider you sign in to with your account: sign out first, while the
 #    agent can still find the sign-in through the entry. Nothing stored is not
 #    a failure, and a sign-out that fails still goes on to the remove.
-if [ "$auth" = oauth ]; then
+if [ "$auth" = oauth ] && [ "$sign_out" = yes ]; then
   echo "Signing out of $name first, so the sign-in isn't left stored."
   "$cli" mcp logout -- "$entry" || echo "Couldn't sign out of $name; removing it anyway."
 fi

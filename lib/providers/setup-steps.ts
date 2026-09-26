@@ -51,6 +51,11 @@ export interface SetupStepsInput {
   /** A Claude entry that arrived without its scope: the chip offers only Retry, so no steps. */
   scopeUnreadable?: boolean;
   /**
+   * The detected entry's transport. A LOCAL (stdio) entry of a provider you sign in to (an older
+   * `uvx elevenlabs-mcp`, with a key) has no sign-in, so it gets no stepper: the chip keeps its single action.
+   */
+  transport?: "http" | "stdio";
+  /**
    * The provider command live in the tab's terminal for THIS provider and agent
    * (the terminal is anchored to this chip and has neither exited nor gone), if any.
    */
@@ -74,9 +79,9 @@ function stepIds(def: ProviderDef): SetupStepId[] {
  * (`unknown`, `agent-not-ready`, an unreadable scope). A Codex `stale` state is
  * a last known state and is listed like a fresh one; the chip marks it.
  */
-export function providerSetupSteps({ def, agentId, state, scopeUnreadable, liveAction }: SetupStepsInput): SetupSteps | null {
+export function providerSetupSteps({ def, agentId, state, scopeUnreadable, liveAction, transport }: SetupStepsInput): SetupSteps | null {
   const ids = stepIds(def);
-  if (ids.length < 2 || scopeUnreadable) return null;
+  if (ids.length < 2 || scopeUnreadable || transport === "stdio") return null;
   const addSignsIn = def.addSignsIn?.includes(agentId === "codex" ? "codex" : "claude") ?? false;
   // What the add command performs for this agent.
   const addCovers: SetupStepId[] = ids.filter((id) => id === "add" || (addSignsIn && id === "sign-in"));

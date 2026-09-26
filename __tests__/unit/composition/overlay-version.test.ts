@@ -61,4 +61,37 @@ describe("per-overlay monotonic version", () => {
     expect(ok2).toBe(true);
     expect(await readVersion("cap-v")).toBe(2);
   });
+
+  // Final review I2, defense in depth: whatever a caller hands in, a patch can
+  // never change an overlay's identity or smuggle a code body onto it.
+  it("never lets a patch set id, kind, drawFunction or sceneFunction", async () => {
+    const overlay: PersistedOverlay = {
+      id: "txt-guard",
+      kind: "text",
+      startTime: 0,
+      duration: 1,
+      rect: { x: 0, y: 0, width: 10, height: 10 },
+      z: 0,
+      opacity: 1,
+      content: "hi",
+      font: "20px Inter",
+      color: "#fff",
+      align: "left",
+    };
+    await addOverlayToManifest(PIECE, overlay);
+    const ok = await updateOverlayInManifest(PIECE, "txt-guard", {
+      id: "other",
+      kind: "three",
+      sceneFunction: "return () => {};",
+      drawFunction: "x",
+      color: "#f00",
+    } as never);
+    expect(ok).toBe(true);
+    const got = (await loadManifest(PIECE)).overlays!.find((o) => o.id === "txt-guard") as Record<string, unknown> | undefined;
+    expect(got).toBeDefined();
+    expect(got!.kind).toBe("text");
+    expect(got).not.toHaveProperty("sceneFunction");
+    expect(got).not.toHaveProperty("drawFunction");
+    expect(got!.color).toBe("#f00");
+  });
 });

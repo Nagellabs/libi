@@ -103,7 +103,7 @@ async function main() {
 
   // Only a supervised launch (the token is how a libi server marks one) treats
   // its stdin as a lifeline. The supervisor holds the only write end of that
-  // pipe and never writes to it, so end-of-file means the libi server that
+  // pipe and writes nothing to it, so end-of-file means the libi server that
   // launched this process is gone, however it ended: a closed terminal or a
   // test runner's group SIGKILL never reaches this process, which has a
   // process group of its own. A run by hand is left alone: its stdin is a

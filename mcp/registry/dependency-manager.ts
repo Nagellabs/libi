@@ -24,6 +24,7 @@ import {
   writeDepTransition as persistDepTransition,
 } from "./dep-transition";
 import { depInstallAcceptedAt, isDepInstalling } from "./dep-in-flight";
+import { acquireInstallLocks, pidIsAlive } from "./install-lock";
 import {
   CHROMIUM_DEP_BINARY,
   CHROMIUM_MCP_ID,
@@ -54,6 +55,88 @@ import {
 } from "@/lib/mcp-virtual-deps/registry";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Installs in flight — `retryDep`'s and `ensureMcp`'s — keyed by what the install WRITES
+ * (`installTargetKey`: one key per file, so `uv`, declared on five extensions,
+ * is one flight however many ask for it at once) — see its single-flight.
+ * On `globalThis` because Next can load this module more than once in one
+ * server process (route bundles and the job runners); a per-module Map would
+ * then not be shared, which is the whole point.
+ */
+function depInstallFlights(): Map<string, Promise<void>> {
+  const g = globalThis as { __libiDepInstallFlights?: Map<string, Promise<void>> };
+  g.__libiDepInstallFlights ??= new Map();
+  return g.__libiDepInstallFlights;
+}
+
+/** `placeBinary`'s temp name: `<dest>.partial-<pid>-<ms>`. */
+const PARTIAL_BINARY_RE = /\.partial-(\d+)-(\d+)$/;
+
+/** A `*.partial-*` older than this is left over from an interrupted install. The
+ *  temp file is written in one go from a finished download, then verified and
+ *  renamed within seconds, so an hour is far past any live one. Its age is the
+ *  `<ms>` in its NAME, never its mtime: an archive dep's temp file is a copy of
+ *  what `tar` extracted, and on Windows `CopyFileW` keeps the source's
+ *  last-write time, i.e. the archive entry's date. */
+export const STALE_PARTIAL_MS = 60 * 60_000;
+
+/** Temp files `placeBinary` is writing in THIS process right now — never swept,
+ *  whatever their age. On `globalThis` for the same reason as the flights. */
+function partialsInFlight(): Set<string> {
+  const g = globalThis as { __libiPartialsInFlight?: Set<string> };
+  g.__libiPartialsInFlight ??= new Set();
+  return g.__libiPartialsInFlight;
+}
+
+/**
+ * Remove `*.partial-*` files an interrupted install left in `dir` (libi's
+ * `bin/` by default): a download killed between write and rename — a quit, a
+ * crash, a sha mismatch whose cleanup failed — leaves one behind, and nothing
+ * else ever deletes it (ffmpeg's is ~80 MB). Only files named older than
+ * STALE_PARTIAL_MS, never one this process is writing, and never one whose
+ * `<pid>` is another process still running (a second libi sharing `bin/`, or a
+ * pid since reused — left for a later sweep either way). Best-effort: a file
+ * that will not delete is logged and left. Returns the paths removed.
+ */
+export function sweepStalePartialBinaries(
+  dir: string = getLibiBinDir(),
+  now: number = Date.now(),
+  isAlive: (pid: number) => boolean = pidIsAlive,
+): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    const m = PARTIAL_BINARY_RE.exec(name);
+    if (!m) continue;
+    const full = path.join(dir, name);
+    if (partialsInFlight().has(full)) continue;
+    const pid = Number(m[1]);
+    if (now - Number(m[2]) <= STALE_PARTIAL_MS) continue;
+    if (pid !== process.pid && isAlive(pid)) continue;
+    try {
+      fs.rmSync(full, { force: true });
+      removed.push(full);
+    } catch (err) {
+      logger.warn(
+        { tag: "dep-install", op: "partial_sweep_failed", path: full, err: (err as Error).message },
+        "could not remove a leftover partial download",
+      );
+    }
+  }
+  if (removed.length > 0) {
+    logger.info(
+      { tag: "dep-install", op: "partial_swept", dir, count: removed.length, removed },
+      "removed partial downloads left by an interrupted install",
+    );
+  }
+  return removed;
+}
 
 export interface BinaryInstallProgress {
   binary: string;
@@ -86,6 +169,40 @@ interface ResolvedStatus {
   bytesTotal?: number;
   /** Present when the last install attempt failed and nothing landed since. */
   error?: string | null;
+}
+
+/** Rename errors that are a file held open for a moment (Windows antivirus scanning a
+ *  just-written `.exe`, an indexer), not a real refusal. */
+const TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+/** Waits between rename attempts: six attempts over ~1.5 s, then the error stands. */
+const RENAME_RETRY_DELAYS_MS = [50, 100, 200, 400, 800];
+
+/** `rename(from, to)`, retried on a transient hold (TRANSIENT_RENAME_CODES) within a short bound.
+ *  Any other error, or the last attempt's, is thrown as is. */
+async function renameWithRetry(
+  from: string,
+  to: string,
+  rename: (from: string, to: string) => void,
+): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException | null)?.code;
+      if (!code || !TRANSIENT_RENAME_CODES.has(code) || attempt >= RENAME_RETRY_DELAYS_MS.length) throw err;
+      logger.warn(
+        { tag: "dep-install", op: "binary_rename_retry", code, attempt: attempt + 1, dest: to },
+        "Placing a binary: the rename was refused, retrying shortly",
+      );
+      await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
+/** The error for an install that finished without throwing but left the dep undetected. */
+function notDetectedAfterInstall(binary: string): string {
+  return `${binary}: the install completed without an error, but libi still does not detect it as installed.`;
 }
 
 export class DependencyManager {
@@ -238,6 +355,8 @@ export class DependencyManager {
     tier?: "tier-1" | "all";
   }): Promise<void> {
     this.ensureBinDir();
+    // Boot (Category A) and Settings resync both start here.
+    sweepStalePartialBinaries();
 
     const tier = options?.tier ?? "all";
     // A tier-1 sweep is exactly the tier-1 DEFS.
@@ -710,29 +829,179 @@ export class DependencyManager {
    * sweep. Always installs — use `ensureDep` for "install only if missing".
    */
   async retryDep(mcpId: string, binary: string): Promise<void> {
+    // Single-flight per dep: a caller that arrives while this dep is already
+    // being installed JOINS that run instead of starting a second one. Two
+    // `video_download` jobs (maxConcurrent 2) that both found yt-dlp missing
+    // or broken would otherwise each run `uv tool install --reinstall
+    // --force`, and the second wipes the venv the first job is already
+    // running yt-dlp from. Same for a Settings click during a job's install.
+    //
+    // Keyed by what the install WRITES, not by `<mcpId>/<binary>`: `uv` is
+    // declared on five extensions (youtube-download, whisper, local-tts,
+    // local-music, libi-tracking), and all five install the one `<bin>/uv`.
+    // `ensureMcp` (Category A, Settings resync) registers its installs in the
+    // same map (`sharedInstall`), so either side joins the other. Another
+    // PROCESS is covered by the install lock inside `retryDepOnce`.
+    const dep = DependencyManager.findBundledDep(mcpId, binary);
+    const key = this.installTargetKey(dep);
+    const running = depInstallFlights().get(key);
+    if (running) {
+      logger.info(
+        { tag: "lifecycle", op: "dep_install_joined", mcpId, binary, key },
+        "joining the install of this dependency that is already running",
+      );
+      // The flight writes transitions for the extension that STARTED it; this
+      // caller's own row gets the outcome too. The flight may be ensureMcp's,
+      // which — unlike retryDepOnce — does not itself fail when the dep is still
+      // not detected afterwards, so that check is made here: a caller that needs
+      // the dep must fail naming it, not carry on and fail at a spawn.
+      try {
+        await running;
+        const fresh = await this.resolveStatusAsync(dep, mcpId);
+        if (!fresh.installed) throw new Error(notDetectedAfterInstall(binary));
+        this.writeDepTransition(mcpId, binary, fresh);
+      } catch (err) {
+        this.writeDepTransition(mcpId, binary, {
+          runtimeStatus: "failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      return;
+    }
+    const flight: Promise<void> = this.retryDepOnce(mcpId, binary).finally(() => {
+      if (depInstallFlights().get(key) === flight) depInstallFlights().delete(key);
+    });
+    depInstallFlights().set(key, flight);
+    return flight;
+  }
+
+  /** What a dep's install writes, as the single-flight key: the custom
+   *  installer, the multi-file destination dir, or the binary's path. */
+  private installTargetKey(dep: BundledDependency): string {
+    if (dep.customInstallerId) return `installer:${dep.customInstallerId}`;
+    if (dep.files) {
+      const root = dep.destination === "models" ? getLibiModelsDir() : getLibiBinDir();
+      return `files:${path.join(root, dep.binary)}`;
+    }
+    return `bin:${this.getBinaryPath(dep.binary)}`;
+  }
+
+  /** The cross-process lock file for a dep's install, next to what it writes
+   *  (`install-lock.ts`). A custom installer's lives in `bin/`, which every
+   *  libi on the machine shares. */
+  private installLockPath(dep: BundledDependency): string {
+    if (dep.customInstallerId) {
+      return path.join(getLibiBinDir(), `${dep.customInstallerId}.install-lock`);
+    }
+    if (dep.files) {
+      const root = dep.destination === "models" ? getLibiModelsDir() : getLibiBinDir();
+      return `${path.join(root, dep.binary)}.install-lock`;
+    }
+    return `${this.getBinaryPath(dep.binary)}.install-lock`;
+  }
+
+  /** Every dep in `deps` is installed right now, judged as ensureMcp judges it. */
+  private async allInstalled(deps: BundledDependency[], mcpId: string): Promise<boolean> {
+    for (const dep of deps) {
+      const installed = dep.files
+        ? this.isMultiFileInstalled(dep)
+        : (await this.resolveStatusAsync(dep, mcpId)).installed;
+      if (!installed) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Run `install` holding the cross-process install lock of every dep it
+   * writes (Y5: two libis sharing `bin/`). When another process held one and
+   * this call waited, "installed?" is asked again first: that install has
+   * usually served this one, and repeating it would only redo — or, for
+   * yt-dlp's `--reinstall --force`, wipe — what just landed.
+   */
+  private async installUnderLock(
+    deps: BundledDependency[],
+    mcpId: string,
+    install: () => Promise<void>,
+  ): Promise<void> {
+    const lock = await acquireInstallLocks(deps.map((d) => this.installLockPath(d)));
+    try {
+      if (lock.waited && (await this.allInstalled(deps, mcpId))) {
+        logger.info(
+          { tag: "lifecycle", op: "dep_install_served_elsewhere", mcpId, binaries: deps.map((d) => d.binary) },
+          "another libi installed this dependency while we waited; not installing it again",
+        );
+        return;
+      }
+      await install();
+    } finally {
+      lock.release();
+    }
+  }
+
+  /**
+   * ensureMcp's install of `deps`, through the SAME single-flight as
+   * `retryDep`: a Settings resync (`ensureAll`) that reaches a dep while a
+   * job's repair or a Retry click is installing it joins that install instead
+   * of starting a second one over it. After joining, the deps are checked
+   * again, and installed here only if they still are not (the flight joined
+   * may have covered only part of an archive group, or failed — a failure is
+   * this caller's failure too). The install itself runs under the
+   * cross-process lock (`installUnderLock`).
+   */
+  private async sharedInstall(
+    deps: BundledDependency[],
+    mcpId: string,
+    install: () => Promise<void>,
+  ): Promise<void> {
+    const flights = depInstallFlights();
+    const keys = [...new Set(deps.map((d) => this.installTargetKey(d)))];
+    for (;;) {
+      const running = [
+        ...new Set(keys.map((k) => flights.get(k)).filter((f): f is Promise<void> => f !== undefined)),
+      ];
+      if (running.length === 0) break;
+      logger.info(
+        { tag: "lifecycle", op: "dep_install_joined", mcpId, binaries: deps.map((d) => d.binary), keys },
+        "joining the install of this dependency that is already running",
+      );
+      await Promise.all(running);
+      if (await this.allInstalled(deps, mcpId)) return;
+    }
+    const flight: Promise<void> = this.installUnderLock(deps, mcpId, install).finally(() => {
+      for (const k of keys) if (flights.get(k) === flight) flights.delete(k);
+    });
+    for (const k of keys) flights.set(k, flight);
+    await flight;
+  }
+
+  private async retryDepOnce(mcpId: string, binary: string): Promise<void> {
     const dep = DependencyManager.findBundledDep(mcpId, binary);
 
     this.ensureBinDir();
+    sweepStalePartialBinaries();
     this.writeDepTransition(mcpId, binary, {
       runtimeStatus: "installing",
       error: null,
     });
     try {
-      if (dep.files) {
-        await this.installMultiFile(dep);
-      } else if (dep.customInstallerId) {
-        await this.runCustomInstaller(dep);
-      } else {
-        const url = DependencyManager.resolveDownloadUrl(dep);
-        await this.downloadGroup(url, [dep]);
-      }
+      await this.installUnderLock([dep], mcpId, async () => {
+        if (dep.files) {
+          await this.installMultiFile(dep);
+        } else if (dep.customInstallerId) {
+          await this.runCustomInstaller(dep);
+        } else {
+          const url = DependencyManager.resolveDownloadUrl(dep);
+          await this.downloadGroup(url, [dep]);
+        }
+      });
       const fresh = await this.resolveStatusAsync(dep, mcpId);
       if (!fresh.installed) {
-        this.writeDepTransition(mcpId, binary, {
-          runtimeStatus: "failed",
-          error: "Install completed without throwing, but binary still not detected.",
-        });
-        return;
+        // An error, not a quiet return: a caller that needs the dep (the
+        // video_download job's repair, the tracking install job) must fail
+        // naming this, not carry on and fail later at a spawn. The catch
+        // below records the same message as the `failed` transition.
+        throw new Error(notDetectedAfterInstall(binary));
       }
       this.writeDepTransition(mcpId, binary, fresh);
       // Verified present, not merely "the download finished" — the boot diet
@@ -845,7 +1114,7 @@ export class DependencyManager {
       });
       onProgress?.({ binary: dep.binary, mcpId, status: "downloading" });
       try {
-        await this.installMultiFile(dep);
+        await this.sharedInstall([dep], mcpId, () => this.installMultiFile(dep));
         const fresh = await this.resolveStatusAsync(dep);
         this.writeDepTransition(mcpId, dep.binary, fresh);
         onProgress?.({ binary: dep.binary, mcpId, status: "done" });
@@ -886,7 +1155,7 @@ export class DependencyManager {
         }
       }
       try {
-        await this.downloadGroup(url, deps, onProgress ? (p) => {
+        await this.sharedInstall(deps, mcpId, () => this.downloadGroup(url, deps, onProgress ? (p) => {
           // Forward byte-level progress from downloadGroup to each dep in the group.
           // downloadGroup emits progress for the shared download; we fan out to deps needing install.
           for (const dep of deps) {
@@ -894,7 +1163,7 @@ export class DependencyManager {
               onProgress({ ...p, binary: dep.binary, mcpId });
             }
           }
-        } : undefined);
+        } : undefined));
         for (const dep of deps) {
           if (needsInstall.has(dep.binary)) {
             onProgress?.({ binary: dep.binary, mcpId, status: "done" });
@@ -927,7 +1196,7 @@ export class DependencyManager {
       });
       onProgress?.({ binary: dep.binary, mcpId, status: "downloading" });
       try {
-        await this.runCustomInstaller(dep);
+        await this.sharedInstall([dep], mcpId, () => this.runCustomInstaller(dep));
         onProgress?.({ binary: dep.binary, mcpId, status: "done" });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -1576,17 +1845,29 @@ export class DependencyManager {
     // and because yt-dlp is a tier-1 dep whose failure is fatal to Category A,
     // that took the whole app down before it ever served a page.
     const venvBinDir = isWindows() ? "Scripts" : "bin";
-    const ytDlpEntry = path.join(
+    const ytDlpEntryAsListed = path.join(
       toolDir,
       "yt-dlp",
       venvBinDir,
       `yt-dlp${exeSuffix()}`,
     );
-    if (!fs.existsSync(ytDlpEntry)) {
+    if (!fs.existsSync(ytDlpEntryAsListed)) {
       throw new Error(
-        `uv tool install completed but expected entry point not found: ${ytDlpEntry}`,
+        `uv tool install completed but expected entry point not found: ${ytDlpEntryAsListed}`,
       );
     }
+    // Bake the CANONICAL path into the launcher, never the one uv reported.
+    // `uv tool dir` answers with UV_TOOL_DIR as given — `<LIBI_HOME>/uv/tools`
+    // — and in a dev worktree that home's `uv/` and `bin/` are SYMLINKS to the
+    // machine's real `~/.libi/uv` and `~/.libi/bin`
+    // (lib/dev/worktree-bootstrap.ts SHARED_LINKS). So a worktree install
+    // wrote a launcher into the SHARED bin that exec'd through the worktree's
+    // own path, and deleting that worktree broke video download for every
+    // libi on the machine (2026-09-25: exit 126 on `…/worktrees/mcp-http/uv/
+    // tools/yt-dlp/bin/yt-dlp`). The certifi lines never had the problem —
+    // Python reports its own realpath. realpath is a no-op for a home that
+    // is not linked.
+    const ytDlpEntry = fs.realpathSync(ytDlpEntryAsListed);
 
     // Locate the uv-managed Python's certifi CA bundle. yt-dlp depends on
     // certifi (it's pulled in transitively), so it's installed in the same
@@ -1821,10 +2102,7 @@ export class DependencyManager {
       }
       const dep = deps[0];
       const binPath = this.getBinaryPath(dep.binary);
-      fs.writeFileSync(binPath, buffer);
-      // RC-E: verify (pinned sha) or warn (latest-alias) BEFORE chmod + token.
-      await this.verifyBinaryIntegrity(dep, binPath);
-      if (!isWindows()) fs.chmodSync(binPath, 0o755);
+      await this.placeBinary(dep, binPath, (tmp) => fs.writeFileSync(tmp, buffer));
       this.writeInstallToken(dep);
       logger.info({ binary: dep.binary, path: binPath }, "Dependency installed");
       return;
@@ -1848,10 +2126,7 @@ export class DependencyManager {
           throw new Error(`Extracted file not found for ${dep.binary}: ${pattern}`);
         }
         const destPath = this.getBinaryPath(dep.binary);
-        fs.copyFileSync(extracted, destPath);
-        // RC-E: verify (pinned sha) or warn (latest-alias) BEFORE chmod + token.
-        await this.verifyBinaryIntegrity(dep, destPath);
-        if (!isWindows()) fs.chmodSync(destPath, 0o755);
+        await this.placeBinary(dep, destPath, (tmp) => fs.copyFileSync(extracted, tmp));
         this.writeInstallToken(dep);
         logger.info({ binary: dep.binary, path: destPath }, "Dependency installed");
       }
@@ -1859,6 +2134,47 @@ export class DependencyManager {
       try {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       } catch { /* ignore */ }
+    }
+  }
+
+  /**
+   * Put a downloaded binary at `destPath` without a window in which that path
+   * holds half a file. It is written next to the destination under a
+   * temporary name, verified (RC-E: pinned sha, or the latest-alias warning)
+   * and made executable THERE, and only then renamed over `destPath` — a
+   * same-directory rename, atomic on POSIX. Copying straight onto the live
+   * path let a concurrent `uv run` (another job, or another libi sharing the
+   * bin dir) exec a truncated binary, and a failed sha check deleted the old,
+   * working one.
+   *
+   * The rename is retried briefly (`renameWithRetry`) on EPERM / EACCES /
+   * EBUSY: on Windows an antivirus scanner holds a just-written `.exe` for a
+   * moment. `rename` is injectable for tests only.
+   */
+  private async placeBinary(
+    dep: BundledDependency,
+    destPath: string,
+    write: (tmpPath: string) => void,
+    rename: (from: string, to: string) => void = fs.renameSync,
+  ): Promise<void> {
+    const tmp = `${destPath}.partial-${process.pid}-${Date.now()}`;
+    // Registered so `sweepStalePartialBinaries` never takes a temp file out
+    // from under this write.
+    partialsInFlight().add(tmp);
+    try {
+      write(tmp);
+      await this.verifyBinaryIntegrity(dep, tmp);
+      if (!isWindows()) fs.chmodSync(tmp, 0o755);
+      await renameWithRetry(tmp, destPath, rename);
+    } catch (err) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        /* best-effort */
+      }
+      throw err;
+    } finally {
+      partialsInFlight().delete(tmp);
     }
   }
 

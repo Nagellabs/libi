@@ -60,10 +60,13 @@ describe("renderInstructionsCore", () => {
   it("names exactly the fakes that are attached, and nothing when there are none", () => {
     expect(testModeCoreBanner([])).toBeNull();
     expect(testModeCoreBanner(["fal-ai"])).toContain("is a sandboxed fake");
-    const both = testModeCoreBanner([...TEST_MODE_FAKE_NAMES])!;
-    expect(both).toContain("`fal-ai` and `ElevenLabs`");
-    expect(both).toContain("are sandboxed fakes");
-    expect(both).toContain("never promise real AI output");
+    expect(testModeCoreBanner(["fal-ai", "elevenlabs"])).toContain("`fal-ai` and `elevenlabs`");
+    const all = testModeCoreBanner([...TEST_MODE_FAKE_NAMES])!;
+    // Three names join as `a`, `b` and `c` — no Oxford comma, because the
+    // core is rendered into a 2,048-character budget.
+    expect(all).toContain("`fal-ai`, `elevenlabs` and `zernio`");
+    expect(all).toContain("are sandboxed fakes");
+    expect(all).toContain("Never promise real AI output");
   });
 
   it("keeps the banner itself small enough to be worth having", () => {

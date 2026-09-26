@@ -54,6 +54,7 @@ import {
   StreamProgress,
   UNKNOWN_SIZE_REPORT_MS,
   isPartialArtifact,
+  normaliseDownloadName,
 } from "@/lib/jobs/runners/video-download";
 import { MAX_BYTES } from "@/lib/net/fetch-and-store";
 
@@ -429,6 +430,38 @@ describe("isPartialArtifact", () => {
   });
 });
 
+/**
+ * T2 (2026-09-25): a TikTok title ending in a literal `...` was stored as
+ * `…_happyhippie_....mp4` (and its proxy `…_...-proxy.mp4`). The file routes'
+ * old substring traversal guard refused both, and the clip never played. The
+ * routes are fixed (lib/storage/safe-name.ts); this stops minting such names.
+ */
+describe("normaliseDownloadName", () => {
+  it.each([
+    ["Morning_vibe_happyhippie_....mp4", "Morning_vibe_happyhippie.mp4"],
+    ["Title...mp4", "Title.mp4"],
+    ["a...b.mp4", "a.b.mp4"],
+    ["a..b..c.mp3", "a.b.c.mp3"],
+    ["Trailing_ _ .mp4", "Trailing.mp4"],
+    ["...Leading.mp4", "Leading.mp4"],
+    ["Some_Title.mp4", "Some_Title.mp4"],
+    ["Talk_about_the.f401.codec_-_part_2.mp4", "Talk_about_the.f401.codec_-_part_2.mp4"],
+  ])("%j → %j", (input, expected) => {
+    expect(normaliseDownloadName(input)).toBe(expected);
+  });
+
+  it("falls back to a plain name when nothing is left of the title", () => {
+    expect(normaliseDownloadName("....mp4")).toBe("video.mp4");
+    expect(normaliseDownloadName("_ _.mp3")).toBe("audio.mp3");
+  });
+
+  it("never returns a name containing `..`", () => {
+    for (const n of ["x.....mp4", ".. ..mp4", "a._..b.mp4"]) {
+      expect(normaliseDownloadName(n)).not.toContain("..");
+    }
+  });
+});
+
 describe("videoDownloadRunner", () => {
   it("is registered under the video_download kind and declares its tool", () => {
     expect(videoDownloadRunner.kind).toBe("video_download");
@@ -525,6 +558,18 @@ describe("videoDownloadRunner", () => {
       title: "Some_Title",
       bytes: "video-bytes".length,
     });
+  });
+
+  it("stores a title ending in `...` under a normalised name (T2, 2026-09-25)", async () => {
+    writeFakeYtDlp(`printf 'video-bytes' > "$OUTDIR/Morning_vibe_happyhippie_....mp4"\n`);
+    const result = await videoDownloadRunner.run(
+      makeCtx({ url: PUBLIC_URL, pieceId: "piece-9", audioOnly: false }) as never,
+    );
+    expect(storeFile).toHaveBeenCalledTimes(1);
+    expect(storeFile.mock.calls[0][0].filename).toBe("Morning_vibe_happyhippie.mp4");
+    expect(storeFile.mock.calls[0][0].buffer.toString()).toBe("video-bytes");
+    expect(result.filename).toBe("Morning_vibe_happyhippie.mp4");
+    expect(result.title).toBe("Morning_vibe_happyhippie");
   });
 
   /** Fail honestly rather than register the abandoned stream. */

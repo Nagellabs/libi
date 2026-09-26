@@ -17,6 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { PendingApproval } from "@/lib/sessions/types";
+import type { AgentMessage } from "@/lib/agents/message-types";
 
 // ---------------------------------------------------------------------------
 // Shared mock state — declared at module scope so each `vi.mock` factory can
@@ -27,6 +28,7 @@ type FakeSession = {
   sessionId: string;
   agentId: string;
   pendingApprovals: Map<string, PendingApproval>;
+  messageCache?: AgentMessage[];
 };
 
 const fakeSession: FakeSession = {
@@ -66,6 +68,15 @@ import { getApprovalMode } from "@/lib/approval/settings";
 // POST /api/sessions/[sessionId]/permission
 // ---------------------------------------------------------------------------
 
+/** The chat card's click: a same-origin browser fetch from libi's own page.
+ *  Anything else is refused by `browserOnlyRefusal` (user-only-routes.test.ts). */
+const PAGE = {
+  "Content-Type": "application/json",
+  host: "127.0.0.1:3461",
+  origin: "http://127.0.0.1:3461",
+  "sec-fetch-site": "same-origin",
+};
+
 describe("POST /api/sessions/[sessionId]/permission", () => {
   beforeEach(() => {
     fakeSession.pendingApprovals.clear();
@@ -98,9 +109,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
       createdAt: Date.now(),
     });
 
-    const req = new Request("http://x/api/sessions/s1/permission", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ pendingId: "p1", optionId: "opt-allow" }),
     });
     const res = await POST(req, {
@@ -120,10 +131,55 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
     });
   });
 
+  // The card is in the session's history (the message cache) so a reload
+  // brings it back; answering it must mark that cached copy resolved, or a
+  // reload after the answer would show an answerable card for a request that
+  // no longer exists.
+  it("marks the cached card resolved with the chosen option", async () => {
+    fakeSession.pendingApprovals.set("p2", {
+      pendingId: "p2",
+      toolCall: { toolCallId: "t2", title: "Edit" } as PendingApproval["toolCall"],
+      options: [{ optionId: "opt-allow", name: "Allow", kind: "allow_once" }],
+      resolve: () => {},
+      createdAt: Date.now(),
+    });
+    fakeSession.messageCache = [
+      {
+        id: "agent_1",
+        role: "agent",
+        timestamp: 1,
+        parts: [
+          {
+            type: "permission-request",
+            pendingId: "p2",
+            toolCall: { toolCallId: "t2", title: "Edit" } as PendingApproval["toolCall"],
+            options: [{ optionId: "opt-allow", name: "Allow", kind: "allow_once" }],
+            reason: "acp",
+            status: "pending",
+          },
+        ],
+      },
+    ];
+    const res = await POST(
+      new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
+        method: "POST",
+        headers: PAGE,
+        body: JSON.stringify({ pendingId: "p2", optionId: "opt-allow" }),
+      }),
+      { params: Promise.resolve({ sessionId: "s1" }) },
+    );
+    expect(res.status).toBe(200);
+    expect(fakeSession.messageCache[0].parts[0]).toMatchObject({
+      status: "resolved",
+      outcome: { kind: "selected", optionId: "opt-allow" },
+    });
+    delete fakeSession.messageCache;
+  });
+
   it("returns 404 when pending id is unknown", async () => {
-    const req = new Request("http://x/api/sessions/s1/permission", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ pendingId: "ghost", optionId: "opt-allow" }),
     });
     const res = await POST(req, {
@@ -134,9 +190,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
   });
 
   it("returns 404 when sessionId is unknown", async () => {
-    const req = new Request("http://x/api/sessions/unknown/permission", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/unknown/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ pendingId: "p1", optionId: "opt-allow" }),
     });
     const res = await POST(req, {
@@ -147,9 +203,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
   });
 
   it("returns 400 when pendingId or optionId is missing", async () => {
-    const req1 = new Request("http://x/api/sessions/s1/permission", {
+    const req1 = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ optionId: "opt-allow" }),
     });
     const res1 = await POST(req1, {
@@ -157,9 +213,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
     });
     expect(res1.status).toBe(400);
 
-    const req2 = new Request("http://x/api/sessions/s1/permission", {
+    const req2 = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ pendingId: "p1" }),
     });
     const res2 = await POST(req2, {
@@ -189,9 +245,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
       createdAt: Date.now(),
     });
 
-    const req = new Request("http://x/api/sessions/s1/permission", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ pendingId: "p1", optionId: "fabricated" }),
     });
     const res = await POST(req, {
@@ -208,9 +264,9 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
   });
 
   it("returns 400 on invalid JSON body", async () => {
-    const req = new Request("http://x/api/sessions/s1/permission", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: "{not json",
     });
     const res = await POST(req, {
@@ -218,6 +274,30 @@ describe("POST /api/sessions/[sessionId]/permission", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "invalid JSON body" });
+  });
+
+  it("refuses a header-less loopback caller (an agent's shell) and leaves the card pending", async () => {
+    let resolved: unknown = null;
+    fakeSession.pendingApprovals.set("p1", {
+      pendingId: "p1",
+      toolCall: { toolCallId: "t1", title: "Edit" } as PendingApproval["toolCall"],
+      options: [{ optionId: "opt-allow", name: "Allow", kind: "allow_once" }],
+      resolve: (r) => {
+        resolved = r;
+      },
+      createdAt: Date.now(),
+    });
+    const req = new Request("http://127.0.0.1:3461/api/sessions/s1/permission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", host: "127.0.0.1:3461" },
+      body: JSON.stringify({ pendingId: "p1", optionId: "opt-allow" }),
+    });
+    const res = await POST(req, { params: Promise.resolve({ sessionId: "s1" }) });
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("browser_only");
+    expect(resolved).toBeNull();
+    expect(fakeSession.pendingApprovals.size).toBe(1);
+    expect(emitForSession).not.toHaveBeenCalled();
   });
 });
 
@@ -251,9 +331,9 @@ describe("/api/sessions/permission-modes", () => {
   });
 
   it("PATCH 200s for valid input, persists the value, and broadcasts", async () => {
-    const req = new Request("http://x/api/sessions/permission-modes", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/permission-modes", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ agentId: "claude-code", mode: "ask" }),
     });
     const res = await PATCH_MODES(req);
@@ -270,9 +350,9 @@ describe("/api/sessions/permission-modes", () => {
   });
 
   it("PATCH 400s on invalid mode", async () => {
-    const req = new Request("http://x/api/sessions/permission-modes", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/permission-modes", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ agentId: "claude-code", mode: "bogus" }),
     });
     const res = await PATCH_MODES(req);
@@ -281,9 +361,9 @@ describe("/api/sessions/permission-modes", () => {
   });
 
   it("PATCH 400s on missing agentId", async () => {
-    const req = new Request("http://x/api/sessions/permission-modes", {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/permission-modes", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: PAGE,
       body: JSON.stringify({ mode: "ask" }),
     });
     const res = await PATCH_MODES(req);
@@ -291,10 +371,25 @@ describe("/api/sessions/permission-modes", () => {
     expect(applyApprovalModeToActiveSessions).not.toHaveBeenCalled();
   });
 
-  it("PATCH 400s on invalid JSON body", async () => {
-    const req = new Request("http://x/api/sessions/permission-modes", {
+  // The mode decides whether a card appears at all: an agent's shell must not be
+  // able to switch cards off instead of answering one.
+  it("PATCH refuses a header-less loopback caller and changes nothing", async () => {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/permission-modes", {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", host: "127.0.0.1:3461" },
+      body: JSON.stringify({ agentId: "claude-code", mode: "auto-with-generations" }),
+    });
+    const res = await PATCH_MODES(req);
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("browser_only");
+    expect(getApprovalMode("claude-code")).toBe("auto");
+    expect(applyApprovalModeToActiveSessions).not.toHaveBeenCalled();
+  });
+
+  it("PATCH 400s on invalid JSON body", async () => {
+    const req = new Request("http://127.0.0.1:3461/api/sessions/permission-modes", {
+      method: "PATCH",
+      headers: PAGE,
       body: "{nope",
     });
     const res = await PATCH_MODES(req);

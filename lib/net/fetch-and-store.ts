@@ -18,9 +18,14 @@ import path from "node:path";
 import { fetchFollowingVettedRedirects, type UrlGuard } from "@/lib/net/follow-redirects";
 import { sha256OfBuffer } from "@/lib/security/download-verify";
 import { storeFile, mimeFromExtension } from "@/mcp/tools/file-tools";
+import { safeStoredMediaType, typeEssence } from "@/lib/http/media-types";
 
 /** Maximum download size per file: 500 MB. */
 export const MAX_BYTES = 500 * 1024 * 1024;
+
+/** The most urls one `remote_fetch` job takes. A caller with more splits them
+ *  into consecutive jobs (`lib/templates/fetch-in-chunks.ts`). */
+export const REMOTE_FETCH_MAX_URLS = 20;
 
 /** How long one download (headers + body) gets before it is aborted. */
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -100,6 +105,12 @@ export interface FetchRemoteBufferOptions {
   filename?: string;
   maxBytes?: number;
   signal?: AbortSignal;
+  /** The URL was chosen by someone libi does not trust (a template's author),
+   *  so the server it names may not choose the stored type: derive it from the
+   *  media allowlist (`lib/http/media-types.ts#safeStoredMediaType`) and refuse
+   *  a download that is neither declared nor named as media. A declared
+   *  `text/html` would otherwise be served as a page in libi's origin. */
+  mediaOnly?: boolean;
 }
 
 export interface FetchRemoteBufferResult {
@@ -152,6 +163,15 @@ export async function fetchRemoteBuffer(
     opts.filename || path.basename(new URL(url).pathname) || "download.bin";
   // A declared type wins; an absent OR opaque (`application/octet-stream`) one
   // falls back to the extension. See `declaredContentType`.
+  if (opts.mediaOnly) {
+    const safe = safeStoredMediaType(res.headers.get("content-type"), filename);
+    if (!safe) {
+      throw new Error(
+        `not a media file: ${filename} (declared ${typeEssence(res.headers.get("content-type")) || "nothing"})`,
+      );
+    }
+    return { buffer, filename, contentType: safe };
+  }
   const contentType =
     declaredContentType(res.headers.get("content-type")) ?? mimeFromExtension(filename);
 
@@ -184,6 +204,8 @@ export interface FetchAndStoreOptions {
   skipProxyGeneration?: boolean;
   maxBytes?: number;
   signal?: AbortSignal;
+  /** See `FetchRemoteBufferOptions.mediaOnly`. */
+  mediaOnly?: boolean;
 }
 
 export interface FetchAndStoreResult {

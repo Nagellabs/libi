@@ -5,10 +5,10 @@ import type { VideoFrameSource } from './video-frame-source';
 import type { Track } from '@/lib/tracking/types';
 import type { ThreeOverlayInstance } from './three-overlay';
 import type { OverlayQuadInstance } from './overlay-quad';
-import { drawOverlay } from './overlay-renderer';
+import type { LayerRequest, LayerSource } from './layer-source';
+import { drawOverlay, planLayer } from './overlay-renderer';
 import { drawWithBalancedState } from './canvas-state';
 import { overlaysActiveAt } from './overlays';
-import type { ContentBox } from '@/lib/overlays/code-content-fit';
 import { clamp01 } from './overlay-timing';
 import { composeEffects } from '@/lib/effects/compose';
 import { resolveEffect } from '@/lib/effects/registry';
@@ -100,6 +100,36 @@ export function collectVideoSeekTargets(
 }
 
 /**
+ * The body-layer requests `renderFrame` will make for `globalFrame` — one per
+ * active code / three / tracked-code overlay, in draw order. The export awaits
+ * every one of these BEFORE calling the synchronous `renderFrame`, the same
+ * way it awaits `collectVideoSeekTargets` (spec §4.6). Uses `planLayer`, the
+ * same function `drawOverlay` uses, so the two cannot disagree.
+ */
+export function collectLayerRequests(
+  composition: Composition,
+  globalFrame: number,
+  renderScale: number,
+  tracks?: Record<string, Track>,
+): LayerRequest[] {
+  const globalTime = globalFrame / composition.fps;
+  const out: LayerRequest[] = [];
+  for (const overlay of overlaysActiveAt(composition.overlays ?? [], globalTime)) {
+    const plan = planLayer(overlay, {
+      time: globalTime,
+      fps: composition.fps,
+      width: composition.width,
+      height: composition.height,
+      renderScale,
+      tracks,
+      overlays: composition.overlays,
+    });
+    if (plan) out.push(plan.request);
+  }
+  return out;
+}
+
+/**
  * Renders a single frame of a composition onto the given canvas.
  *
  * Paints the composition background, then composites every active overlay on
@@ -116,11 +146,12 @@ export function renderFrame(
   > = {},
   videoFrameSources?: Record<string, VideoFrameSource>,
   imageElements?: Record<string, HTMLImageElement>,
-  compiledDrawFns?: Record<string, (ctx: DrawContext) => void>,
+  /** Sandboxed body layers for code / three / tracked-code overlays (spec §4.4). */
+  layers?: LayerSource,
   tracks?: Record<string, Track>,
+  /** 3D-TEXT instances only (host-built); `three` bodies come through `layers`. */
   threeScenes?: Record<string, ThreeOverlayInstance>,
   spatialQuads?: Record<string, OverlayQuadInstance>,
-  codeContentBoxes?: Record<string, ContentBox | null>,
   /** Fired once per (overlay, frame) whose draw threw and was skipped —
    *  in addition to the console warning below. The export loop uses this to
    *  collect a bounded, deduped `droppedOverlays` list for the export result
@@ -184,8 +215,7 @@ export function renderFrame(
             totalFrames: compTotalFrames,
             videoFrameSources,
             imageElements,
-            compiledDrawFns,
-            codeContentBoxes,
+            layers,
             tracks,
             // The full overlay list — a tracked overlay resolves the video
             // overlay its track rides on from it, which is what puts the art

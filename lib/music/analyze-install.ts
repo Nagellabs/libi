@@ -7,6 +7,7 @@ import {
 } from "@/lib/music/analyze";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { formatStderrTail } from "@/lib/music/generate";
 import { isTokenCurrent, writeInstallToken } from "@/lib/uv-env/install-token";
 
@@ -49,7 +50,11 @@ export async function installMusicAnalysisDeps(timeoutMs = 5 * 60_000): Promise<
     child.on("close", (code) => {
       clearTimeout(t);
       if (code === 0) resolve();
-      else reject(new MusicAnalyzeError(`install exited ${code}: ${formatStderrTail(err)}`));
+      else {
+        // Offline reads as one sentence; the raw uv text goes to the log.
+        const offline = uvNetworkFailureMessage("music analysis", err);
+        reject(new MusicAnalyzeError(offline ?? `install exited ${code}: ${formatStderrTail(err)}`));
+      }
     });
   });
   writeMusicAnalysisToken();

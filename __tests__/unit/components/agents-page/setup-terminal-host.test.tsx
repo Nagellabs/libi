@@ -14,6 +14,7 @@ interface ViewProps {
   terminalId: string;
   onExited?: (c: number) => void;
   onSessionGone?: () => void;
+  onSubmit?: () => void;
 }
 /** The last props each terminal id's view rendered with, so a test can fire a late event from a replaced view. */
 const viewProps = new Map<string, ViewProps>();
@@ -305,6 +306,17 @@ describe("SetupTerminalHost + SetupTerminal", () => {
     expect(screen.getByText(/press enter/i)).toBeInTheDocument();
     expect(screen.queryByText(/finished/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/closed after being idle/i)).not.toBeInTheDocument();
+  });
+
+  it("an Enter in the terminal marks it submitted, and one from a replaced terminal changes nothing", async () => {
+    renderHost(<Opener surface="agents" />);
+    await act(async () => { fireEvent.click(screen.getByText("open-agents")); });
+    await act(async () => { fireEvent.click(screen.getByText("open-agents")); });
+    act(() => viewProps.get("term-1")!.onSubmit?.());
+    expect(screen.getByText(/press enter/i)).toBeInTheDocument();
+    act(() => viewProps.get("term-2")!.onSubmit?.());
+    expect(screen.getByText("Running. Follow what it asks in the terminal.")).toBeInTheDocument();
+    expect(screen.queryByText(/press enter/i)).not.toBeInTheDocument();
   });
 
   it("a slow close never removes a newer terminal opened on the same surface meanwhile", async () => {

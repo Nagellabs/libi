@@ -1,6 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import { toast } from "sonner";
+import { USER_STARTED_JOB_KINDS } from "@/lib/jobs/user-started-kinds";
+import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
 import { useAllJobs, useCancelJob, useRetryJob } from "@/lib/queries/jobs";
 import type { JobStatus } from "@/lib/jobs/types";
 
@@ -143,9 +146,11 @@ export function JobsTab() {
                       )}
                     </td>
                     <td className="px-3 py-2 text-muted-foreground">
-                      {pct != null
-                        ? `${pct}% (${formatProgressCounts(job.progressDone, job.progressTotal, job.progressUnit)})`
-                        : "—"}
+                      {isExportWaiting({ unit: job.progressUnit }) && isInflight
+                        ? EXPORT_WAITING_MESSAGE
+                        : pct != null
+                          ? `${pct}% (${formatProgressCounts(job.progressDone, job.progressTotal, job.progressUnit)})`
+                          : "—"}
                     </td>
                     <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">
                       {/* ETA only means something for in-flight jobs — a
@@ -166,9 +171,20 @@ export function JobsTab() {
                           Cancel
                         </button>
                       )}
-                      {isTerminal && (
+                      {/* A job only the user starts (a template publish) is never re-run from
+                          stored params — the retry route refuses it — so no Retry is offered for one. */}
+                      {isTerminal && USER_STARTED_JOB_KINDS.has(job.kind) && (
+                        <span
+                          className="text-muted-foreground"
+                          title="A publish is never re-run from here. Try it again from its review on the Templates page."
+                          data-testid={`job-no-retry-${job.id}`}
+                        >
+                          Try again from Templates
+                        </span>
+                      )}
+                      {isTerminal && !USER_STARTED_JOB_KINDS.has(job.kind) && (
                         <button
-                          onClick={() => retryMutation.mutate(job.id)}
+                          onClick={() => retryMutation.mutate(job.id, { onError: (e) => toast.error(e.message) })}
                           disabled={retryMutation.isPending}
                           className="cursor-pointer text-primary/80 hover:text-primary disabled:opacity-50"
                         >

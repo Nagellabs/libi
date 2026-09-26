@@ -64,7 +64,9 @@ function sourceFiles(): { rel: string; text: string }[] {
   for (const dir of SOURCE_DIRS) {
     for (const full of walk(path.join(REPO_ROOT, dir))) {
       files.push({
-        rel: path.relative(REPO_ROOT, full),
+        // Repo-relative with `/` on every host: the allowlists below are written that way, and on Windows
+        // `path.relative` answers with `\`.
+        rel: path.relative(REPO_ROOT, full).split(path.sep).join("/"),
         text: fs.readFileSync(full, "utf-8"),
       });
     }

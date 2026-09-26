@@ -110,6 +110,63 @@ export function baseTimeRange(base: ExportBase): {
   return { start, end, duration: end - start };
 }
 
+/** A stream that starts less than this after a cut starts with it. */
+export const LEAD_EPS = 0.001;
+
+/**
+ * How an ffmpeg backend cuts the base at `start` without losing a stream that
+ * starts late (its `videoLead` / `audioLead`, `lib/ffmpeg/probe.ts`).
+ *
+ * `-ss` before `-i` makes the demuxer seek on the VIDEO: every stream is
+ * positioned at the video keyframe at or before `start`. When the video
+ * starts after `start` there is no such keyframe, so the seek lands on the
+ * video's first keyframe and the audio before it is dropped. That holds even
+ * for `-ss 0`, and even with `-vn` (measured with ffmpeg 8.1 and 9.0.1: a
+ * file whose video starts 0.4 s after its audio lost the audio's first
+ * 0.32 s, the first keyframe's DTS, in MP4, and 0.406 s in MKV).
+ *
+ * So a cut inside the video's lead reads the base from its start (only `-to`)
+ * and the graph cuts `start` off the audio itself. The video then starts
+ * `videoLead` after the cut, and the export shows its first frame until then,
+ * as the preview and the canvas export do (`MediaBunnyExportFrameSource`).
+ * docs-local/qa/2026-09-25-mediabunny-upgrade-report.md (Export lead fix)
+ */
+export interface BaseCut {
+  /** `-ss` before the base's `-i`; null reads the base from its start. */
+  inputSeek: number | null;
+  /** Seconds the graph cuts from the base audio (inputSeek null). */
+  graphTrim: number;
+  /** Seconds after the cut the base video starts (0: at the cut). */
+  videoLead: number;
+}
+
+export function baseCut(start: number, videoLead = 0): BaseCut {
+  if (videoLead > start + LEAD_EPS) return { inputSeek: null, graphTrim: start, videoLead: videoLead - start };
+  return { inputSeek: start, graphTrim: 0, videoLead: 0 };
+}
+
+/**
+ * Whether `-c copy` keeps every kept stream where the source has it, on the
+ * output's own timeline, for a cut at `start`. A copy can't add silence or
+ * repeat a frame, so it can't keep a lead that the whole output would start
+ * with: the output's timeline then begins at its first packet, and a reader
+ * (ffmpeg, libi's preview) plays everything that much early.
+ * - The video starts by the cut: the seek lands on a keyframe at or before
+ *   it, the output starts at 0, and an audio lead stays a lead. Copy.
+ * - The video starts after a cut past 0: the seek drops audio (`baseCut`).
+ * - The video starts after a cut at 0: read from the start, which keeps the
+ *   video's lead only if the kept audio starts at 0.
+ */
+export function streamCopyKeepsTimeline(
+  start: number,
+  leads: { videoLead?: number; audioLead?: number },
+  keepsAudio: boolean,
+): boolean {
+  if ((leads.videoLead ?? 0) <= start + LEAD_EPS) return true;
+  if (start > LEAD_EPS) return false;
+  return keepsAudio && (leads.audioLead ?? 0) <= LEAD_EPS;
+}
+
 /**
  * True when `-c copy` would preserve the composition's framing.
  *
@@ -150,4 +207,55 @@ export function findBaseInlineAudioClip(
 export function keepsBaseAudio(comp: Composition, base: ExportBase): boolean {
   const clip = findBaseInlineAudioClip(comp, base);
   return clip !== undefined && clip.enabled;
+}
+
+/**
+ * The audio as it sits on its file's timeline, from the file's start.
+ *
+ * The ffmpeg CLI rebases an input by the file's start, but a track that starts
+ * later than the file (after a subtitle or the video, or a microphone that
+ * started late) keeps that lead only as its first timestamp. `atrim` then
+ * `asetpts=PTS-STARTPTS` threw it away: a clip trimmed inside the lead played
+ * from the track's first sample, as early as the lead was long (400 ms on a
+ * file whose audio starts 0.4 s in, 200 ms trimmed at 0.2 s). The preview
+ * plays silence there. Padding the lead with silence first puts every trim
+ * point where the preview has it. On a track that starts with its file it is
+ * a no-op.
+ * docs-local/qa/2026-09-25-mediabunny-upgrade-report.md (Export lead fix)
+ */
+export const ON_FILE_TIMELINE = "aresample=async=1:first_pts=0";
+
+/**
+ * `ON_FILE_TIMELINE` for an input read through its probe's `audioRead` fix:
+ * its timestamps first moved by `ptsShift` seconds (an Ogg or MPEG-TS read
+ * for its audio alone, whose start ffmpeg moved to the audio's; a FLAC-in-MP4
+ * cut read without its edit list). See `ProbedMedia.audioRead`.
+ */
+export function onFileTimeline(ptsShift = 0): string {
+  if (!Number.isFinite(ptsShift) || Math.abs(ptsShift) < 1e-6) return ON_FILE_TIMELINE;
+  const x = +Math.abs(ptsShift).toFixed(9);
+  // A whole number of ticks (samples): `x/TB` alone is a float a hair under
+  // the sample (0.397333333 s × 48 kHz = 19071.99998), which the padding
+  // truncated: the audio came out one sample early (review round 4).
+  return `asetpts=PTS${ptsShift > 0 ? "+" : "-"}round(${x}/TB),${ON_FILE_TIMELINE}`;
+}
+
+/**
+ * Filters (with a trailing comma) that show a video's first frame from its
+ * stream's time 0 until the frame's own time `lead`, or "" when there is no
+ * lead. A stream that starts late otherwise has no frame there at all: the
+ * `overlay` filter draws nothing over that span, and a base that starts late
+ * starts the whole output late, so a reader of the file plays it early. The
+ * preview and the canvas export show the first frame there
+ * (`MediaBunnyExportFrameSource`), so the export repeats it.
+ *
+ * `tpad` inserts its frames before the stream's first frame and shifts the
+ * stream by them, so the stream is first moved to 0. The padding is whole
+ * frames at the stream's rate: the first real frame lands within half a frame
+ * of `lead`.
+ * docs-local/qa/2026-09-25-mediabunny-upgrade-report.md (Export lead fix)
+ */
+export function leadFill(lead: number): string {
+  if (!(lead > 0.001)) return "";
+  return `setpts=PTS-STARTPTS,tpad=start_mode=clone:start_duration=${+lead.toFixed(9)},`;
 }

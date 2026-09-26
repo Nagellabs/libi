@@ -233,6 +233,29 @@ export const settings = sqliteTable("settings", {
   /** JSON-serialized CrashReportSettings (see lib/db/settings.ts). Null = defaults
    *  (choice "unset", which behaves as enabled — see that file). */
   crashReports: text("crash_reports"),
+  /** JSON-serialized SocialSettings (see lib/db/settings.ts): chosen social
+   *  provider + defaults. NEVER a token — the grant lives in lib/social/token-store.ts. */
+  social: text("social"),
+  /** JSON-serialized TemplatesAuthorSetting (see lib/db/settings.ts): the
+   *  install's public-catalog creator key, its derived author id and the
+   *  chosen nickname. The key is a bearer the SITE never stores; here it is
+   *  the one secret this table holds, so it is never included in any API
+   *  response except POST /api/templates/cloud/key/reveal (Settings →
+   *  General's explicit Reveal or Copy). */
+  templatesAuthor: text("templates_author"),
+  /** JSON-serialized TemplatesCatalogSetting (see lib/db/settings.ts): which
+   *  public templates catalog a DEV build reads — production or a development
+   *  site — and that site's Vercel protection-bypass token. Read only by dev
+   *  builds (lib/templates/cloud/catalog-setting.ts); a packaged or npm build
+   *  ignores it. The token is a secret: never in getSettings(), never in any
+   *  API response (masked only), never logged. Null = the default. */
+  templatesCatalog: text("templates_catalog"),
+  /** JSON string[] of piece ids already told that their canvas-scene layers
+   *  from libi 0.1.0/0.1.1 were not loaded (hooks/editor/use-legacy-scenes-notice.ts).
+   *  Server-side on purpose: the packaged app's origin changes every launch
+   *  (ephemeral port), so browser storage cannot keep "once per piece". A
+   *  deleted piece's id is removed (lib/pieces/delete-piece.ts). Null = none. */
+  legacyScenesNoticed: text("legacy_scenes_noticed"),
   onboardingPersona: text("onboarding_persona"),
   personaSelectedAt: integer("persona_selected_at", { mode: "timestamp" }),
   agentEverConnected: integer("agent_ever_connected", { mode: "boolean" })
@@ -644,3 +667,279 @@ export const skillInstalls = sqliteTable(
   }),
 );
 
+/**
+ * The ONE relation libi cannot derive on demand: which provider post came from
+ * which piece. Zernio stores `metadata.libi.pieceId` on the post but cannot
+ * filter by it, so this table is the index and the stamp is what rebuilds it
+ * ("Re-index from provider"). `last_status` is a display cache for the
+ * Posting tab's offline/empty states; the provider is the truth. Piece DELETE
+ * cascades here — the post at the provider is NOT deleted (the confirm says so).
+ */
+export const socialPostLinks = sqliteTable(
+  "social_post_links",
+  {
+    providerId: text("provider_id").notNull(),
+    providerPostId: text("provider_post_id").notNull(),
+    pieceId: text("piece_id")
+      .notNull()
+      .references(() => pieces.id, { onDelete: "cascade" }),
+    exportPath: text("export_path"),
+    /** The x-request-id the post was created with; reused on retry. */
+    requestId: text("request_id"),
+    createdBy: text("created_by", { enum: ["agent", "ui"] }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+    lastStatus: text("last_status"),
+    lastStatusAt: integer("last_status_at", { mode: "timestamp" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.providerId, t.providerPostId] }),
+    pieceIdx: index("idx_social_post_links_piece").on(t.pieceId),
+  }),
+);
+
+/**
+ * A piece <-> AD link, for an ad that was never an organic post.
+ *
+ * The other kind of ad needs no table at all: when an ad boosts a post, the
+ * provider itself knows (`effectiveInstagramMediaId` matches that post's
+ * target `platformPostId`), so it is discovered on every read and stored
+ * nowhere. This table exists only for the case the provider cannot answer —
+ * a piece published straight to an ad account as a "dark post", which has no
+ * organic post to match against and so no trace back to the piece.
+ *
+ * Same shape and same reasoning as `social_post_links`: libi stores the LINK,
+ * never the ad. Spend, status and creative all stay on the provider.
+ */
+export const socialAdLinks = sqliteTable(
+  "social_ad_links",
+  {
+    providerId: text("provider_id").notNull(),
+    /** The PROVIDER'S ad id (Zernio's `_id`), which is what its lists key on. */
+    providerAdId: text("provider_ad_id").notNull(),
+    /** The ad NETWORK'S id (Meta's ad id) when the creator knew it — the value
+     *  `ad_campaigns_list_ads` takes as `platform_ad_id`. */
+    platformAdId: text("platform_ad_id"),
+    pieceId: text("piece_id")
+      .notNull()
+      .references(() => pieces.id, { onDelete: "cascade" }),
+    createdBy: text("created_by", { enum: ["agent", "ui"] }).notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.providerId, t.providerAdId] }),
+    pieceIdx: index("idx_social_ad_links_piece").on(t.pieceId),
+  }),
+);
+
+/**
+ * The write-ahead half of the dedupe contract: one row per logical post
+ * ATTEMPT, written before the provider is asked to create anything.
+ *
+ * It exists because `social_post_links` is keyed `(provider_id,
+ * provider_post_id)` — there is nothing to write there until an id comes
+ * back, which is exactly the window a crashed or timed-out create falls into.
+ * Zernio's MCP tools expose no idempotency header
+ * (`.superpowers/sdd/zernio-live-shapes.md`), so this row plus the
+ * `metadata.libi.requestId` stamp is the whole guard: a retry finds the row,
+ * and either reuses the id on it or scans recent posts for its own
+ * `requestId` before creating again.
+ *
+ * `piece_id` is nullable so a post that belongs to no piece can still be
+ * guarded; when it is set, the FK cascade deletes the row with its piece,
+ * same as `social_post_links`.
+ */
+export const socialPostIntents = sqliteTable(
+  "social_post_intents",
+  {
+    providerId: text("provider_id").notNull(),
+    /** The idempotency key, reused across every retry of this logical post. */
+    requestId: text("request_id").notNull(),
+    pieceId: text("piece_id").references(() => pieces.id, { onDelete: "cascade" }),
+    /** Null until libi LEARNS the id — the uncovered window itself. */
+    providerPostId: text("provider_post_id"),
+    mode: text("mode", { enum: ["draft", "schedule", "now"] }).notNull(),
+    /** `pending` = sent, outcome unknown · `linked` = id known · `unknown` = the attempt failed with the outcome unestablished. */
+    state: text("state", { enum: ["pending", "linked", "unknown"] }).notNull().default("pending"),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" }),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.providerId, t.requestId] }),
+    pieceIdx: index("idx_social_post_intents_piece").on(t.pieceId),
+  }),
+);
+
+/**
+ * A reusable video concept captured from a piece: instructions + overlays +
+ * clips + media, stored under `<LIBI_HOME>/templates/<id>/` (the folder is
+ * written only by lib/templates/store.ts). `origin: "installed"` and
+ * `cloudId` are reserved for the public catalog (sub-project 3); a local
+ * template keeps `cloudId` null until it is published.
+ */
+export const templates = sqliteTable(
+  "templates",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    /** JSON string[] — lowercased, ≤ 10, each `^[a-z0-9][a-z0-9-]{0,29}$`. */
+    tags: text("tags").notNull().default("[]"),
+    origin: text("origin", { enum: ["local", "installed"] }).notNull().default("local"),
+    cloudId: text("cloud_id"),
+    /** A publish the catalog prepared that libi has not yet seen land: JSON,
+     *  `PublishPending` in lib/templates/store.ts. It names the cloud id, so a
+     *  retry finishes THAT publish instead of minting a second one. Cleared
+     *  when the commit lands. */
+    publishPending: text("publish_pending"),
+    /** Which catalog `cloudId` and `publishPending` belong to — `catalogSource()`
+     *  when they were written: "test-mode" (the fixture) or a site origin. A row
+     *  linked to another catalog than this process reads is not linked here
+     *  (lib/templates/cloud/catalog-source.ts). Null only with no link. */
+    cloudSource: text("cloud_source"),
+    /** Bumps on every update_template / re-extract. */
+    version: integer("version").notNull().default(1),
+    /** Lineage only — nulled when the source piece goes. */
+    createdFromPieceId: text("created_from_piece_id").references(() => pieces.id, {
+      onDelete: "set null",
+    }),
+    /** Any code/three body present (gates publish until sub-project 1 lands). */
+    hasCode: integer("has_code", { mode: "boolean" }).notNull().default(false),
+    /** Denormalised from template_uses. */
+    useCount: integer("use_count").notNull().default(0),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (t) => ({
+    originUpdatedIdx: index("idx_templates_origin_updated").on(t.origin, t.updatedAt),
+    /** One row per catalog template: a second install of the same cloud id
+     *  (another process racing this one) fails its insert and uses the row
+     *  that won (lib/templates/cloud/install.ts). */
+    cloudIdUnique: uniqueIndex("templates_cloud_id_unique").on(t.cloudId).where(sql`${t.cloudId} IS NOT NULL`),
+  }),
+);
+
+/** One row per apply. `reported` is whether the use reached the catalog
+ *  (sub-project 3); a local-only template's rows stay `false` forever. */
+export const templateUses = sqliteTable(
+  "template_uses",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    templateId: text("template_id")
+      .notNull()
+      .references(() => templates.id, { onDelete: "cascade" }),
+    pieceId: text("piece_id").references(() => pieces.id, { onDelete: "set null" }),
+    usedAt: integer("used_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    reported: integer("reported", { mode: "boolean" }).notNull().default(false),
+    /** The use reporter's (lib/templates/cloud/use-reporter.ts) failed tries
+     *  for this row's template, kept on every unreported row of it. */
+    reportAttempts: integer("report_attempts").notNull().default(0),
+    /** Not before this may the reporter send this row: a backoff after a
+     *  failure, or a claim while one process sends it — so two libi servers
+     *  on one LIBI_HOME never send the same use. Null: due now. */
+    reportNextAt: integer("report_next_at", { mode: "timestamp_ms" }),
+    /** The catalog this process read when the use happened (`catalogSource()`):
+     *  a use is only ever reported to that catalog. */
+    source: text("source"),
+  },
+  (t) => ({
+    templateUsedIdx: index("idx_template_uses_template_used").on(t.templateId, t.usedAt),
+  }),
+);
+
+/**
+ * A publish an agent PREPARED and only the user can make: `libi.publish_template`
+ * records one after its local preflight, and the Templates page's review panel
+ * publishes it (`POST /api/templates/cloud/publish-requests/:id/confirm`) or
+ * discards it (lib/templates/cloud/publish-requests.ts). One per template; the
+ * template's delete cascades to it.
+ */
+export const templatePublishRequests = sqliteTable(
+  "template_publish_requests",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    templateId: text("template_id")
+      .notNull()
+      .references(() => templates.id, { onDelete: "cascade" }),
+    /** The catalog this process read when the request was made (`catalogSource()`):
+     *  test mode and a normal boot share LIBI_HOME, and a request prepared against
+     *  the fixture must never be confirmed against the real catalog. */
+    source: text("source").notNull(),
+    /** JSON `{ fileId } | { path } | { exportPieceId }` — the example's source. */
+    exampleVideo: text("example_video").notNull(),
+    /** A nickname the agent passed with the request; applied only on confirm. */
+    nickname: text("nickname"),
+    /** sha256 of what the review showed (lib/templates/cloud/publish-content.ts#contentFingerprint):
+     *  confirm refuses, and the job itself refuses, when the template changed since. */
+    fingerprint: text("fingerprint").notNull(),
+    /** Single-use proof the confirm came from the review panel: returned only by
+     *  the page's read route to a browser request, rotated on every confirm. */
+    confirmCode: text("confirm_code").notNull(),
+    /** `awaiting` the user; `publishing` since a confirm started `jobId`; `failed`
+     *  when that job did not publish (the panel offers a fresh confirm). */
+    status: text("status", { enum: ["awaiting", "publishing", "failed"] }).notNull().default("awaiting"),
+    jobId: text("job_id"),
+    error: text("error"),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    templateUnique: uniqueIndex("template_publish_requests_template_unique").on(t.templateId),
+  }),
+);
+
+/** The public catalog's index, cached locally (lib/templates/cloud/catalog-cache.ts).
+ *  Replaced wholesale on every successful fetch; mirrored into templates_fts
+ *  with scope "public" so one search serves local and public rows. Every text
+ *  column is a STRANGER's words (validated by the cloud client, not trusted). */
+export const catalogIndex = sqliteTable(
+  "catalog_index",
+  {
+    cloudId: text("cloud_id").primaryKey(),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    nickname: text("nickname").notNull().default(""),
+    authorId: text("author_id").notNull().default(""),
+    version: integer("version").notNull().default(1),
+    hasCode: integer("has_code", { mode: "boolean" }).notNull().default(false),
+    canvasWidth: integer("canvas_width").notNull(),
+    canvasHeight: integer("canvas_height").notNull(),
+    duration: real("duration").notNull().default(0),
+    slotCount: integer("slot_count").notNull().default(0),
+    /** Relative to the bucket base — resolved on read, never stored absolute. */
+    poster: text("poster").notNull(),
+    video: text("video").notNull(),
+    usesTotal: integer("uses_total").notNull().default(0),
+    uses7d: integer("uses_7d").notNull().default(0),
+    heat: real("heat").notNull().default(0),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+    fetchedAt: integer("fetched_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (t) => ({
+    trendingIdx: index("idx_catalog_index_uses7d").on(t.uses7d),
+  }),
+);
+
+/** One row (id 1): the cached index's ETag, when it was last confirmed fresh,
+ *  and which catalog it came from (`catalogSource()`: the test-mode
+ *  fixture, or the site's origin). A copy from another source is never served. */
+export const catalogIndexMeta = sqliteTable("catalog_index_meta", {
+  id: integer("id").primaryKey().default(1),
+  etag: text("etag"),
+  fetchedAt: integer("fetched_at", { mode: "timestamp_ms" }),
+  source: text("source"),
+});

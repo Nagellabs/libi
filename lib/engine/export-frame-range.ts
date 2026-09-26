@@ -16,6 +16,24 @@ export interface FrameRange {
 }
 
 /**
+ * An explicit list of composition frames to render, ascending and distinct —
+ * what `libi.render_overlay_frames` asks for, so a verify render costs the
+ * frames the agent wants to see rather than the whole piece. Encoded like a
+ * chunk: the i-th listed frame is the file's i-th frame, at t = i / fps.
+ */
+export interface FrameList {
+  frames: readonly number[];
+}
+
+/** The composition frames an export renders, in encode order. */
+export function framesToRender(selection: FrameRange | FrameList | undefined, compositionFrames: number): number[] {
+  if (selection && "frames" in selection) return [...selection.frames];
+  const start = selection?.startFrame ?? 0;
+  const end = selection?.endFrameExclusive ?? compositionFrames;
+  return Array.from({ length: Math.max(0, end - start) }, (_, i) => start + i);
+}
+
+/**
  * Per-frame encode metadata for a chunk render.
  *
  * @param frame   absolute composition frame index (startFrame..endFrameExclusive-1)

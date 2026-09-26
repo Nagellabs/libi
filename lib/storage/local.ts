@@ -73,7 +73,9 @@ export class LocalFileStorage implements FileStorage {
     const dir = this.dirForPiece(pieceId);
     const resolved = this.localPath(pieceId, filename);
     const [real, realDir] = await Promise.all([fs.realpath(resolved), fs.realpath(dir)]);
-    if (real !== realDir && !real.startsWith(realDir + path.sep)) {
+    // The piece folder itself is not a file in it (a symlink to `.`, a `.` name past a route).
+    if (real === realDir) throw new Error(`resolved path is the piece directory itself: ${filename}`);
+    if (!real.startsWith(realDir + path.sep)) {
       throw new Error(`resolved path escapes piece directory: ${filename}`);
     }
     return real;

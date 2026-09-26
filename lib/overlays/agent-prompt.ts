@@ -32,8 +32,21 @@ export function buildModifyPrompt(
   return [
     `Modify the ${overlay.kind} overlay "${overlay.id}"${what} on the currently-open piece.`,
     description ? `Change: ${description}` : `Describe the change here.`,
-    `Use the libi update_overlay tool — modify this overlay, do not create a new one.`,
+    modifyInstruction(overlay.kind),
   ].join("\n");
+}
+
+/** How to change an overlay of this kind. update_overlay takes no code, so a
+ *  code/three overlay is changed through its code file; a tracked overlay may
+ *  carry code OR media content, so its line covers both. */
+function modifyInstruction(kind: string): string {
+  if (kind === "code" || kind === "three") {
+    return "Edit its code file — the `codeFilePath` libi.get_overlays returns for this overlay — with your file tools; update_overlay takes no code (use it only for placement, timing or opacity).";
+  }
+  if (kind === "tracked") {
+    return "If libi.get_overlays shows a `codeFilePath` for it, edit that file with your file tools; otherwise use the libi update_overlay tool — modify this overlay, do not create a new one.";
+  }
+  return `Use the libi update_overlay tool — modify this overlay, do not create a new one.`;
 }
 
 /** Seed prompt for transcribing a selected audio clip's source file. The user

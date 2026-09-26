@@ -5,7 +5,10 @@ import { files } from "@/lib/db/schema/sqlite";
 import { getStorage } from "@/lib/storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
-import { baseTimeRange, keepsBaseAudio, resolveExportBase } from "../export-base";
+import { probeMedia } from "@/lib/ffmpeg/probe";
+import { baseCut, baseTimeRange, keepsBaseAudio, resolveExportBase, streamCopyKeepsTimeline } from "../export-base";
+import { FfmpegOverlayBackend } from "./ffmpeg-overlay";
+import { exportLogger as logger } from "@/lib/logger";
 import type { ExportBackend, ExportContext } from "../backend";
 import type { ExportResult } from "@/lib/engine/types";
 
@@ -43,16 +46,45 @@ export class StreamCopyTrimBackend implements ExportBackend {
     // export would carry the source's audio track straight through and the
     // user's muted video would ship with sound. The passthrough case (an
     // enabled inline clip on the base) keeps its audio.
-    const audioArgs = keepsBaseAudio(ctx.composition, base) ? [] : ["-an"];
+    // Explicit streams: the video and audio the preview plays (mediabunny's
+    // primary tracks: the first default-flagged, else the first). Without
+    // -map ffmpeg picks its own "best" streams, which on a multi-track
+    // recording can be a different picture or sound (Re-review R1). A failed
+    // probe falls back to the first real video (never cover art) and the first
+    // audio stream.
+    const probed = await probeMedia(srcPath);
+    const keepsAudio = keepsBaseAudio(ctx.composition, base);
+    // A stream that starts after the cut: a copy can't keep that lead unless
+    // another kept stream starts at the cut (see streamCopyKeepsTimeline).
+    // Re-encode through the ffmpeg-overlay path, which pads it the way the
+    // preview plays it.
+    if (!streamCopyKeepsTimeline(start, probed, keepsAudio)) {
+      logger.info(
+        {
+          tag: "export", op: "export_stream_copy_lead_reencode", compositionId: ctx.composition.id, fileId: base.fileId,
+          start, videoLead: probed.videoLead, audioLead: probed.audioLead,
+        },
+        "a stream starts after the cut; re-encoding to keep its lead",
+      );
+      return new FfmpegOverlayBackend().run(ctx);
+    }
+    const cut = baseCut(start, probed.videoLead);
+    const videoMap = ["-map", probed.primaryVideoStreamIndex !== undefined ? `0:${probed.primaryVideoStreamIndex}` : "0:V:0"];
+    const audioArgs = keepsAudio
+      ? ["-map", probed.primaryAudioStreamIndex !== undefined ? `0:${probed.primaryAudioStreamIndex}` : "0:a:0?"]
+      : ["-an"];
 
     let ok = false;
     try {
       await runFfmpeg(
         [
           "-y",
-          "-ss", String(start),
+          // No -ss for a cut at 0 inside the video's lead: a seek would drop
+          // the audio before the video's first keyframe (baseCut).
+          ...(cut.inputSeek !== null ? ["-ss", String(cut.inputSeek)] : []),
           "-to", String(end),
           "-i", srcPath,
+          ...videoMap,
           "-c", "copy",
           ...audioArgs,
           "-movflags", "+faststart",

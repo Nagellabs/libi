@@ -6,13 +6,14 @@ import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { AssetExplorer } from "./asset-explorer";
 import { PieceObjectsTab } from "./piece-objects-tab";
+import { PostingTab } from "./posting-tab";
 import { StoryboardTab } from "@/components/storyboard/storyboard-tab";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { HeaderToggleButton } from "./header-toggle-button";
 import { SnapshotBanner } from "./snapshot-banner";
 import { SnapshotDraftSwitcher } from "./snapshot-draft-switcher";
 
-type PieceTab = "preview" | "storyboard" | "assets" | "objects";
+type PieceTab = "preview" | "storyboard" | "assets" | "objects" | "posting";
 
 interface EditorPanelProps {
   activeTab: PieceTab;
@@ -100,6 +101,7 @@ export default function EditorPanel({
             <TabsTrigger value="storyboard">Storyboard</TabsTrigger>
             <TabsTrigger value="assets">Assets</TabsTrigger>
             <TabsTrigger value="objects">Objects</TabsTrigger>
+            <TabsTrigger value="posting">Posting</TabsTrigger>
           </TabsList>
         </div>
 
@@ -114,6 +116,9 @@ export default function EditorPanel({
         </TabsContent>
         <TabsContent value="objects" className="flex-1 min-h-0 overflow-auto m-0">
           <PieceObjectsTab pieceId={pieceId} />
+        </TabsContent>
+        <TabsContent value="posting" className="flex-1 min-h-0 overflow-auto m-0">
+          <PostingTab pieceId={pieceId} />
         </TabsContent>
       </Tabs>
     </div>

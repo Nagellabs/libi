@@ -45,12 +45,18 @@ single user or a team. It is never required, and it never gates anything already
   coding chat and for generation instead of your own API keys, with usage tracking and
   per-member limits.
 
+**Not sold, and not free end to end: social posting.** Publishing, scheduling, performance
+numbers and ads reporting ship in the free app, and libi charges nothing for them. libi runs no
+server for them, so there is nothing here to sell. They do run through a third-party posting
+provider the user signs up with ([Zernio](https://zernio.com) today). That provider has its own
+paid plans: it bills per connected social account after a free allowance, and some platforms are
+metered separately. The user pays the provider directly, never libi. See the README's
+"Social posting: what it costs".
+
 **Planned to join the membership later:**
 
 - **Viral DB** — a continuously-updated database of trending videos with structured
   analyses your agent can search.
-- **Posting scheduler & analytics** — auto-publish to TikTok, Instagram, YouTube, X, and
-  Reddit on a schedule, then feed engagement data back to the agent.
 - More over time. The membership grows; the editor stays free.
 
 These are **cloud services**. They run on libi's servers, and their code is not part of this

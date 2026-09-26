@@ -180,8 +180,9 @@ describe("ugc-product-video bundled skill (refactored structure)", () => {
     expect(ref).toMatch(/provider:\s*"fal"/);
     // Never read FAL_KEY / curl fal storage — local files go through the fal MCP's upload tool.
     expect(ref).toMatch(/NEVER\s+read `FAL_KEY`/);
-    // Music: the paid alternative's tool name.
-    expect(ref).toContain("compose_music");
+    // Music: the paid alternative's tool name (ElevenLabs' hosted server, one generation per call).
+    expect(ref).toContain('`creative_generate_in_flow` with `node_type: "music"`');
+    expect(ref).toContain("generations_count: 1");
     // Cross-references by path, not by repetition.
     expect(ref).toContain("ai-asset-generation");
     expect(ref).toContain("ai-video-models");

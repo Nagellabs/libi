@@ -69,6 +69,13 @@ export const EVENT_NAMES = [
   "export_started",
   "export_completed",
   "agent_message_sent",
+  // The user restarted a chat from its right-click menu and it loaded again
+  // (`SessionManager.restartSession`, success path only). Params:
+  // `agent` (`AnalyticsAgentId`: claude-code | codex) and `scope`
+  // ("session" — the chat alone was closed and loaded again — or
+  // "agent_process" — the adapter was not answering and its process was
+  // replaced). Both enums by construction.
+  "session_restarted",
   // asset / feature usage (UI-initiated; not covered by the tool_used wrap)
   "file_uploaded",
   // Asset revealed in the OS file manager. Param `source` is
@@ -211,8 +218,83 @@ export const EVENT_NAMES = [
   // `libi.suggest_provider` (a card in the chat in-app, the commands as text
   // on a CLI). Fired from the MCP process on the tool's success path; the
   // `kind` param is the schema's enum (image | video | music | voice | sfx |
-  // transcription). The agent's `reason` line is user-shaped and never sent.
+  // transcription | social). The agent's `reason` line is user-shaped and never sent.
   "provider_suggested",
+  // libi's OWN grant for a social provider finished its browser sign-in
+  // (callback route), never the click. Param: provider (SocialProviderId).
+  "social_libi_connected",
+  // A social post was created through libi (draft, scheduled, or published
+  // immediately) — from `POST /api/social/posts`, success path only, and a
+  // dedupe (`deduped: true`) still counts here since it is not a failure.
+  // Params: provider (SocialProviderId); platform_count "1"|"2"|"3+";
+  // mode draft|schedule|now; source ui|agent.
+  "social_post_created",
+  // An existing post was changed through libi — edit, (re)schedule, publish
+  // now, cancel a schedule, delete or retry a failed post. One event for all
+  // of them so the action itself is the bounded-cardinality param rather than
+  // a name per verb. Params: provider; action schedule|publish|cancel|edit|delete|retry.
+  "social_post_action",
+  // The chosen social provider changed (including to "none"), from
+  // `PUT /api/social/settings`. Param: provider (SocialProviderId | "none").
+  "social_provider_selected",
+  // The Social page's posting-specific tab (as opposed to the top-level
+  // page view) was opened. No params.
+  "social_posting_tab_viewed",
+  // A tab within the Social page was viewed. Param: tab
+  // posts|schedule|ads|settings.
+  "social_page_viewed",
+  // The user asked the in-app agent to help with a social-posting task from
+  // the Social UI (Task 16's prompts). Param: kind
+  // caption|decide|multi|bulk|ads|analytics|post (the `AskKind` union in
+  // lib/social/prompts.ts — keep the two in step).
+  "social_ask_agent",
+  // Templates (local templates spec §8).
+  // A template was captured from a piece (`libi.create_template_from_piece`,
+  // success path). Param: scope "local" (sub-project 3 adds "public").
+  "template_created",
+  // A template was applied (`libi.apply_template`, success path). Params:
+  // origin "local" | "public"; hasCode boolean; target "new-piece" |
+  // "existing-piece". Never the template id or name.
+  "template_applied",
+  // A template was deleted, from the tool or the page's Delete. No params.
+  "template_deleted",
+  // A template was published to the public catalog — fired from the
+  // `template_publish` runner's success path, never on the tool call. The
+  // only param is `hasCode: boolean` (the spelling `template_applied` uses),
+  // bounded by construction.
+  "template_published",
+  // The publish funnel ("an agent can prepare a publish; only you can
+  // publish"): an agent prepared one (`libi.publish_template` recorded a
+  // request), the user clicked Publish publicly on its review panel (the job
+  // started), or the user clicked Don't publish. No params.
+  "template_publish_requested",
+  "template_publish_confirmed",
+  "template_publish_discarded",
+  // A public template's files were downloaded and written locally
+  // (lib/templates/cloud/install.ts success path). No params — the cloud id
+  // is unbounded and never sent. `template_applied { origin: "public" }`
+  // (sub-project 2's event) counts the apply that usually follows.
+  "template_installed",
+  // A public template was reported from the Public tab. `reason` is the
+  // catalog's fixed enum (spam | offensive | broken | copyright | other).
+  "template_reported",
+  // A creator applied to publish (publishing is invite-only), on the route's
+  // success (app/api/templates/cloud/creator). No params.
+  "template_creator_applied",
+  // The Templates page upgrade (final review F13). Params are closed enums only.
+  // Render preview was asked for on a card or a template's page
+  // (POST /api/templates/<id>/example answered 202). No params.
+  "template_preview_requested",
+  // A template's example render finished (the `template_example` runner's
+  // success path — the agent's create or Render preview). No params.
+  "template_preview_rendered",
+  // A template's own page showed a template: `scope` "local" | "public".
+  "template_details_viewed",
+  // An example was played WITH sound: `where` "card" (the grid's play
+  // button) | "details" (the template's page player).
+  "template_example_played",
+  // The Templates page's Cards / List switch: `view` "cards" | "list".
+  "templates_view_switched",
   // privacy
   "analytics_opt_out",
   "analytics_opt_in",

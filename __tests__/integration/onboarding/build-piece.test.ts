@@ -24,6 +24,7 @@ import { ONBOARDING_ASSETS_V1 } from "@/lib/onboarding/piece/v1/assets";
 import { ONBOARDING_PIECE_V1 } from "@/lib/onboarding/piece/v1";
 import type { CompositionManifest, PersistedOverlay } from "@/lib/composition/persistence";
 import type { DrawContext, Overlay } from "@/lib/engine/types";
+import type { LayerBitmap, LayerSource } from "@/lib/engine/layer-source";
 import type {
   OnboardingPieceParams,
   OnboardingPieceResult,
@@ -217,6 +218,45 @@ async function renderFrameToCanvas(
       : fn;
   }
 
+  // Bodies render in the overlay sandbox in the product (spec §4.4); this test
+  // runs them in-process instead, one @napi-rs/canvas layer per request, with
+  // the same context the runtime hands a body — so the pixels measured below
+  // still come from the real draw functions.
+  const drawn = new Map<string, LayerBitmap>();
+  const layers: LayerSource = {
+    request(req) {
+      const fn = compiled[req.overlayId];
+      if (!fn) return;
+      const pad = req.pad ?? { left: 0, top: 0, right: 0, bottom: 0 };
+      const layer = createCanvas(
+        Math.max(1, Math.ceil((pad.left + req.size.width + pad.right) * req.pixelRatio)),
+        Math.max(1, Math.ceil((pad.top + req.size.height + pad.bottom) * req.pixelRatio)),
+      );
+      const lctx = layer.getContext("2d");
+      lctx.setTransform(req.pixelRatio, 0, 0, req.pixelRatio, 0, 0);
+      lctx.translate(pad.left, pad.top);
+      fn({
+        ctx: lctx as unknown as CanvasRenderingContext2D,
+        width: req.size.width,
+        height: req.size.height,
+        fps: req.fps,
+        ...req.time,
+        words: req.words,
+        assets: {},
+      });
+      drawn.set(req.overlayId, {
+        frame: req.frame,
+        bitmap: layer as unknown as ImageBitmap,
+        size: req.size,
+        pixelRatio: req.pixelRatio,
+        ...(req.pad ? { pad: req.pad } : {}),
+      });
+    },
+    get(overlayId) {
+      return drawn.get(overlayId) ?? null;
+    },
+  };
+
   const canvas = createCanvas(manifest.width, manifest.height);
   renderFrame(
     canvas as unknown as HTMLCanvasElement,
@@ -225,7 +265,7 @@ async function renderFrameToCanvas(
     {},
     undefined,
     undefined,
-    compiled,
+    layers,
     // Deliberately empty. A film that needed a track here could not render one
     // — this is the assertion, not an omission.
     {},

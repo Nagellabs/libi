@@ -2,11 +2,15 @@
 id: voice-replacement-revoice-ugc
 title: Re-voicing an existing UGC clip runs voice-replacement + reaches ElevenLabs (format-aware)
 skills: [voice-replacement, voiceover-production, ai-asset-generation]
-mcps: [ElevenLabs, fal-ai]
+mcps: [elevenlabs, fal-ai]
+# Local Whisper for step 1's transcript: the skill routes transcription to audio-analysis, and paid ElevenLabs
+# transcription is asserted absent below. Without uv and the weights the hermetic home stops at Whisper's
+# needs_install (as the 2026-09-25 re-run did once the switch to paid transcription was ruled out).
+share: [bin, models]
 agent: claude-code
 runs: 1
 timeoutSec: 600
-covers: [voice-replacement, revoice, elevenlabs, text-to-speech, format-aware-provider, mute-not-delete, lip-sync]
+covers: [voice-replacement, revoice, elevenlabs, text-to-speech, format-aware-provider, mute-not-delete, lip-sync, elevenlabs-hosted, one-generation]
 ---
 
 > **STATUS (2026-06-09): LENIENT — asserts the voice-replacement flow reaches the
@@ -22,10 +26,16 @@ covers: [voice-replacement, revoice, elevenlabs, text-to-speech, format-aware-pr
 > `PROVIDER_CATALOG`, which carries no "recommended" flag. The parenthetical is gone; the
 > format→capability routing that is the actual decision stays: a UGC talking-head needs a
 > **hosted expressive** voice, not local Kokoro. This scenario's wiring is what makes the
-> assertions below still bite — `mcps: [ElevenLabs, fal-ai]` means the one hosted
+> assertions below still bite — `mcps: [elevenlabs, fal-ai]` means the one hosted
 > expressive provider in the tool list IS ElevenLabs, so "route by capability" and "reach
 > ElevenLabs" are the same observable event here. The run is the check that the removal
 > did not cost the routing.
+
+> **2026-09-25: ElevenLabs is its hosted server.** A new voice is `creative_generate_speech`
+> per segment; keeping the original delivery in another voice is the voice changer
+> (`creative_generate_in_flow`, `node_type: "voice-changer"`). Either is a pass for the
+> headline, so it is an ANY-OF on the rendered tool call (the fake runs as `elevenlabs`, the real entry's name).
+> Both default to four charged takes; the needles hold them to `generations_count: 1`.
 
 ## Prompt
 First, generate ONE short ~8-second UGC talking-head clip of a woman reviewing a
@@ -38,9 +48,16 @@ back on later.
 ## Hard invariants
 ```yaml
 assertions:
-  # The re-voice reached the ElevenLabs TTS path (UGC talking-head → ElevenLabs,
-  # the format-aware recommendation). This is the headline assertion.
-  - { provider: "elevenlabs", tool: "text_to_speech", expect: present }
+  # The re-voice reached ElevenLabs (UGC talking-head → a hosted expressive voice, the
+  # format-aware recommendation). This is the headline assertion.
+  - { transcript_contains: ["[tool-call mcp__elevenlabs__creative_generate_speech]", "[tool-call mcp__elevenlabs__creative_generate_in_flow]"], expect: present }
+  # One take per call, never the hosted default of four.
+  - { provider: "elevenlabs", tool: "creative_generate_speech", where: "input.generations_count != 1", expect: absent }
+  - { provider: "elevenlabs", tool: "creative_generate_in_flow", where: "input.generations_count != 1", expect: absent }
+  # No paid transcription on its own initiative: the 2026-09-25 run switched to ElevenLabs'
+  # Scribe because Whisper wasn't installed. The transcript is audio-analysis's job (Whisper),
+  # and its paid path is only for a user who asked for it.
+  - { provider: "elevenlabs", tool: "creative_transcribe_audio", expect: absent }
   # The fal lip-sync half of an earlier split was proven only by a human reading
   # trace.jsonl. Keyed on endpoint_id, never on tool: a tool-keyed assertion passes
   # on the WRONG model.

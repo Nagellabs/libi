@@ -60,6 +60,15 @@ describe("terminal REST routes", () => {
     expect(res.status).toBe(409);
   });
 
+  it("POST returns 409 for another bundle's copy of TerminalCapacityError (the manager is a globalThis singleton)", async () => {
+    managerMock.create.mockImplementation(() => {
+      throw Object.assign(new Error("Terminal session limit reached (50)."), { name: "TerminalCapacityError" });
+    });
+    const res = await createSession(jsonRequest({ cliId: "shell" }));
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/limit reached/);
+  });
+
   it("PATCH renames and 404s for unknown ids", async () => {
     managerMock.rename.mockReturnValue(true);
     const ok = await renameSession(jsonRequest({ title: "build box" }), params("term-1"));

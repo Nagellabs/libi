@@ -61,7 +61,8 @@ is the coverage anchor (it tells you WHO speaks, WHEN, and for HOW LONG):
 - **Reuse first:** `libi.analysis_get({ fileId })` — if a transcript already exists, use it.
 - **Else transcribe:** run the **`audio-analysis`** skill (local Whisper, free, word-level
   timing) on each target scene's video. If diarization is needed, use a `transcription`
-  provider through the `audio-analysis` skill's Path B.
+  provider whose result carries speaker labels, through the `audio-analysis` skill's Path B
+  (that skill's reference for the provider says whether it does).
 Record, per scene: the spoken text, the speech start/end within the scene, and the
 talking **duration** (so the new segment can match it).
 

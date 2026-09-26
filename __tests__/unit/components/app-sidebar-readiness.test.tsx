@@ -115,7 +115,6 @@ vi.mock("@/lib/queries/terminals", () => ({
 vi.mock("@/components/sessions/agent-selector", () => ({ default: () => <div /> }));
 vi.mock("@/components/sessions/sidebar-session-list", () => ({ default: () => <div /> }));
 vi.mock("@/components/terminal/cli-preset-selector", () => ({ default: () => <div /> }));
-vi.mock("@/components/layout/theme-toggle", () => ({ ThemeToggle: () => <div /> }));
 
 // The sidebar chrome is shadcn/base-ui plumbing (cookies, matchMedia, context)
 // that has nothing to do with what's under test.

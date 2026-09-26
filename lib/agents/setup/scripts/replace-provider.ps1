@@ -11,7 +11,7 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider    fal, higgsfield or elevenlabs
+#   provider    fal, higgsfield, zernio or elevenlabs
 #   agent       claude or codex
 #   cli         the full path of that agent's command-line tool
 #   entry       the name the provider's MCP server has in the agent's config now
@@ -24,8 +24,9 @@
 # What it does:
 #   1. Runs the agent's own `mcp remove` for the entry you have now.
 #   2. Only when that worked, runs add-provider.ps1's text from that folder the
-#      same way, which adds the provider again: it asks for your key, or for
-#      Higgsfield, starts the sign-in with your Higgsfield account.
+#      same way, which adds the provider again: it asks for your key, or for a
+#      provider you sign in to (Higgsfield, Zernio, ElevenLabs), starts that
+#      sign-in.
 #
 # A FAL_KEY libi saved for Codex is left alone in step 1, because step 2
 # replaces it. The entry's name goes after `--`, so a name that starts with `-`
@@ -36,7 +37,7 @@ param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$
 # Checked before anything is removed, so an add that could not run never
 # follows a remove. A libi test keeps this list the same as the providers
 # add-provider.ps1 knows.
-if ($Provider -cnotin @('fal', 'higgsfield', 'elevenlabs')) {
+if ($Provider -cnotin @('fal', 'higgsfield', 'zernio', 'elevenlabs')) {
   [Console]::Error.WriteLine("replace-provider.ps1: unknown provider '$Provider'")
   exit 2
 }

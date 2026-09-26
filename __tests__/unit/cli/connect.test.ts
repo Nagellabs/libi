@@ -2,7 +2,8 @@ import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolveConnectDir, resolveConnectUrl, claudeMcpAddArgs, codexMcpAddArgs, cleanupLegacyConnectFiles, runConnect, type ConnectDeps } from "@/lib/cli/connect";
+import { resolveConnectDir, resolveConnectUrl, claudeMcpAddArgs, codexMcpAddArgs, codexMcpUrl, cleanupLegacyConnectFiles, runConnect, codexAlreadyConnected, type ConnectDeps } from "@/lib/cli/connect";
+import type { CodexMcpListEntry } from "@/lib/codex-config/codex-cli";
 import { packageRoot } from "@/lib/runtime/package-root";
 import type { AddSkillInstallInput, SkillInstallView } from "@/lib/agents/skill-installs-types";
 
@@ -39,6 +40,10 @@ describe("mcp add argument builders", () => {
   });
   it("codex: url form with the codex dialect", () => {
     expect(codexMcpAddArgs("http://127.0.0.1:3457/mcp")).toEqual(["mcp", "add", "libi", "--url", "http://127.0.0.1:3457/mcp?agent=codex"]);
+  });
+  it("codexMcpUrl is the single source both the add args and the already-connected check build from", () => {
+    expect(codexMcpUrl("http://127.0.0.1:3457/mcp")).toBe("http://127.0.0.1:3457/mcp?agent=codex");
+    expect(codexMcpAddArgs("http://127.0.0.1:3457/mcp").at(-1)).toBe(codexMcpUrl("http://127.0.0.1:3457/mcp"));
   });
 });
 
@@ -424,5 +429,164 @@ describe("runConnect", () => {
       { id: "skills", agentId: "codex", status: "printed", detail: "Codex skills: could not install (no such table: skill_installs) — start libi once, then re-run libi connect", failed: true },
     ]);
     expect(steps.find((s) => s.id === "legacy")).toBeDefined();
+  });
+});
+
+// QA 2026-09-19 (codex-cli 0.153.4): re-running `libi connect` over an
+// unchanged Codex `libi` entry wiped the user's
+// `[mcp_servers.libi.tools.<tool>] approval_mode = "approve"` subtables —
+// `codex mcp add` REPLACES the whole entry and re-serializes config.toml. So
+// connect asks codex (read-only: `codex mcp list --json`) first, and leaves an
+// entry that already says the right thing alone.
+describe("runConnect leaves an unchanged Codex registration alone", () => {
+  const URL = "http://127.0.0.1:3457/mcp";
+  const CODEX_URL = `${URL}?agent=codex`;
+  /** Verbatim shape codex-cli 0.153.4 prints for the entry `libi connect` writes. */
+  function libiEntry(over: Partial<CodexMcpListEntry> & { url?: string; type?: string } = {}): CodexMcpListEntry {
+    const { url = CODEX_URL, type = "streamable_http", ...rest } = over;
+    return {
+      name: "libi",
+      enabled: true,
+      transport: { type, url, bearer_token_env_var: null },
+      auth_status: "unsupported",
+      ...rest,
+    } as CodexMcpListEntry;
+  }
+  const codexCalls = (d: { run: ReturnType<typeof vi.fn> }) =>
+    d.run.mock.calls.filter(([bin]) => String(bin).includes("codex"));
+
+  it("same URL, enabled, http → no codex mcp add, and says so", async () => {
+    const listCodex = vi.fn(async () => [libiEntry()]);
+    const d = deps({ listCodex });
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+    expect(listCodex).toHaveBeenCalledWith("/usr/local/bin/codex");
+    expect(codexCalls(d)).toEqual([]);
+    expect(steps.find((s) => s.id === "codex")).toEqual({
+      id: "codex",
+      status: "done",
+      detail: `codex: already connected at ${CODEX_URL} — left as is`,
+    });
+    // Claude is unaffected: its add runs exactly as before.
+    expect(d.run).toHaveBeenCalledWith("/usr/local/bin/claude", claudeMcpAddArgs(URL), "/me/proj");
+  });
+
+  it("a trailing slash on the registered path is the same URL", async () => {
+    const d = deps({ listCodex: vi.fn(async () => [libiEntry({ url: `${URL}/?agent=codex` })]) });
+    await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+    expect(codexCalls(d)).toEqual([]);
+  });
+
+  it("a different URL (the port moved) → add as today", async () => {
+    const d = deps({ listCodex: vi.fn(async () => [libiEntry({ url: "http://127.0.0.1:3999/mcp?agent=codex" })]) });
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+    expect(d.run).toHaveBeenCalledWith("/usr/local/bin/codex", codexMcpAddArgs(URL), "/me/proj");
+    expect(steps.find((s) => s.id === "codex")!.detail).toBe('codex: registered "libi" (Codex registrations are always user-wide)');
+  });
+
+  it("a disabled entry, a stdio entry, or no entry → add as today", async () => {
+    for (const entries of [
+      [libiEntry({ enabled: false })],
+      [libiEntry({ type: "stdio", url: undefined, command: "node" } as never)],
+      [libiEntry({ name: "not-libi" })],
+      [],
+    ]) {
+      const d = deps({ listCodex: vi.fn(async () => entries) });
+      await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+      expect(codexCalls(d)).toHaveLength(1);
+    }
+  });
+
+  it("a listing that failed (null) or threw → add as today", async () => {
+    for (const listCodex of [vi.fn(async () => null), vi.fn(async () => { throw new Error("spawn ENOENT"); })]) {
+      const d = deps({ listCodex });
+      const steps = await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+      expect(codexCalls(d)).toHaveLength(1);
+      expect(steps.find((s) => s.id === "codex")).toMatchObject({ status: "done" });
+    }
+  });
+
+  it("never lists when codex is missing or libi's own copy — it prints the command", async () => {
+    const listCodex = vi.fn(async () => [libiEntry()]);
+    const onProgress = vi.fn();
+    const d = deps({ listCodex, onProgress, findCodex: () => ({ kind: "none" }) });
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+    expect(listCodex).not.toHaveBeenCalled();
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(steps.find((s) => s.id === "codex")).toMatchObject({ status: "printed" });
+  });
+
+  it("prints a progress line before the codex listing read", async () => {
+    const calls: string[] = [];
+    const listCodex = vi.fn(async () => {
+      calls.push("list");
+      return [libiEntry()];
+    });
+    const onProgress = vi.fn((message: string) => calls.push(`progress:${message}`));
+    const d = deps({ listCodex, onProgress });
+    await runConnect({ dir: "/me/proj", global: false, url: URL, running: true }, d);
+    expect(onProgress).toHaveBeenCalledWith("checking codex's current registration…");
+    expect(calls).toEqual(["progress:checking codex's current registration…", "list"]);
+  });
+
+  it("codexAlreadyConnected is pure and judges only libi's entry", () => {
+    expect(codexAlreadyConnected([libiEntry()], CODEX_URL)).toBe(true);
+    expect(codexAlreadyConnected([libiEntry({ type: "http" })], CODEX_URL)).toBe(true);
+    expect(codexAlreadyConnected([libiEntry({ url: "http://127.0.0.1:3457/mcp" })], CODEX_URL)).toBe(false);
+    expect(codexAlreadyConnected(null, CODEX_URL)).toBe(false);
+    expect(codexAlreadyConnected([null as never, libiEntry()], CODEX_URL)).toBe(true);
+  });
+});
+
+// When the add DOES rewrite (a new port, a disabled entry), codex still drops
+// the per-tool approvals. libi can't stop that without hand-editing the file,
+// so it reads its OWN pre-write copy and says what was lost and where it is.
+describe("runConnect warns when a codex rewrite drops libi's per-tool approvals", () => {
+  let home: string;
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "connect-approvals-"));
+  });
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  function copy(contents: string): string {
+    const p = path.join(home, "config.toml.libi-backup-X");
+    fs.writeFileSync(p, contents);
+    return p;
+  }
+  const codexRun = (res: Record<string, unknown>) =>
+    vi.fn(async (bin: string) => (bin.includes("codex") ? { ok: true, stderr: "", ...res } : { ok: true, stderr: "" })) as unknown as ConnectDeps["run"];
+
+  it("approvals in the pre-write copy → an explicit warning naming the copy", async () => {
+    const backup = copy('[mcp_servers.libi]\nurl = "http://127.0.0.1:3999/mcp?agent=codex"\n\n[mcp_servers.libi.tools.libi_list_pieces]\napproval_mode = "approve"\n');
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: "u", running: true }, deps({ run: codexRun({ configBackup: backup }) }));
+    const detail = steps.find((s) => s.id === "codex")!.detail;
+    expect(detail).toContain("codex dropped the per-tool approvals you had set for libi");
+    expect(detail).toContain(backup);
+  });
+
+  it("names the copy even when it was taken on an earlier run (unchanged bytes, no new copy)", async () => {
+    const backup = copy('[mcp_servers.libi.tools.libi_export_video]\napproval_mode = "approve"\n');
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: "u", running: true }, deps({ run: codexRun({ priorConfig: backup }) }));
+    const detail = steps.find((s) => s.id === "codex")!.detail;
+    expect(detail).toContain("codex dropped the per-tool approvals you had set for libi");
+    expect(detail).toContain(backup);
+    // No new copy was taken, so no "copy of the previous one" line.
+    expect(detail).not.toContain("a copy of the previous one is at");
+  });
+
+  it("no approvals for libi (another server's tools table) → no warning", async () => {
+    const backup = copy('[mcp_servers.other.tools.x]\napproval_mode = "approve"\n[mcp_servers.libi]\nurl = "u"\n');
+    const steps = await runConnect({ dir: "/me/proj", global: false, url: "u", running: true }, deps({ run: codexRun({ configBackup: backup }) }));
+    const detail = steps.find((s) => s.id === "codex")!.detail;
+    expect(detail).toContain("codex rewrote your config.toml");
+    expect(detail).not.toContain("per-tool approvals");
+  });
+
+  it("an unreadable copy is not fatal", async () => {
+    const steps = await runConnect(
+      { dir: "/me/proj", global: false, url: "u", running: true },
+      deps({ run: codexRun({ configBackup: path.join(home, "gone") }) }),
+    );
+    expect(steps.find((s) => s.id === "codex")).toMatchObject({ status: "done" });
   });
 });

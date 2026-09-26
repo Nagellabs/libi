@@ -49,7 +49,11 @@ export function useRetryJob() {
   return useMutation({
     mutationFn: async (jobId: string) => {
       const res = await fetch(`/api/jobs/${jobId}/retry`, { method: "POST" });
-      if (!res.ok) throw new Error("retry failed");
+      if (!res.ok) {
+        // The route's own words (why this job can't be retried), shown by the caller.
+        const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+        throw new Error(typeof body.error === "string" && body.error ? body.error : `Retry failed (${res.status}).`);
+      }
       return (await res.json()) as { jobId: string };
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: jobKeys.all }),

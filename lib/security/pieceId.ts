@@ -49,3 +49,16 @@ export function assertSafeTrackId(trackId: string): void {
     throw new Error("unsafe_track_id");
   }
 }
+
+/**
+ * Guard for a storyboard card or sketch-slot id — taken from a URL (the sketch route) or
+ * supplied by an agent creating a card (`addStoryboardCard`). Both name folders and files
+ * under the piece (`storyboard/cards/<cardId>/sketches/<slotId>.png`). They are generated —
+ * `card_<n>` and `sk_<n>` — or an agent's own card id (`s1-hook`), so the piece-id alphabet plus
+ * INTERIOR dots is enough: no leading or trailing dot, no `..`, no `%`, `:`, space or separator.
+ */
+const SAFE_STORYBOARD_ID = /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/;
+
+export function isSafeStoryboardId(id: string): boolean {
+  return typeof id === "string" && SAFE_STORYBOARD_ID.test(id);
+}

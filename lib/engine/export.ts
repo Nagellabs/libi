@@ -8,14 +8,14 @@ import {
   CanvasSource,
 } from 'mediabunny';
 import type { VideoCodec } from 'mediabunny';
-import type { Composition, ExportResult, ExportSettings, DrawContext } from './types';
-import { collectVideoSeekTargets, getCompositionFrames, renderFrame } from './renderer';
-import { chunkFrameMeta, type FrameRange } from './export-frame-range';
+import type { Composition, ExportResult, ExportSettings } from './types';
+import { collectLayerRequests, collectVideoSeekTargets, getCompositionFrames, renderFrame } from './renderer';
+import { chunkFrameMeta, framesToRender, type FrameList, type FrameRange } from './export-frame-range';
 import type { VideoFrameSource } from './video-frame-source';
 import type { Track } from '@/lib/tracking/types';
 import type { ThreeOverlayInstance } from "./three-overlay";
 import type { OverlayQuadInstance } from "./overlay-quad";
-import type { ContentBox } from "@/lib/overlays/code-content-fit";
+import type { SettledLayerSource } from "./layer-source";
 
 /**
  * Keyframe interval (seconds) for the canvas-source encoder. MediaBunny
@@ -49,12 +49,11 @@ const MAX_DROPPED_OVERLAYS = 20;
  * @param onProgress - Optional callback receiving a progress value from 0 to 1
  * @param videoFrameSources - Optional map of VideoFrameSource keyed by scene.id AND video-overlay.id
  * @param imageElements - Optional map of HTMLImageElement keyed by overlay.id (image + tracked-image overlays)
- * @param compiledDrawFns - Optional map of compiled draw fns keyed by overlay.id (code + tracked-code overlays)
+ * @param layers - Optional sandboxed body layers (code / three / tracked-code overlays); every request for a frame is settled before `renderFrame`, and a layer that failed on the frame is reported as a dropped overlay (spec §4.6)
  * @param tracks - Optional map of Track keyed by overlay.trackId (tracked overlays)
- * @param threeScenes - Optional map of ThreeOverlayInstance keyed by overlay.id (three overlays)
+ * @param threeScenes - Optional map of ThreeOverlayInstance keyed by overlay.id (3D-text overlays; `three` bodies come through `layers`)
  * @param spatialQuads - Optional map of OverlayQuadInstance keyed by overlay.id (perspective-tilted image/video/code/flat-text overlays)
- * @param codeContentBoxes - Optional map of probed content ink-bboxes keyed by overlay.id (code overlays) — drives the content contain-fit
- * @param frameRange - Optional sub-range to render (one chunk of a chunked parallel render). When present, the loop renders `[startFrame, endFrameExclusive)`, the encoder timestamp is chunk-local (each chunk file starts at t=0), `onProgress` is chunk-local, and the returned `duration` is the chunk length. Absent → exactly the full-composition behavior (`0 .. getCompositionFrames()`).
+ * @param frameRange - Optional sub-range to render (one chunk of a chunked parallel render). When present, the loop renders `[startFrame, endFrameExclusive)`, the encoder timestamp is chunk-local (each chunk file starts at t=0), `onProgress` is chunk-local, and the returned `duration` is the chunk length. A `FrameList` instead renders exactly the listed frames, encoded back to back the same way (`libi.render_overlay_frames`). Absent → exactly the full-composition behavior (`0 .. getCompositionFrames()`).
  * @returns A promise that resolves with the exported video blob and metadata
  */
 export async function exportVideo(
@@ -63,23 +62,21 @@ export async function exportVideo(
   onProgress?: (progress: number) => void,
   videoFrameSources?: Record<string, VideoFrameSource>,
   imageElements?: Record<string, HTMLImageElement>,
-  compiledDrawFns?: Record<string, (ctx: DrawContext) => void>,
+  layers?: SettledLayerSource,
   tracks?: Record<string, Track>,
   threeScenes?: Record<string, ThreeOverlayInstance>,
   spatialQuads?: Record<string, OverlayQuadInstance>,
-  codeContentBoxes?: Record<string, ContentBox | null>,
-  frameRange?: FrameRange,
+  frameRange?: FrameRange | FrameList,
 ): Promise<ExportResult> {
   const compositionFrames = getCompositionFrames(composition);
   const fps = settings.fps;
   const frameDuration = 1 / fps;
 
-  // Resolve the render window: a chunk range, or the whole composition.
-  const range: FrameRange = frameRange ?? {
-    startFrame: 0,
-    endFrameExclusive: compositionFrames,
-  };
-  const chunkFrames = range.endFrameExclusive - range.startFrame;
+  // Resolve the render window: a chunk range, a frame list, or the whole
+  // composition. Either way the file holds `frames.length` frames from t=0.
+  const frames = framesToRender(frameRange, compositionFrames);
+  const chunkFrames = frames.length;
+  const encodeRange: FrameRange = { startFrame: 0, endFrameExclusive: chunkFrames };
 
   // Create an OffscreenCanvas at the export resolution
   const canvas = new OffscreenCanvas(settings.width, settings.height);
@@ -127,7 +124,8 @@ export async function exportVideo(
   // Render and encode each frame via the unified `renderFrame()` pipeline.
   // It handles scene rendering (canvas vs. video), overlay compositing, and
   // canvas clear + resize internally — do not duplicate any of that here.
-  for (let frame = range.startFrame; frame < range.endFrameExclusive; frame++) {
+  for (let index = 0; index < frames.length; index++) {
+    const frame = frames[index];
     // CRITICAL: `renderFrame` reads each video source via a SYNCHRONOUS
     // `getFrame()`, which returns the source's last-decoded frame. For a
     // one-shot export we must position every active video source AND wait
@@ -149,6 +147,24 @@ export async function exportVideo(
       }
     }
 
+    // Body layers: post every render for THIS frame and wait until the
+    // sandbox has answered each (bitmap, error, or watchdog) before
+    // compositing, so the synchronous renderFrame below is frame-exact (spec
+    // §4.6). A layer that failed draws nothing and is reported once as a
+    // dropped overlay, the way a throwing in-process body used to be.
+    if (layers) {
+      const requests = collectLayerRequests(composition, frame, canvas.width / composition.width, tracks);
+      if (requests.length) {
+        await layers.settle(requests, { frame, time: frame / composition.fps });
+        for (const req of requests) {
+          const failure = layers.failureFor(req.overlayId);
+          if (!failure) continue;
+          const where = failure.line ? ` (line ${failure.line}${failure.column ? `:${failure.column}` : ''})` : '';
+          onOverlayDropped(req.overlayId, `${failure.phase}: ${failure.message}${where}`);
+        }
+      }
+    }
+
     renderFrame(
       canvas as unknown as HTMLCanvasElement,
       composition,
@@ -156,18 +172,17 @@ export async function exportVideo(
       {},
       videoFrameSources,
       imageElements,
-      compiledDrawFns,
+      layers,
       tracks,
       threeScenes,
       spatialQuads,
-      codeContentBoxes,
       onOverlayDropped,
     );
 
     // Feed the rendered frame to the encoder. For a chunk, the timestamp is
     // chunk-local (each chunk file starts at t=0) and progress is chunk-local
     // so the concat downstream produces one continuous timeline.
-    const { timestamp, progress } = chunkFrameMeta(frame, range, fps);
+    const { timestamp, progress } = chunkFrameMeta(index, encodeRange, fps);
     await videoSource.add(timestamp, frameDuration);
 
     // Report progress

@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `templates_author` text;

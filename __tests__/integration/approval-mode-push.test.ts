@@ -190,7 +190,12 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
 
     expect(setSessionMode).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ agentId: "codex", mode: "auto" }),
+      expect.objectContaining({
+        agentId: "codex",
+        mode: "auto",
+        tag: "session-manager",
+        op: "approval_mode_unsupported_by_agent",
+      }),
       "approval.mode.unsupported_by_agent",
     );
   });
@@ -203,7 +208,11 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
 
     expect(setSessionMode).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ agentId: "gemini" }),
+      expect.objectContaining({
+        agentId: "gemini",
+        tag: "session-manager",
+        op: "approval_mode_unsupported_by_agent",
+      }),
       "approval.mode.unsupported_by_agent",
     );
   });
@@ -248,19 +257,37 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
 
     expect(setSessionMode).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ agentId: "claude-code", mode: "auto" }),
+      expect.objectContaining({
+        agentId: "claude-code",
+        mode: "auto",
+        tag: "session-manager",
+        op: "approval_mode_unsupported_by_agent",
+      }),
       "approval.mode.unsupported_by_agent",
     );
   });
 
   it("catches setSessionMode rejections (does not propagate)", async () => {
     vi.mocked(getApprovalMode).mockReturnValue("auto");
-    setSessionMode.mockRejectedValueOnce(new Error("agent rejected"));
+    const rejection = new Error("agent rejected");
+    setSessionMode.mockRejectedValueOnce(rejection);
 
     // Must not throw.
     await expect(
       callPush(sm, "s1", "claude-code", CLAUDE_MODES),
     ).resolves.toBeUndefined();
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        err: rejection,
+        agentId: "claude-code",
+        sessionId: "s1",
+        target: "default",
+        tag: "session-manager",
+        op: "approval_mode_set_failed",
+      }),
+      "approval.mode.set_failed",
+    );
   });
 
   it("no-ops when there's no connection for the agent", async () => {

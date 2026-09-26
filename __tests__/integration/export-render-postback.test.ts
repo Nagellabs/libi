@@ -1,10 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { POST as postResult } from "@/app/api/export/render-result/route";
 import { createRenderJob, __resetRegistryForTests, type RenderPayload } from "@/lib/export/render-jobs";
 import type { ExportSettings } from "@/lib/engine/types";
-import { writeFile, mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+
+/** What the real render page sends: a same-origin POST to the loopback studio
+ *  (measured live in Chromium — Host, a matching Origin, Sec-Fetch-Site
+ *  same-origin). The route re-runs the origin guard itself (it sits outside
+ *  proxy.ts), and a `Request` built here carries no headers unless given. */
+const LOOPBACK = { host: "127.0.0.1:3456", origin: "http://127.0.0.1:3456", "sec-fetch-site": "same-origin" };
 
 describe("POST /api/export/render-result", () => {
   let tmp: string;
@@ -33,6 +39,7 @@ describe("POST /api/export/render-result", () => {
     const req = new Request("http://localhost/api/export/render-result", {
       method: "POST",
       body: fd,
+      headers: LOOPBACK,
     });
 
     const res = await postResult(req);
@@ -64,6 +71,7 @@ describe("POST /api/export/render-result", () => {
     const req = new Request("http://localhost/api/export/render-result", {
       method: "POST",
       body: fd,
+      headers: LOOPBACK,
     });
     const res = await postResult(req);
     expect(res.status).toBe(200);
@@ -86,7 +94,7 @@ describe("POST /api/export/render-result", () => {
     fd.append("durationSeconds", "2.5");
     fd.append("unloadedFonts", JSON.stringify([{ fontFileId: "font-1", reason: "OTS parsing error" }, 7, { fontFileId: 3 }]));
     fd.append("file", new Blob([new Uint8Array([1, 2, 3])], { type: "video/mp4" }), "out.mp4");
-    const res = await postResult(new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }));
+    const res = await postResult(new Request("http://localhost/api/export/render-result", { method: "POST", body: fd, headers: LOOPBACK }));
     expect(res.status).toBe(200);
     expect((await job.done).unloadedFonts).toEqual([{ fontFileId: "font-1", reason: "OTS parsing error" }]);
   });
@@ -103,7 +111,7 @@ describe("POST /api/export/render-result", () => {
     fd.append("durationSeconds", "2.5");
     fd.append("file", new Blob([new Uint8Array([1])], { type: "video/mp4" }), "out.mp4");
     const res = await postResult(
-      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }),
+      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd, headers: LOOPBACK }),
     );
     expect(res.status).toBe(200);
     const result = await job.done;
@@ -123,11 +131,26 @@ describe("POST /api/export/render-result", () => {
     fd.append("droppedOverlays", "{not json");
     fd.append("file", new Blob([new Uint8Array([1])], { type: "video/mp4" }), "out.mp4");
     const res = await postResult(
-      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd }),
+      new Request("http://localhost/api/export/render-result", { method: "POST", body: fd, headers: LOOPBACK }),
     );
     expect(res.status).toBe(200);
     const result = await job.done;
     expect(result.droppedOverlays).toBeUndefined();
+  });
+
+  it("refuses a cross-site postback even with a valid token (guard re-run outside the proxy)", async () => {
+    const job = createRenderJob({ pieceId: "p1", payload: { id: "c1" } as unknown as RenderPayload, settings: { format: "mp4" } as ExportSettings });
+    const fd = new FormData();
+    fd.append("jobId", job.jobId);
+    fd.append("token", job.token);
+    fd.append("durationSeconds", "1");
+    fd.append("file", new Blob([new Uint8Array([0, 0, 0, 20])], { type: "video/mp4" }), "out.mp4");
+    const crossSite = await postResult(new Request("http://127.0.0.1:3456/api/export/render-result", { method: "POST", body: fd, headers: { host: "127.0.0.1:3456", "sec-fetch-site": "cross-site" } }));
+    expect(crossSite.status).toBe(403);
+    expect(await crossSite.json()).toMatchObject({ error: "forbidden_cross_origin" });
+    const rebound = await postResult(new Request("http://rebind.attacker.example/api/export/render-result", { method: "POST", body: fd, headers: { host: "rebind.attacker.example" } }));
+    expect(rebound.status).toBe(403);
+    expect(await rebound.json()).toMatchObject({ error: "forbidden_cross_origin" });
   });
 
   it("rejects with 404 when token is wrong", async () => {
@@ -137,7 +160,7 @@ describe("POST /api/export/render-result", () => {
     fd.append("token", "bogus");
     fd.append("durationSeconds", "1");
     fd.append("file", new Blob([new Uint8Array([1])], { type: "video/mp4" }), "out.mp4");
-    const res = await postResult(new Request("http://localhost/r", { method: "POST", body: fd }));
+    const res = await postResult(new Request("http://localhost/r", { method: "POST", body: fd, headers: LOOPBACK }));
     expect(res.status).toBe(404);
   });
 });

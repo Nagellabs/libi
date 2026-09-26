@@ -23,10 +23,10 @@ import { validateDrawFunction, validateThreeFunction, warnThreeFunction } from "
 import { aspectMismatchWarning } from "@/lib/composition/aspect-mismatch";
 import { findEffect, listEffects } from "@/lib/effects/registry";
 import { overlayLogger } from "@/lib/logger";
+import { articleFor, fileCategoryOf } from "@/mcp/tools/file-tools";
 import { clampRectToFrame } from "@/lib/engine/overlays";
 import { flattenOverlay } from "@/lib/captions/flat-guard";
-import { overlayCodeFile } from "@/lib/overlays/code-fields";
-import { overlayCodeRelPath } from "@/lib/overlays/paths";
+import { overlayCodeFilePath, toAgentOverlayRecord } from "@/lib/overlays/code-files";
 import { starterBody } from "@/lib/overlays/templates";
 import {
   overlayKeyframeTimes,
@@ -84,7 +84,18 @@ function lookupPieceFile(pieceId: string, fileId: string) {
  * playback every ~1s. Returns a structured rejection ToolResult, or null when
  * the fileId is usable.
  */
-function validateOverlayFileId(pieceId: string, fileId: string): ToolResult | null {
+/**
+ * Ownership + kind gate for an image/video overlay's `fileId`. With `kind`, the
+ * file must also be that kind: an audio file on an image overlay, or a video
+ * on an image, persists a layer that renders broken with no refusal. The
+ * refusal fires only when the file's category is KNOWN and differs — an
+ * unknown (`other`) category passes, as it always has.
+ */
+function validateOverlayFileId(
+  pieceId: string,
+  fileId: string,
+  kind?: "image" | "video",
+): ToolResult | null {
   const db = getDb();
   const [file] = db.select().from(files).where(eq(files.id, fileId)).limit(1).all();
   if (!file) {
@@ -104,6 +115,18 @@ function validateOverlayFileId(pieceId: string, fileId: string): ToolResult | nu
         hint: `File ${fileId} belongs to another piece (${file.pieceId}) — use libi.duplicate_file or libi.assign_file to bring it into this piece first.`,
       },
     };
+  }
+  if (kind) {
+    const category = fileCategoryOf(file);
+    if (category !== "other" && category !== kind) {
+      return {
+        success: false,
+        error: "file_kind_mismatch",
+        data: {
+          hint: `File \`${fileId}\` is ${articleFor(category)} \`${category}\` file; ${articleFor(kind)} \`${kind}\` overlay needs ${articleFor(kind)} \`${kind}\` file.`,
+        },
+      };
+    }
   }
   return null;
 }
@@ -186,12 +209,6 @@ function clampToFrame(
   return frame ? clampRectToFrame(rect, frame.width, frame.height) : rect;
 }
 
-/** codeFilePath for the data payload, or undefined for non-code overlays. */
-function codePathFor(o: PersistedOverlay): string | undefined {
-  const f = overlayCodeFile(o);
-  return f ? overlayCodeRelPath(o.id, f) : undefined;
-}
-
 /**
  * add_overlay — create an overlay of any kind. For `code`/`three`, the body
  * (or a scaffolded starter when omitted) is validated, then persisted to a
@@ -221,11 +238,11 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
   // Reject a fileId the piece can't actually use (unknown, or owned by another
   // piece) BEFORE anything is persisted — see validateOverlayFileId.
   if ((kind === "image" || kind === "video") && params.fileId !== undefined) {
-    const rejection = validateOverlayFileId(pieceId, params.fileId);
+    const rejection = validateOverlayFileId(pieceId, params.fileId, kind);
     if (rejection) {
       overlayLogger.warn(
         { event: "add_rejected_file_id", pieceId, kind, fileId: params.fileId, reason: rejection.error },
-        "overlay.add rejected — fileId not usable by this piece",
+        "overlay.add rejected — fileId not usable by this overlay",
       );
       return rejection;
     }
@@ -459,7 +476,7 @@ export async function addOverlay(params: AddOverlayParams): Promise<ToolResult> 
     }
   }
 
-  const codeFilePath = codePathFor(overlay);
+  const codeFilePath = await overlayCodeFilePath(pieceId, overlay);
 
   const warnings: string[] = [];
   const threeWarning =
@@ -512,16 +529,36 @@ export async function updateOverlay(params: UpdateOverlayParams): Promise<ToolRe
     if (v !== undefined) cleanPatch[k] = v;
   }
   if (cleanPatch.rect) cleanPatch.rect = await clampRect(pieceId, cleanPatch.rect as OverlayRect);
-  // Ownership gate for a fileId patch (defensive — the MCP/REST schemas don't
-  // expose `fileId` today, but this function is called directly elsewhere and
-  // the schema may grow one): reject an unknown or cross-piece fileId before
-  // it is persisted, exactly like add_overlay.
+  // Ownership gate for a fileId patch: `updateOverlaySchema` exposes `fileId`
+  // (the templates skill fills a media slot with it), so both the MCP tool and
+  // the REST route can carry one. Reject an unknown or cross-piece fileId
+  // before it is persisted, exactly like add_overlay. The file must also match
+  // the TARGET overlay's kind, and only image/video overlays take a fileId at
+  // all — a text/code/three/tracked overlay would persist a stray field.
   if (typeof cleanPatch.fileId === "string") {
-    const rejection = validateOverlayFileId(pieceId, cleanPatch.fileId);
+    const fileId = cleanPatch.fileId;
+    const { manifest } = await loadComposition(pieceId);
+    const target = (manifest.overlays ?? []).find((o) => o.id === overlayId) as
+      | Overlay
+      | undefined;
+    let rejection: ToolResult | null;
+    if (target && target.kind !== "image" && target.kind !== "video") {
+      rejection = {
+        success: false,
+        error: "file_id_not_supported",
+        data: {
+          hint: `Only image and video overlays take a \`fileId\`; \`${overlayId}\` is a \`${target.kind}\` overlay.`,
+        },
+      };
+    } else {
+      // An unknown overlayId still gets the ownership check; the update below
+      // then reports it as not found.
+      rejection = validateOverlayFileId(pieceId, fileId, target?.kind);
+    }
     if (rejection) {
       overlayLogger.warn(
-        { event: "update_rejected_file_id", pieceId, overlayId, fileId: cleanPatch.fileId, reason: rejection.error },
-        "overlay.update rejected — fileId not usable by this piece",
+        { event: "update_rejected_file_id", pieceId, overlayId, fileId, reason: rejection.error },
+        "overlay.update rejected — fileId not usable by this overlay",
       );
       return rejection;
     }
@@ -636,24 +673,9 @@ export async function updateOverlay(params: UpdateOverlayParams): Promise<ToolRe
  */
 export async function getOverlays(params: GetOverlaysParams): Promise<ToolResult> {
   const { manifest } = await loadComposition(params.pieceId);
-  const overlays = (manifest.overlays ?? []).map((o) => {
-    const codeFilePath = codePathFor(o);
-    // Strip the (large) hydrated body fields; agents edit the file.
-    const { drawFunction, sceneFunction, content, ...rest } = o as Record<string, unknown>;
-    // Tracked-code overlays nest the body at content.drawFunction — elide it too.
-    const strippedContent =
-      content && typeof content === "object" && (content as Record<string, unknown>).kind === "code"
-        ? (() => {
-            const { drawFunction: _drop, ...contentRest } = content as Record<string, unknown>;
-            return { ...contentRest };
-          })()
-        : content;
-    return {
-      ...rest,
-      ...(content !== undefined ? { content: strippedContent } : {}),
-      ...(codeFilePath ? { codeFilePath } : {}),
-    };
-  });
+  const overlays = await Promise.all(
+    (manifest.overlays ?? []).map((o) => toAgentOverlayRecord(params.pieceId, o)),
+  );
   return { success: true, data: { overlays } };
 }
 

@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { drawOverlay, type DrawOverlayContext } from "@/lib/engine/overlay-renderer";
-import type { Overlay, DrawContext } from "@/lib/engine/types";
+import type { Overlay } from "@/lib/engine/types";
 import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
+import type { LayerSource } from "@/lib/engine/layer-source";
+import { fakeBitmap, fakeLayers } from "@/__tests__/helpers/fake-layers";
 
 /**
  * A 2D overlay with an out-of-plane (spatial) transform draws its content into
@@ -11,7 +13,9 @@ import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
  * restored around the content draw: the code case's clip-to-rect, translate
  * and content-fit scale stayed on it after every draw (throwing or not), so
  * the next draw — and the next frame's clearRect — ran clipped and offset.
- * Review of 53db53c3 (MINOR 1).
+ * Review of 53db53c3 (MINOR 1). The body now renders in the sandbox (spec
+ * §4.4); the host-side hazard left is its own clip plus a LayerSource that
+ * throws mid-draw.
  */
 type Rect = { x: number; y: number; w: number; h: number };
 const scratch = {
@@ -75,37 +79,27 @@ const spatialCode = {
   transform3d: { position: { x: 0, y: 0, z: 0 }, rotation: { x: Math.PI / 6, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 } },
 } as unknown as Overlay;
 
-function draw(fn: (d: DrawContext) => void) {
+function draw(layers: LayerSource) {
   drawOverlay(spatialCode, {
     ctx: mainCtx(), width: 1920, height: 1080, fps: 30, totalFrames: 60, frame: 0, time: 0,
     duration: 2, progress: 0, assets: {},
-    compiledDrawFns: { c1: fn },
-    // A content box that isn't the rect → the code case adds translate + scale.
-    codeContentBoxes: { c1: { x: 10, y: 10, width: 50, height: 50 } },
+    layers,
     spatialQuads: { c1: quad },
   } as unknown as DrawOverlayContext);
 }
 
 describe("spatial 2D overlays leave the shared scratch canvas as they found it", () => {
   it("a normal code draw: no clip or translate survives, the next clear is clean", () => {
-    draw(() => {});
+    draw(fakeLayers({ c1: fakeBitmap() }));
     expect(scratch.stack).toHaveLength(0);
     expect(scratch.clip).toBeNull();
     expect(scratch.tx).toBe(0);
-    draw(() => {});
+    draw(fakeLayers({ c1: fakeBitmap() }));
     expect(scratch.clears.at(-1)).toEqual({ clip: null, tx: 0 });
   });
 
-  it("a code body that throws after its own save + clip leaves nothing behind", () => {
-    expect(() =>
-      draw((d) => {
-        d.ctx.save();
-        d.ctx.beginPath();
-        d.ctx.rect(0, 0, 5, 5);
-        d.ctx.clip();
-        throw new Error("boom");
-      }),
-    ).toThrow("boom");
+  it("a LayerSource that throws after the host's clip leaves nothing behind", () => {
+    expect(() => draw(fakeLayers({ c1: fakeBitmap() }, { throwOnGet: ["c1"] }))).toThrow("layer c1 failed");
     expect(scratch.stack).toHaveLength(0);
     expect(scratch.clip).toBeNull();
     expect(scratch.tx).toBe(0);

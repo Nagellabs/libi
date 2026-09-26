@@ -1,9 +1,11 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { useEditorState } from "@/lib/editor-state-context";
 import { sendPromptToAgent } from "@/lib/agents/send-prompt-to-agent";
+import { beginHandoff, EDITOR_PATH } from "@/lib/agents/agent-handoff";
 
 /**
  * Drives the shared "send this prompt to the agent" dialog. Use anywhere the
@@ -15,7 +17,11 @@ import { sendPromptToAgent } from "@/lib/agents/send-prompt-to-agent";
  *
  * "Send" POSTs /api/agent/dispatch, then switches the chat to the new session
  * (the agent often replies with a question — e.g. a paid-tool cost
- * confirmation — that the user must see). In bring-your-own-CLI mode the
+ * confirmation — that the user must see). The chat exists only on /editor, so
+ * a send from any other page (Templates' Use, Social's Ask the agent) also
+ * takes the user there and records a hand-off, so the agent's first
+ * "open this piece" still lands if it beats the editor's mount
+ * (lib/agents/agent-handoff.ts). In bring-your-own-CLI mode the
  * route returns 409 and we show a friendly toast (NOT an error) nudging the
  * user to copy the prompt into their own CLI. "Copy" uses the clipboard.
  */
@@ -24,6 +30,8 @@ export function useDispatchToAgent() {
   const [prompt, setPrompt] = useState("");
   const [sending, setSending] = useState(false);
   const { sessionList, chatVisible, toggleChat } = useEditorState();
+  const router = useRouter();
+  const pathname = usePathname();
 
   const openWith = useCallback((p: string) => {
     setPrompt(p);
@@ -41,11 +49,15 @@ export function useDispatchToAgent() {
     try {
       const r = await sendPromptToAgent(prompt, {
         // Follow the conversation: select the dispatched session and make sure
-        // the chat panel is on screen.
+        // the chat panel is on screen — which, off the editor, means going there.
         onSession: (sessionId) => {
           switchSession(sessionId);
           refresh();
           if (!chatVisible) toggleChat();
+          if (pathname !== EDITOR_PATH) {
+            beginHandoff({ sessionId, fromPath: pathname, at: Date.now() });
+            router.push(EDITOR_PATH);
+          }
         },
       });
       if (r.byoCli) {
@@ -65,7 +77,7 @@ export function useDispatchToAgent() {
     } finally {
       setSending(false);
     }
-  }, [prompt, switchSession, refresh, chatVisible, toggleChat]);
+  }, [prompt, switchSession, refresh, chatVisible, toggleChat, pathname, router]);
 
   // Same signal as `send`, for the same reason: true only when the prompt
   // actually made it to the clipboard.

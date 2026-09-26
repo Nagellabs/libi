@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
-import path from "node:path";
 import os from "node:os";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { z } from "zod/v3";
-import type { JobContext, JobRunner } from "@/lib/jobs/types";
+import { CancelledError, type JobContext, type JobRunner } from "@/lib/jobs/types";
+import { getExportLane } from "@/lib/export/export-lane";
+import { EXPORT_WAITING_UNIT } from "@/lib/export/export-waiting";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadComposition } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
@@ -31,6 +32,7 @@ import type {
 } from "@/lib/engine/types";
 import { exportLogger } from "@/lib/logger";
 import { cssFamilyForFontFile } from "@/lib/fonts/family";
+import { describeDroppedOverlays, droppedVideoFileIds, type DroppedOverlay } from "@/lib/export/dropped-overlays";
 
 /**
  * Unified `export` job. One entry point covers all three server-side backends
@@ -86,19 +88,24 @@ export interface ExportResult {
   backend: "stream-copy-trim" | "ffmpeg-overlay" | "chromium-render";
   width: number;
   height: number;
-  /** Overlays whose draw threw during the chromium-render pass and were
-   *  skipped (QA 2026-09-18 B1) — surfaced here so `libi.export_video`'s
-   *  response tells the agent which overlay(s) failed. The export still
-   *  succeeds; this is informational. Only the chromium-render backend can
-   *  produce this (stream-copy-trim / ffmpeg-overlay never run a code
-   *  overlay's draw function). */
-  droppedOverlays?: Array<{ id: string; message: string }>;
+  /** Overlays the chromium-render pass went out without: a body whose draw
+   *  threw (QA 2026-09-18 B1), or a video clip that could not be loaded (F13).
+   *  Surfaced so `libi.export_video`'s response tells the agent, and the
+   *  export screen tells the user. The export still succeeds; this is
+   *  informational. A video entry carries `kind: "video"` + its file
+   *  (`lib/export/dropped-overlays.ts`). Only the chromium-render backend can
+   *  produce this (stream-copy-trim / ffmpeg-overlay run no draw function and
+   *  read the original through ffmpeg, which fails the export instead). */
+  droppedOverlays?: DroppedOverlay[];
   /** Uploaded fonts the chromium-render page could not load (Final QA F1):
    *  their text rendered in a fallback face. The export still succeeds; the
    *  agent tells the user which font and why. Bounded; absent when every
    *  font loaded. `family` is the one libi.upload_font returned. */
   unloadedFonts?: Array<{ fontFileId: string; family: string; reason: string }>;
 }
+
+/** How often an export waiting for the lane checks for a cancel. */
+const LANE_CANCEL_POLL_MS = 250;
 
 /** Cap on the reported unloaded-fonts list. */
 const MAX_UNLOADED_FONTS = 20;
@@ -121,291 +128,333 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
   // map from this declaration.
   mcpToolId: makeMcpToolId("libi", "libi.export_video"),
   async run(ctx: JobContext<ExportParams>): Promise<ExportResult> {
-    const { pieceId, source, filename, settings } = ctx.params;
-    const destFolder = ctx.params.destFolder?.trim() || resolveExportFolder();
-
-    // Validate / create the destination folder up front so we fail fast.
+    // The export lane (lib/export/export-lane.ts): a user's export goes first —
+    // a background example render in progress yields to it at once. A cancel
+    // while it waits behind another export gives up its place at once.
+    const waiting = new AbortController();
+    const poll = setInterval(() => {
+      if (ctx.shouldCancel()) waiting.abort(new CancelledError(ctx.jobId));
+    }, LANE_CANCEL_POLL_MS);
+    let release: () => void;
     try {
-      ensureFolderExists(destFolder);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new Error(`Export folder not writable: ${destFolder} (${msg})`);
-    }
-
-    // Load composition (draft or snapshot).
-    let manifest: CompositionManifest;
-    if (source === "snapshot") {
-      const snap = await loadCurrentSnapshot(pieceId);
-      if (!snap) throw new Error(`No committed snapshot for piece ${pieceId}`);
-      manifest = snap;
-    } else {
-      ({ manifest } = await loadComposition(pieceId));
-    }
-
-    // Hidden layers (overlay.hidden — the persisted eye toggle) leave the
-    // export entirely: strip them + their coupled inline audio ONCE, before
-    // classification — every downstream consumer (classifier, all three
-    // backends, the chromium render payload + its audio mux) reads the
-    // filtered arrays. This is what makes agent/server exports honor the eye
-    // with no client threading.
-    const stripped = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
-    if (stripped.changed) {
-      manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
-    }
-
-    const composition = buildCompositionFromManifest(manifest);
-
-    // Resolve the actual ExportSettings shape — derive width/height from the
-    // composition for "source" preset. The route should have already done
-    // this, but keep it defensive.
-    const resolvedSettings: ExportSettings = {
-      ...settings,
-      width: settings.width || manifest.width,
-      height: settings.height || manifest.height,
-      fps: settings.fps || manifest.fps,
-    };
-
-    let shape = classifyExportShape(composition).tag;
-    if (shape === "canvas-source") shape = "chromium-render"; // browser-only — not reachable from server runner
-    if (shape === "error") throw new Error("Composition cannot be exported");
-
-    // If target dims differ from composition AND the classifier picked
-    // stream-copy-trim, upgrade to ffmpeg-overlay so the upscale stage runs.
-    if (
-      shape === "stream-copy-trim" &&
-      (resolvedSettings.width !== composition.width || resolvedSettings.height !== composition.height)
-    ) {
-      shape = "ffmpeg-overlay";
-    }
-
-    // stream-copy-trim only ships the source bytes verbatim. If the requested
-    // container ≠ what the source actually contains, the output file would be
-    // bytes of one codec wrapped in a different container's box layout (an
-    // H.264-in-WebM file most players refuse). Force ffmpeg-overlay to
-    // transcode whenever the target format isn't MP4, or when the source
-    // file extension hints at a different container than MP4.
-    if (shape === "stream-copy-trim") {
-      // The stream-copy base is always the bottom full-frame video OVERLAY —
-      // resolved by the same shared resolver the classifier used to pick this
-      // shape, so the two can't disagree about which file ships.
-      const base = resolveExportBase(composition);
-      const sourceFile = base
-        ? getDb().select().from(filesTable).where(eq(filesTable.id, base.fileId)).limit(1).all()[0]
-        : null;
-      const sourceExt = sourceFile?.filename.split(".").pop()?.toLowerCase() ?? "";
-      const mp4Family = sourceExt === "mp4" || sourceExt === "m4v" || sourceExt === "mov";
-      if (resolvedSettings.format !== "mp4" || !mp4Family) {
-        shape = "ffmpeg-overlay";
-      }
-    }
-
-    // An ffmpeg too old to read its graph from a file would take a
-    // caption-heavy graph on the command line, past what the OS accepts —
-    // render those in the browser instead.
-    if (shape === "ffmpeg-overlay" && (await overlayGraphNeedsBrowser(composition, resolvedSettings))) {
-      exportLogger.info(
-        { op: "graph_too_long_inline", jobId: ctx.jobId, pieceId },
-        "export.fallback — overlay graph too long for this ffmpeg's command line",
-      );
-      shape = "chromium-render";
-    }
-
-    // ── Step `ensure-chromium` ────────────────────────────────────────────
-    // The classifier is pure — the `fallbackShape()` sites in
-    // lib/export/classifier.ts know an export needs a browser but cannot
-    // fetch one. This is the first impure place that knows `shape`, and it is
-    // deliberately BEFORE `claimExportPath` so a failed or cancelled download
-    // leaves no placeholder file behind.
-    //
-    // Progress is reported in MB, not on the 0..100 "%" scale the render uses
-    // below. The unit travels with each event (JobManager stores
-    // `progressUnit` per row; the agent-facing string is built from it in
-    // mcp/tools/export-tools.ts), so the chat reads "87/173 MB" during the
-    // download and "12/100 %" during the render — two honest phases rather
-    // than one bar that restarts. Every MB tick comes from the download
-    // itself: an export on a machine that already has Chromium must not
-    // flash a "0/173 MB" bar (it did, until a review caught it).
-    //
-    // Wire the AbortSignal here, before the download, rather than at the
-    // render: JobManager cancels via ctx.shouldCancel, and the signal gives
-    // the download (and later ffmpeg + chromium) a SIGKILL/teardown on cancel
-    // without waiting for the poll. ONE `finally` owns the interval from
-    // here to the end of the run — every exit path clears it, including a
-    // throw from `claimExportPath` between the download and the render,
-    // which used to leak a poll that outlived the failed job.
-    const ac = new AbortController();
-    const cancelPoll = setInterval(() => {
-      if (ctx.shouldCancel() && !ac.signal.aborted) ac.abort();
-    }, 500);
-
-    try {
-      if (shape === "chromium-render") {
-        await ensureChromium({
-          shouldCancel: () => ctx.shouldCancel(),
-          signal: ac.signal,
-          onProgress: ({ doneMb, totalMb }) => {
-            ctx.reportProgress(doneMb, totalMb, "MB");
-          },
-        });
-        // Nothing about a completed download is resumable — the Playwright CLI
-        // owns its own partial state under ms-playwright — but the checkpoint
-        // records that this phase is behind us, so a resumed job's status page
-        // does not re-advertise a download that already happened.
-        await ctx.checkpoint({ chromiumReady: true });
-        if (ctx.shouldCancel()) throw new Error("cancelled");
-      }
-
-      // Claim the destination path atomically.
-      const ext = resolvedSettings.format;
-      const outputPath = claimExportPath(destFolder, filename, ext);
-
-      exportLogger.info(
-        {
-          event: "start",
-          jobId: ctx.jobId,
-          backend: shape,
-          pieceId,
-          source,
-          outputPath,
-          targetWidth: resolvedSettings.width,
-          targetHeight: resolvedSettings.height,
-          bitrate: resolvedSettings.bitrate,
-        },
-        "export.start",
-      );
-
-      // Progress is reported as a percentage on a fixed 0..100 scale. The
-      // underlying ffmpeg-overlay / stream-copy backends compute the ratio
-      // against their OWN duration math (which is the trimmed window, not the
-      // composition total) — keeping the runner's denominator fixed at 100
-      // means the bar moves monotonically and ends exactly at 100% no matter
-      // which backend ran.
-      ctx.reportProgress(0, 100, "%");
-
-      const onProgress = (ratio: number) => {
-        const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-        ctx.reportProgress(pct, 100, "%");
-      };
-
-      try {
-        let durationSeconds = 0;
-        let droppedOverlays: Array<{ id: string; message: string }> | undefined;
-        let unloadedFonts: ExportResult["unloadedFonts"];
-
-        if (shape === "stream-copy-trim") {
-          const backend = new StreamCopyTrimBackend();
-          const result = await backend.run({
-            composition,
-            settings: resolvedSettings,
-            outputPath,
-            onProgress,
-            signal: ac.signal,
-          });
-          durationSeconds = result.duration;
-        } else if (shape === "ffmpeg-overlay") {
-          const backend = new FfmpegOverlayBackend();
-          const result = await backend.run({
-            composition,
-            settings: resolvedSettings,
-            outputPath,
-            onProgress,
-            signal: ac.signal,
-          });
-          durationSeconds = result.duration;
-        } else {
-          // chromium-render path: build the payload, run the existing backend
-          // (which delegates to the export_render runner via JobManager), then
-          // MOVE the temp file to outputPath.
-          const payload = buildRenderPayload(pieceId, manifest);
-          const backend = new ChromiumRenderBackend();
-          const result = await backend.run({
-            pieceId,
-            composition,
-            payload,
-            settings: resolvedSettings,
-            onProgress,
-            signal: ac.signal,
-          });
-          durationSeconds = result.duration;
-          droppedOverlays = result.droppedOverlays;
-          // Make a dropped overlay findable beyond the render page's own
-          // console line, keyed by the job id the agent was given (QA
-          // 2026-09-18 B1, O1).
-          if (droppedOverlays?.length) {
-            exportLogger.warn(
-              { op: "overlay_dropped", jobId: ctx.jobId, pieceId, droppedOverlays },
-              "export.overlay_dropped",
-            );
-          }
-          // An uploaded font the render page couldn't load drew in a default
-          // face (QA 2026-09-18 recheck N5). Not fatal, but never silent.
-          if (result.unloadedFonts?.length) {
-            unloadedFonts = result.unloadedFonts.slice(0, MAX_UNLOADED_FONTS).map((f) => ({
-              fontFileId: f.fontFileId,
-              family: cssFamilyForFontFile(f.fontFileId),
-              reason: f.reason,
-            }));
-            exportLogger.warn(
-              { op: "font_load_failed", jobId: ctx.jobId, pieceId, unloadedFonts },
-              "export.font_load_failed",
-            );
-          }
-          // The chromium backend returned a Blob; write it to our claimed path.
-          const buf = Buffer.from(await result.blob.arrayBuffer());
-          await fs.writeFile(outputPath, new Uint8Array(buf));
-        }
-
-        const stat = await fs.stat(outputPath);
-        // Snap to 100% on success so the bar lands exactly full, regardless of
-        // whether the backend stopped reporting at 99%.
-        ctx.reportProgress(100, 100, "%");
-        exportLogger.info(
-          {
-            event: "done",
-            jobId: ctx.jobId,
-            backend: shape,
-            pieceId,
-            outputPath,
-            sizeBytes: stat.size,
-            durationSeconds,
-          },
-          "export.done",
-        );
-        return {
-          filePath: outputPath,
-          sizeBytes: stat.size,
-          durationSeconds,
-          backend: shape as ExportResult["backend"],
-          width: resolvedSettings.width,
-          height: resolvedSettings.height,
-          ...(droppedOverlays?.length ? { droppedOverlays } : {}),
-          ...(unloadedFonts?.length ? { unloadedFonts } : {}),
-        };
-      } catch (err) {
-        // Clean up the claimed placeholder/partial file.
-        try { fsSync.unlinkSync(outputPath); } catch { /* ignore */ }
-        const message = err instanceof Error ? err.message : String(err);
-        const isCancel = ctx.shouldCancel() || ac.signal.aborted;
-        exportLogger.warn(
-          {
-            event: isCancel ? "cancel" : "fail",
-            jobId: ctx.jobId,
-            backend: shape,
-            pieceId,
-            outputPath,
-            error: message,
-            // ffmpeg-overlay keeps a failed long graph's file for debugging.
-            ...graphFileOf(err),
-          },
-          `export.${isCancel ? "cancel" : "fail"}`,
-        );
-        throw err;
-      }
+      // Behind another export: say so, rather than sit at "running 0 %" (final review F7).
+      if (getExportLane().foregroundBusy()) ctx.reportProgress(0, 1, EXPORT_WAITING_UNIT);
+      release = await getExportLane().foreground({ signal: waiting.signal });
     } finally {
-      clearInterval(cancelPoll);
+      clearInterval(poll);
+    }
+    try {
+      if (ctx.shouldCancel()) throw new CancelledError(ctx.jobId);
+      return await renderExport(ctx);
+    } finally {
+      release();
     }
   },
 };
+
+/**
+ * The export itself: the piece rendered to `destFolder` by the backend the
+ * classifier picks, reading ORIGINAL media. The `export` job runs it (above);
+ * so does a template's example render (lib/templates/example-export.ts), in
+ * its own job and under its own lane slot, so that no `export` row — the
+ * Posting tab's "latest export", `libi.post_piece`'s, the jobs list's — is
+ * ever recorded for it. The caller holds the export lane.
+ */
+export async function renderExport(ctx: JobContext<ExportParams>): Promise<ExportResult> {
+  const { pieceId, source, filename, settings } = ctx.params;
+  const destFolder = ctx.params.destFolder?.trim() || resolveExportFolder();
+
+  // Validate / create the destination folder up front so we fail fast.
+  try {
+    ensureFolderExists(destFolder);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Export folder not writable: ${destFolder} (${msg})`);
+  }
+
+  // Load composition (draft or snapshot).
+  let manifest: CompositionManifest;
+  if (source === "snapshot") {
+    const snap = await loadCurrentSnapshot(pieceId);
+    if (!snap) throw new Error(`No committed snapshot for piece ${pieceId}`);
+    manifest = snap;
+  } else {
+    ({ manifest } = await loadComposition(pieceId));
+  }
+
+  // Hidden layers (overlay.hidden — the persisted eye toggle) leave the
+  // export entirely: strip them + their coupled inline audio ONCE, before
+  // classification — every downstream consumer (classifier, all three
+  // backends, the chromium render payload + its audio mux) reads the
+  // filtered arrays. This is what makes agent/server exports honor the eye
+  // with no client threading.
+  const stripped = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
+  if (stripped.changed) {
+    manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
+  }
+
+  const composition = buildCompositionFromManifest(manifest);
+
+  // Resolve the actual ExportSettings shape — derive width/height from the
+  // composition for "source" preset. The route should have already done
+  // this, but keep it defensive.
+  const resolvedSettings: ExportSettings = {
+    ...settings,
+    width: settings.width || manifest.width,
+    height: settings.height || manifest.height,
+    fps: settings.fps || manifest.fps,
+  };
+
+  const classified = classifyExportShape(composition);
+  if (classified.tag === "error") throw new Error(`Composition cannot be exported: ${classified.reason}`);
+  let shape = classified.tag;
+  if (shape === "canvas-source") shape = "chromium-render"; // browser-only — not reachable from server runner
+
+  // If target dims differ from composition AND the classifier picked
+  // stream-copy-trim, upgrade to ffmpeg-overlay so the upscale stage runs.
+  if (
+    shape === "stream-copy-trim" &&
+    (resolvedSettings.width !== composition.width || resolvedSettings.height !== composition.height)
+  ) {
+    shape = "ffmpeg-overlay";
+  }
+
+  // stream-copy-trim only ships the source bytes verbatim. If the requested
+  // container ≠ what the source actually contains, the output file would be
+  // bytes of one codec wrapped in a different container's box layout (an
+  // H.264-in-WebM file most players refuse). Force ffmpeg-overlay to
+  // transcode whenever the target format isn't MP4, or when the source
+  // file extension hints at a different container than MP4.
+  if (shape === "stream-copy-trim") {
+    // The stream-copy base is always the bottom full-frame video OVERLAY —
+    // resolved by the same shared resolver the classifier used to pick this
+    // shape, so the two can't disagree about which file ships.
+    const base = resolveExportBase(composition);
+    const sourceFile = base
+      ? getDb().select().from(filesTable).where(eq(filesTable.id, base.fileId)).limit(1).all()[0]
+      : null;
+    const sourceExt = sourceFile?.filename.split(".").pop()?.toLowerCase() ?? "";
+    const mp4Family = sourceExt === "mp4" || sourceExt === "m4v" || sourceExt === "mov";
+    if (resolvedSettings.format !== "mp4" || !mp4Family) {
+      shape = "ffmpeg-overlay";
+    }
+  }
+
+  // An ffmpeg too old to read its graph from a file would take a
+  // caption-heavy graph on the command line, past what the OS accepts —
+  // render those in the browser instead.
+  if (shape === "ffmpeg-overlay" && (await overlayGraphNeedsBrowser(composition, resolvedSettings))) {
+    exportLogger.info(
+      { op: "graph_too_long_inline", jobId: ctx.jobId, pieceId },
+      "export.fallback — overlay graph too long for this ffmpeg's command line",
+    );
+    shape = "chromium-render";
+  }
+
+  // ── Step `ensure-chromium` ────────────────────────────────────────────
+  // The classifier is pure — the `fallbackShape()` sites in
+  // lib/export/classifier.ts know an export needs a browser but cannot
+  // fetch one. This is the first impure place that knows `shape`, and it is
+  // deliberately BEFORE `claimExportPath` so a failed or cancelled download
+  // leaves no placeholder file behind.
+  //
+  // Progress is reported in MB, not on the 0..100 "%" scale the render uses
+  // below. The unit travels with each event (JobManager stores
+  // `progressUnit` per row; the agent-facing string is built from it in
+  // mcp/tools/export-tools.ts), so the chat reads "87/173 MB" during the
+  // download and "12/100 %" during the render — two honest phases rather
+  // than one bar that restarts. Every MB tick comes from the download
+  // itself: an export on a machine that already has Chromium must not
+  // flash a "0/173 MB" bar (it did, until a review caught it).
+  //
+  // Wire the AbortSignal here, before the download, rather than at the
+  // render: JobManager cancels via ctx.shouldCancel, and the signal gives
+  // the download (and later ffmpeg + chromium) a SIGKILL/teardown on cancel
+  // without waiting for the poll. ONE `finally` owns the interval from
+  // here to the end of the run — every exit path clears it, including a
+  // throw from `claimExportPath` between the download and the render,
+  // which used to leak a poll that outlived the failed job.
+  const ac = new AbortController();
+  const cancelPoll = setInterval(() => {
+    if (ctx.shouldCancel() && !ac.signal.aborted) ac.abort();
+  }, 500);
+
+  try {
+    if (shape === "chromium-render") {
+      await ensureChromium({
+        shouldCancel: () => ctx.shouldCancel(),
+        signal: ac.signal,
+        onProgress: ({ doneMb, totalMb }) => {
+          ctx.reportProgress(doneMb, totalMb, "MB");
+        },
+      });
+      // Nothing about a completed download is resumable — the Playwright CLI
+      // owns its own partial state under ms-playwright — but the checkpoint
+      // records that this phase is behind us, so a resumed job's status page
+      // does not re-advertise a download that already happened.
+      await ctx.checkpoint({ chromiumReady: true });
+      if (ctx.shouldCancel()) throw new Error("cancelled");
+    }
+
+    // Claim the destination path atomically.
+    const ext = resolvedSettings.format;
+    const outputPath = claimExportPath(destFolder, filename, ext);
+
+    exportLogger.info(
+      {
+        event: "start",
+        jobId: ctx.jobId,
+        backend: shape,
+        pieceId,
+        source,
+        outputPath,
+        targetWidth: resolvedSettings.width,
+        targetHeight: resolvedSettings.height,
+        bitrate: resolvedSettings.bitrate,
+      },
+      "export.start",
+    );
+
+    // Progress is reported as a percentage on a fixed 0..100 scale. The
+    // underlying ffmpeg-overlay / stream-copy backends compute the ratio
+    // against their OWN duration math (which is the trimmed window, not the
+    // composition total) — keeping the runner's denominator fixed at 100
+    // means the bar moves monotonically and ends exactly at 100% no matter
+    // which backend ran.
+    ctx.reportProgress(0, 100, "%");
+
+    const onProgress = (ratio: number) => {
+      const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+      ctx.reportProgress(pct, 100, "%");
+    };
+
+    try {
+      let durationSeconds = 0;
+      let droppedOverlays: DroppedOverlay[] | undefined;
+      let unloadedFonts: ExportResult["unloadedFonts"];
+
+      if (shape === "stream-copy-trim") {
+        const backend = new StreamCopyTrimBackend();
+        const result = await backend.run({
+          composition,
+          settings: resolvedSettings,
+          outputPath,
+          onProgress,
+          signal: ac.signal,
+        });
+        durationSeconds = result.duration;
+      } else if (shape === "ffmpeg-overlay") {
+        const backend = new FfmpegOverlayBackend();
+        const result = await backend.run({
+          composition,
+          settings: resolvedSettings,
+          outputPath,
+          onProgress,
+          signal: ac.signal,
+        });
+        durationSeconds = result.duration;
+      } else {
+        // chromium-render path: build the payload, run the existing backend
+        // (which delegates to the export_render runner via JobManager), then
+        // MOVE the temp file to outputPath.
+        const payload = buildRenderPayload(pieceId, manifest);
+        const backend = new ChromiumRenderBackend();
+        const result = await backend.run({
+          pieceId,
+          composition,
+          payload,
+          settings: resolvedSettings,
+          onProgress,
+          signal: ac.signal,
+        });
+        durationSeconds = result.duration;
+        // Which of them were video clips, and their names — read from the
+        // manifest and the files table here, not taken from the render page.
+        const exported = composition.overlays ?? [];
+        droppedOverlays = result.droppedOverlays?.length
+          ? describeDroppedOverlays(
+              result.droppedOverlays,
+              exported,
+              fileNamesOf(droppedVideoFileIds(result.droppedOverlays, exported), ctx.jobId),
+            )
+          : undefined;
+        // Make a dropped overlay findable beyond the render page's own
+        // console line, keyed by the job id the agent was given (QA
+        // 2026-09-18 B1, O1).
+        if (droppedOverlays?.length) {
+          exportLogger.warn(
+            { op: "overlay_dropped", jobId: ctx.jobId, pieceId, droppedOverlays },
+            "export.overlay_dropped",
+          );
+        }
+        // An uploaded font the render page couldn't load drew in a default
+        // face (QA 2026-09-18 recheck N5). Not fatal, but never silent.
+        if (result.unloadedFonts?.length) {
+          unloadedFonts = result.unloadedFonts.slice(0, MAX_UNLOADED_FONTS).map((f) => ({
+            fontFileId: f.fontFileId,
+            family: cssFamilyForFontFile(f.fontFileId),
+            reason: f.reason,
+          }));
+          exportLogger.warn(
+            { op: "font_load_failed", jobId: ctx.jobId, pieceId, unloadedFonts },
+            "export.font_load_failed",
+          );
+        }
+        // The chromium backend returned a Blob; write it to our claimed path.
+        const buf = Buffer.from(await result.blob.arrayBuffer());
+        await fs.writeFile(outputPath, new Uint8Array(buf));
+      }
+
+      const stat = await fs.stat(outputPath);
+      // Snap to 100% on success so the bar lands exactly full, regardless of
+      // whether the backend stopped reporting at 99%.
+      ctx.reportProgress(100, 100, "%");
+      exportLogger.info(
+        {
+          event: "done",
+          jobId: ctx.jobId,
+          backend: shape,
+          pieceId,
+          outputPath,
+          sizeBytes: stat.size,
+          durationSeconds,
+        },
+        "export.done",
+      );
+      return {
+        filePath: outputPath,
+        sizeBytes: stat.size,
+        durationSeconds,
+        backend: shape as ExportResult["backend"],
+        width: resolvedSettings.width,
+        height: resolvedSettings.height,
+        ...(droppedOverlays?.length ? { droppedOverlays } : {}),
+        ...(unloadedFonts?.length ? { unloadedFonts } : {}),
+      };
+    } catch (err) {
+      // Clean up the claimed placeholder/partial file.
+      try { fsSync.unlinkSync(outputPath); } catch { /* ignore */ }
+      const message = err instanceof Error ? err.message : String(err);
+      const isCancel = ctx.shouldCancel() || ac.signal.aborted;
+      exportLogger.warn(
+        {
+          event: isCancel ? "cancel" : "fail",
+          jobId: ctx.jobId,
+          backend: shape,
+          pieceId,
+          outputPath,
+          error: message,
+          // ffmpeg-overlay keeps a failed long graph's file for debugging.
+          ...graphFileOf(err),
+        },
+        `export.${isCancel ? "cancel" : "fail"}`,
+      );
+      throw err;
+    }
+  } finally {
+    clearInterval(cancelPoll);
+  }
+}
 
 function buildCompositionFromManifest(
   manifest: CompositionManifest,
@@ -437,6 +486,27 @@ function buildRenderPayload(
     fps: manifest.fps,
     files,
   };
+}
+
+/** `name` / `filename` of the given files, for naming a dropped clip. Only a label: by the time
+ *  it runs the export is rendered, so a failed lookup leaves the clips unnamed ("an unnamed
+ *  clip") and is logged — it never fails the export. */
+function fileNamesOf(ids: string[], jobId: string): Map<string, { name: string; filename: string }> {
+  if (!ids.length) return new Map();
+  try {
+    const rows = getDb()
+      .select({ id: filesTable.id, name: filesTable.name, filename: filesTable.filename })
+      .from(filesTable)
+      .where(inArray(filesTable.id, ids))
+      .all();
+    return new Map(rows.map((r) => [r.id, { name: r.name, filename: r.filename }]));
+  } catch (err) {
+    exportLogger.warn(
+      { op: "dropped_clip_names_failed", jobId, error: err instanceof Error ? err.message : String(err) },
+      "export.dropped_clip_names_failed",
+    );
+    return new Map();
+  }
 }
 
 /** Look up the piece's `name` for default-filename derivation. */

@@ -319,6 +319,43 @@ function binNames(name: string, platform: NodeJS.Platform): string[] {
  * a hit is classified by where it really lives, not just accepted.
  */
 export function findUserCli(binNames_: string[], opts: FindUserCliOpts = {}): UserCliSource {
+  let internal: UserCliSource | null = null;
+  for (const hit of scanCliHits(binNames_, opts)) {
+    // A real user install anywhere on the search path wins over an in-tree
+    // shim that happened to be earlier (npm puts `node_modules/.bin` first).
+    if (hit.kind === "user") return hit;
+    internal ??= hit;
+  }
+  return internal ?? { kind: "none" };
+}
+
+/**
+ * EVERY copy of the user's own CLI on the search path, in search order —
+ * libi's own shims skipped, and two spellings of one binary (same realpath)
+ * kept once, under the first spelling. The resolver version-checks them in
+ * this order: a user can have an old Homebrew copy AND a current one from
+ * fnm or the native installer, and the first on the path is not always the
+ * one that works (`lib/agents/cli/resolve.ts`).
+ */
+export function findUserCliCandidates(binNames_: string[], opts: FindUserCliOpts = {}): string[] {
+  const realpath = opts.realpath ?? defaultRealpath;
+  const seenReal = new Set<string>();
+  const out: string[] = [];
+  for (const hit of scanCliHits(binNames_, opts)) {
+    if (hit.kind !== "user") continue;
+    const real = realpath(hit.path);
+    if (seenReal.has(real)) continue;
+    seenReal.add(real);
+    out.push(hit.path);
+  }
+  return out;
+}
+
+/** Every executable hit in search order (folders outside, spellings inside), classified. */
+function* scanCliHits(
+  binNames_: string[],
+  opts: FindUserCliOpts,
+): Generator<{ kind: "user" | "libi-internal"; path: string }> {
   const platform = opts.platform ?? process.platform;
   const dirs = opts.searchDirs ?? userCommandSearchDirs();
   const isExecutable = opts.isExecutable ?? defaultIsExecutable;
@@ -328,8 +365,6 @@ export function findUserCli(binNames_: string[], opts: FindUserCliOpts = {}): Us
   const join = platform === "win32" ? path.win32.join : path.posix.join;
 
   const seen = new Set<string>();
-  let internal: UserCliSource | null = null;
-
   for (const dir of dirs) {
     if (!dir) continue;
     for (const name of names) {
@@ -346,15 +381,9 @@ export function findUserCli(binNames_: string[], opts: FindUserCliOpts = {}): Us
         classifyCliPath(candidate, roots) === "libi-internal"
           ? "libi-internal"
           : "user";
-
-      // A real user install anywhere on the search path wins over an in-tree
-      // shim that happened to be earlier (npm puts `node_modules/.bin` first).
-      if (kind === "user") return { kind, path: candidate };
-      internal ??= { kind, path: candidate };
+      yield { kind, path: candidate };
     }
   }
-
-  return internal ?? { kind: "none" };
 }
 
 /**

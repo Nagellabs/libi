@@ -51,4 +51,14 @@ describe("agent prompt builders", () => {
     expect(p).toContain("music.wav");
     expect(p.toLowerCase()).toContain("transcribe");
   });
+  it("points a code or three overlay at its code file, not update_overlay's code", () => {
+    for (const kind of ["code", "three"]) {
+      const p = buildModifyPrompt({ id: "o1", kind }, "make it red");
+      expect(p).toMatch(/codeFilePath/);
+      expect(p).not.toMatch(/Use the libi update_overlay tool — modify this overlay/);
+    }
+    // a tracked overlay may carry code OR media content: the prompt covers both
+    expect(buildModifyPrompt({ id: "o1", kind: "tracked" }, "x")).toMatch(/codeFilePath[\s\S]*otherwise[\s\S]*update_overlay/);
+    expect(buildModifyPrompt({ id: "o1", kind: "text", content: "Hi" }, "bigger")).toMatch(/update_overlay/);
+  });
 });

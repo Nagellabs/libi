@@ -13,11 +13,14 @@ import { probeMedia } from "@/lib/ffmpeg/probe";
 import { vpxAlphaDecodeArgs } from "@/lib/ffmpeg/alpha";
 import { exportLogger as logger } from "@/lib/logger";
 import { detectAvailableEncoders, pickEncoder } from "../hw-accel";
+import { untaggedHdColorParams, untaggedSdToHdConversion } from "../untagged-color";
 import {
   drawtextSpecFor,
   assetOverlaySegments,
   textFaceOf,
   plateSpecFor,
+  plateRectFor,
+  plateLayerSegments,
   shadowDrawtextSpecFor,
   shadowLayerSegments,
   shadowBandOf,
@@ -30,10 +33,11 @@ import { textRunEnd } from "../text-runs";
 import { bundledFaceFor } from "@/lib/fonts/bundled";
 import { bundledFontFilePath } from "@/lib/fonts/register-server";
 import { buildAudioMixGraph } from "../audio-mix";
+import { probeInputAudio, mixInputMaps } from "../audio-channels";
 import { resolveAudioBitrate } from "../quality";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "../duck-envelopes";
-import { baseTimeRange, resolveExportBase } from "../export-base";
+import { baseCut, baseTimeRange, leadFill, resolveExportBase } from "../export-base";
 import type { ExportBackend, ExportContext } from "../backend";
 import type {
   ExportResult,
@@ -150,22 +154,89 @@ export class FfmpegOverlayBackend implements ExportBackend {
     // decode via libvpx — ffmpeg's NATIVE vp9 decoder silently skips the WebM
     // alpha side-band, which would composite the cutout fully opaque (the
     // original scene, background and all) over the base.
-    const alphaDecodeArgsFor = async (
+    //
+    // Every VIDEO input is also probed for its colour tags: an untagged HD
+    // stream is declared BT.709 — what the preview's browser reads it as —
+    // before anything is composited (lib/export/untagged-color.ts).
+    //
+    // An untagged SD base exported at a non-SD size is instead CONVERTED to
+    // 709 by its fit scale — the output is read by its size, not the source's.
+    const probeInput = async (
       f: { hasAlpha: boolean | null; pieceId: string | null; filename: string },
-    ): Promise<string[]> => {
-      if (!f.hasAlpha) return [];
+    ): Promise<{
+      decodeArgs: string[];
+      colorParams: string | null;
+      sdToHd: { scaleArgs: string; params: string } | null;
+      audioChannels: number | undefined;
+      audioStream: number | undefined;
+      videoStream: number | undefined;
+      /** false = the probe found no audio stream; undefined = unknown. */
+      hasAudio: boolean | undefined;
+      /** Seconds after the file's start its video / audio starts (probe). */
+      videoLead: number;
+      audioLead: number;
+      /** How an audio-only read of the file stays on its timeline (probe). */
+      audioRead: { inputArgs: string[]; ptsShift: number } | undefined;
+    }> => {
       const probed = await probeMedia(storage.localPath(f.pieceId, f.filename));
-      return vpxAlphaDecodeArgs({ hasAlpha: true, videoCodec: probed.videoCodec });
+      return {
+        decodeArgs: f.hasAlpha ? vpxAlphaDecodeArgs({ hasAlpha: true, videoCodec: probed.videoCodec }) : [],
+        colorParams: untaggedHdColorParams(probed),
+        sdToHd: untaggedSdToHdConversion(probed, { width: ctx.settings.width, height: ctx.settings.height }),
+        audioChannels: probed.audioChannels,
+        audioStream: probed.primaryAudioStreamIndex,
+        videoStream: probed.primaryVideoStreamIndex,
+        hasAudio: probed.hasAudio,
+        videoLead: probed.videoLead ?? 0,
+        audioLead: probed.audioLead ?? 0,
+        audioRead: probed.audioRead,
+      };
     };
+    const baseProbe = await probeInput(baseFile);
+    const declared: {
+      input: number;
+      role: "base" | "video-overlay";
+      overlayId?: string;
+      convert?: "bt601->bt709";
+      params: string;
+    }[] = [];
+    if (baseProbe.colorParams) declared.push({ input: 0, role: "base", params: baseProbe.colorParams });
+    if (baseProbe.sdToHd) {
+      declared.push({ input: 0, role: "base", convert: "bt601->bt709", params: baseProbe.sdToHd.params });
+    }
     const inputPaths: string[] = [basePath];
-    const inputOptionArgs: string[][] = [await alphaDecodeArgsFor(baseFile)];
+    const inputOptionArgs: string[][] = [baseProbe.decodeArgs];
     const assetInputIndex = new Map<string, number>(); // overlay.id -> ffmpeg input index
+    const assetColorParams = new Map<string, string>(); // overlay.id -> setparams stage
+    // overlay.id -> the video stream the preview plays from that file (Re-review R1)
+    const assetVideoStream = new Map<string, number>();
+    // overlay.id -> how long after its file's start the video starts
+    const assetVideoLead = new Map<string, number>();
     for (const o of assetOverlays) {
       const f = fileById.get(o.fileId);
       if (!f) throw new Error(`Overlay file not found: ${o.fileId}`);
       inputPaths.push(storage.localPath(f.pieceId, f.filename));
-      inputOptionArgs.push(await alphaDecodeArgsFor(f));
+      if (o.kind === "video") {
+        const probed = await probeInput(f);
+        inputOptionArgs.push(probed.decodeArgs);
+        if (probed.videoStream !== undefined) assetVideoStream.set(o.id, probed.videoStream);
+        if (probed.videoLead > 0) assetVideoLead.set(o.id, probed.videoLead);
+        if (probed.colorParams) {
+          assetColorParams.set(o.id, probed.colorParams);
+          declared.push({ input: inputPaths.length - 1, role: "video-overlay", overlayId: o.id, params: probed.colorParams });
+        }
+      } else {
+        // Images decode to RGB, or to a tagged yuvj (JPEG): nothing to declare.
+        inputOptionArgs.push(f.hasAlpha ? (await probeInput(f)).decodeArgs : []);
+      }
       assetInputIndex.set(o.id, inputPaths.length - 1);
+    }
+
+    if (declared.length > 0) {
+      logger.info(
+        { tag: "export", op: "color_declare", compositionId: ctx.composition.id, inputs: declared },
+        "untagged video input(s) declared (or converted to) BT.709",
+      );
     }
 
     // Audio clips get their own -i inputs after the video assets. Each
@@ -248,6 +319,9 @@ export class FfmpegOverlayBackend implements ExportBackend {
     // `trim` selects a SOURCE range; `duration` is the TIMELINE length. The
     // preview shows whichever is shorter, so the export must cut there too.
     const { start, end, duration } = baseTimeRange(base);
+    // Where the base is cut, keeping a stream that starts after the cut in its
+    // place (see baseCut).
+    const cut = baseCut(start, baseProbe.videoLead);
 
     // Sort overlays by z ascending so the highest z draws last (on top).
     const sorted = [...overlays].sort((a, b) => a.z - b.z);
@@ -269,6 +343,13 @@ export class FfmpegOverlayBackend implements ExportBackend {
       // whichever the preview showed — a contain-padded export of a cover
       // overlay ships black bars where the user saw a full-bleed frame.
       baseFit: base.overlayId != null ? "cover" : "contain",
+      baseColorParams: baseProbe.colorParams ?? undefined,
+      baseScaleColor: baseProbe.sdToHd ?? undefined,
+      assetColorParams,
+      baseVideoStream: baseProbe.videoStream,
+      baseVideoLead: cut.videoLead,
+      assetVideoStream,
+      assetVideoLead,
     }, fontPathByOverlayId, (o) =>
       o.kind === "text" ? createServerTextMeasurer(o, fontAbsPathByOverlayId.get(o.id)) : undefined);
 
@@ -279,12 +360,53 @@ export class FfmpegOverlayBackend implements ExportBackend {
       c.kind === "inline" && c.linkedOverlayId === base.overlayId;
 
     const inlineClip = audioClips.find(isBaseInlineClip);
-    const keepBaseAudio = inlineClip !== undefined && inlineClip.enabled;
+    // A base with no audio stream has nothing to keep, even when a clip is
+    // linked to it (a relink can do that). `[0:a]` would match no stream and
+    // fail the export.
+    const baseSilent = baseProbe.hasAudio === false;
+    if (inlineClip?.enabled && baseSilent) {
+      logger.info(
+        { tag: "export", op: "export_overlay_render", fileId: base.fileId, clipId: inlineClip.id },
+        "base video has no audio stream — its linked clip adds nothing",
+      );
+    }
+    const baseHasAudio = inlineClip !== undefined && inlineClip.enabled && !baseSilent;
+    // A base whose audio ffmpeg must read with its own input options (a
+    // FLAC-in-MP4 cut: ProbedMedia.audioRead) can't share input 0 with the
+    // video, which those options would move too. Its audio is mixed from its
+    // own clip input instead, as a clip over the base's window.
+    const baseAudioAsClip =
+      baseHasAudio && inlineClip !== undefined && !!baseProbe.audioRead?.inputArgs.length && clipInputIndex.has(inlineClip.id);
+    const keepBaseAudio = baseHasAudio && !baseAudioAsClip;
     const baseVolume = keepBaseAudio ? (inlineClip?.volume ?? 1) : 1;
 
     // Standalone clips (+ inline clips NOT belonging to the base) go through
     // the filter chain as extra audio inputs.
-    const standaloneClips = audioClips.filter((c) => c.enabled && !isBaseInlineClip(c));
+    let standaloneClips = audioClips.filter((c) => c.enabled && !isBaseInlineClip(c));
+    if (baseAudioAsClip && inlineClip) {
+      // First, so amix's duration=first still ties the mix to the base.
+      standaloneClips = [{ ...inlineClip, startTime: 0, trimStart: start, duration }, ...standaloneClips];
+    }
+
+    // Each clip input's primary audio stream (the one the preview plays) and its
+    // channel count; the base's come from the probe it already had (Review M5,
+    // M6). Layout: stereo whenever any mixed input is, with mono inputs upmixed
+    // at unity (amix would otherwise take the first input's layout).
+    const inputAudio = await probeInputAudio(new Map([...clipInputIndex.values()].map((idx) => [idx, inputPaths[idx]])));
+    if (keepBaseAudio) {
+      inputAudio.set(0, {
+        ...(baseProbe.audioChannels !== undefined ? { channels: baseProbe.audioChannels } : {}),
+        ...(baseProbe.audioStream !== undefined ? { stream: baseProbe.audioStream } : {}),
+      });
+    }
+    // Clips on files with no audio stream contribute nothing, and `[n:a]` for
+    // them would fail the export.
+    const silentInput = (c: AudioClip) => inputAudio.get(clipInputIndex.get(c.id) ?? -1)?.hasAudio === false;
+    standaloneClips = standaloneClips.filter((c) => !silentInput(c));
+    const { inputChannels, inputAudioStream, inputPtsShift } = mixInputMaps(inputAudio);
+    // A clip input ffmpeg reads off its file's timeline gets its probe's
+    // input options (ProbedMedia.audioRead).
+    for (const [idx, a] of inputAudio) if (idx > 0 && a.read?.inputArgs.length) inputOptionArgs[idx] = [...a.read.inputArgs];
 
     // Ducked clips multiply against a pre-rendered gain curve rather than
     // running through an ffmpeg compressor, so the export applies the preview's
@@ -301,13 +423,15 @@ export class FfmpegOverlayBackend implements ExportBackend {
       for (const scId of duckSidechainIds(c.duck)) {
         const sc = clipById.get(scId);
         const scFile = sc && fileById.get(sc.fileId);
-        if (!sc || !scFile) continue;
+        if (!sc || !scFile || silentInput(sc)) continue;
         sidechains.push({
           path: storage.localPath(scFile.pieceId, scFile.filename),
           startTime: sc.startTime,
           trimStart: sc.trimStart ?? 0,
           duration: sc.duration,
           volume: sc.volume,
+          audioStream: inputAudio.get(clipInputIndex.get(sc.id) ?? -1)?.stream,
+          read: inputAudio.get(clipInputIndex.get(sc.id) ?? -1)?.read,
         });
       }
       if (sidechains.length === 0) continue; // no sidechain present — mixes undicked
@@ -331,9 +455,13 @@ export class FfmpegOverlayBackend implements ExportBackend {
       clips: standaloneClips,
       inputIndex: clipInputIndex,
       envelopeIndex,
-      // base -ss/-to already trimmed [0:a], so clips use absolute times
-      // relative to composition start (= 0).
+      inputChannels,
+      inputAudioStream,
+      inputPtsShift,
+      // base -ss/-to already trimmed [0:a] (all but cut.graphTrim), so clips
+      // use absolute times relative to composition start (= 0).
       sceneDuration: duration,
+      baseTrimStart: cut.graphTrim,
     });
 
     // Pick the encoder family for the requested CONTAINER. MP4 + H.264 is the
@@ -353,7 +481,8 @@ export class FfmpegOverlayBackend implements ExportBackend {
     //   -filter_complex combines the video chain and (optionally) the audio
     //   chain. Labels [vout] and [aout] are the outputs we map.
     const args: string[] = ["-y"];
-    args.push("-ss", String(start), "-to", String(end));
+    if (cut.inputSeek !== null) args.push("-ss", String(cut.inputSeek));
+    args.push("-to", String(end));
     args.push(...inputOptionArgs[0], "-i", resolvePath(inputPaths[0]));
     for (let i = 1; i < inputPaths.length; i++) {
       args.push(...inputOptionArgs[i], "-i", resolvePath(inputPaths[i]));
@@ -370,7 +499,9 @@ export class FfmpegOverlayBackend implements ExportBackend {
       args.push("-map", "[aout]");
     } else if (keepBaseAudio && baseVolume === 1 && standaloneClips.length === 0) {
       // Back-compat: no audio filter graph — preserve base audio directly.
-      args.push("-map", "0:a?");
+      // Only the stream the preview plays: `0:a?` would take every audio
+      // stream (Re-review R1).
+      args.push("-map", baseProbe.audioStream !== undefined ? `0:${baseProbe.audioStream}` : "0:a:0?");
     }
     // else: no audio output at all (no inline clip or disabled, no standalone clips).
     args.push("-c:v", encoder);
@@ -471,6 +602,26 @@ export function buildFilterChain(
      *  legacy base SCENE renders (`fitRect`). `"cover"` scales up and crops the
      *  overflow — what a base-shaped video OVERLAY renders (`coverRect`). */
     baseFit?: "cover" | "contain";
+    /** A `setparams=…` stage declaring the base's colour before any overlay
+     *  converts into it (lib/export/untagged-color.ts). Absent ⇒ none. */
+    baseColorParams?: string;
+    /** A matrix conversion the base's fit scale performs (`scaleArgs`,
+     *  appended to its `scale=` options) and the `setparams=…` stage tagging
+     *  the result — an untagged SD base at a non-SD output size
+     *  (lib/export/untagged-color.ts#untaggedSdToHdConversion). */
+    baseScaleColor?: { scaleArgs: string; params: string };
+    /** overlay.id → the same declaration for a video overlay's own input. */
+    assetColorParams?: Map<string, string>;
+    /** ffprobe index of the base's primary video stream — the one the preview
+     *  plays (probeMedia). Absent ⇒ `[0:v]`, the first video stream. */
+    baseVideoStream?: number;
+    /** overlay.id → the same for a video overlay's own input. */
+    assetVideoStream?: Map<string, number>;
+    /** Seconds after the cut the base video starts (`baseCut`): its first
+     *  frame fills them (`leadFill`). */
+    baseVideoLead?: number;
+    /** overlay.id → seconds after its file's start a video overlay starts. */
+    assetVideoLead?: Map<string, number>;
   },
   /** overlay.id → font file for a text overlay: its uploaded custom font (an
    *  absolute path), or the bundled face for its family + weight (a BARE
@@ -505,14 +656,18 @@ export function buildFilterChain(
   //   cover   (base video OVERLAY, `coverRect`) — scale up + centre-crop.
   // Getting this wrong is a visibly wrong frame, not a slow one: a cover
   // overlay exported with contain shows black bars the preview never had.
+  const baseLabel = `[0:${composition.baseVideoStream ?? "v"}]`;
+  const baseIn = `${baseLabel}${leadFill(composition.baseVideoLead ?? 0)}${composition.baseColorParams ? `${composition.baseColorParams},` : ""}`;
+  const scaleColor = composition.baseScaleColor?.scaleArgs ?? "";
+  const baseOut = composition.baseScaleColor ? `,${composition.baseScaleColor.params}[base]` : "[base]";
   const baseChain =
     composition.baseFit === "cover"
-      ? `[0:v]scale=${CW}:${CH}:force_original_aspect_ratio=increase,` +
+      ? `${baseIn}scale=${CW}:${CH}:force_original_aspect_ratio=increase${scaleColor},` +
         `crop=${CW}:${CH},` +
-        `setsar=1[base]`
-      : `[0:v]scale=${CW}:${CH}:force_original_aspect_ratio=decrease,` +
+        `setsar=1${baseOut}`
+      : `${baseIn}scale=${CW}:${CH}:force_original_aspect_ratio=decrease${scaleColor},` +
         `pad=${CW}:${CH}:(ow-iw)/2:(oh-ih)/2:black,` +
-        `setsar=1[base]`;
+        `setsar=1${baseOut}`;
 
   if (overlays.length === 0) {
     // Passthrough — no overlays (shouldn't happen for ffmpeg-overlay shape,
@@ -543,23 +698,36 @@ export function buildFilterChain(
       const layouts = run.map(layoutOf);
       const fontOf = (m: Overlay) => fontPathByOverlayId?.get(m.id);
       // timeOffset 0: the base is the full clip starting at composition t=0.
+      // The run's plates go first, through ONE RGBA layer composited with the
+      // run's union window — drawbox straight onto the YUV frame paints them
+      // in BT.601 whatever the frame's matrix (plateLayerSegments). Within a
+      // run no two members are on screen together, so drawing every plate
+      // before any text is invisible.
+      const plates = run.flatMap((m, k) => {
+        const rect = plateRectFor(layouts[k], scale);
+        return rect
+          ? [{
+              rect,
+              color: layouts[k].plate?.color,
+              drawbox: (origin: { x: number; y: number }) => plateSpecFor(m, layouts[k], 0, scale, origin)!,
+            }]
+          : [];
+      });
+      if (plates.length > 0) {
+        chain.push(...plateLayerSegments(plates, { width: CW, height: CH }, unionEnableExpr(run, 0), currentLabel, `tp${i}`, String(i)));
+        currentLabel = `tp${i}`;
+      }
       if (!run.some((m) => blurredShadowOf(m))) {
-        // No shadow layer: each member is its own segment (plate, then text).
+        // No shadow layer: each member's text is its own segment.
         run.forEach((m, k) => {
           const isLastOfRun = k === run.length - 1;
           const label = isLastOfRun ? outLabel : `v${i + k}`;
-          const plate = plateSpecFor(m, layouts[k], 0, scale);
           const fill = drawtextSpecFor(m, 0, fontOf(m), scale, layouts[k]);
-          chain.push(`[${currentLabel}]${plate ? `${plate},` : ""}${fill}[${label}]`);
+          chain.push(`[${currentLabel}]${fill}[${label}]`);
           currentLabel = label;
         });
         i = j;
         continue;
-      }
-      const plates = run.flatMap((m, k) => plateSpecFor(m, layouts[k], 0, scale) ?? []);
-      if (plates.length > 0) {
-        chain.push(`[${currentLabel}]${plates.join(",")}[tp${i}]`);
-        currentLabel = `tp${i}`;
       }
       // One layer per distinct (σ, colour, alpha × opacity) — the blur, the
       // fill and the alpha scale are per layer. Each layer is cropped to the
@@ -611,7 +779,10 @@ export function buildFilterChain(
       if (inputIdx !== undefined) {
         // Scale the asset to its (target-scaled) overlay rect before compositing so
         // large sources fit the rect cleanly without overflowing. timeOffset 0.
-        chain.push(...assetOverlaySegments(o, inputIdx, currentLabel, nextLabel, String(i), 0, scale));
+        chain.push(...assetOverlaySegments(
+          o, inputIdx, currentLabel, nextLabel, String(i), 0, scale, composition.assetColorParams?.get(o.id),
+          composition.assetVideoStream?.get(o.id), composition.assetVideoLead?.get(o.id),
+        ));
         currentLabel = nextLabel;
       }
       i++;
@@ -666,17 +837,28 @@ export function buildAudioFilterChain(opts: {
   sceneDuration: number;
   /** `clip.id` → input index of its pre-rendered duck envelope, if any. */
   envelopeIndex?: Map<string, number>;
+  /** Input index → audio channel count (see `buildAudioMixGraph`). */
+  inputChannels?: Map<number, number | undefined>;
+  /** Input index → primary audio stream index (see `buildAudioMixGraph`). */
+  inputAudioStream?: Map<number, number>;
+  /** Seconds the graph cuts from the base audio when the base isn't input-seeked (`baseCut`). */
+  baseTrimStart?: number;
+  /** Input index → timestamp shift of a clip input read off its timeline (see `buildAudioMixGraph`). */
+  inputPtsShift?: Map<number, number>;
 }): { chain: string | null } {
   // Thin adapter over the shared `buildAudioMixGraph`. The single-video path's
   // base scene audio is already time-sliced by -ss/-to, so it maps to the
   // base-audio input; clips mix on top. `duration=first` ties the mix to that
   // full-length base (see buildAudioMixGraph for the multi-scene variant).
   return buildAudioMixGraph({
-    baseAudio: opts.keepBaseAudio ? { volume: opts.baseVolume } : null,
+    baseAudio: opts.keepBaseAudio ? { volume: opts.baseVolume, trimStart: opts.baseTrimStart } : null,
     clips: opts.clips,
     inputIndex: opts.inputIndex,
     envelopeIndex: opts.envelopeIndex,
     mixDuration: "first",
+    inputChannels: opts.inputChannels,
+    inputAudioStream: opts.inputAudioStream,
+    inputPtsShift: opts.inputPtsShift,
   });
 }
 

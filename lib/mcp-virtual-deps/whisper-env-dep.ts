@@ -8,6 +8,7 @@ import {
 } from "@/lib/whisper/transcribe";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { isInstalling } from "./in-flight";
 
 class WhisperEnvInstallError extends Error {
@@ -86,7 +87,10 @@ export const whisperEnvVirtualDep: VirtualDep = {
         else
           reject(
             new WhisperEnvInstallError(
-              `install exited ${code}: ${err.trim().slice(-2000)}`,
+              // Offline reads as one sentence on the chip; the raw uv text
+              // goes to the log (uv-env/uv_offline).
+              uvNetworkFailureMessage("transcription", err) ??
+                `install exited ${code}: ${err.trim().slice(-2000)}`,
             ),
           );
       });

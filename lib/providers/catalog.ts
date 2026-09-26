@@ -12,8 +12,13 @@
  */
 
 import { KOKORO_DOWNLOAD_MB } from "@/lib/tts/model-size";
+import { MANAGED_PYTHON_DISK_MB } from "@/lib/uv-env/managed-python-size";
 
-export const PROVIDER_KINDS = ["image", "video", "music", "voice", "sfx", "transcription"] as const;
+/** Every on-device Python feature also needs libi's own CPython, once per
+ *  machine (lib/uv-env/managed-python-size.ts). */
+const PYTHON_ONCE = `plus ~${MANAGED_PYTHON_DISK_MB} MB for libi's own Python the first time`;
+
+export const PROVIDER_KINDS = ["image", "video", "music", "voice", "sfx", "transcription", "social"] as const;
 export type ProviderKind = (typeof PROVIDER_KINDS)[number];
 
 /** Runtime guard for a kind that arrived over the wire (`POST /api/notify`). */
@@ -21,7 +26,7 @@ export function isProviderKind(v: unknown): v is ProviderKind {
   return typeof v === "string" && (PROVIDER_KINDS as readonly string[]).includes(v);
 }
 
-export type ProviderId = "fal" | "higgsfield" | "elevenlabs" | "ace-step" | "kokoro" | "whisper";
+export type ProviderId = "fal" | "higgsfield" | "elevenlabs" | "ace-step" | "kokoro" | "whisper" | "zernio";
 
 export interface ProviderDef {
   id: ProviderId;
@@ -61,8 +66,9 @@ export interface ProviderDef {
   /**
    * `auth: "oauth"` only: the agents whose add command also runs the sign-in and
    * waits for it, so ONE action performs both setup steps on the Providers tab
-   * (`lib/providers/setup-steps.ts`). An agent not listed adds first, then signs
-   * in as a separate step.
+   * (`lib/providers/setup-steps.ts`). Codex's own `mcp add` signs in; for Claude
+   * Code, libi's add script runs `claude mcp login` after an add that worked. An
+   * agent not listed adds first, then signs in as a separate step.
    */
   addSignsIn?: readonly ("claude" | "codex")[];
   /**
@@ -133,29 +139,65 @@ export const PROVIDER_CATALOG: readonly ProviderDef[] = [
       claude: "claude mcp login higgsfield",
       codex: "codex mcp login higgsfield",
     },
-    // Codex's add is the sign-in too (see `commands.codex`); Claude Code's add
-    // finishes before any sign-in, which is then its own step.
-    addSignsIn: ["codex"],
+    // Codex's add is the sign-in too (see `commands.codex`). Claude Code's add
+    // finishes before any sign-in, so libi's add script runs its `mcp login`
+    // right after an add that worked: one action for both steps on either agent.
+    addSignsIn: ["codex", "claude"],
     codexNote: "Add opens your browser to sign in with your Higgsfield account, and waits until you finish.",
+  },
+  {
+    id: "zernio",
+    name: "Zernio",
+    kinds: ["social"],
+    kind: "remote-mcp",
+    // Zernio's hosted MCP (streamable HTTP, OAuth 2.1 + PKCE). The agent signs
+    // in with the user's Zernio account; there is no key. Posts go out from the
+    // accounts the user connected at Zernio. libi's OWN grant for the Social
+    // page is a separate sign-in (lib/social/), never this entry.
+    docsUrl: "https://docs.zernio.com/mcp",
+    transport: "http",
+    auth: "oauth",
+    match: { names: ["zernio"], urls: ["mcp.zernio.com"] },
+    commands: {
+      claude: "claude mcp add --transport http --scope user zernio https://mcp.zernio.com/mcp",
+      codex: "codex mcp add zernio --url https://mcp.zernio.com/mcp",
+    },
+    signInCommands: { claude: "claude mcp login zernio", codex: "codex mcp login zernio" },
+    addSignsIn: ["codex", "claude"],
+    codexNote: "Add opens your browser to sign in with your Zernio account, and waits until you finish.",
   },
   {
     id: "elevenlabs",
     name: "ElevenLabs",
+    // Voice, music and sound effects. Its hosted server also generates images and video; libi doesn't
+    // recommend it for those.
     kinds: ["voice", "music", "sfx"],
     kind: "remote-mcp",
-    docsUrl: "https://github.com/elevenlabs/elevenlabs-mcp",
-    transport: "stdio",
-    keyName: "ELEVENLABS_API_KEY",
-    match: { names: ["elevenlabs", "eleven-labs", "eleven_labs"] },
-    // The NAME=<your key> pair is quoted so an UNEDITED paste fails loudly:
-    // bare, a POSIX shell reads `<your` as "redirect stdin from a file called
-    // `your`" and runs the add with an empty key.
+    // ElevenLabs' hosted MCP server (streamable HTTP). It signs in with the user's ElevenLabs account (OAuth),
+    // installs nothing and has no key; generations bill that account's plan. It replaced the local
+    // `uvx elevenlabs-mcp` server (2026-09-25): that needed uv, and on a computer without it the entry read
+    // connected while the chat had no ElevenLabs tools.
+    //
+    // WHY api.us: the documented https://api.elevenlabs.io/v1/mcp answers 401 with `resource_metadata` naming
+    // https://api.us.elevenlabs.io/v1/mcp as the protected resource, and Claude Code 2.x refuses that sign-in
+    // ("Protected resource https://api.us.elevenlabs.io… does not match expected https://api.elevenlabs.io").
+    // Verified live on 2026-09-25: the api.us URL adds and signs in on Claude Code, and Codex's add starts the
+    // OAuth flow against it. Credits, the source for "generations use your ElevenLabs credits": the server's own
+    // tool descriptions say a run "Charges credits" (creative_run_flow_nodes, creative_design_voice), and every
+    // generate tool takes `estimate_only` to price a run first.
+    docsUrl: "https://elevenlabs.io/mcp",
+    transport: "http",
+    auth: "oauth",
+    // `urls` also recognises an entry the user added under another name, at either host.
+    match: { names: ["elevenlabs", "eleven-labs", "eleven_labs"], urls: ["elevenlabs.io"] },
     commands: {
-      claude:
-        'claude mcp add --scope user elevenlabs -e "ELEVENLABS_API_KEY=<your key>" -- uvx elevenlabs-mcp',
-      codex: 'codex mcp add elevenlabs --env "ELEVENLABS_API_KEY=<your key>" -- uvx elevenlabs-mcp',
+      claude: "claude mcp add --transport http --scope user elevenlabs https://api.us.elevenlabs.io/v1/mcp",
+      // As for Higgsfield, `codex mcp add` starts the browser sign-in itself and waits for it.
+      codex: "codex mcp add elevenlabs --url https://api.us.elevenlabs.io/v1/mcp",
     },
-    codexNote: "Needs uv on your PATH (https://docs.astral.sh/uv/).",
+    signInCommands: { claude: "claude mcp login elevenlabs", codex: "codex mcp login elevenlabs" },
+    addSignsIn: ["codex", "claude"],
+    codexNote: "Add opens your browser to sign in with your ElevenLabs account, and waits until you finish.",
   },
   {
     id: "ace-step",
@@ -163,7 +205,7 @@ export const PROVIDER_CATALOG: readonly ProviderDef[] = [
     kinds: ["music"],
     kind: "extension",
     extensionId: "local-music",
-    sizeNote: "~8.3 GB model weights, downloaded once, then free and offline.",
+    sizeNote: `~8.3 GB model weights, ${PYTHON_ONCE}, downloaded once, then free and offline.`,
     match: { names: [] },
   },
   {
@@ -172,7 +214,7 @@ export const PROVIDER_CATALOG: readonly ProviderDef[] = [
     kinds: ["voice"],
     kind: "extension",
     extensionId: "local-tts",
-    sizeNote: `~${KOKORO_DOWNLOAD_MB} MB model, downloaded once, then free and offline.`,
+    sizeNote: `~${KOKORO_DOWNLOAD_MB} MB model, ${PYTHON_ONCE}, downloaded once, then free and offline.`,
     match: { names: [] },
   },
   {
@@ -181,7 +223,7 @@ export const PROVIDER_CATALOG: readonly ProviderDef[] = [
     kinds: ["transcription"],
     kind: "extension",
     extensionId: "whisper",
-    sizeNote: "~150 MB–1.5 GB depending on model size, downloaded once.",
+    sizeNote: `~150 MB–1.5 GB depending on model size, ${PYTHON_ONCE}, downloaded once.`,
     match: { names: [] },
   },
 ];
@@ -240,6 +282,29 @@ export function findProvider(id: ProviderId): ProviderDef {
 }
 
 /**
+ * The catalog provider an agent's MCP entry is for, by its name (any of `match.names`, in any case) or its url's
+ * host (`match.urls`, or a subdomain of one); null for a server the catalog doesn't know. Provider detection reads
+ * rows with it (`./detect.ts`), and test mode puts its fakes over the user's real entries with it
+ * (`lib/mcp-config.ts`).
+ */
+export function matchProvider(name: string, url: string | undefined): ProviderId | null {
+  const lower = name.toLowerCase();
+  let host = "";
+  if (url) {
+    try {
+      host = new URL(url).hostname.toLowerCase();
+    } catch {
+      host = "";
+    }
+  }
+  for (const def of PROVIDER_CATALOG) {
+    if (def.match.names.some((n) => n.toLowerCase() === lower)) return def.id;
+    if (host && def.match.urls?.some((u) => host === u || host.endsWith(`.${u}`))) return def.id;
+  }
+  return null;
+}
+
+/**
  * Every provider that can produce `kind`, remote MCPs first. The order is the
  * order the panel and `libi.suggest_provider` present them in: a remote MCP is
  * one command away, an extension is a multi-GB download.
@@ -250,6 +315,19 @@ export function providersForKind(kind: ProviderKind): ProviderDef[] {
     ...hits.filter((p) => p.kind === "remote-mcp"),
     ...hits.filter((p) => p.kind === "extension"),
   ];
+}
+
+/**
+ * Whether this provider's paid usage shows up as "generations use your X
+ * credits" — true only for an `oauth` provider that actually generates media.
+ * A posting-only provider (kind `"social"`, e.g. Zernio) signs in the same
+ * way but produces no media and has no credits, so callers must never print
+ * that sentence for it. Derived from `kinds` — already the field that marks a
+ * provider as posting-only — rather than a special case for one provider id,
+ * since more posting providers are planned.
+ */
+export function billsGenerationCredits(def: ProviderDef): boolean {
+  return def.auth === "oauth" && !def.kinds.includes("social");
 }
 
 /** The literal placeholder every key-bearing command carries. */

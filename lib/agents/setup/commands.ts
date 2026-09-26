@@ -38,8 +38,8 @@ export interface SetupCli {
  * no scopes.
  */
 export type DetectedProviderEntry =
-  | { agentId: "claude-code"; name: string; scope: ClaudeMcpScope }
-  | { agentId: "codex"; name: string };
+  | { agentId: "claude-code"; name: string; scope: ClaudeMcpScope; transport?: "http" | "stdio" }
+  | { agentId: "codex"; name: string; transport?: "http" | "stdio" };
 
 const LIBI_ENTRY = "libi";
 const CLAUDE_MCP_SCOPES: readonly string[] = ["user", "local", "project"];
@@ -213,13 +213,15 @@ function scriptCommand(
   scriptsDir: string,
   action: ProviderScriptAction,
   args: string[],
-  opts: { passZdotdir: boolean },
+  opts: { passZdotdir: boolean; trailing?: string[] },
 ): string {
   const powershell = isPowerShell(flavor);
   const folder = scriptsFolder(scriptsDir, flavor);
   const script = `${folder}${powershell ? "\\" : "/"}${scriptFileName(action, flavor)}`;
+  // A trailing switch goes unquoted: a PowerShell switch quoted is a positional string.
+  const trailing = opts.trailing ?? [];
   if (!powershell) {
-    const words = [script, ...args].map((a) => q(a, flavor)).join(" ");
+    const words = [...[script, ...args].map((a) => q(a, flavor)), ...trailing].join(" ");
     return opts.passZdotdir ? `ZDOTDIR="\${ZDOTDIR-}" sh ${words}` : `sh ${words}`;
   }
   const doubleQuoted = [script, ...args].find((word) => word.includes('"'));
@@ -228,6 +230,7 @@ function scriptCommand(
   }
   const words = args.map((a) => q(a, flavor));
   if (action === "provider-replace") words.push("-ScriptsDir", q(folder, flavor));
+  words.push(...trailing);
   const payload = `& ([scriptblock]::Create([IO.File]::ReadAllText(${q(script, flavor)}))) ${words.join(" ")}`;
   return `powershell -NoProfile -Command "${payload.replace(POWERSHELL_DOUBLE_QUOTED_SPECIAL, (c) => `\`${c}`)}"`;
 }
@@ -294,7 +297,9 @@ function entryArgs(cli: SetupCli, entry: DetectedProviderEntry): string[] {
  * entry, so the sign-in the agent stored is not left behind. It runs BEFORE the
  * remove because both agents look that sign-in up through the entry, and exit 1
  * with "No MCP server named …" once it is gone; with nothing stored it exits 0,
- * and a failed sign-out never stops the remove. `null` for a docs-only provider — the scripts know only
+ * and a failed sign-out never stops the remove. A detected LOCAL (stdio) entry of such a provider (an older
+ * `uvx elevenlabs-mcp`, with a key) has no sign-in, so it gets `--no-sign-out` / `-NoSignOut` and the remove runs
+ * alone. `null` for a docs-only provider — the scripts know only
  * providers with commands — once the entry itself has been validated.
  */
 export function providerRemoveCommand(
@@ -307,8 +312,12 @@ export function providerRemoveCommand(
   isPowerShell(flavor);
   const target = entryArgs(cli, entry);
   if (!catalogCommandFor(cli, def)) return null;
+  // A LOCAL entry of a provider you sign in to (an older `uvx elevenlabs-mcp`, with a key) has no sign-in to clear.
+  const noSignOut = def.auth === "oauth" && entry.transport === "stdio";
+  const flag = noSignOut ? [isPowerShell(flavor) ? "-NoSignOut" : "--no-sign-out"] : [];
   return scriptCommand(flavor, scriptsDir, "provider-remove", [def.id, scriptAgent(cli.agentId), cli.realPath, ...target], {
     passZdotdir: readsLoginProfiles(cli, flavor, def),
+    trailing: flag,
   });
 }
 

@@ -1,0 +1,8 @@
+{
+  "syncStatus": "ready",
+  "lastUpdated": "2026-09-20T10:00:00.000Z",
+  "platformAnalytics": [
+    { "platform": "instagram", "impressions": 4200, "reach": 3100, "views": 3900, "likes": 210, "comments": 18, "shares": 12, "saves": 34, "engagementRate": 6.8 },
+    { "platform": "tiktok", "impressions": 9800, "reach": 8700, "views": 9600, "likes": 540, "comments": 41, "shares": 88, "saves": 60, "engagementRate": 7.1 }
+  ]
+}

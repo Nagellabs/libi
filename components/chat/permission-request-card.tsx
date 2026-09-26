@@ -52,14 +52,8 @@ export function PermissionRequestCard({
     (toolCall as { title?: string }).title ?? "Permission required";
   const toolId = fromAnyToolName(rawTitle);
   const title = toolId ? formatToolId(toolId) : formatBuiltinTitle(rawTitle);
-  const headline =
-    reason === "extension"
-      ? "Approve extension tool"
-      : "Approve tool call";
-  const hint =
-    reason === "extension"
-      ? "This libi extension is marked \"requires approval\" in Settings."
-      : null;
+  const headline = reason === "extension" ? "Approve extension tool" : "Approve tool call";
+  const hint = reason === "extension" ? "This libi extension is marked \"requires approval\" in Settings." : null;
 
   if (status === "resolved") {
     const selected =

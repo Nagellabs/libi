@@ -18,20 +18,29 @@ import { buildComposition } from "@/lib/composition/build-composition";
 import type {
   AudioClip,
   Composition,
-  DrawContext,
   ExportSettings,
   Overlay,
 } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
-import { createDrawFunction } from "@/lib/ai/scene-validator";
-import { DRAW_HELPERS } from "@/lib/engine/draw-helpers";
-import { measureOverlayContentBoxes } from "@/lib/overlays/code-content-fit";
 import type { VideoFrameSource } from "@/lib/engine/video-frame-source";
 import { MediaBunnyExportFrameSource } from "@/lib/engine/media-bunny-export-frame-source";
 import { hydrateCustomEffects } from "@/lib/effects/hydrate-custom-client";
+import { configureEffectSampler, prepareCustomEffectCurves } from "@/lib/effects/custom-curves";
+import { resolveEffect } from "@/lib/effects/registry";
+import { EffectSampler } from "@/lib/sandbox/effect-sampler";
 import { buildOverlayThreeScenesWithDeps } from "@/lib/export/render-entry-three";
 import { buildOverlaySpatialQuadsWithDeps } from "@/lib/export/render-entry-quads";
+import { loadVideoSourcesWithDeps, mergeDroppedOverlays } from "@/lib/export/render-entry-video";
 import { loadOverlayTracks } from "@/lib/export/render-overlay-tracks";
+import { OverlaySandbox, type LoadInput } from "@/lib/sandbox/host";
+import { createIframeTransport } from "@/lib/sandbox/iframe-transport";
+import { EXPORT_SANDBOX_OPTIONS, ExportLayerSource, buildExportDiagnosticsReport } from "@/lib/sandbox/export-layers";
+import { collectSandboxFonts } from "@/lib/sandbox/fonts";
+import { collectSandboxImages } from "@/lib/sandbox/images";
+import { sha256Hex } from "@/lib/sandbox/hash";
+import type { BodyKind } from "@/lib/sandbox/protocol";
+import { getOverlayBody } from "@/lib/overlays/code-fields";
+import type { PersistedOverlay } from "@/lib/composition/persistence";
 
 interface JobPayload {
   overlays: Overlay[];
@@ -42,6 +51,8 @@ interface JobPayload {
   files: FileRecord[];
   totalFrames?: number;
   frameRange?: { startFrame: number; endFrameExclusive: number };
+  /** The verify render's explicit frames (`RenderPayload.frames`). */
+  frames?: number[];
 }
 
 interface JobResponse {
@@ -122,36 +133,132 @@ async function loadOverlayImages(
   return out;
 }
 
-/** Compile code + tracked-code overlay draw functions. */
-function compileOverlayDrawFns(
-  overlays: Overlay[],
-): Record<string, (ctx: DrawContext) => void> {
-  const out: Record<string, (ctx: DrawContext) => void> = {};
-  for (const o of overlays) {
-    let source: string | null = null;
-    if (o.kind === "code") source = o.drawFunction;
-    else if (o.kind === "tracked" && o.content.kind === "code")
-      source = o.content.drawFunction;
-    if (!source) continue;
-    try {
-      out[o.id] = createDrawFunction(source, DRAW_HELPERS) as unknown as (
-        ctx: DrawContext,
-      ) => void;
-    } catch (err) {
-      console.warn("[Render] failed to compile overlay draw fn", {
-        overlayId: o.id,
-        error: (err as Error).message,
-      });
-    }
-  }
-  return out;
+/** Longest the render page waits for the sandbox to take every body. A body
+ *  that will not load (a compile error, a build that hangs) costs that
+ *  overlay, not the export: past this the export runs and each unloaded body
+ *  is a dropped overlay. A sandbox that never came up AT ALL is different —
+ *  every body overlay would be missing, so the export fails, loudly, rather
+ *  than listing them all as "did not load" (final security review, I3). */
+const BODY_LOAD_BUDGET_MS = 20_000;
+export const SANDBOX_NEVER_CAME_UP_MESSAGE = `the overlay sandbox did not come up within ${BODY_LOAD_BUDGET_MS / 1000} s, so every code, three and tracked-code overlay would be missing from this export`;
+
+function bodyKindOf(o: Overlay): BodyKind | null {
+  if (o.kind === "code") return "code";
+  if (o.kind === "three") return "three";
+  if (o.kind === "tracked" && o.content.kind === "code") return "tracked";
+  return null;
 }
 
-/** Build a ThreeOverlayInstance per `three` overlay AND per `text+threeD`
- *  overlay for the export pass — keyed by `overlay.id` into one scenes map,
- *  mirroring the preview hook (`useOverlayThreeScenes`). Without the `text+threeD`
- *  half, 3D text exports flat because the renderer's `case "text"` finds no
- *  instance and falls back to `drawTextOverlay`.
+interface OverlayLayers {
+  layers: ExportLayerSource;
+  /** Kind and source hash per body overlay — what the diagnostics name. */
+  bodies: Map<string, { kind: BodyKind; sourceHash: string }>;
+  loaded: number;
+  dispose(): void;
+}
+
+/**
+ * Bring up the overlay sandbox for this render (spec §4.6) — the SAME
+ * sandboxed runtime the preview uses: an opaque-origin iframe whose worker
+ * runs every code / three / tracked-code body. No body executes in this
+ * page's origin. Loads every body once, and returns the frame-exact
+ * LayerSource the export loop settles before each frame.
+ */
+async function buildOverlayLayers(
+  overlays: Overlay[],
+  imageElements: Record<string, HTMLImageElement>,
+): Promise<OverlayLayers> {
+  const inputs: LoadInput[] = [];
+  const bodies = new Map<string, { kind: BodyKind; sourceHash: string }>();
+  for (const o of overlays) {
+    const kind = bodyKindOf(o);
+    if (!kind) continue;
+    const source = getOverlayBody(o as unknown as PersistedOverlay) ?? "";
+    const sourceHash = await sha256Hex(source);
+    bodies.set(o.id, { kind, sourceHash });
+    inputs.push({
+      id: o.id,
+      kind,
+      source,
+      sourceHash,
+      // The protocol requires a positive load size (each render carries the
+      // real per-frame one).
+      width: Math.max(1, o.rect?.width || 1),
+      height: Math.max(1, o.rect?.height || 1),
+      ...(o.kind === "three" ? { three: { cameraPreset: o.cameraPreset ?? "billboard", pixelRatio: 1 as const } } : {}),
+    });
+  }
+  if (inputs.length === 0) {
+    return { layers: new ExportLayerSource(() => -1), bodies, loaded: 0, dispose() {} };
+  }
+
+  let source: ExportLayerSource | null = null;
+  const sandbox = new OverlaySandbox({
+    // A dead frame fails the export; it is never replaced mid-run (R2-M1). So
+    // does a live frame whose worker is not back in time after a restart (R3-M3).
+    ...EXPORT_SANDBOX_OPTIONS,
+    // Always the sandbox: the dev-only in-origin mode is preview-only
+    // (lib/sandbox/mode.ts), so an export always crosses the real boundary.
+    createTransport: (nonce) => createIframeTransport(document.body, nonce),
+    onLayer: (m) => (source ? source.onLayer(m) : m.bitmap.close()),
+    onError: (m) => source?.onError(m),
+    onUnattributed: (m) => source?.onUnattributed(m),
+    onTimeout: (id, phase, afterMs, reason) => source?.onTimeout(id, phase, afterMs, reason),
+    onRestart: () => source?.onRestart(),
+    onFrameLost: (message) => source?.onFrameLost(message),
+  });
+  // Re-issuing a cached input after a restart joins the host's own replay of
+  // it (one post each) and is how the export learns the body is back.
+  const loadAll = () => Promise.all(inputs.map((i) => sandbox.load(i).catch(() => {}))).then(() => {});
+  source = new ExportLayerSource((input) => sandbox.render(input), { reloadAll: loadAll });
+
+  // Piece images, as bitmaps, only for bodies that can reach them (loadImage).
+  const images = inputs.some((i) => i.source.includes("loadImage"))
+    ? await collectSandboxImages(overlays, imageElements)
+    : {};
+  for (const input of inputs) if (input.source.includes("loadImage")) input.images = images;
+  sandbox.setFonts(await collectSandboxFonts(overlays));
+
+  // A compile/build failure is recorded through onError and reported as a
+  // dropped overlay; it never fails the export.
+  let budget: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    loadAll(),
+    new Promise<void>((resolve) => {
+      budget = setTimeout(() => {
+        console.warn("[Render] overlay sandbox did not take every body in time", { budgetMs: BODY_LOAD_BUDGET_MS });
+        resolve();
+      }, BODY_LOAD_BUDGET_MS);
+    }),
+  ]);
+  clearTimeout(budget);
+  if (sandbox.isFrameLost() || sandbox.generation() === 0) {
+    sandbox.destroy();
+    for (const b of Object.values(images)) b.close();
+    throw new Error(sandbox.isFrameLost() ? sandbox.frameLostMessage : SANDBOX_NEVER_CAME_UP_MESSAGE);
+  }
+  const layers = source;
+  let disposed = false;
+  return {
+    layers,
+    bodies,
+    loaded: inputs.filter((i) => sandbox.isLoaded(i.id)).length,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      layers.dispose();
+      sandbox.destroy();
+      for (const b of Object.values(images)) b.close();
+    },
+  };
+}
+
+/** Build a ThreeOverlayInstance per 3D-TEXT overlay (`text+threeD` or
+ *  place3d) for the export pass — keyed by `overlay.id`, mirroring the preview
+ *  hook (`useOverlayThreeScenes`). Without it 3D text exports flat because the
+ *  renderer's `case "text"` finds no instance and falls back to
+ *  `drawTextOverlay`. `three` BODIES are not built here: they render in the
+ *  overlay sandbox (`buildOverlayLayers`).
  *
  *  Awaits each instance's text-rasterization readiness so the FIRST captured
  *  frame is deterministic (no blank text). One shared renderer for the whole
@@ -160,21 +267,20 @@ function compileOverlayDrawFns(
  *  /fonts/3d/<file> for bundled, /api/files/by-id/<id>/content for uploaded —
  *  both valid in the headless-Chromium render page). */
 async function buildOverlayThreeScenes(overlays: Overlay[]): Promise<{
-  scenes: Record<string, import("@/lib/engine/three-overlay").ThreeOverlayInstance>;
+  scenes: Record<string, import("@/lib/engine/three-renderer").ThreeOverlayInstance>;
   dispose: () => void;
 }> {
   const [
-    { createSharedThreeRenderer, buildThreeInstance },
+    { createSharedThreeRenderer },
     { buildTextThreeInstance },
     { makeBrowserTextThreeDeps },
   ] = await Promise.all([
-    import("@/lib/engine/three-overlay"),
+    import("@/lib/engine/three-renderer"),
     import("@/lib/engine/text-3d/build-text-three"),
     import("@/lib/engine/text-3d/browser-deps"),
   ]);
   return buildOverlayThreeScenesWithDeps(overlays, {
     createSharedThreeRenderer,
-    buildThreeInstance,
     buildTextThreeInstance,
     makeBrowserTextThreeDeps,
   });
@@ -183,81 +289,19 @@ async function buildOverlayThreeScenes(overlays: Overlay[]): Promise<{
 /** Build one `OverlayQuadInstance` per perspective-tilted image/video/code/
  *  flat-text overlay (the preview's `useOverlayQuads` parity for the export
  *  pass), so a spatially-transformed 2D overlay renders in the export instead of
- *  vanishing. Wires the real browser three-overlay + overlay-quad impls. */
+ *  vanishing. Wires the real browser three-renderer + overlay-quad impls. */
 async function buildOverlaySpatialQuads(overlays: Overlay[]): Promise<{
   quads: Record<string, import("@/lib/engine/overlay-quad").OverlayQuadInstance>;
   dispose: () => void;
 }> {
   const [{ createSharedThreeRenderer }, { buildQuadInstance }] = await Promise.all([
-    import("@/lib/engine/three-overlay"),
+    import("@/lib/engine/three-renderer"),
     import("@/lib/engine/overlay-quad"),
   ]);
   return buildOverlaySpatialQuadsWithDeps(overlays, {
     createSharedThreeRenderer,
     buildQuadInstance,
   });
-}
-
-/**
- * Build one `MediaBunnyExportFrameSource` per video scene + plain/tracked video
- * overlay, keyed by scene.id / overlay.id to match `renderFrame` / `drawOverlay`.
- *
- * Always resolves the ORIGINAL file (`/content`) — exports read originals, not
- * the 720p proxy (mediabunny/WebCodecs decodes the original directly). If the
- * original is undecodable by WebCodecs, fall back to the proxy URL so the export
- * still produces frames (lower res, but frame-exact).
- */
-async function loadVideoSources(
-  composition: Composition,
-  filesMap: Map<string, FileRecord>,
-): Promise<Record<string, VideoFrameSource>> {
-  const entries: Array<{ id: string; fileId: string; fallbackUrl: string | null }> = [];
-
-  void filesMap;
-  for (const o of composition.overlays ?? []) {
-    if (o.kind === "video") {
-      entries.push({ id: o.id, fileId: o.fileId, fallbackUrl: null });
-    } else if (o.kind === "tracked" && o.content.kind === "video") {
-      entries.push({ id: o.id, fileId: o.content.fileId, fallbackUrl: null });
-    }
-  }
-
-  const originalUrl = (fileId: string) => `/api/files/by-id/${fileId}/content`;
-  const proxyUrl = (fileId: string) => `/api/files/by-id/${fileId}/proxy`;
-
-  const map: Record<string, VideoFrameSource> = {};
-  await Promise.all(
-    entries.map(async ({ id, fileId, fallbackUrl }) => {
-      // 1) original — dispose the abandoned source on failure so its mediabunny
-      //    Input (network fetch + demuxer) isn't held until GC before we retry.
-      let src: MediaBunnyExportFrameSource | null = null;
-      try {
-        src = new MediaBunnyExportFrameSource(originalUrl(fileId));
-        await src.whenReady();
-        map[id] = src;
-        return;
-      } catch (err) {
-        src?.dispose();
-        console.warn("[Render] original decode init failed; trying proxy", {
-          id, fileId, error: (err as Error).message,
-        });
-      }
-      // 2) proxy (explicit proxy route, or the scene's pickVideoUrl fallback)
-      const fb = fallbackUrl ?? proxyUrl(fileId);
-      let proxySrc: MediaBunnyExportFrameSource | null = null;
-      try {
-        proxySrc = new MediaBunnyExportFrameSource(fb);
-        await proxySrc.whenReady();
-        map[id] = proxySrc;
-      } catch (err) {
-        proxySrc?.dispose();
-        console.warn("[Render] video source load failed (original + proxy)", {
-          id, fileId, fb, error: (err as Error).message,
-        });
-      }
-    }),
-  );
-  return map;
 }
 
 export async function runRender({
@@ -268,6 +312,9 @@ export async function runRender({
   token: string;
 }): Promise<void> {
   console.log("[Render] runRender start", { jobId });
+  // Disposed on every exit, not only the happy path (T10 minor): a render
+  // that throws mid-export must still tear down the sandbox frame.
+  let bodyLayers: OverlayLayers | null = null;
   try {
     setStatus("fetching-job");
     console.log("[Render] fetching job");
@@ -298,7 +345,10 @@ export async function runRender({
     // Register custom effect packages into THIS bundle's registry before any
     // frame is rendered — the render entry is a standalone esbuild bundle with
     // its own module instances, so the server's boot-time registration doesn't
-    // reach it. Best-effort: built-in effects render regardless.
+    // reach it. Best-effort: built-in effects render regardless. Their
+    // `animate.js` never runs on this page: the effect sandbox samples it
+    // (always the real sandbox here, like the overlay bodies).
+    configureEffectSampler(() => new EffectSampler({ createTransport: (nonce) => createIframeTransport(document.body, nonce) }));
     const customCount = await hydrateCustomEffects();
     console.log("[Render] custom effects registered", { customCount });
     const filesMap = new Map<string, FileRecord>(
@@ -318,35 +368,45 @@ export async function runRender({
     // warning and skips that overlay/scene rather than failing the export.
     setStatus("loading-overlays");
     const overlays = composition.overlays ?? [];
-    const [imageElements, tracks, videoFrameSources] = await Promise.all([
+    const [imageElements, tracks, videoLoad] = await Promise.all([
       loadOverlayImages(overlays, filesMap),
       loadOverlayTracks(overlays),
-      loadVideoSources(composition, filesMap),
+      loadVideoSourcesWithDeps(overlays, {
+        createSource: (url) => new MediaBunnyExportFrameSource(url),
+        warn: (message, detail) => console.warn(message, detail),
+      }),
     ]);
-    const compiledDrawFns = compileOverlayDrawFns(overlays);
-    // Probe each code overlay's drawn-ink bbox once so the renderer contain-fits
-    // the content into its rect (same as the preview hook does). Runs in the
-    // headless Chromium render page → real OffscreenCanvas is available.
-    const codeContentBoxes = measureOverlayContentBoxes(overlays, compiledDrawFns);
+    const videoFrameSources: Record<string, VideoFrameSource> = videoLoad.sources;
+    // Every custom-effect slot's curve is sampled BEFORE the first frame; one
+    // that cannot be sampled fails the export, naming the effect, rather than
+    // exporting it without its animation.
+    const customCurves = await prepareCustomEffectCurves(overlays, resolveEffect);
+    console.log("[Render] custom effect curves sampled", { customCurves });
     const three = await buildOverlayThreeScenes(overlays);
     const quads = await buildOverlaySpatialQuads(overlays);
+    bodyLayers = await buildOverlayLayers(overlays, imageElements);
 
     console.log("[Render] overlay assets loaded", {
       images: Object.keys(imageElements).length,
       tracks: Object.keys(tracks).length,
       videoSources: Object.keys(videoFrameSources).length,
-      compiledFns: Object.keys(compiledDrawFns).length,
+      bodies: bodyLayers.bodies.size,
+      bodiesLoaded: bodyLayers.loaded,
     });
 
     setStatus("rendering");
     // When rendering a chunk, progress + the stall-watchdog frame counts are
     // CHUNK-LOCAL (each chunk is its own registry job). Absent frameRange →
     // the whole composition, exactly as before.
-    const frameRange = payload.frameRange;
+    // A verify render (`libi.render_overlay_frames`) names its frames instead,
+    // and renders only those.
+    const frameRange = payload.frameRange ?? (payload.frames ? { frames: payload.frames } : undefined);
     const compositionFrames = getCompositionFrames(composition);
-    const chunkFrames = frameRange
-      ? frameRange.endFrameExclusive - frameRange.startFrame
-      : compositionFrames;
+    const chunkFrames = !frameRange
+      ? compositionFrames
+      : "frames" in frameRange
+        ? frameRange.frames.length
+        : frameRange.endFrameExclusive - frameRange.startFrame;
     console.log("[Render] hydrated; starting exportVideo", {
       overlayCount: composition.overlays?.length ?? 0,
       compositionFrames,
@@ -369,11 +429,10 @@ export async function runRender({
       },
       videoFrameSources,
       imageElements,
-      compiledDrawFns,
+      bodyLayers.bodies.size ? bodyLayers.layers : undefined,
       tracks,
       three.scenes,
       quads.quads,
-      codeContentBoxes,
       frameRange,
     );
     const elapsedSeconds = (performance.now() - start) / 1000;
@@ -389,6 +448,13 @@ export async function runRender({
     for (const s of Object.values(videoFrameSources)) s.dispose();
     three.dispose(); // free 3D-overlay geometries/materials/text + the shared WebGL context
     quads.dispose(); // free spatial-quad geometries/materials/textures + their shared WebGL context
+    // What the bodies did, for libi.get_piece_state (spec §4.7) — read before
+    // the sandbox goes; then tear its frame down with the page's other GPU
+    // resources (spec §4.9).
+    const diagnosticsReport = bodyLayers.bodies.size
+      ? buildExportDiagnosticsReport(bodyLayers.layers, bodyLayers.bodies, { fps: composition.fps, now: Date.now() })
+      : null;
+    bodyLayers.dispose();
 
     setStatus("uploading");
     const fd = new FormData();
@@ -404,10 +470,17 @@ export async function runRender({
     // Overlays skipped this render because their draw threw (QA 2026-09-18
     // B1) — forwarded to the server so it can log it loud and surface it in
     // the export result, instead of only the info-level console line above.
-    if (result.droppedOverlays?.length) {
-      fd.append("droppedOverlays", JSON.stringify(result.droppedOverlays));
+    // Plus the videos that could not be loaded at all (original and proxy both failed), which the
+    // render drew without — reported the same way rather than exported silently without the clip.
+    const droppedOverlays = mergeDroppedOverlays(result.droppedOverlays, videoLoad.dropped);
+    if (droppedOverlays.length) {
+      fd.append("droppedOverlays", JSON.stringify(droppedOverlays));
     }
     if (unloadedFonts.length) fd.append("unloadedFonts", JSON.stringify(unloadedFonts));
+    // Body failures, unattributed runtime diagnostics and the frames each body
+    // rendered cleanly: the server merges them into the piece's diagnostics
+    // (and retires ones this render proved fixed).
+    if (diagnosticsReport) fd.append("renderDiagnostics", JSON.stringify(diagnosticsReport));
     fd.append("file", result.blob, `out.${settings.format}`);
     const up = await fetch("/api/export/render-result", {
       method: "POST",
@@ -426,6 +499,9 @@ export async function runRender({
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ jobId, token, message }),
     }).catch(() => {});
+  } finally {
+    bodyLayers?.dispose();
+    configureEffectSampler(null);
   }
 }
 

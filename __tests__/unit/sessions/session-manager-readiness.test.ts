@@ -506,6 +506,22 @@ describe("SessionManager agent readiness", () => {
     expect(sm.activeAgentId).toBeNull();
   });
 
+  it("recognises another bundle's copy of AgentSpawnRefusedError (the PM is its own globalThis singleton)", async () => {
+    // The process manager may have been built by a different route bundle than the session
+    // manager, so its refusal can be a different class copy: same name and fields.
+    const foreign = Object.assign(new Error("Agent codex is not installed: needs an update"), {
+      name: "AgentSpawnRefusedError",
+      agentId: "codex",
+      reason: { code: "not_installed", message: "Codex is older than libi needs — open Agents to update it." },
+    });
+    pm.warmProcess.mockRejectedValue(foreign);
+    await expect(sm.switchAgent("codex")).rejects.toBe(foreign);
+    expect(sm.getReadiness("codex")).toEqual({
+      state: "not-installed",
+      reason: "Codex is older than libi needs — open Agents to update it.",
+    });
+  });
+
   /** The error the process manager throws when the CLI is below the minimum. */
   function belowMinimumRefusal(): AgentSpawnRefusedError {
     return new AgentSpawnRefusedError("claude-code", {

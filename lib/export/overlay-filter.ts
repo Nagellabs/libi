@@ -26,6 +26,7 @@ import { firstFamily } from "@/lib/fonts/bundled";
 import type { CaptionAnchor } from "@/lib/captions/types";
 import { layoutTextForExport, type ExportTextLayout } from "./text-export-layout";
 import { PLATE_RADIUS_SQUARE_MAX } from "./overlay-predicates";
+import { leadFill } from "./export-base";
 
 export { quoteFilterValue, escapeDrawtext };
 import { cssColorToFfmpeg } from "./backends/ffmpeg-overlay";
@@ -132,9 +133,22 @@ export function xExprForAlign(
 }
 
 /**
- * Build the `enable='between(t,a,b)'` expression for an overlay, shifting its
- * timeline window by `timeOffset` so it lines up with the base label's time
- * origin and clamping the lower bound to 0 (the base never plays before t=0).
+ * The window [a, b) as an ffmpeg expression — HALF-OPEN, like the preview
+ * (`time >= start && time < start + duration`, lib/engine/overlays.ts). ffmpeg's
+ * `between(t,a,b)` is inclusive at both ends, so on a frame exactly at a cue
+ * boundary two touching cues both drew: their texts overprinted for a frame.
+ * An overlay ending at the export's end still shows on the last frame, which
+ * sits at end − 1/fps.
+ */
+export function windowExpr(a: number, b: number): string {
+  return `gte(t,${a})*lt(t,${b})`;
+}
+
+/**
+ * Build the `enable` expression for an overlay's window (half-open, see
+ * windowExpr), shifting it by `timeOffset` so it lines up with the base
+ * label's time origin and clamping the lower bound to 0 (the base never plays
+ * before t=0).
  */
 export function enableExpr(
   startTime: number,
@@ -143,7 +157,7 @@ export function enableExpr(
 ): string {
   const localStart = Math.max(0, startTime - timeOffset);
   const localEnd = startTime + duration - timeOffset;
-  return `between(t,${localStart},${localEnd})`;
+  return windowExpr(localStart, localEnd);
 }
 
 /** A shadow with at most this much canvas `shadowBlur` is drawn as drawtext's
@@ -197,8 +211,8 @@ export function blurredShadowOf(
 }
 
 /** One `enable` expression covering every window — overlapping or touching
- *  windows merged, so a continuous caption track is ONE `between`. See
- *  MAX_ENABLE_SPANS for many disjoint windows. */
+ *  windows merged, so a continuous caption track is ONE window. See
+ *  MAX_ENABLE_SPANS for many disjoint windows. Half-open — see windowExpr. */
 export function unionEnableExpr(
   windows: { startTime: number; duration: number }[],
   timeOffset: number,
@@ -217,12 +231,12 @@ export function unionEnableExpr(
   // them failed to parse), so past a few spans one covering window is used:
   // still correct, it only stops skipping the gaps.
   if (merged.length > MAX_ENABLE_SPANS) {
-    return `between(t,${merged[0][0]},${Math.max(...merged.map((m) => m[1]))})`;
+    return windowExpr(merged[0][0], Math.max(...merged.map((m) => m[1])));
   }
-  return merged.map(([a, b]) => `between(t,${a},${b})`).join("+");
+  return merged.map(([a, b]) => windowExpr(a, b)).join("+");
 }
 
-/** The most `between` terms one `enable` expression is built from. */
+/** The most window terms one `enable` expression is built from. */
 export const MAX_ENABLE_SPANS = 8;
 
 /** Font selection for drawtext — see `drawtextSpecFor`. */
@@ -390,17 +404,15 @@ export function shadowDrawtextSpecFor(
 export { PLATE_RADIUS_SQUARE_MAX };
 
 /**
- * The background plate as one `drawbox` (no labels): the preview's single
- * plate around the whole block (widest line + padding × ink top…bottom +
- * padding), NOT drawtext's per-line `box`, which hugs each line separately.
- * Square-cornered — see PLATE_RADIUS_SQUARE_MAX (overlay-predicates.ts). Null when there is no plate.
+ * The background plate's rectangle in target px — the preview's single plate
+ * around the whole block (widest line + padding × ink top…bottom + padding),
+ * NOT drawtext's per-line `box`, which hugs each line separately. Null when
+ * there is no plate.
  */
-export function plateSpecFor(
-  o: TextOverlayLike,
+export function plateRectFor(
   layout: ExportTextLayout,
-  timeOffset: number,
   scale = 1,
-): string | null {
+): { x: number; y: number; w: number; h: number } | null {
   const p = layout.plate;
   if (!p || layout.lines.length === 0) return null;
   const x = Math.round(p.x * scale);
@@ -408,8 +420,91 @@ export function plateSpecFor(
   const w = Math.round((p.x + p.width) * scale) - x;
   const h = Math.round((p.y + p.height) * scale) - y;
   if (w <= 0 || h <= 0) return null;
-  const color = ffmpegColorWithOpacity(p.color, o.opacity ?? 1);
-  return `drawbox=x=${x}:y=${y}:w=${w}:h=${h}:color=${color}:t=fill:enable='${enableExpr(o.startTime, o.duration, timeOffset)}'`;
+  return { x, y, w, h };
+}
+
+/**
+ * The background plate as one `drawbox` (no labels) over `plateRectFor`.
+ * Square-cornered — see PLATE_RADIUS_SQUARE_MAX (overlay-predicates.ts). Null
+ * when there is no plate.
+ *
+ * With an `origin`, the box is drawn on a transparent RGBA LAYER whose top-left
+ * sits at `origin` (plateLayerSegments): the coordinates are translated and the
+ * colour REPLACES the layer's pixels, keeping its alpha for `overlay` to blend.
+ */
+export function plateSpecFor(
+  o: TextOverlayLike,
+  layout: ExportTextLayout,
+  timeOffset: number,
+  scale = 1,
+  origin?: { x: number; y: number },
+): string | null {
+  const r = plateRectFor(layout, scale);
+  if (!r || !layout.plate) return null;
+  const color = ffmpegColorWithOpacity(layout.plate.color, o.opacity ?? 1);
+  const x = r.x - (origin?.x ?? 0);
+  const y = r.y - (origin?.y ?? 0);
+  return `drawbox=x=${x}:y=${y}:w=${r.w}:h=${r.h}:color=${color}:t=fill${origin ? ":replace=1" : ""}:enable='${enableExpr(o.startTime, o.duration, timeOffset)}'`;
+}
+
+/**
+ * Composite plates onto `inLabel` through ONE transparent RGBA layer.
+ *
+ * `drawbox` straight onto a YUV frame converts its colour with a hard-coded
+ * BT.601 limited-range formula, whatever the frame declares, so a saturated
+ * plate on a BT.709 base (tagged, or declared by lib/export/untagged-color.ts)
+ * played back off-colour: pure green as 0,215,0. On an RGBA layer drawbox
+ * writes the colour as-is, and `overlay` converts the layer into the frame with
+ * the frame's own matrix (ffmpeg ≥ 7.1 — older builds convert with 601, which
+ * is exactly today's colour, from the same graph).
+ *
+ * The layer is a crop of the frame itself — the plates' bounding box, clamped
+ * to the frame and widened to even px so the 4:2:0 composite doesn't shift
+ * chroma by half a pixel — cleared to transparent, so it carries the frame's
+ * timestamps and `enable` sees the same `t` (a lavfi `color` source would
+ * need the export's frame rate and a duration). Each box keeps its own enable;
+ * the composite runs only inside `enable` (the run's union window).
+ * `format=yuv420p` pins the frame's format before the split, as in
+ * shadowLayerSegments — without it negotiation can pull `rgba` back through
+ * the split onto the whole frame.
+ */
+export function plateLayerSegments(
+  plates: {
+    rect: { x: number; y: number; w: number; h: number };
+    drawbox: (origin: { x: number; y: number }) => string;
+    /** The plate's colour (any form cssColorToFfmpeg takes). */
+    color?: string;
+  }[],
+  frame: { width: number; height: number },
+  enable: string,
+  inLabel: string,
+  outLabel: string,
+  key: string,
+): string[] {
+  const left = Math.max(0, Math.floor(Math.min(...plates.map((p) => p.rect.x)) / 2) * 2);
+  const top = Math.max(0, Math.floor(Math.min(...plates.map((p) => p.rect.y)) / 2) * 2);
+  const right = Math.min(frame.width, Math.ceil(Math.max(...plates.map((p) => p.rect.x + p.rect.w)) / 2) * 2);
+  const bottom = Math.min(frame.height, Math.ceil(Math.max(...plates.map((p) => p.rect.y + p.rect.h)) / 2) * 2);
+  if (plates.length === 0 || right <= left || bottom <= top) return [`[${inLabel}]null[${outLabel}]`];
+  const w = right - left;
+  const h = bottom - top;
+  const main = `tpm${key}`;
+  const src = `tps${key}`;
+  const layer = `tpl${key}`;
+  // The layer is cleared to the first plate's colour at alpha 0, not to black:
+  // 4:2:0 conversion averages a 2×2 block's colour whatever its alpha, so an
+  // edge block half plate, half transparent-black would fringe the plate's
+  // edge dark. A caption track's plates share one colour, so its edges are clean.
+  const clear = plates[0]?.color ? ffmpegColorWithOpacity(plates[0].color, 0) : "black@0";
+  // Each box REPLACES the layer's pixels (replace=1), so plates within a run
+  // never double-blend, even where two are enabled on the same frame.
+  const boxes = plates.map((p) => p.drawbox({ x: left, y: top }));
+  return [
+    `[${inLabel}]format=yuv420p,split[${main}][${src}]`,
+    `[${src}]crop=${w}:${h}:${left}:${top},format=rgba,` +
+      `drawbox=x=0:y=0:w=${w}:h=${h}:color=${clear}:t=fill:replace=1:enable='${enable}',${boxes.join(",")}[${layer}]`,
+    `[${main}][${layer}]overlay=${left}:${top}:enable='${enable}'[${outLabel}]`,
+  ];
 }
 
 /**
@@ -467,7 +562,10 @@ export function shadowLayerSegments(
     `[${inLabel}]format=yuv420p,split=3[${main}][${maskSrc}][${colorSrc}]`,
     `[${maskSrc}]${crop},format=gray,lut=c0=0,${silhouettes.join(",")},` +
       `gblur=sigma=${shadow.sigma}:steps=3:enable='${enable}'[${mask}]`,
-    `[${colorSrc}]${crop},format=yuva420p,drawbox=c=${shadow.color}:t=fill:replace=1[${fill}]`,
+    // RGBA, not yuva420p: drawbox on a YUV frame converts its colour with
+    // BT.601 whatever the frame declares (see plateLayerSegments); on RGBA the
+    // colour is exact and `overlay` converts it with the frame's matrix.
+    `[${colorSrc}]${crop},format=rgba,drawbox=c=${shadow.color}:t=fill:replace=1[${fill}]`,
     `[${fill}][${mask}]alphamerge,lut=a=val*${shadow.alpha}[${layer}]`,
     `[${main}][${layer}]overlay=0:${band.top}:enable='${enable}'[${outLabel}]`,
   ];
@@ -504,6 +602,15 @@ export function assetOverlaySegments(
   /** Composition→target scale — see drawtextSpecFor. Scales the asset's rect so
    *  image/video overlays composite at the target resolution. 1 = no scale. */
   scale = 1,
+  /** A `setparams=…` stage declaring the input's colour before it is scaled
+   *  and converted into the frame (lib/export/untagged-color.ts). */
+  colorParams?: string,
+  /** ffprobe index of the input's primary video stream (the one the preview
+   *  plays). Absent ⇒ `v`, the first video stream. */
+  videoStream?: number,
+  /** Seconds after its file's start the video starts (probe `videoLead`):
+   *  its first frame is shown from the file's start, as the preview does. */
+  videoLead = 0,
 ): string[] {
   const enable = enableExpr(o.startTime, o.duration, timeOffset);
   const scaled = `ovl${scratchKey}`;
@@ -524,8 +631,19 @@ export function assetOverlaySegments(
   const opacity = o.opacity ?? 1;
   const alphaStage = opacity < 1 ? `,format=rgba,colorchannelmixer=aa=${opacity}` : "";
 
+  // A video overlay plays its source from its own start: source time 0 at
+  // `startTime` on the timeline, as the preview draws it (renderer.ts:
+  // `globalTime - startTime`). The input's timestamps are source times, and
+  // `overlay` pairs frames by timestamp, so they are moved to the overlay's
+  // window; left as they were, an overlay starting at 2 s showed its source
+  // from 2 s. (Trimmed video overlays don't come here: the classifier sends
+  // them to the renderer.)
+  const shift = o.kind === "video" ? o.startTime - timeOffset : 0;
+  const place = Math.abs(shift) > 1e-6
+    ? `setpts=PTS${shift > 0 ? "+" : "-"}${+Math.abs(shift).toFixed(6)}/TB,`
+    : "";
   return [
-    `[${inputIndex}:v]${scaleStage}${alphaStage}[${scaled}]`,
+    `[${inputIndex}:${videoStream ?? "v"}]${leadFill(videoLead)}${place}${colorParams ? `${colorParams},` : ""}${scaleStage}${alphaStage}[${scaled}]`,
     `[${currentLabel}][${scaled}]overlay=${rx}:${ry}:enable='${enable}'[${outLabel}]`,
   ];
 }

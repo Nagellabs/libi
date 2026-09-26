@@ -25,9 +25,41 @@ and if it ever moves, re-run `libi connect` to update the registration.
 - **Real editing tools** — timeline, audio mixer with ducking, object tracking, background removal, video analysis.
 - **Bring any MCP server.** Generate clips, voiceover, music or sound effects through fal.ai, ElevenLabs, YouTube download, or anything you connect yourself.
 - **Fast exports.** A trim is a stream copy; overlays composite in a single ffmpeg pass; anything else renders through WebCodecs.
+- **Publish and measure, in the app.** Post a finished piece to Instagram or TikTok, schedule it, and see how each post and ad did — through a posting provider you sign up with yourself. libi charges nothing for this; the provider may ([what it costs](#social-posting-what-it-costs)).
 - **Local-first.** Your media, database and generated assets stay on your machine in `~/.libi/`.
 
 > **libi is in beta.** It moves fast and has rough edges. Please tell us about the ones you hit.
+
+---
+
+## Social posting: what it costs
+
+**libi charges nothing for social posting**, and it isn't part of any paid membership. But it
+is not free end to end, because libi doesn't post anything itself. It works through a
+**third-party posting provider** you sign up with — [Zernio](https://zernio.com) today — and
+that provider is a paid service with its own plans:
+
+- **The provider bills you, not libi.** Zernio charges per connected social account and meters
+  some platforms separately (X's API, for one). A free-tier allowance covers a small setup
+  today, but its size and prices are Zernio's to set and change. Check Zernio's pricing before
+  you connect more accounts.
+- **Your agent's usage is yours.** When the agent drafts or posts for you, it uses your own
+  Claude Code or Codex plan, like any other chat.
+- **Ad spend is between you and the ad network.** libi only reads ads; it never creates,
+  funds or pauses one. Ask your agent for those changes — it states the budget and waits for
+  your yes.
+
+What the app covers today:
+
+- **Composing in libi:** Instagram (Reel, Feed, Story) and TikTok.
+- **Posts made elsewhere:** your agent can post to Facebook, X and YouTube through the same
+  provider, and those posts show up in libi's lists, but libi's composer can't target those
+  networks yet.
+- **Ads:** read-only reporting, and not yet checked against a live ad account.
+
+libi stores only your provider choice and a piece ↔ post link. The posts, media and metrics
+stay on the provider. You sign in to the provider in your browser; libi never sees or stores
+a password or API key.
 
 ---
 
@@ -156,6 +188,12 @@ a cloned repo:
   is a hard kill-switch that overrides everything.
 - **Product analytics** (GA4) — bounded, enumerated events like "a piece was created", keyed
   to a random per-install id. Never file names, prompts, or anything you typed.
+
+Connecting a posting provider is the one place libi holds a credential of yours: the OAuth
+token from a browser sign-in you complete, kept in your OS keychain (or a private 0600 file
+under `npx`), never in the database and never in an API response. Revoke it in libi or at
+the provider. It is separate from your agent's own sign-in to that provider, and libi never
+reads that one.
 
 Full details: [privacy policy](https://libi.nagellabs.com/privacy).
 

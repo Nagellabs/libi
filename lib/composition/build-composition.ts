@@ -2,6 +2,7 @@ import type { Composition, Overlay, AudioClip } from "@/lib/engine/types";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { pickVideoUrl } from "@/lib/proxy/url";
 import { approxLegacyMeasure, normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
+import { isUnfilledSlotFileId, unfilledSlotLabel } from "@/lib/templates/unfilled-slot";
 
 /** Frame used when a caller has no manifest dims (a brand-new piece's
  *  EMPTY_MANIFEST default). Real callers pass the piece's own dims. */
@@ -69,12 +70,17 @@ export function buildComposition(
       raw.kind === "text"
         ? normalizeLegacyTextOverlay(raw, frameWidth, approxLegacyMeasure(raw))
         : raw;
-    // Attach the runtime preview URL for VIDEO overlays — the scrub-friendly
-    // proxy (1 keyframe/sec) when ready, else the original. Mirrors how video
-    // SCENES get `videoUrl`; without it overlays decoded the ORIGINAL (sparse
-    // keyframes on AI clips) → slow backward scrubbing. Export still reads the
-    // original (the ffmpeg backends never use this field).
-    if (o.kind === "video") {
+    // An applied template's unfilled media slot has no file to find or fetch:
+    // flag it for the renderer's neutral "add media" placeholder. No
+    // `videoUrl`, so no video source is created for it either.
+    if ((o.kind === "video" || o.kind === "image") && isUnfilledSlotFileId(o.fileId)) {
+      o = { ...o, missing: false, unfilledSlot: unfilledSlotLabel(o) };
+    } else if (o.kind === "video") {
+      // Attach the runtime preview URL for VIDEO overlays — the scrub-friendly
+      // proxy (1 keyframe/sec) when ready, else the original. Mirrors how video
+      // SCENES get `videoUrl`; without it overlays decoded the ORIGINAL (sparse
+      // keyframes on AI clips) → slow backward scrubbing. Export still reads the
+      // original (the ffmpeg backends never use this field).
       const file = filesById.get(o.fileId);
       // Confirmed-missing only: the
       // file queries have settled AND the id is absent from the known set
@@ -95,6 +101,9 @@ export function buildComposition(
         // that as a mismatch and takes the re-encoding path.
         sourceWidth: file?.mediaWidth ?? null,
         sourceHeight: file?.mediaHeight ?? null,
+        // Runtime-only: names the clip on the preview's "can't be played"
+        // placeholder (overlay-renderer.ts#drawUnplayableVideoPlaceholder).
+        sourceName: file?.name || undefined,
         missing,
       };
     }
@@ -103,7 +112,7 @@ export function buildComposition(
     // deleted must not render silently: silence is indistinguishable from a
     // genuinely-transparent asset (alpha cutout) or an overlay that hasn't
     // started yet.
-    if (o.kind === "image") {
+    else if (o.kind === "image") {
       const missing =
         opts.filesResolved === true &&
         opts.knownFileIds != null &&

@@ -6,6 +6,7 @@ import { jobs } from "@/lib/db/schema/sqlite";
 import { getJobManager } from "@/lib/jobs/manager";
 import { checkPaidJobRateLimit } from "@/lib/jobs/rate-limit";
 import { serverLogger as logger } from "@/lib/logger";
+import { USER_STARTED_JOB_KINDS } from "@/lib/jobs/user-started-kinds";
 import {
   snapshotFromRow,
   type EnqueueResult,
@@ -90,6 +91,18 @@ export async function POST(req: Request): Promise<Response> {
 
   const { kind, params, pieceId, fileId, clientKey, forceNew, discardOutput, resume, toolHint } =
     parsed.data;
+
+  // A job only the user starts (a template publish) is never started here, by
+  // any caller: the Templates page's confirm starts it in-process
+  // (lib/templates/cloud/publish-confirm.ts). This route is on loopback and
+  // answers any local process — the agent's own shell included.
+  if (USER_STARTED_JOB_KINDS.has(kind)) {
+    logger.warn({ tag: "security", op: "jobs_user_started_refused", kind }, "jobs.post.user_started_refused");
+    return NextResponse.json(
+      { error: `${kind} is started only from libi's Templates page, where you review and publish it.` },
+      { status: 403 },
+    );
+  }
 
   // Resolve the job manager FIRST — this registers the builtin runners on a
   // cold process. The paid-kind rate check below derives "paid" from the

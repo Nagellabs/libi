@@ -3,7 +3,8 @@
 What to reach for when a music campaign has stalled and the user's paid `music` provider
 is their own ElevenLabs MCP — libi does not bundle or configure it. This skill generates
 no music itself: it delegates to `music-creation`, whose
-`references/providers/elevenlabs.md` owns `compose_music` and the per-call cost rule. That
+`references/providers/elevenlabs.md` owns ElevenLabs music generation (`creative_generate_in_flow`
+with `node_type: "music"`, one generation per call) and the per-call cost rule. That
 file is the one to follow; this one only says when to get there and what it buys.
 
 ## When the local track isn't landing

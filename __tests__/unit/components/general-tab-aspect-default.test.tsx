@@ -10,7 +10,10 @@ vi.mock("@/lib/queries/piece-defaults", () => ({
   useUpdatePieceDefaults: () => ({ mutate, isPending: updateState.isPending }),
 }));
 
-vi.mock("@/components/settings/updates-section", () => ({ UpdatesSection: () => null }));
+vi.mock("@/components/settings/updates-section", () => ({
+  UpdatesSection: () => <div data-testid="updates-section" />,
+}));
+vi.mock("@/components/settings/creator-key-card", () => ({ CreatorKeyCard: () => null }));
 vi.mock("@/lib/editor-state-context", () => ({
   useEditorState: () => ({ previewQuality: "auto", setPreviewQuality: vi.fn() }),
 }));
@@ -72,5 +75,16 @@ describe("GeneralTab — default aspect ratio", () => {
     expect(
       (screen.getByTestId("default-ratio-16:9") as HTMLButtonElement).disabled,
     ).toBe(false);
+  });
+});
+
+describe("GeneralTab — appearance", () => {
+  it("places the light/dark choice directly below the version & updates section", () => {
+    render(<GeneralTab />);
+    const updates = screen.getByTestId("updates-section");
+    const appearance = screen.getByTestId("theme-mode-light").closest("div[role=group]")!
+      .parentElement!;
+    expect(updates.nextElementSibling).toBe(appearance);
+    expect(screen.getByTestId("theme-mode-dark")).toBeTruthy();
   });
 });

@@ -323,7 +323,7 @@ export const playwrightDriver: RenderDriver = {
     // render-page failures that would otherwise be silent.
     page.on("console", (msg) => {
       exportLogger.info(
-        { event: "playwright_console", jobId, level: msg.type(), text: msg.text() },
+        { event: "playwright_console", jobId, consoleLevel: msg.type(), text: msg.text() },
         "export.playwright_console",
       );
     });

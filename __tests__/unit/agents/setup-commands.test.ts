@@ -13,6 +13,7 @@ import {
   type DetectedProviderEntry, type SetupAgentId,
 } from "@/lib/agents/setup/commands";
 import { setupScriptsDir } from "@/lib/agents/setup/scripts-dir";
+import { createSignInMarkerReader, signInMarkerLine } from "@/lib/providers/sign-in-markers";
 import { PROVIDER_CATALOG, KEY_PLACEHOLDER, findProvider } from "@/lib/providers/catalog";
 import type { ShellFlavor } from "@/lib/terminal/shell-quote";
 
@@ -247,7 +248,25 @@ describe("provider add / replace / remove: one short call to a setup script", ()
     expect(providerReplaceCommand(claude, "posix", DOCS_ONLY, claudeFalUser, SCRIPTS)).toBeNull();
     expect(providerSignInCommand(claude, "posix", claudeFalUser, DOCS_ONLY, SCRIPTS)).toBeNull();
     expect(providerSignInCommand(codex, "posix", { agentId: "codex", name: "fal-ai" }, fal, SCRIPTS)).toBeNull();
-    expect(providerSignInCommand(claude, "posix", { agentId: "claude-code", name: "elevenlabs", scope: "user" }, elevenlabs, SCRIPTS)).toBeNull();
+  });
+  it("ElevenLabs is a hosted sign-in provider: its sign-in is one call to signin-provider, with no ZDOTDIR", () => {
+    expect(providerSignInCommand(claude, "posix", { agentId: "claude-code", name: "elevenlabs", scope: "user" }, elevenlabs, SCRIPTS)).toBe(
+      "sh /opt/libi/lib/agents/setup/scripts/signin-provider.sh elevenlabs claude /Users/me/.local/bin/claude elevenlabs",
+    );
+  });
+  it("a detected LOCAL (stdio) entry of a provider you sign in to is removed with --no-sign-out: it has no sign-in", () => {
+    expect(providerRemoveCommand(claude, "posix", { agentId: "claude-code", name: "elevenlabs", scope: "user", transport: "stdio" }, elevenlabs, SCRIPTS)).toBe(
+      "sh /opt/libi/lib/agents/setup/scripts/remove-provider.sh elevenlabs claude /Users/me/.local/bin/claude elevenlabs user --no-sign-out",
+    );
+    expect(providerRemoveCommand(codex, "posix", { agentId: "codex", name: "elevenlabs", transport: "stdio" }, elevenlabs, SCRIPTS)).toBe(
+      "sh /opt/libi/lib/agents/setup/scripts/remove-provider.sh elevenlabs codex /Users/me/.local/bin/codex elevenlabs --no-sign-out",
+    );
+    expect(providerRemoveCommand(codexWin, "powershell", { agentId: "codex", name: "elevenlabs", transport: "stdio" }, elevenlabs, SCRIPTS_WIN)).toMatch(
+      / 'elevenlabs' -NoSignOut"$/,
+    );
+    // The hosted entry signs out first, as before; a keyed provider never had a sign-out to skip.
+    expect(providerRemoveCommand(claude, "posix", { agentId: "claude-code", name: "elevenlabs", scope: "user", transport: "http" }, elevenlabs, SCRIPTS)).not.toContain("--no-sign-out");
+    expect(providerRemoveCommand(claude, "posix", { agentId: "claude-code", name: "fal-ai", scope: "user", transport: "stdio" }, fal, SCRIPTS)).not.toContain("--no-sign-out");
   });
   it("Higgsfield: add, remove and replace name the provider like any other, and never pass ZDOTDIR — there is no key to save", () => {
     expect(providerAddCommand(claude, "posix", higgsfield, SCRIPTS)).toBe(
@@ -261,6 +280,14 @@ describe("provider add / replace / remove: one short call to a setup script", ()
     );
     expect(providerReplaceCommand(claude, "posix", higgsfield, { agentId: "claude-code", name: "higgsfield", scope: "user" }, SCRIPTS)).toBe(
       "sh /opt/libi/lib/agents/setup/scripts/replace-provider.sh higgsfield claude /Users/me/.local/bin/claude higgsfield user",
+    );
+  });
+  it("zernio on Claude and Codex: add-provider.sh with the provider, the agent and the CLI's path", () => {
+    expect(providerAddCommand(claude, "posix", findProvider("zernio"), SCRIPTS)).toBe(
+      "sh /opt/libi/lib/agents/setup/scripts/add-provider.sh zernio claude /Users/me/.local/bin/claude",
+    );
+    expect(providerAddCommand(codex, "posix", findProvider("zernio"), SCRIPTS)).toBe(
+      "sh /opt/libi/lib/agents/setup/scripts/add-provider.sh zernio codex /Users/me/.local/bin/codex",
     );
   });
   it("sign-in is one call to signin-provider with the provider, the agent, the CLI's path and the detected name — no scope, since `mcp login` takes only a name", () => {
@@ -658,7 +685,9 @@ describe("the PowerShell scripts, as text", () => {
 
   it("take their arguments as plain positional strings, and refuse an unknown provider or agent with exit 2", () => {
     expect(add()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli)");
-    expect(remove()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope)");
+    // The one switch: -NoSignOut, for a local entry of a provider you sign in to.
+    expect(remove()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)");
+    expect(remove()).toContain("usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut]");
     expect(replace()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [string]$ScriptsDir)");
     expect(scriptText("signin-provider.ps1")).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry)");
     for (const text of [remove(), replace()]) {
@@ -706,21 +735,45 @@ describe("the PowerShell scripts, as text", () => {
     const keyedCommands = WITH_COMMANDS.flatMap((def) => [def.commands!.claude, def.commands!.codex]).filter((c) => c.includes(KEY_PLACEHOLDER));
     expect(keyLines).toHaveLength(1 + 1 + 1 + keyedCommands.length);
     for (const line of keyLines) expect(line).not.toMatch(/Write-|Out-|echo|\$Host/);
-    // The agent's own exit code comes back out.
-    expect(text).toMatch(
-      /& \$Cli @addArgs\nif \(\$\?\) \{\n {2}if \(\$auth -ceq 'oauth' -and \$Agent -ceq 'claude'\) \{\n {4}Write-Host "[^"\n]+"\n {2}\}\n {2}exit 0\n\}\nif \(\$LASTEXITCODE\) \{ exit \$LASTEXITCODE \}\nexit 1\n$/,
-    );
+    // The agent's own exit code comes back out (the whole tail is checked in the Claude sign-in test below).
+    expect(text).toContain("  & $Cli @addArgs\n  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n");
+    expect(text).toMatch(/\nexit \$code\n$/);
   });
   it("add-provider.ps1 asks nothing for a provider signed in to with an account, and says what the sign-in does in the same words as add-provider.sh", () => {
     const text = add();
     expect(text).toContain("if ($auth -ceq 'key') {\n  $key = [Net.NetworkCredential]::new('', (Read-Host \"$name key\" -AsSecureString)).Password\n}");
     // The same two messages as the POSIX script, with PowerShell's variables in place of sh's.
-    const shMessages = [...scriptText("add-provider.sh").matchAll(/^ +echo "((?:Codex adds|Added\. Now sign in)[^"]*)"$/gm)].map((m) => m[1]);
+    const shMessages = [...scriptText("add-provider.sh").matchAll(/^ +echo "((?:Codex|Claude Code) adds[^"]*)"$/gm)].map((m) => m[1]);
     expect(shMessages).toHaveLength(2);
-    for (const message of shMessages) expect(text).toContain(`Write-Host "${message.replace("$provider", "$Provider")}"`);
-    // Codex's message comes before the add, which starts the sign-in; Claude's only after the add worked.
+    for (const message of shMessages) expect(text).toContain(`Write-Host "${message}"`);
+    // Both come before the add: Codex's add starts the sign-in, and Claude Code's sign-in follows it.
     expect(text.indexOf('Write-Host "Codex adds')).toBeLessThan(text.indexOf("& $Cli @addArgs"));
-    expect(text.indexOf('Write-Host "Added. Now sign in')).toBeGreaterThan(text.indexOf("if ($?) {"));
+    expect(text.indexOf('Write-Host "Claude Code adds')).toBeLessThan(text.indexOf("& $Cli @addArgs"));
+  });
+  it("add-provider.ps1 runs Claude Code's own `mcp login` for the entry the add made, only after an add that worked, and exits with its code", () => {
+    const text = add();
+    for (const def of OAUTH) {
+      // The entry the add creates is named after the provider, and the catalog's sign-in names that entry.
+      expect(tokenizeCatalogCommand(def.commands!.claude)).toContain(def.id);
+      expect(tokenizeCatalogCommand(def.signInCommands!.claude)).toEqual(["claude", "mcp", "login", def.id]);
+    }
+    // The sign-in is announced before the add, and its end in a `finally`, so a failed add, a failed login and a
+    // Ctrl+C all print it (lib/providers/sign-in-markers.ts); the add's or the login's code comes back out.
+    expect(text).toMatch(
+      new RegExp(
+        escapeRegExp("if ($signsIn) {\n") +
+          "[^}]*" +
+          escapeRegExp('  Write-Host "[libi sign-in start: $Provider]"\n}\n$code = 0\ntry {\n  & $Cli @addArgs\n') +
+          escapeRegExp("  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n  } elseif ($signsIn) {\n") +
+          escapeRegExp("    $loginArgs = @('mcp', 'login', '--', $Provider)\n    & $Cli @loginArgs\n") +
+          escapeRegExp("    if (-not $?) {\n      $code = 1\n      if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n    }\n  }\n") +
+          escapeRegExp("} finally {\n") +
+          "  #[^\\n]*\\n" +
+          escapeRegExp('  if ($signsIn) { [Console]::WriteLine("[libi sign-in end: $Provider]") }\n}\nexit $code\n') +
+          "$",
+      ),
+    );
+    expect(text).toContain("$signsIn = $auth -ceq 'oauth' -and $Agent -ceq 'claude'");
   });
   it("signin-provider.ps1 runs the agent's own `mcp login` for the detected name, says a browser opens, and exits with the CLI's code", () => {
     const text = scriptText("signin-provider.ps1");
@@ -733,9 +786,16 @@ describe("the PowerShell scripts, as text", () => {
       }
     }
     const sh = /^echo "(Opening your browser[^"]*)"$/m.exec(scriptText("signin-provider.sh"))![1];
+    // Claude Code's sign-in is announced at its start and, in a `finally`, at its end (lib/providers/sign-in-markers.ts).
     expect(text).toMatch(
       new RegExp(
-        `Write-Host "${escapeRegExp(sh)}"\\n\\$loginArgs = @\\('mcp', 'login', '--', \\$Entry\\)\\n& \\$Cli @loginArgs\\nif \\(\\$\\?\\) \\{ exit 0 \\}\\nif \\(\\$LASTEXITCODE\\) \\{ exit \\$LASTEXITCODE \\}\\nexit 1\\n$`,
+        escapeRegExp(`Write-Host "${sh}"\n$marked = $Agent -ceq 'claude'\nif ($marked) { Write-Host "[libi sign-in start: $Entry]" }\n`) +
+          escapeRegExp("$code = 0\ntry {\n  $loginArgs = @('mcp', 'login', '--', $Entry)\n  & $Cli @loginArgs\n") +
+          escapeRegExp("  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n  }\n") +
+          escapeRegExp("} finally {\n") +
+          "  #[^\\n]*\\n" +
+          escapeRegExp('  if ($marked) { [Console]::WriteLine("[libi sign-in end: $Entry]") }\n}\nexit $code\n') +
+          "$",
       ),
     );
   });
@@ -754,11 +814,16 @@ describe("the PowerShell scripts, as text", () => {
     const sh = [...scriptText("remove-provider.sh").matchAll(/"((?:Signing out of|Couldn't sign out of) \$name[^"]*)"/g)].map((m) => m[1]);
     expect(sh).toHaveLength(2);
     expect(code).toContain(
-      `if ($auth -ceq 'oauth') {\n  Write-Host "${sh[0]}"\n  $logoutArgs = @('mcp', 'logout', '--', $Entry)\n  & $Cli @logoutArgs\n  if (-not $?) { Write-Host "${sh[1]}" }\n}`,
+      `if ($auth -ceq 'oauth' -and -not $NoSignOut) {\n  Write-Host "${sh[0]}"\n  $logoutArgs = @('mcp', 'logout', '--', $Entry)\n  & $Cli @logoutArgs\n  if (-not $?) { Write-Host "${sh[1]}" }\n}`,
     );
     expect(code.indexOf("& $Cli @logoutArgs")).toBeLessThan(code.indexOf("& $Cli @removeArgs"));
   });
 
+  it("remove-provider.ps1 skips the sign-out with -NoSignOut, for a local entry that has none", () => {
+    const text = remove();
+    expect(text).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)");
+    expect(codeLines(text).join("\n")).toContain("if ($auth -ceq 'oauth' -and -not $NoSignOut) {");
+  });
   it("remove-provider.ps1 resets $LASTEXITCODE right before the remove, so a remove that never started exits 1 and one that ran exits with its own code, never the sign-out's", () => {
     const code = codeLines(remove()).join("\n");
     // Global: a native command sets the global one, and a plain assignment would make a script-scope copy that the
@@ -832,7 +897,7 @@ describe("the PowerShell scripts, as text", () => {
 });
 
 /** A fake agent CLI that records each call's arguments, one per line, and exits with $FAKE_EXIT — or, for an `mcp logout`, with $FAKE_LOGOUT_EXIT when that is set. */
-const RECORDING_CLI = `#!/bin/sh\n{ printf '%s\\n' "$@"; echo '--end--'; } >> "$0.argv"\n[ "$2" != logout ] || exit "\${FAKE_LOGOUT_EXIT:-\${FAKE_EXIT:-0}}"\nexit "\${FAKE_EXIT:-0}"\n`;
+const RECORDING_CLI = `#!/bin/sh\n{ printf '%s\\n' "$@"; echo '--end--'; } >> "$0.argv"\n[ "$2" != logout ] || exit "\${FAKE_LOGOUT_EXIT:-\${FAKE_EXIT:-0}}"\n[ "$2" != login ] || exit "\${FAKE_LOGIN_EXIT:-\${FAKE_EXIT:-0}}"\nexit "\${FAKE_EXIT:-0}"\n`;
 /** Every character a shell acts on, so a key that were ever re-parsed would come out changed. */
 const TRICKY_KEY = 'sk-Q$1"b`c!d\\e*f;g';
 
@@ -884,6 +949,8 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
   const signOutLine = (def: (typeof WITH_COMMANDS)[number]) => `Signing out of ${def.name} first, so the sign-in isn't left stored.\n`;
   const signOutFailedLine = (def: (typeof WITH_COMMANDS)[number]) => `Couldn't sign out of ${def.name}; removing it anyway.\n`;
   const entryArgs = (agent: "claude" | "codex") => (agent === "claude" ? ["my-entry", "project"] : ["my-entry"]);
+  /** The two lines a Claude Code sign-in is announced with (lib/providers/sign-in-markers.ts), around nothing else. */
+  const marked = (entry: string) => `${signInMarkerLine("start", entry)}\n${signInMarkerLine("end", entry)}\n`;
   const savedLine = (def: (typeof WITH_COMMANDS)[number]) => `export ${def.codexKeyEnv}='${TRICKY_KEY}' # ${def.name} key for Codex, added by libi\n`;
 
   it("add-provider runs the catalog's exact add command for every provider and agent, with the key read at the prompt where the placeholder is", () => {
@@ -892,14 +959,14 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
         rmSync(path.join(home, ".profile"), { force: true });
         const result = runScript("add-provider.sh", [def.id, agent, cliPath(agent)], `${TRICKY_KEY}\n`);
         expect(result.status, result.stderr).toBe(0);
-        expect(takeCalls(agent)).toEqual([addArgs(def, agent)]);
+        expect(takeCalls(agent)).toEqual(
+          def.auth === "oauth" && agent === "claude" ? [addArgs(def, agent), ["mcp", "login", "--", def.id]] : [addArgs(def, agent)],
+        );
         if (def.auth === "oauth") {
-          // No key prompt: Codex's add starts the browser sign-in; Claude Code is told how to sign in after.
-          expect(result.stdout).toBe(
-            agent === "codex"
-              ? `Codex adds ${def.name}, then opens your browser to sign in with your ${def.name} account. This waits here until you finish signing in.\n`
-              : `Added. Now sign in with your ${def.name} account: click Sign in on libi's Providers tab, or open Claude Code, run /mcp, choose ${def.id}, then Authenticate.\n`,
-          );
+          // No key prompt. Codex's add starts the browser sign-in itself; for Claude Code the script runs its own
+          // `mcp login` for the entry the add made, right after it — one command for both steps on either agent.
+          const says = `${agent === "codex" ? "Codex" : "Claude Code"} adds ${def.name}, then opens your browser to sign in with your ${def.name} account. This waits here until you finish signing in.\n`;
+          expect(result.stdout).toBe(agent === "claude" ? `${says}${marked(def.id)}` : says);
           expect(existsSync(path.join(home, ".profile"))).toBe(false);
         } else if (agent === "codex" && def.codexKeyEnv) {
           expect(result.stdout).toBe(`${def.name} key: \nSaved ${def.codexKeyEnv} in ${path.join(home, ".profile")}. Restart libi and Codex so they read it.\n`);
@@ -927,6 +994,17 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
           expect(result.stdout).toBe(agent === "codex" && def.codexKeyEnv ? `No ${def.codexKeyEnv} line from libi was found.\n` : "");
         }
       }
+    }
+  });
+
+  // An older LOCAL ElevenLabs entry (`uvx elevenlabs-mcp`, with a key) has no sign-in: the Providers tab passes
+  // --no-sign-out for a detected stdio row of a provider you sign in to, and the remove runs alone.
+  it("remove-provider with --no-sign-out runs only the agent's remove, for Claude with its scope and for Codex", () => {
+    for (const agent of ["claude", "codex"] as const) {
+      const result = runScript("remove-provider.sh", ["elevenlabs", agent, cliPath(agent), ...entryArgs(agent), "--no-sign-out"]);
+      expect(result.status, result.stderr).toBe(0);
+      expect(takeCalls(agent)).toEqual([removeArgs(agent)]);
+      expect(result.stdout).toBe("");
     }
   });
 
@@ -962,7 +1040,8 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
       for (const agent of ["claude", "codex"] as const) {
         const result = runScript("replace-provider.sh", [def.id, agent, cliPath(agent), ...entryArgs(agent)], `${TRICKY_KEY}\n`);
         expect(result.status, result.stderr).toBe(0);
-        expect(takeCalls(agent)).toEqual([removeArgs(agent), addArgs(def, agent)]);
+        const signIn = def.auth === "oauth" && agent === "claude" ? [["mcp", "login", "--", def.id]] : [];
+        expect(takeCalls(agent)).toEqual([removeArgs(agent), addArgs(def, agent), ...signIn]);
         expect(result.stdout).not.toContain("Removed");
       }
     }
@@ -975,13 +1054,66 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
         expect(head).toBe(agent);
         const result = runScript("signin-provider.sh", [def.id, agent, cliPath(agent), def.id]);
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe(`Opening your browser to sign in with your ${def.name} account. This waits here until you finish.\n`);
+        const opening = `Opening your browser to sign in with your ${def.name} account. This waits here until you finish.\n`;
+        // Claude Code's sign-in is announced at its start and its end (lib/providers/sign-in-markers.ts); Codex's is not.
+        expect(result.stdout).toBe(agent === "claude" ? `${opening}${marked(def.id)}` : opening);
         // The catalog's sign-in command, with the detected name after `--`.
         expect(takeCalls(agent)).toEqual([[...args.slice(0, -1), "--", def.id]]);
         const renamed = runScript("signin-provider.sh", [def.id, agent, cliPath(agent), "my entry"], "", { FAKE_EXIT: "5" });
         expect(renamed.status).toBe(5);
+        // Ended, even though it failed.
+        if (agent === "claude") expect(renamed.stdout).toBe(`${opening}${marked("my entry")}`);
         expect(takeCalls(agent)).toEqual([["mcp", "login", "--", "my entry"]]);
       }
+    }
+  });
+
+  it("add-provider on Claude Code signs in only after an add that worked, and exits with the sign-in's own status", () => {
+    for (const def of OAUTH) {
+      const failedAdd = runScript("add-provider.sh", [def.id, "claude", cliPath("claude")], "", { FAKE_EXIT: "4" });
+      expect(failedAdd.status).toBe(4);
+      expect(takeCalls("claude")).toEqual([addArgs(def, "claude")]);
+      // The sign-in was announced before the add, so its end is announced even when the add failed.
+      expect(failedAdd.stdout.endsWith(marked(def.id))).toBe(true);
+      const failedLogin = runScript("add-provider.sh", [def.id, "claude", cliPath("claude")], "", { FAKE_LOGIN_EXIT: "6" });
+      expect(failedLogin.status).toBe(6);
+      expect(failedLogin.stdout.endsWith(marked(def.id))).toBe(true);
+      expect(takeCalls("claude")).toEqual([addArgs(def, "claude"), ["mcp", "login", "--", def.id]]);
+      // A replace runs this same add, so it signs in too.
+      const replaced = runScript("replace-provider.sh", [def.id, "claude", cliPath("claude"), ...entryArgs("claude")]);
+      expect(replaced.status, replaced.stderr).toBe(0);
+      expect(takeCalls("claude")).toEqual([removeArgs("claude"), addArgs(def, "claude"), ["mcp", "login", "--", def.id]]);
+    }
+  });
+
+  it("a Claude Code sign-in stopped by a signal still announces its end, and the reader libi runs on the terminal finds both lines", async () => {
+    // A login that waits until it is stopped, as `mcp login` waits on the browser.
+    const hanging = path.join(root, "bin", "claude-hangs");
+    writeFileSync(hanging, '#!/bin/sh\n[ "$2" != login ] || { echo waiting > "$0.started"; sleep 30; }\nexit 0\n');
+    chmodSync(hanging, 0o755);
+    const runs: Array<[string, string[]]> = [
+      ["signin-provider.sh", ["elevenlabs", "claude", hanging, "elevenlabs"]],
+      ["add-provider.sh", ["elevenlabs", "claude", hanging]],
+    ];
+    for (const [script, args] of runs) {
+      rmSync(`${hanging}.started`, { force: true });
+      const child = spawn(scriptShell, [scriptPath(script), ...args], {
+        env: { HOME: home, SHELL: "/bin/bash", PATH: `${path.join(root, "sh-bin")}:/usr/bin:/bin`, NODE_ENV: "test" },
+        detached: true,
+      });
+      let out = "";
+      child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
+      const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+      await waitUntil(() => existsSync(`${hanging}.started`), 10_000);
+      // Ctrl-C reaches the whole foreground group: the script and the CLI it waits on.
+      process.kill(-child.pid!, "SIGINT");
+      expect(await exited).toBe(130);
+      await new Promise((r) => setTimeout(r, 50));
+      const read = createSignInMarkerReader();
+      expect(read(out)).toEqual([
+        { phase: "start", entry: "elevenlabs" },
+        { phase: "end", entry: "elevenlabs" },
+      ]);
     }
   });
 
@@ -1015,7 +1147,7 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
       const signIn = name === "signin-provider.sh";
       // signin-provider knows only providers signed in to with an account; a keyed one is refused like an unknown one.
       const known = signIn ? "higgsfield" : "fal";
-      const unknown = signIn ? ["nope", "fal", "elevenlabs", "Higgsfield"] : ["nope", "Fal", "higgsfield-x", "ace-step"];
+      const unknown = signIn ? ["nope", "fal", "ElevenLabs", "Higgsfield"] : ["nope", "Fal", "higgsfield-x", "ace-step"];
       const cases: Array<[string[], RegExp]> = [
         ...unknown.map((id): [string[], RegExp] => [[id, "claude", cliPath("claude"), "x", "user"], /unknown provider/]),
         [[known, "gemini", cliPath("claude"), "x", "user"], /unknown agent/],
@@ -1033,6 +1165,12 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
     }
   });
 
+  it("remove-provider.sh's usage error names its one flag, --no-sign-out", () => {
+    const result = runScript("remove-provider.sh", ["fal", "claude"]);
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("usage: sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>] [--no-sign-out]");
+  });
+
   it("remove-provider and replace-provider accept only the user, local or project scope, with exit 2 before running anything", () => {
     for (const name of ["remove-provider.sh", "replace-provider.sh"]) {
       for (const [agent, scope] of [["claude", "global"], ["claude", "User"], ["claude", "user;x"], ["codex", "--all"]] as const) {
@@ -1043,9 +1181,9 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
         expect(takeCalls(agent)).toEqual([]);
       }
       for (const scope of ["user", "local", "project"]) {
-        const result = runScript(name, ["elevenlabs", "claude", cliPath("claude"), "elevenlabs", scope], `${TRICKY_KEY}\n`);
+        const result = runScript(name, ["fal", "claude", cliPath("claude"), "fal-ai", scope], `${TRICKY_KEY}\n`);
         expect(result.status, result.stderr).toBe(0);
-        expect(takeCalls("claude")[0]).toEqual(["mcp", "remove", "--scope", scope, "--", "elevenlabs"]);
+        expect(takeCalls("claude")[0]).toEqual(["mcp", "remove", "--scope", scope, "--", "fal-ai"]);
       }
     }
   });
@@ -1126,16 +1264,16 @@ describe.each(SCRIPT_SHELLS)("the hidden key prompt, run by %s", (scriptShell) =
   const env = (): NodeJS.ProcessEnv => ({ HOME: root, SHELL: "/bin/bash", PATH: `${path.join(root, "bin")}:/usr/bin:/bin`, NODE_ENV: "test" });
 
   it("turns typing echo off for the key and back on right after it, before the add runs", () => {
-    const result = spawnSync(scriptShell, [scriptPath("add-provider.sh"), "elevenlabs", "claude", path.join(root, "bin", "claude")], {
+    const result = spawnSync(scriptShell, [scriptPath("add-provider.sh"), "fal", "claude", path.join(root, "bin", "claude")], {
       env: env(),
       input: "sk-prompt-key\n",
       encoding: "utf8",
       timeout: 20_000,
     });
     expect(result.status, result.stderr).toBe(0);
-    expect(result.stdout).toBe("ElevenLabs key: \n");
+    expect(result.stdout).toBe("fal.ai key: \n");
     expect(readFileSync(log(), "utf8")).toBe("-g\n-echo\nsaved-state\n");
-    expect(readFileSync(path.join(root, "bin", "claude.argv"), "utf8")).toContain("\nELEVENLABS_API_KEY=sk-prompt-key\n");
+    expect(readFileSync(path.join(root, "bin", "claude.argv"), "utf8")).toContain("\nAuthorization: Bearer sk-prompt-key\n");
   });
 
   it("Ctrl-C at the prompt ends the prompt's line, turns echo back on, exits 130, and saves and adds nothing", async () => {

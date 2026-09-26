@@ -534,8 +534,9 @@ describe("voice-replacement split — the two-reference pattern", () => {
     expect(fal).toContain("fal-ai/sync-lipsync/v2");
     expect(fal).toContain("fal-ai/latentsync");
     const el = read(elRef);
-    expect(el).toContain("voice_clone");
-    expect(el).toContain("text_to_speech");
+    // ElevenLabs' hosted server (2026-09-25): voices from the list, speech per segment.
+    expect(el).toContain("creative_list_voices");
+    expect(el).toContain("creative_generate_speech");
   });
 
   it("body names no vendor-prefixed endpoint id and points at the provider references", () => {
@@ -625,13 +626,17 @@ describe("voice-replacement split — the two-reference pattern", () => {
   it("the elevenlabs reference owns cloning + voice picking and says whose MCP it is", () => {
     const ref = read(elRef);
     expect(ref).toMatch(/^# ElevenLabs — provider reference for `voice-replacement`/m);
-    expect(ref).toMatch(/the user's own ElevenLabs\s+MCP\*\* — libi does not bundle or configure it\./);
+    expect(ref).toMatch(/the user's\s+own ElevenLabs MCP\*\* — libi does not bundle or configure it\./);
     expect(ref).toMatch(/## Cloning/);
-    expect(ref).toMatch(/\*\*`voice_clone`\*\* — the only way to clone the original speaker\./);
+    // The hosted server has no cloning tool: a voice cloned in ElevenLabs' app is in the list.
+    expect(ref).toMatch(/The hosted server has \*\*no cloning tool\*\*/);
     expect(ref).toMatch(/`libi\.extract_audio`/);
     expect(ref).toMatch(/using-character-library/);
+    expect(ref).toMatch(/"voice-changer"/);
     expect(ref).toMatch(/## Picking a voice/);
-    expect(ref).toMatch(/\*\*`list_voices`\*\* to browse, \*\*`text_to_speech`\*\* to generate each segment\./);
+    expect(ref).toMatch(/\*\*`creative_list_voices`\*\*, then run \*\*`creative_generate_speech`\*\* for each\s+segment with `generations_count: 1`\./);
+    // The call mechanics live in ai-asset-generation's ElevenLabs reference.
+    expect(ref).toMatch(/`ai-asset-generation`'s `references\/providers\/elevenlabs\.md`/);
     expect(ref).toMatch(/## Cost/);
     expect(ref).toMatch(/`libi\.generate_speech`, free, on-device/);
     expect(ref).toMatch(/Kokoro reads as flat on a UGC talking-head\./);
@@ -1231,6 +1236,27 @@ describe("music-creation split — local extension is the default provider", () 
     );
   });
 
+  /** music-creation/02 (2026-09-25): with ACE-Step blocked on `needs_install`, the agent told the user "a paid
+   *  music provider could skip the download" without checking what was connected — so it never named one, and never
+   *  called libi.list_providers. Both routes it can take (this skill's Stage 6, ai-asset-generation's Step 1.7) now
+   *  require the check before any paid alternative is mentioned. */
+  it("a paid alternative is named from libi.list_providers AND the tool list, never offered generically — here and in Step 1.7", () => {
+    expect(body).toMatch(
+      /Whenever you mention a paid alternative[\s\S]{0,200}answered `needs_install`[\s\S]{0,120}\*\*check\s+`libi\.list_providers\(\)` and your tool list first\*\*/,
+    );
+    const step17 = read("ai-asset-generation/SKILL.md").split(/^## Step 1\.7/m)[1].split(/^## /m)[0];
+    for (const text of [body, step17]) {
+      // list_providers reads the agent config and can lag the live tool list (it never sees test-mode fakes), so
+      // the tool list counts too — "none is connected" from list_providers alone could contradict it.
+      expect(text).toMatch(/name the\s+connected option\(s\)\s+that\s+can make music \(either source counts; your tool\s+list is authoritative\)/);
+      expect(text).toMatch(/bill\s+the user's own account/);
+      expect(text).toMatch(/If neither shows one, say so\./);
+      expect(text).toMatch(/Never offer a\s+generic "a paid\s+provider" you have not checked for\./);
+      expect(text).not.toMatch(/If none is connected/);
+    }
+    expect(step17).toMatch(/If you mention a paid alternative here[\s\S]{0,120}\*\*check `libi\.list_providers\(\)` and your tool list first\*\*/);
+  });
+
   it("keeps the decisions that must not move out of the body", () => {
     // Stage 0.5's reuse-vs-generate fork, its licensing caveat, and its tools.
     expect(body).toMatch(/^## Stage 0\.5 — Recreating a video that already has music\?/m);
@@ -1262,13 +1288,14 @@ describe("music-creation split — local extension is the default provider", () 
     expect(existsSync(path.join(skillsDir, elRef))).toBe(true);
   });
 
-  it("the elevenlabs reference owns compose_music and says whose MCP it is", () => {
+  it("the elevenlabs reference owns music generation and says whose MCP it is", () => {
     const ref = read(elRef);
     expect(ref).toMatch(/^# ElevenLabs — provider reference for `music-creation`/m);
-    expect(ref).toMatch(/the user's own ElevenLabs MCP\. libi does not bundle or\s+configure it\./);
+    expect(ref).toMatch(/the user's own ElevenLabs MCP\. libi does not bundle or configure\s+it\./);
     expect(ref).toMatch(
-      /\*\*`compose_music`\*\* — the generation tool\. Best vocal quality, especially for English\./,
+      /\*\*`creative_generate_in_flow`\*\* with `node_type: "music"` and `model_id: "eleven_music_v2"`\s+is the generation tool\. It has the best vocal quality, especially for English\./,
     );
+    expect(ref).toMatch(/\*\*Always `generations_count: 1`\.\*\*/);
     expect(ref).toMatch(
       /Paid, billed per generation\. \*\*Disclose the cost and get approval before every call\.\*\*/,
     );
@@ -1436,7 +1463,7 @@ describe("music-video-creation split — the wrapper escalates by kind, not by v
     // The elevenlabs half was pinned only POSITIVELY, so an edit could inline
     // `music-creation`'s ElevenLabs mechanics here and drift against that copy with
     // nothing to catch it — the exact class SHARED_IDS exists for, one level up.
-    // Naming `compose_music` while pointing AT its owner is the pointer, not the
+    // Naming the music tool while pointing AT its owner is the pointer, not the
     // mechanics; what may not appear is the billing rule and the voice-picking loop.
     expect(read(elRef)).not.toMatch(
       /list_voices|billed per generation|approval before every call/,
@@ -1499,7 +1526,7 @@ describe("music-video-creation split — the wrapper escalates by kind, not by v
  *     what `covered` names, or say plainly what libi cannot do", which IS this exit,
  *     minus the diarization-specific offer the skill adds. So the body still says it
  *     itself rather than paying a tool call to be told to.)
- *  2. **`speech_to_text` is still worth documenting**, because a user who connected
+ *  2. **ElevenLabs' STT is still worth documenting**, because a user who connected
  *     ElevenLabs for voice HAS it in their tool list and the gate says to use what you
  *     have. So the reference exists, in the same spirit as `voice-replacement`'s fal
  *     reference for lip-sync (a capability outside that provider's catalog kinds) — it
@@ -1591,18 +1618,37 @@ describe("audio-analysis split — Whisper is the provider, the paid STT is the 
     expect(ref).not.toMatch(/the (transcription )?provider libi recommends/i);
   });
 
-  it("the reference owns what speech_to_text buys, and the flat-string trap", () => {
+  /** Rewritten 2026-09-25 from a live paid run: the HOSTED `creative_transcribe_audio` returns flat text only (no
+   *  word timing, no speaker labels, no audio events) and has no option to ask for them. The reference used to sell
+   *  it for diarization, and the fake invented a `words` array to match, so an eval passed on a result reality
+   *  never returns. */
+  it("the reference says the hosted transcript is flat text only, and turns a speaker-label request down without spending", () => {
     const ref = read(elRef);
-    expect(ref).toMatch(/^## What `speech_to_text` adds$/m);
-    expect(ref).toContain("speaker_id");
-    expect(ref).toMatch(/`type`\s*\n?\(`word` \| `spacing` \| `audio_event`\)/);
-    expect(ref).toMatch(
-      /\*\*speaker diarization\*\* and\s+\*\*audio-event tags\*\* are the two things this buys/,
-    );
-    expect(ref).toMatch(/Take the `words` array, not the flat top-level text/);
+    expect(ref).toMatch(/^## What `creative_transcribe_audio` returns: flat text only$/m);
+    expect(ref).toMatch(/`transcripts\[\]\.text`/);
+    expect(ref).toMatch(/\*\*no per-word timing, no speaker labels and no audio events\*\*/);
+    // Only what the live run proved: no timings, speakers or events (it proved nothing about accuracy).
+    expect(ref).toMatch(/on this server ElevenLabs adds no\s+timings, speakers or audio events over Whisper/);
+    expect(ref).not.toMatch(/adds nothing over/);
+    expect(ref).toMatch(/the connected ElevenLabs can't label speakers or tag audio events/);
+    expect(ref).toMatch(/and don't spend on it/);
+    // The flat text goes to the user, never into the file's chunks: a words-less `ready` chunk is skipped by every
+    // later Whisper run, so the file could never be captioned (G5 review I2).
+    expect(ref).toMatch(/\*\*Then give the user that text\*\*/);
+    expect(ref).toMatch(/\*\*Do not save it through Path B's save step\.\*\*/);
+    expect(ref).toMatch(/A later Whisper run skips chunks already marked done/);
+    expect(ref).not.toMatch(/words: \[\]/);
+    expect(body).toMatch(/Save only a result that carries\s+word timings\. A provider that returns flat text only is NOT saved here/);
+    expect(body).not.toMatch(/saves `words: \[\]`/);
+    // The claims it used to make are gone.
+    expect(ref).not.toMatch(/can label \*\*speakers\*\*/);
+    expect(ref).not.toMatch(/Take per-word timing when the transcript carries it/);
+    // The older local server may still diarize: that is the one place speaker_id belongs.
+    const oldServer = ref.split(/\n\s*\n/).find((p) => p.includes("older local server"))!;
+    expect(oldServer).toContain("speaker_id");
     expect(ref).toMatch(/^## Cost$/m);
     expect(ref).toMatch(
-      /Paid, billed per minute of audio, on the user's own ElevenLabs account\./,
+      /Paid, billed per minute of audio, on the user's own ElevenLabs credits\./,
     );
     expect(ref).toMatch(/get explicit approval before the first chunk/);
     expect(ref).toMatch(/Local Whisper,\s+including its first-run model download, never needs approval/);
@@ -1621,7 +1667,7 @@ describe("audio-analysis split — Whisper is the provider, the paid STT is the 
     expect(ref).not.toMatch(/libi\.analysis_transcribe_audio\(\{ fileId/);
   });
 
-  /** ElevenLabs' STT is a named TOOL (`speech_to_text`), not a fal endpoint id, so there is
+  /** ElevenLabs' STT is a named TOOL (`creative_transcribe_audio`), not a fal endpoint id, so there is
    *  no id for this reference to name in the first place. (`music-creation` and
    *  `music-video-creation` also cited fake-fal's missing audio-kind entry; that gap has
    *  since been closed, which changes nothing here — an audio model in the KB is a music

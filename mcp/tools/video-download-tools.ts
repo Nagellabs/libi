@@ -1,10 +1,12 @@
-import fs from "node:fs";
-import path from "node:path";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types";
 import { runJobViaServer } from "@/mcp/jobs-client";
-import { getLibiBinDir } from "@/lib/libi-home";
-import { isWindows } from "@/lib/platform";
+import {
+  checkYtDlpLauncher,
+  VIDEO_DOWNLOAD_UI_PATH,
+  YT_DLP_UNAVAILABLE,
+} from "@/lib/video-download/launcher";
+import { isNetworkCause } from "@/lib/uv-env/network-failure";
 import { mcpLogger as logger } from "@/lib/logger";
 import type { ToolResult } from "./types";
 import type { DownloadVideoParams } from "./schemas";
@@ -55,13 +57,37 @@ export function canonicalizeVideoUrl(raw: string): string {
 }
 
 /**
- * The wrapper the `yt-dlp-uv` installer writes into `~/.libi/bin`. Mirrors
- * `ytDlpBinaryPath()` in the runner, which this process must not import
- * (nothing under `mcp/` imports `lib/jobs/*`). Only its EXISTENCE is read
- * here, to know whether this call is the first-use install.
+ * The agent-facing text for the LAST-RESORT failure: libi tried to install or
+ * repair yt-dlp itself and could not (offline, a proxy refusing PyPI, a full
+ * disk). Only a cause that reads as the network gets the "check you are
+ * online" advice; anything else is relayed as it is. Everything short of that
+ * libi fixes on its own inside the job, so
+ * this never asks the user to install anything by hand, never sends them to
+ * Settings (the extension lives under Agents → Libi MCP), and forbids the
+ * repair the owner's agent actually did on 2026-09-25 — `sed` on libi's
+ * launcher. `cause` is the job's own error, marker stripped.
  */
-function ytDlpWrapperPresent(): boolean {
-  return fs.existsSync(path.join(getLibiBinDir(), isWindows() ? "yt-dlp.cmd" : "yt-dlp"));
+export function needsInstallMessage(cause: string): string {
+  const where =
+    `${VIDEO_DOWNLOAD_UI_PATH}: the uv and yt-dlp chips there show the error, and their Download / ` +
+    "Retry / Re-download button reinstalls.";
+  const never =
+    "Do NOT edit, create or delete anything under ~/.libi/bin or ~/.libi/uv, and do not fall back to " +
+    "a system yt-dlp via Bash.";
+  const head =
+    `libi could not install or repair its video downloader (uv + yt-dlp) on this machine: ${cause}. ` +
+    "libi installs and repairs Video download itself.";
+  if (isNetworkCause(cause)) {
+    return (
+      `${head} This looks like a network problem (offline, or a network that blocks GitHub / PyPI). ` +
+      "Tell the user that in plain words, ask them to check they are online, and retry this tool ONCE " +
+      `when they say so. If it still fails, point them at ${where} ${never}`
+    );
+  }
+  return (
+    `${head} Tell the user plainly what failed (the reason above) and point them at ${where} ` +
+    `Retry this tool ONCE after they have done that. ${never}`
+  );
 }
 
 interface DownloadedVideo {
@@ -88,7 +114,17 @@ export async function downloadVideo(
   extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
 ): Promise<ToolResult> {
   const url = canonicalizeVideoUrl(params.url);
-  const firstUse = !ytDlpWrapperPresent();
+  // Only a launcher's EXISTENCE marks the first-use install; one that exists
+  // but points at nothing is a repair the job does on its own (and, with the
+  // uv tool still on disk, in seconds) — logged, not disclosed as a download.
+  const launcher = checkYtDlpLauncher();
+  const firstUse = !launcher.ok && launcher.reason === "missing";
+  if (!launcher.ok && !firstUse) {
+    logger.info(
+      { tag: "video-download", op: "launcher_repair_expected", reason: launcher.reason, target: launcher.target },
+      "yt-dlp launcher present but unusable; the job will reinstall it before downloading",
+    );
+  }
   if (firstUse) {
     logger.info(
       { tag: "video-download", op: "first_use_install", installMb: YT_DLP_INSTALL_MB },
@@ -116,26 +152,23 @@ export async function downloadVideo(
     return { success: true, data: firstUse ? { ...result, ytDlpInstalled: true } : { ...result } };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    // The wrapper is a tier-2 dependency of the youtube-download extension.
-    // The runner installs it itself, so reaching a spawn ENOENT (or a
-    // "uv not found" from the installer) means that install did not leave a
-    // usable wrapper — a recoverable state the user fixes from Settings, not
-    // an error the agent should retry.
-    if (/ENOENT|not found|no such file/i.test(message)) {
+    // The runner installs uv + yt-dlp itself, reinstalls a launcher whose
+    // target is gone, and repairs + retries once when yt-dlp cannot be
+    // started. It marks the one failure left over — libi could NOT make
+    // yt-dlp usable — with YT_DLP_UNAVAILABLE; only that is needs_install.
+    // (The old `/ENOENT|not found|no such file/` test also caught yt-dlp's
+    // own "Video not found" and sent the user off to reinstall.)
+    const at = message.indexOf(YT_DLP_UNAVAILABLE);
+    if (at !== -1) {
+      const cause = message.slice(at + YT_DLP_UNAVAILABLE.length).trim();
       logger.info(
         { tag: "video-download", op: "needs_install", message },
-        "yt-dlp wrapper absent after the job; returning needs_install",
+        "libi could not install or repair yt-dlp; returning needs_install",
       );
       return {
         success: false,
         error: "needs_install",
-        data: {
-          extensionId: EXTENSION_ID,
-          message:
-            `yt-dlp is not installed and libi could not install it automatically (${message}). ` +
-            `Tell the user this downloads uv + yt-dlp (public domain, ~${YT_DLP_INSTALL_MB} MB) onto their machine ` +
-            "and ask them to install the Video download extension from Settings, then retry.",
-        },
+        data: { extensionId: EXTENSION_ID, message: needsInstallMessage(cause) },
       };
     }
     return { success: false, error: "download_failed", data: { message } };

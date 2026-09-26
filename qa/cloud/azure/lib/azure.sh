@@ -156,8 +156,27 @@ fi
 #
 # An 8-hour session is therefore ~$3.31 Windows + ~$1.84 Linux. Compute is
 # NOT where the money goes — idle disks are. See LIBI_AZ_DISK_SKU below.
-: "${LIBI_AZ_WIN_SIZE:=Standard_D4s_v5}"
-: "${LIBI_AZ_LINUX_SIZE:=Standard_D4s_v5}"
+#
+# 2026-09-25: the default moved to Standard_E4bds_v5. The subscription is
+# pay-as-you-go (quotaId PayAsYouGo_2014-09-01, no spending limit), but vCPU
+# quota is PER FAMILY, and in swedencentral every v5 family except EBDSv5 has a
+# limit of 0 — so D4s_v5 failed `restore` with QuotaExceeded (standardDSv5Family,
+# limit 0). The v4/v3 D sizes that do have quota were refused for capacity
+# (SkuNotAvailable) the same day, and the v6 sizes need an NVMe disk controller
+# that `restore` does not pass. E4bds_v5 (EBDSv5, quota 10) restored the Windows
+# snapshot cleanly: 4 vCPU like before, 32 GB instead of 16, SCSI, Gen2.
+# swedencentral retail rates checked 2026-09-25:
+#
+#   size              vCPU/RAM   linux $/hr   windows $/hr
+#   Standard_E4bds_v5   4/32       0.355        0.539        <- chosen (has quota)
+#   Standard_D4s_v5     4/16       0.204        0.388        DSv5 quota 0
+#   Standard_D4s_v6     4/16       0.214        0.398        needs NVMe controller
+#
+# To go back to D4s_v5, raise "Standard DSv5 Family vCPUs" in swedencentral
+# (Azure portal → Quotas), then set LIBI_AZ_*_SIZE in azure.local.sh.
+# `lab.sh doctor` prints the configured size's family quota.
+: "${LIBI_AZ_WIN_SIZE:=Standard_E4bds_v5}"
+: "${LIBI_AZ_LINUX_SIZE:=Standard_E4bds_v5}"
 
 # Disk. Without music, libi's own footprint is ~10 GB (Chromium, ffmpeg, node,
 # the 345 MB adapter, whisper small 480 MB, Kokoro 124 MB, tracking pyenv+models

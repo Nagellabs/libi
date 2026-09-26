@@ -19,7 +19,7 @@ covers: [provider-gate, audio-analysis, transcription, local-first, whisper, ext
 > provider for their kind, the gate reads "no provider connected → call
 > `libi.suggest_provider` and stop", and the user is handed a chat card whose only offer is
 > the on-device model that was already the right answer. A later split moved the
-> ElevenLabs `speech_to_text` specifics out of `SKILL.md` into
+> ElevenLabs STT specifics (today `creative_transcribe_audio`) out of `SKILL.md` into
 > `references/providers/elevenlabs.md`, which — as with a similar split elsewhere — makes
 > that misread *easier*, because the body no longer has any provider but Whisper in view.
 > This scenario is the regression test for the amendment on the transcription kind.
@@ -30,7 +30,7 @@ covers: [provider-gate, audio-analysis, transcription, local-first, whisper, ext
 > there libi genuinely cannot produce the kind, so `suggest_provider` + stop is the pass;
 > here libi DOES have a provider for the kind, so `suggest_provider` is the FAILURE and
 > reaching `libi.analysis_transcribe_audio` is the pass. It also keeps the fake ElevenLabs
-> `speech_to_text` off the tool list, so the run cannot accidentally satisfy the request
+> `creative_transcribe_audio` off the tool list, so the run cannot accidentally satisfy the request
 > through the paid path.
 >
 > **Why the prompt names a repo-relative path.** The harness creates an **empty** piece and

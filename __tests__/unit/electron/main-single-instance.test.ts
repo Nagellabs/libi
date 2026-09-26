@@ -27,6 +27,8 @@ const h = vi.hoisted(() => ({
   createSplash: vi.fn(),
   resolveRuntime: vi.fn(),
   runInstallPhase: vi.fn(),
+  userData: "/tmp/libi-main-single-instance-userdata",
+  lockedOn: [] as string[],
   windows: [] as Array<Record<string, ReturnType<typeof vi.fn>> & { minimized: boolean }>,
 }));
 
@@ -65,13 +67,16 @@ vi.mock("electron", () => ({
     on: (event: string, fn: (...args: unknown[]) => unknown) => {
       h.handlers.set(event, fn);
     },
-    getPath: () => "/tmp/libi-main-single-instance-userdata",
+    getPath: (k: string) => (k === "appData" ? "/tmp/libi-main-single-instance-appdata" : h.userData),
+    setName: vi.fn(),
     quit: h.quit,
     relaunch: vi.fn(),
     exit: vi.fn(),
     commandLine: { appendSwitch: vi.fn() },
     disableHardwareAcceleration: vi.fn(),
-    setPath: vi.fn(),
+    setPath: (k: string, v: string) => {
+      if (k === "userData") h.userData = v;
+    },
     dock: { setIcon: vi.fn() },
   },
   BrowserWindow: vi.fn(function FakeBrowserWindow() {
@@ -112,10 +117,16 @@ beforeEach(() => {
   h.windows.length = 0;
   h.isPackaged = true;
   h.lock = true;
+  h.userData = "/tmp/libi-main-single-instance-userdata";
+  h.lockedOn.length = 0;
   for (const fn of [h.requestSingleInstanceLock, h.quit, h.bootstrapPath, h.mainSyncLog, h.createSplash, h.resolveRuntime, h.runInstallPhase]) {
     fn.mockReset();
   }
-  h.requestSingleInstanceLock.mockImplementation(() => h.lock);
+  // Record the userData the lock was keyed on at the moment it was requested.
+  h.requestSingleInstanceLock.mockImplementation(() => {
+    h.lockedOn.push(h.userData);
+    return h.lock;
+  });
   h.bootstrapPath.mockImplementation(() => ({ probeSettled: Promise.resolve() }));
   h.createSplash.mockImplementation(() => fakeWindow());
   h.resolveRuntime.mockImplementation(() => ({
@@ -221,6 +232,38 @@ describe("electron/main.ts: one running app per data folder", () => {
     expect(h.windows).toHaveLength(1);
     const main = h.windows[0] as unknown as { webContents: { on: ReturnType<typeof vi.fn> } };
     expect(main.webContents.on).toHaveBeenCalledWith("context-menu", expect.any(Function));
+  });
+
+  it("LIBI_USER_DATA_DIR moves the lock: a QA copy beside the operator's Libi locks its own folder and boots", async () => {
+    // The real bootstrap this time — the point is the ORDER across the two
+    // modules: userData must already be the override when main.ts asks for
+    // the lock, or the QA copy collides with the operator's app and quits.
+    vi.doUnmock("../../../electron/libi-home-bootstrap");
+    delete process.env.LIBI_HOME;
+    const qaDir = path.join(libiHome, "qa-user-data");
+    process.env.LIBI_USER_DATA_DIR = qaDir;
+    try {
+      await importMain();
+    } finally {
+      vi.doMock("../../../electron/libi-home-bootstrap", () => ({}));
+    }
+
+    expect(h.lockedOn).toEqual([qaDir]);
+    expect(process.env.LIBI_HOME).toBe(qaDir);
+    expect(h.quit).not.toHaveBeenCalled();
+    expect(h.bootstrapPath).toHaveBeenCalledTimes(1);
+  });
+
+  it("without LIBI_USER_DATA_DIR the lock stays on the pinned default folder", async () => {
+    vi.doUnmock("../../../electron/libi-home-bootstrap");
+    delete process.env.LIBI_HOME;
+    delete process.env.LIBI_USER_DATA_DIR;
+    try {
+      await importMain();
+    } finally {
+      vi.doMock("../../../electron/libi-home-bootstrap", () => ({}));
+    }
+    expect(h.lockedOn).toEqual([path.join("/tmp/libi-main-single-instance-appdata", "libi")]);
   });
 
   it("dev launches never take the lock, so the Electron e2e harness can run beside a dev shell on the same LIBI_HOME", async () => {

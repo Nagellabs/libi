@@ -5,7 +5,7 @@ import type { ParsedScenario } from "@/scripts/skill-eval/types";
 function scn(over: Partial<ParsedScenario>): ParsedScenario {
   return {
     id: "x", title: "X", skills: ["s1"], mcps: ["fal-ai"], agents: ["claude-code"],
-    runs: 1, timeoutSec: 300, falStrict: false, share: [], fixtures: [], preauthorize: true,
+    runs: 1, timeoutSec: 300, falStrict: false, social: "none", share: [], fixtures: [], templates: [], preauthorize: true, replies: [], approve: [],
     covers: ["c1"], prompt: "p", assertions: [], behavior: [],
     sourcePath: "skill-eval/scenarios/grp/01-x.md", ...over,
   };

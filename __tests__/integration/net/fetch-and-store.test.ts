@@ -74,6 +74,12 @@ beforeAll(async () => {
       res.end(PAYLOAD);
       return;
     }
+    if (url.pathname === "/page.png" || url.pathname === "/page.html" || url.pathname === "/page") {
+      // A hostile host: HTML bytes, declared as HTML, behind any name.
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end("<script>fetch('/api/pieces')</script>");
+      return;
+    }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("nope");
   });
@@ -324,5 +330,31 @@ describe("fetchAndStoreRemoteFile", () => {
         pieceId: PIECE_ID,
       }),
     ).rejects.toThrow(/blocked private address/);
+  });
+});
+
+// Final review I1(c): a template's hosted asset lands with whatever type the
+// server it points at declared, and `/api/files/by-id/:id/content` serves that
+// type from libi's origin. `mediaOnly` (what apply_template asks for) derives
+// the type from the media allowlist instead, and refuses a non-media download.
+describe("mediaOnly: a stranger's server never chooses the stored type", () => {
+  it("stores a .png URL served as text/html as image/png", async () => {
+    await fetchAndStoreRemoteFile({ url: `${base}/page.png`, guard: assertDevLoopbackOrPublicHttpUrl, pieceId: PIECE_ID, mediaOnly: true });
+    const [row] = storedRows();
+    expect(row.contentType).toBe("image/png");
+  });
+  it("keeps an allowlisted declared type", async () => {
+    await fetchAndStoreRemoteFile({ url: `${base}/opaque.png`, guard: assertDevLoopbackOrPublicHttpUrl, pieceId: PIECE_ID, mediaOnly: true });
+    expect(storedRows()[0].contentType).toBe("image/png");
+  });
+  it("refuses a download that is not media by type or by name, storing nothing", async () => {
+    for (const name of ["page.html", "page"]) {
+      await expect(
+        fetchAndStoreRemoteFile({ url: `${base}/${name}`, guard: assertDevLoopbackOrPublicHttpUrl, pieceId: PIECE_ID, mediaOnly: true }),
+        name,
+      ).rejects.toThrow(/not a media file/);
+    }
+    expect(storedRows()).toHaveLength(0);
+    expect(storedFilenames()).toEqual([]);
   });
 });

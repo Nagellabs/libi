@@ -1,4 +1,5 @@
 "use client";
+import { useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { DetectedMcp, ProviderDetection } from "@/lib/providers/detect";
 import type { ProviderId } from "@/lib/providers/catalog";
@@ -10,7 +11,13 @@ import type { ProviderId } from "@/lib/providers/catalog";
  *  configured. `codex` is set when Codex's rows are not a fresh answer: `stale`
  *  rows are codex's last good listing, and `unread` means there are no Codex
  *  rows because codex gave no listing (see `ProviderDetection`). */
-export type ProvidersResponse = { connected: DetectedMcp[]; error?: string; codex?: ProviderDetection["codex"] };
+export type ProvidersResponse = {
+  connected: DetectedMcp[];
+  error?: string;
+  codex?: ProviderDetection["codex"];
+  /** Test mode only: the entry names libi's stdio fakes are attached to Codex under (see the route). */
+  testModeCodexFakes?: string[];
+};
 
 // ── Query keys ──────────────────────────────────────────────────────
 
@@ -30,6 +37,9 @@ export type LegacyKeyNotice = {
 
 // ── Queries ─────────────────────────────────────────────────────────
 
+/** A fetch this long after the previous one is a new look, not a poll (see `useProviders`). */
+const LOOK_GAP_MS = 30_000;
+
 async function fetchProviders(query = ""): Promise<ProvidersResponse> {
   const res = await fetch(`/api/providers${query}`);
   if (!res.ok) throw new Error("failed to read providers");
@@ -47,19 +57,38 @@ async function fetchProviders(query = ""): Promise<ProvidersResponse> {
 export function useProviders({
   enabled = true,
   refetchInterval = 10_000,
-}: { enabled?: boolean; refetchInterval?: number | false } = {}) {
+  revalidateOnLook = false,
+}: {
+  enabled?: boolean;
+  /** A number, `false`, or a function of the latest answer (to poll while it says something is being checked). */
+  refetchInterval?: number | false | ((data: ProvidersResponse | undefined) => number | false);
+  /**
+   * A fetch that is not one of the poll's — the first one (the tab opened), or one after a gap of
+   * `LOOK_GAP_MS` (the window came back into view) — says the user is looking (`?revalidate=1`), and the server
+   * asks Claude Code again about an entry whose answer is not "signed in" and not recent: they may have signed in
+   * through their own Claude Code. Never on a poll.
+   */
+  revalidateOnLook?: boolean;
+} = {}) {
+  const lastFetchAt = useRef(0);
   return useQuery({
     enabled,
     queryKey: providerKeys.all,
-    queryFn: () => fetchProviders(),
-    refetchInterval,
+    queryFn: () => {
+      const now = Date.now();
+      const look = revalidateOnLook && now - lastFetchAt.current >= LOOK_GAP_MS;
+      lastFetchAt.current = now;
+      return fetchProviders(look ? "?revalidate=1" : "");
+    },
+    refetchInterval: typeof refetchInterval === "function" ? (query) => refetchInterval(query.state.data) : refetchInterval,
   });
 }
 
 /**
  * Retry. A plain refetch can be answered from the server's 5 s memo of a codex
  * listing that just failed, so this reads with `?refresh=1`, which asks codex
- * again (joining a listing already running), and writes the answer into
+ * again (joining a listing already running) — and Claude Code again about an
+ * entry it has not said is signed in — and writes the answer into
  * `useProviders`' cache.
  */
 export function useRefreshProviders() {

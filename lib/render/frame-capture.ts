@@ -11,6 +11,8 @@ import { loadComposition } from "@/lib/composition/persistence";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import type { AudioClip, Composition, ExportSettings, Overlay } from "@/lib/engine/types";
+import { getCompositionFrames } from "@/lib/engine/renderer";
+import { roundToMs } from "@/lib/engine/overlay-timing";
 import { getDb } from "@/lib/db/client";
 import { files as filesTable } from "@/lib/db/schema";
 import type { RenderPayload } from "@/lib/export/render-jobs";
@@ -19,8 +21,10 @@ import { getLibiStorageDir } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 
 export interface CapturedFrame {
-  time: number;  // requested timestamp (seconds)
-  path: string;  // absolute path to the written PNG
+  time: number;       // requested timestamp (seconds)
+  frame: number;      // the absolute composition frame drawn for it
+  frameTime: number;  // that frame's own composition second (frame / fps)
+  path: string;       // absolute path to the written PNG
 }
 
 export interface RenderFramesOptions {
@@ -85,6 +89,80 @@ export function overlayFileIds(overlays: readonly Overlay[]): string[] {
     if (content && typeof content.fileId === "string") ids.add(content.fileId);
   }
   return [...ids];
+}
+
+/** How close (seconds) a requested time must be to a frame's time to mean
+ *  that frame: the precision diagnostics report times in (ms). */
+const FRAME_SNAP_S = 0.001;
+
+/**
+ * The composition frame a requested time shows.
+ *
+ * A time within 1 ms of a frame's time IS that frame. A render diagnostic
+ * reports its failing frame's time rounded to ms (`buildExportDiagnosticsReport`),
+ * and the manual tells the agent to pass that time straight back here; 30 fps
+ * frame 2 is reported as 0.067, and 0.067 × 30 = 2.01. Without the snap that
+ * time drew frame 3 — and since this path renders ONLY the frames asked for,
+ * the frame that failed was never re-checked (Task 12b re-review 2, N1).
+ *
+ * Any other time takes the first frame at or after `t`: what `ffmpeg -ss t`
+ * picked when this path rendered the whole piece and cut PNGs out of it
+ * (accurate seek keeps the first frame whose pts ≥ t — measured, 30 fps:
+ * 1.01 → 31), so the picture is unchanged. The epsilon absorbs float noise in
+ * `t × fps` (0.1 × 30 is 3.0000000000000004, and ffmpeg picks frame 3).
+ *
+ * Clamped to the piece, so a time after the last frame's own time but before
+ * the end (4.99 s of a 5 s piece at 30 fps) is the last frame — the one on
+ * screen then. A time at or past the END is not a frame of the piece at all:
+ * `renderCompositionFrames` refuses it (`FrameTimesOutOfRangeError`) before
+ * this is asked.
+ */
+export function frameForTime(t: number, fps: number, totalFrames: number): number {
+  const time = Math.max(0, t);
+  const nearest = Math.round(time * fps);
+  const frame = Math.abs(time - nearest / fps) <= FRAME_SNAP_S + 1e-9 ? nearest : Math.ceil(time * fps - 1e-6);
+  return Math.max(0, Math.min(frame, Math.max(0, totalFrames - 1)));
+}
+
+/** The last frame's time, rounded to ms — which `frameForTime` maps back to
+ *  that frame. */
+export function lastValidTime(fps: number, totalFrames: number): number {
+  return roundToMs(Math.max(0, totalFrames - 1) / fps);
+}
+
+/** A requested time at or past the end of the piece (or within the 1 ms that
+ *  snaps onto the end). */
+function isPastEnd(t: number, fps: number, totalFrames: number): boolean {
+  return Math.max(0, t) >= totalFrames / fps - FRAME_SNAP_S - 1e-9;
+}
+
+const seconds = (s: number) => `${Math.round(s * 1000) / 1000} s`;
+
+/**
+ * Times the piece has no frame for (Task 12b re-review 2, N2). Clamping them
+ * to the last frame answered "what does the end card look like at 5 s?" with
+ * a different moment labelled 5 s; the old whole-piece path failed loudly
+ * there. So each such time is refused, naming the duration and the last time
+ * that renders, and nothing is rendered.
+ */
+export class FrameTimesOutOfRangeError extends Error {
+  readonly duration: number;
+  readonly lastValidTime: number;
+  readonly errors: { time: number; error: string }[];
+
+  constructor(times: number[], fps: number, totalFrames: number) {
+    const duration = Math.round((totalFrames / fps) * 1000) / 1000;
+    const last = lastValidTime(fps, totalFrames);
+    const why =
+      totalFrames > 0
+        ? `the piece is ${seconds(duration)} long (${totalFrames} frames at ${fps} fps), so the last valid time is ${last} (frame ${totalFrames - 1})`
+        : "the piece is empty (0 s long): it has no frame to render";
+    super(`atTimes ${times.join(", ")} ${times.length === 1 ? "is" : "are"} at or past the end of the piece: ${why}.`);
+    this.name = "FrameTimesOutOfRangeError";
+    this.duration = duration;
+    this.lastValidTime = last;
+    this.errors = times.map((time) => ({ time, error: `${time} is at or past the end of the piece: ${why}.` }));
+  }
 }
 
 /** Bitrate for the verify-only chromium render. The MP4 is a transient
@@ -189,6 +267,17 @@ export async function renderCompositionFrames(
     files: [...pieceFiles, ...globalFiles],
   };
 
+  // Only the frames the agent asked to see (Task 12b review): rendering the
+  // whole piece and cutting PNGs out afterwards made this tool cost piece
+  // length × body cost — 77.6 s for a 5 s piece with one 500 ms body, past the
+  // MCP client's 60 s timeout. Several times can land on one frame.
+  const totalFrames = getCompositionFrames(stub);
+  const pastEnd = times.filter((t) => isPastEnd(t, manifest.fps, totalFrames));
+  if (pastEnd.length > 0) throw new FrameTimesOutOfRangeError(pastEnd, manifest.fps, totalFrames);
+  const frameOf = new Map(times.map((t) => [t, frameForTime(t, manifest.fps, totalFrames)]));
+  const frameList = Array.from(new Set(frameOf.values())).sort((a, b) => a - b);
+  payload.frames = frameList;
+
   // Compute output resolution (capped for speed, no upscale)
   const { width, height } = computeVerifyDims(
     manifest.width,
@@ -221,7 +310,7 @@ export async function renderCompositionFrames(
     // ignore readdir errors (dir may have just been created)
   }
 
-  // Run the Chromium render backend to produce a full-composition MP4
+  // Run the Chromium render backend: an MP4 holding exactly `frameList`, in order
   const backend = new ChromiumRenderBackend();
   const result = await backend.run({
     pieceId,
@@ -236,15 +325,19 @@ export async function renderCompositionFrames(
   const mp4Path = path.join(outDir, `_verify-source-${randomUUID().slice(0, 8)}.mp4`);
   await fs.writeFile(mp4Path, Buffer.from(await result.blob.arrayBuffer()));
 
-  // Extract one PNG per requested timestamp via ffmpeg
+  // Extract one PNG per requested timestamp via ffmpeg: the file's frame i is
+  // `frameList[i]`, picked by index so no timestamp rounding can land on its
+  // neighbour.
   const frames: CapturedFrame[] = [];
   for (const t of times) {
     const outPng = path.join(outDir, `frame-${Math.round(t * 1000)}ms.png`);
+    const frame = frameOf.get(t)!;
+    const index = frameList.indexOf(frame);
     await runFfmpeg(
-      ["-y", "-ss", String(t), "-i", mp4Path, "-frames:v", "1", outPng],
+      ["-y", "-i", mp4Path, "-vf", `select=eq(n\\,${index})`, "-frames:v", "1", outPng],
       { op: "render_verify_frame" },
     );
-    frames.push({ time: t, path: outPng });
+    frames.push({ time: t, frame, frameTime: frame / manifest.fps, path: outPng });
   }
 
   // Clean up the temp MP4; keep PNGs for caller inspection

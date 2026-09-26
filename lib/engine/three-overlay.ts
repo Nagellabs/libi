@@ -1,163 +1,32 @@
-/** three.js overlay runtime: ONE shared WebGLRenderer for all 3D overlays,
- *  plus a per-overlay instance that builds its scene ONCE and exposes a
- *  synchronous render() that the 2D compositor drawImage's onto the frame.
- *  three is lazy-imported so the base bundle is unaffected until a
- *  3D overlay is used. Text is rendered via the dependency-free Canvas2D-texture
+/** three.js overlay runtime: a per-overlay instance that COMPILES a `three`
+ *  body, builds its scene ONCE and exposes a synchronous render() that the 2D
+ *  compositor drawImage's onto the frame. Only the sandboxed overlay runtime
+ *  (`lib/sandbox/runtime/three.ts`) calls it. The renderer pool and instance
+ *  contract live in the compiler-free leaf `three-renderer.ts` (re-exported
+ *  here) — import THAT from any page that must not be able to compile a body.
+ *  three is lazy-imported so the base bundle is unaffected until a 3D overlay
+ *  is used. Text is rendered via the dependency-free Canvas2D-texture
  *  replacement in lib/engine/canvas-text.ts (NOT troika-three-text). */
 
-import { THREE_PARAM_NAMES } from "@/lib/ai/scene-validator";
 import { makeCanvasTextClass } from "@/lib/engine/canvas-text";
 import { DRAW_HELPERS } from "@/lib/engine/draw-helpers";
-import type { ContentBoundsNDC } from "@/lib/engine/three-content-bounds";
 import { applyCameraPreset, THREE3D_HELPERS, type CameraPreset } from "@/lib/engine/three-helpers";
-import type { Transform3D } from "@/lib/engine/types";
-import { IDENTITY_TRANSFORM3D } from "@/lib/overlays/transform3d";
+import {
+  compileThreeBody,
+  defaultWrapperLineOffset,
+  mapBodyError,
+} from "@/lib/sandbox/runtime/compile";
+import type { SharedThreeRenderer, ThreeFrameApi, ThreeOverlayInstance } from "@/lib/engine/three-renderer";
 
-export interface ThreeFrameApi {
-  frame: number;
-  time: number;
-  totalFrames: number;
-  duration: number;
-  progress: number;
-  /** Gizmo-driven 3D transform applied to the scene root this frame. A template
-   *  MAY read it (most won't — the renderer already applies it via
-   *  applyTransform before render). Identity/absent ⇒ no transform. */
-  readonly transform3d?: Transform3D;
-  /** Voice-synced caption word timings (element-local seconds) when the overlay
-   *  carries `caption.words`. The 3D-text reveal drives karaoke / word-current /
-   *  typewriter off THESE (paired with `time`) instead of the linear `progress`;
-   *  a custom three caption body reads them with the injected word helpers.
-   *  Absent/empty ⇒ fall back to progress-based reveal. */
-  readonly words?: import("@/lib/captions/types").CaptionCueWord[];
-}
-
-export interface SharedThreeRenderer {
-  renderer: import("three").WebGLRenderer;
-  dispose(): void;
-}
-
-export interface ThreeOverlayInstance {
-  /** Per-frame closure captured from the body's return (undefined for a static scene). */
-  update?: (api: ThreeFrameApi) => void;
-  /** Apply the gizmo 3D transform to the scene ROOT (position/rotation).
-   *  Identity (or absent) leaves the render byte-identical (no-op). Called by the
-   *  overlay renderer immediately before render(). */
-  applyTransform: (t: Transform3D) => void;
-  /** Synchronous: size the shared renderer and render, returning the GL canvas.
-   *  The `three` overlay renders the scene into the base rect (window model) and
-   *  ignores the trailing super-frame args. The 3D-TEXT instance
-   *  (lib/engine/text-3d/build-text-three.ts) still uses the optional
-   *  expanded/offset args to render into a content-bounds super-frame via
-   *  camera.setViewOffset — both impls share this interface. */
-  render: (
-    baseW: number,
-    baseH: number,
-    expandedW?: number,
-    expandedH?: number,
-    offsetX?: number,
-    offsetY?: number,
-  ) => HTMLCanvasElement | OffscreenCanvas;
-  /** Free geometries/materials/textures + canvas-text instances. */
-  dispose: () => void;
-  /** Project the scene's content AABB to normalized viewport bounds — used ONLY by
-   *  the 3D-TEXT path (content-bounds super-frame). The `three` overlay (window
-   *  model) does NOT implement this; callers use optional chaining. */
-  contentBoundsNDC?: () => ContentBoundsNDC | null;
-  /** Resolves when initial text rasterization completes (export gate). Canvas2D
-   *  text is synchronous, so this settles on the next microtask. */
-  ready: Promise<void>;
-}
-
-/** Create ONE renderer. `preserveDrawingBuffer` is REQUIRED so the 2D ctx can
- *  drawImage the WebGL canvas after render() in the same tick.
- *
- *  NOTE (perf, measured 2026-06-27): a renderer must be sized by AT MOST ONE
- *  overlay. Sharing a renderer across multiple active 3D overlays of different
- *  expanded sizes makes `render()` call `setSize()` (a native GL drawing-buffer
- *  realloc — `canvas.width = …` reallocs even for the same value) once PER
- *  overlay PER frame, which churns GPU memory and triggers a recurring major GC
- *  (~38ms, ~0.7×/s) → dropped frames + visible stutter. The fix is a per-overlay
- *  renderer (see `OverlayRendererPool`) so each renderer only ever sees one
- *  overlay's (mostly stable) size. See
- *  docs-local/superpowers/notes/smoothness-fixture.md. */
-export async function createSharedThreeRenderer(): Promise<SharedThreeRenderer> {
-  const THREE = await import("three");
-  const renderer = new THREE.WebGLRenderer({
-    alpha: true,
-    antialias: true,
-    preserveDrawingBuffer: true,
-  });
-  renderer.setPixelRatio(1);
-  renderer.setClearColor(0x000000, 0);
-  return {
-    renderer,
-    dispose() {
-      renderer.dispose();
-      renderer.forceContextLoss();
-    },
-  };
-}
-
-/** Max DEDICATED per-overlay renderers (WebGL contexts) a single pool hands out.
- *  Browsers cap total live contexts at ~16; with two pools (3D scenes + quads)
- *  this keeps the combined ceiling safe. Overlays beyond the cap share ONE
- *  fallback renderer (degrades to the old per-frame-realloc behaviour for the
- *  overflow only — a logged, bounded degradation). */
-export const MAX_OVERLAY_RENDERERS = 6;
-
-/** Hands out a dedicated `SharedThreeRenderer` per overlay id (up to
- *  `maxDedicated`), so an overlay's per-frame `render()` only ever resizes its
- *  OWN GL drawing buffer — never another overlay's. Overflow overlays share a
- *  single lazily-created fallback renderer. One pool per hook; dispose on unmount. */
-export interface OverlayRendererPool {
-  /** Renderer for this overlay id (created on first request; cached by id). */
-  acquire(id: string): Promise<SharedThreeRenderer>;
-  /** Dispose + drop the dedicated renderer for this id (no-op for the fallback). */
-  release(id: string): void;
-  /** Dispose every dedicated renderer + the fallback. */
-  disposeAll(): void;
-}
-
-export function createOverlayRendererPool(
-  maxDedicated: number = MAX_OVERLAY_RENDERERS,
-): OverlayRendererPool {
-  const dedicated = new Map<string, SharedThreeRenderer>();
-  let fallback: SharedThreeRenderer | null = null;
-  let warnedOverflow = false;
-  return {
-    async acquire(id: string): Promise<SharedThreeRenderer> {
-      const existing = dedicated.get(id);
-      if (existing) return existing;
-      if (dedicated.size < maxDedicated) {
-        const r = await createSharedThreeRenderer();
-        // Re-check: another concurrent acquire for the same id may have won.
-        const raced = dedicated.get(id);
-        if (raced) { r.dispose(); return raced; }
-        dedicated.set(id, r);
-        return r;
-      }
-      if (!fallback) fallback = await createSharedThreeRenderer();
-      if (!warnedOverflow) {
-        warnedOverflow = true;
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[overlay-3d] >${maxDedicated} concurrent 3D overlays — extras share one renderer (may stutter). Reduce active 3D overlays for smooth playback.`,
-        );
-      }
-      return fallback;
-    },
-    release(id: string) {
-      const r = dedicated.get(id);
-      if (r) { r.dispose(); dedicated.delete(id); }
-    },
-    disposeAll() {
-      for (const r of dedicated.values()) r.dispose();
-      dedicated.clear();
-      fallback?.dispose();
-      fallback = null;
-    },
-  };
-}
+export {
+  createOverlayRendererPool,
+  createSharedThreeRenderer,
+  MAX_OVERLAY_RENDERERS,
+  type OverlayRendererPool,
+  type SharedThreeRenderer,
+  type ThreeFrameApi,
+  type ThreeOverlayInstance,
+} from "@/lib/engine/three-renderer";
 
 /** Build one overlay instance. Compiles the body via the same injected-param
  *  signature validateThreeFunction checks, invokes it ONCE to populate the
@@ -166,6 +35,18 @@ export async function buildThreeInstance(
   body: string,
   cameraPreset: CameraPreset | undefined,
   shared: SharedThreeRenderer,
+  /** The layer's logical size, passed to the body as `width`/`height`. The
+   *  historical value was 0/0 ("bodies that need it read camera.aspect"); the
+   *  sandboxed runtime passes the real rect (spec §4.3). Callers that have no
+   *  size yet keep the historical behaviour. */
+  size: { width: number; height: number } = { width: 0, height: 0 },
+  /** Lines `new Function` prepends to the body, so a `build` throw reports the
+   *  body's own line. Measured once per runtime, not assumed. */
+  wrapperLineOffset: number = defaultWrapperLineOffset(),
+  /** Called the moment before the body's factory runs. The sandbox runtime
+   *  announces the body's owner here (async-owner.ts): a build runs inside a
+   *  `load`, which the host does not bracket the way it brackets a render. */
+  beforeBody?: () => void,
 ): Promise<ThreeOverlayInstance> {
   const THREE = await import("three");
 
@@ -186,8 +67,13 @@ export async function buildThreeInstance(
     }
   }
 
-  // eslint-disable-next-line no-new-func
-  const factory = new Function(...[...THREE_PARAM_NAMES], body) as (
+  // Validated at COMPILE, not only on the MCP write paths: `compileThreeBody`
+  // runs `validateThreeFunction` before `new Function`, so a body that reached
+  // a piece without the write-time gate (a preset merge, an applied template, a
+  // hand-edited or restored manifest) is refused here as a BodyError("compile")
+  // and never runs. An EMPTY body compiles to a no-op and keeps rendering an
+  // empty scene, as it always has. This runs only inside the sandboxed runtime.
+  const factory = compileThreeBody(body, wrapperLineOffset) as (
     ...args: unknown[]
   ) => ((api: ThreeFrameApi) => void) | undefined;
 
@@ -200,17 +86,23 @@ export async function buildThreeInstance(
   const camQuatBefore = camera.quaternion.clone();
 
   // Order MUST match THREE_PARAM_NAMES: THREE, scene, camera, renderer, width, height, Text, helpers, three3d.
-  const update = factory(
-    THREE,
-    scene,
-    camera,
-    shared.renderer,
-    0, // width — overlays size at render time; bodies that need it read camera.aspect
-    0, // height
-    TrackedText,
-    DRAW_HELPERS,
-    THREE3D_HELPERS,
-  );
+  let update: ((api: ThreeFrameApi) => void) | undefined;
+  beforeBody?.();
+  try {
+    update = factory(
+      THREE,
+      scene,
+      camera,
+      shared.renderer,
+      size.width,
+      size.height,
+      TrackedText,
+      DRAW_HELPERS,
+      THREE3D_HELPERS,
+    );
+  } catch (err) {
+    throw mapBodyError(err, "build", wrapperLineOffset);
+  }
 
   const bodyAuthoredCamera =
     !camera.position.equals(camPosBefore) || !camera.quaternion.equals(camQuatBefore);
@@ -308,6 +200,12 @@ export async function buildThreeInstance(
   // makes a static overlay size its buffer once and never realloc again.
   let _lastW = -1;
   let _lastH = -1;
+  // What the drawing buffer measured right after this instance last sized it.
+  // A renderer SHARED past the pool's cap, or one shrunk by idle eviction, can
+  // be resized behind this instance's back; comparing the live buffer catches
+  // that without a realloc when nothing changed (reading `width` is free).
+  let _bufW = -1;
+  let _bufH = -1;
 
   return {
     update: typeof update === "function" ? update : undefined,
@@ -333,10 +231,13 @@ export async function buildThreeInstance(
       scene.scale.setScalar(1);
     },
     render(baseW, baseH) {
-      if (baseW !== _lastW || baseH !== _lastH) {
+      const buf = shared.renderer.domElement as { width?: number; height?: number } | undefined;
+      if (baseW !== _lastW || baseH !== _lastH || (buf?.width ?? -1) !== _bufW || (buf?.height ?? -1) !== _bufH) {
         shared.renderer.setSize(baseW, baseH, false);
         _lastW = baseW;
         _lastH = baseH;
+        _bufW = buf?.width ?? -1;
+        _bufH = buf?.height ?? -1;
       }
       if (baseW > 0 && baseH > 0) {
         camera.aspect = baseW / baseH;
@@ -359,6 +260,11 @@ export async function buildThreeInstance(
       }
       shared.renderer.render(scene, camera);
       return shared.renderer.domElement;
+    },
+    releaseDrawingBuffer() {
+      shared.renderer.setSize(1, 1, false);
+      _lastW = -1;
+      _lastH = -1;
     },
     dispose() {
       for (const t of texts) t.dispose();

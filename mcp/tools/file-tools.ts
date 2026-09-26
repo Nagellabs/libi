@@ -3,6 +3,7 @@
 import path from "path";
 import * as fs from "fs/promises";
 import { probeMedia } from "@/lib/ffmpeg/probe";
+import { audioProxyReason } from "@/lib/ffmpeg/audio-preview";
 import { alphaRecoverableInPreview } from "@/lib/ffmpeg/alpha";
 import { getStorage } from "@/lib/storage";
 import { getDb } from "@/lib/db/client";
@@ -282,6 +283,32 @@ export function categorizeFileType(
   return "other";
 }
 
+/** The categories `categorizeFileType` can answer besides `other`. */
+const KNOWN_FILE_CATEGORIES: ReadonlySet<string> = new Set(["image", "video", "audio", "document", "font"]);
+
+/** "an" before a vowel-initial category word ("an audio", "an image"), "a" otherwise. */
+export function articleFor(word: string): "a" | "an" {
+  return /^[aeiou]/i.test(word) ? "an" : "a";
+}
+
+/**
+ * A stored file's category, for the kind gates (an overlay's `fileId`, a
+ * template slot's value). `files.type` is trusted only when it IS one of the
+ * known categories: `libi.save_asset` stores the agent's free-text type
+ * verbatim (`image/png`, `audio/voiceover`), and a row written before
+ * extension inference existed says `other` for a real image or video. Anything
+ * else is re-derived from the content type and filename. `other` means still
+ * unknown, which a gate must let through.
+ */
+export function fileCategoryOf(file: {
+  type: string | null;
+  contentType: string | null;
+  filename: string | null;
+}): string {
+  if (file.type && KNOWN_FILE_CATEGORIES.has(file.type)) return file.type;
+  return categorizeFileType(file.contentType, file.filename);
+}
+
 export interface StoreFileParams {
   pieceId: string | null;
   filename: string;
@@ -409,6 +436,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
   let resolvedWidth = mediaWidth;
   let resolvedHeight = mediaHeight;
   let probedVideoCodec: string | undefined;
+  let probedMedia: Awaited<ReturnType<typeof probeMedia>> | undefined;
   const category = categorizeFileType(contentType, sanitizedFilename);
   const needsProbe =
     category === "video"
@@ -418,6 +446,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
         : false;
   if (needsProbe) {
     const probed = await probeMedia(storage.localPath(pieceId, sanitizedFilename));
+    probedMedia = probed;
     resolvedHasAudio ??= probed.hasAudio;
     resolvedHasAlpha ??= probed.hasAlpha;
     resolvedDuration ??= probed.duration;
@@ -484,6 +513,23 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
       { fileId: record.id },
       { pieceId: record.pieceId, fileId: record.id },
     ).catch((err) => logProxyGenEnqueueFailure(record.id, err));
+  }
+
+  // An audio file the preview can't play itself (a chained Ogg, FLAC in Ogg,
+  // a codec WebCodecs doesn't decode) gets an AAC proxy, which the preview's
+  // audio engine plays instead (lib/ffmpeg/audio-preview.ts, review round 4).
+  // (An MP3, AAC or FLAC file holds only its own codec, which the preview
+  // plays: no probe for those.)
+  if (record.type === "audio" && !params.skipProxyGeneration && !/\.(mp3|aac|flac)$/i.test(sanitizedFilename)) {
+    const localPath = storage.localPath(pieceId, sanitizedFilename);
+    const reason = await audioProxyReason(localPath, probedMedia ?? (await probeMedia(localPath)));
+    if (reason) {
+      void enqueueJobOnServer(
+        "proxy_gen",
+        { fileId: record.id },
+        { pieceId: record.pieceId, fileId: record.id },
+      ).catch((err) => logProxyGenEnqueueFailure(record.id, err));
+    }
   }
 
   return record;

@@ -4,10 +4,6 @@ export function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function getAssetUrl(pieceId: string, filename: string): string {
-  return `/api/files/${pieceId}/${filename}`;
-}
-
 /**
  * Compact relative time ("just now", "5m ago", "3d ago", else a date).
  * Returns "—" for absent or unparseable input, so callers can render it

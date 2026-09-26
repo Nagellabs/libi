@@ -12,11 +12,15 @@
 // still correct, the tools just appear later), shells out to the user's OWN
 // `claude`/`codex` binaries, and records and writes libi's skills for both
 // agents through the install service, so a running libi keeps them current.
-// Finding the two CLIs takes up to ~10 s in the worst case: they resolve one
-// after the other (Claude's registration runs in between), and each resolution
-// is a bounded login-shell PATH probe (≤ 2 s; reused only if the previous one
-// is under 5 s old) plus `--version` (≤ 3 s). Each `mcp add` it then runs has
-// its own 30 s bound on top of that.
+// Finding the two CLIs takes up to ~31 s in the worst case: they resolve one
+// after the other (Claude's registration runs in between), and each
+// resolution is independently bounded at ~15.5 s (login-shell PATH probe plus
+// up to 4 `--version` candidates at ≤ 3 s each — see resolveAgentCli in
+// AGENTS.md § MCP). Each `mcp add` it then runs has
+// its own 30 s bound on top of that. Before the codex add it asks codex, read-
+// only, what `libi` is registered as (`codex mcp list --json`, the shared
+// listing's 15 s bound) and skips the add when the entry already says the
+// right thing — see `codexAlreadyConnected` in ./connect.ts.
 //
 // It is NOT free of side effects under `~/.libi`, though: the install service
 // opens the database, and `getDb()` creates the standard `LIBI_HOME` scaffold
@@ -24,6 +28,7 @@
 // this command writes there, and it is a consequence of reading and recording
 // skill installs, not of booting anything.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { getMcpPortFile } from "@/lib/libi-home";
@@ -31,8 +36,11 @@ import { resolveAgentCli, type ResolvedAgentCli } from "@/lib/agents/cli/resolve
 import { resolveCmdShimNativeTarget, spawnViaNodeIfScript } from "@/lib/agents/cli/spawn-shape";
 import { isWindows } from "@/lib/platform";
 import type { UserCliSource } from "@/lib/agents/user-cli";
-import { backupCodexConfig } from "@/lib/codex-config/backup";
+import { ensureCodexConfigBackup } from "@/lib/codex-config/backup";
 import { resolveCodexHome } from "@/lib/codex-config/canonical";
+import { readCodexMcpListing, type CodexMcpListing } from "@/lib/agents/codex-mcp-listing";
+import type { CodexMcpListEntry } from "@/lib/codex-config/codex-cli";
+import type { ResolvedBin } from "@/lib/agents/cli/spawn-shape";
 import { addSkillInstall, listSkillInstalls } from "@/mcp/skills/installs";
 import { trackServerEvent } from "@/lib/analytics/server";
 import {
@@ -46,8 +54,11 @@ import {
 interface RunResult {
   ok: boolean;
   stderr: string;
-  /** Where `config.toml` was copied to before a codex write, if anywhere. */
+  /** Where `config.toml` was copied to before a codex write, if a NEW copy was taken. */
   configBackup?: string | null;
+  /** A copy holding the bytes codex was about to rewrite — the new one, or an
+   *  earlier run's when those bytes were unchanged. Set whenever one exists. */
+  priorConfig?: string;
 }
 
 /**
@@ -66,12 +77,12 @@ function backupCodexConfigFor(
   bin: string,
   args: string[],
   env?: Record<string, string>,
-): string | null {
+): { path: string; created: boolean } | null {
   const base = path.basename(bin).toLowerCase();
   const isCodex = base === "codex" || base === "codex.exe";
   const writes = args[0] === "mcp" && (args[1] === "add" || args[1] === "remove");
   if (!isCodex || !writes) return null;
-  return backupCodexConfig(env?.CODEX_HOME ?? resolveCodexHome());
+  return ensureCodexConfigBackup(env?.CODEX_HOME ?? resolveCodexHome());
 }
 
 /** The one shape of `child_process.execFile` this module uses, narrowed so a
@@ -166,7 +177,9 @@ export function makeRun(
     // Present only when a copy was actually taken, so a claude add — or a codex
     // call with nothing yet to protect — keeps the exact `{ ok, stderr }` shape
     // every other caller was written against.
-    const configBackup = backup ? { configBackup: backup } : {};
+    const configBackup: Pick<RunResult, "configBackup" | "priorConfig"> = backup
+      ? { ...(backup.created ? { configBackup: backup.path } : {}), priorConfig: backup.path }
+      : {};
     const first = await exec(execFileImpl, bin, args, cwd, env);
     const isAdd = args[0] === "mcp" && args[1] === "add";
     if (first.ok || !isAdd || !/already exists/i.test(first.stderr)) {
@@ -179,6 +192,28 @@ export function makeRun(
 }
 
 const run = makeRun();
+
+/**
+ * Build `ConnectDeps["listCodex"]`: codex's own listing through the shared
+ * reader (`lib/agents/codex-mcp-listing.ts`) — never a read of `config.toml`.
+ * Only a FRESH listing is an answer; anything else is `null`, and connect then
+ * adds as it always did.
+ *
+ * The home is the one the add will WRITE: `libi connect` runs `codex mcp add`
+ * with the inherited env, so codex resolves `CODEX_HOME`, else its own default
+ * `~/.codex`. `resolveCodexHome()` would diverge under LIBI_TEST_MODE (it
+ * points at libi's scoped home), and a listing of a different home than the
+ * one being written could skip an add that was needed.
+ */
+export function makeListCodex(
+  read: (cmd: ResolvedBin, opts: { codexHome: string }) => Promise<CodexMcpListing> = readCodexMcpListing,
+): (bin: string) => Promise<CodexMcpListEntry[] | null> {
+  return async (bin) => {
+    const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+    const listing = await read(spawnShapeFor(bin), { codexHome });
+    return listing.state === "fresh" ? listing.entries : null;
+  };
+}
 
 /** `libi connect` finds the CLIs through the same resolver as the app. A
  *  found-but-broken CLI is still handed over: `mcp add` will fail loudly and
@@ -235,8 +270,10 @@ export async function connectCommand(
       findClaude: async () => toUserCliSource(await resolveAgentCli("claude-code", { holdEventLoop: true })),
       findCodex: async () => toUserCliSource(await resolveAgentCli("codex", { holdEventLoop: true })),
       run,
+      listCodex: makeListCodex(),
       installSkills: addSkillInstall,
       listInstalls: listSkillInstalls,
+      onProgress: (message) => process.stdout.write(`[libi] ${message}\n`),
     },
   );
 

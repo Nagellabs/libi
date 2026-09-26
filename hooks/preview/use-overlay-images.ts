@@ -13,7 +13,8 @@ interface ImageEntry {
 function pickImageOverlays(overlays: Overlay[]): Array<{ overlayId: string; fileId: string }> {
   const out: Array<{ overlayId: string; fileId: string }> = [];
   for (const o of overlays) {
-    if (o.kind === "image") {
+    // An unfilled template slot has no file: fetching `unfilled-<key>` only 404s.
+    if (o.kind === "image" && o.unfilledSlot === undefined) {
       out.push({ overlayId: o.id, fileId: o.fileId });
     } else if (o.kind === "tracked" && o.content.kind === "image") {
       out.push({ overlayId: o.id, fileId: o.content.fileId });
@@ -27,7 +28,8 @@ function pickImageOverlays(overlays: Overlay[]): Array<{ overlayId: string; file
  * elements is external mutable state (browser resources, not render data), so
  * it is published to React through useSyncExternalStore instead of a
  * setState-inside-effect cascade. `reconcile` only emits when the keyed set
- * actually changed, so identical SSE refetches never re-render consumers.
+ * actually changed, so identical SSE refetches never re-render consumers; the
+ * one other emit is an element finishing its load.
  */
 function createImageStore() {
   const map = new Map<string, ImageEntry>();
@@ -43,6 +45,19 @@ function createImageStore() {
 
   const load = (overlayId: string, fileId: string) => {
     const img = new Image();
+    // Publish again once the element has DECODED, not only when it is
+    // created: the sandbox hands `loadImage` bodies bitmaps made from loaded
+    // elements only, so on a freshly opened piece it would otherwise never
+    // see an image that finished after its first reconcile (and the player
+    // repaints a paused frame with the image now drawable). An element the
+    // store already let go of publishes nothing.
+    img.addEventListener(
+      "load",
+      () => {
+        if (map.get(overlayId)?.img === img) publish();
+      },
+      { once: true },
+    );
     img.src = `/api/files/by-id/${fileId}/content`;
     img.crossOrigin = "anonymous";
     map.set(overlayId, { img, fileId });

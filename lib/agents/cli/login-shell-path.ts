@@ -51,10 +51,26 @@ export interface LoginShellPathDeps {
 
 let memo: { at: number; dirs: string[] } | null = null;
 let inflight: Promise<string[]> | null = null;
+/** The last PATH a probe actually delivered — kept past the 5 s memo, and past later probes that gave nothing. */
+let lastGood: string[] | null = null;
 
 export function __clearLoginShellPathMemo(): void {
   memo = null;
   inflight = null;
+  lastGood = null;
+}
+
+/**
+ * The login-shell PATH the most recent successful probe delivered, or `null`
+ * when no probe has delivered one yet in this process. NEVER spawns: it is for
+ * callers polled too often to probe themselves (provider detection asks every
+ * few seconds while a setup terminal is open). A probe that times out, closes
+ * without both markers or fails to spawn yields `[]` to its own caller and
+ * leaves this untouched — "no answer" is not "an empty PATH". Always `null` on
+ * Windows, which has no login shell.
+ */
+export function lastLoginShellPathDirs(): string[] | null {
+  return lastGood;
 }
 
 /** The PATH entries between the two markers; null unless BOTH markers are present. */
@@ -149,6 +165,7 @@ export async function loginShellPathDirs(deps: LoginShellPathDeps = {}): Promise
   }).then((dirs) => {
     memo = { at: now(), dirs };
     inflight = null;
+    if (dirs.length > 0) lastGood = dirs;
     return dirs;
   });
   return inflight;

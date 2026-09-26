@@ -43,6 +43,16 @@ describe("the release build repairs the Electron binary", () => {
     ).toContain("ensure-electron-binary");
   });
 
+  it("runs ensure-electron-binary before the Electron test suite", () => {
+    // `npm run test:electron` launches node_modules/electron's binary for every
+    // spec. On Node 24, electron's own install.js exits 0 part-way through its
+    // unzip (extract-zip's promise never settles and the event loop drains),
+    // leaving dist/ holding only LICENSES.chromium.html — reproduced on a fresh
+    // `npm ci` in a worktree, 2026-09-26. Without the repair, every launching
+    // spec dies with "Electron failed to install correctly".
+    expect(scripts()["pretest:electron"] ?? "").toContain("ensure-electron-binary");
+  });
+
   it("keeps the repair script on disk", () => {
     expect(fs.existsSync(path.join(ROOT, "scripts", "ensure-electron-binary.js"))).toBe(true);
   });

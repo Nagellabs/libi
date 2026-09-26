@@ -77,4 +77,16 @@ describe("MediaBunnyExportFrameSource", () => {
     expect(idOf(src, 0.5)).toBe(2);
     expect(sink.state.starts.length).toBe(2); // initial + one restart
   });
+
+  it("reads a file that starts at 1.5 s from its own start (Review M6)", async () => {
+    // Raw timestamps 1.5, 1.75, …; source time 0 is raw 1.5 — where ffmpeg,
+    // which mixes the export's audio, puts it too.
+    const sink = fakeSink(Array.from({ length: 8 }, (_, i) => frame(i, 1.5 + i / 4)));
+    const src = new MediaBunnyExportFrameSource("", sink, 1.5);
+    await src.seekAndDecode(0);
+    expect(idOf(src, 0)).toBe(0);
+    await src.seekAndDecode(0.5);
+    expect(idOf(src, 0.5)).toBe(2);
+    expect(sink.state.starts[0]).toBe(1.5);
+  });
 });

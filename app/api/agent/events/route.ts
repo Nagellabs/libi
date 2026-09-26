@@ -1,4 +1,5 @@
 import { getSessionManager } from "@/lib/sessions/session-manager";
+import { isSessionMidTurn } from "@/lib/sessions/types";
 import type { AgentEvent } from "@/lib/agents/types";
 import type { SystemEvent } from "@/lib/sessions/types";
 import {
@@ -6,6 +7,7 @@ import {
   type NavigateEvent,
   type RefreshQueryEvent,
   type NavigateAgentsEvent,
+  type NavigateTemplatesEvent,
   type OverlayErrorEvent,
   type HighlightEvent,
   type HighlightEffectEvent,
@@ -24,6 +26,7 @@ export async function GET(req: Request) {
   let refreshHandlerRef: ((event: RefreshQueryEvent) => void) | null = null;
   let systemHandlerRef: ((event: SystemEvent) => void) | null = null;
   let navAgentsHandlerRef: ((e: NavigateAgentsEvent) => void) | null = null;
+  let navTemplatesHandlerRef: ((e: NavigateTemplatesEvent) => void) | null = null;
   let overlayErrorHandlerRef: ((e: OverlayErrorEvent) => void) | null = null;
   let highlightHandlerRef: ((e: HighlightEvent) => void) | null = null;
   let highlightEffectHandlerRef: ((e: HighlightEffectEvent) => void) | null = null;
@@ -43,6 +46,7 @@ export async function GET(req: Request) {
       navigationEmitter.off("refresh_query", refreshHandlerRef);
     if (systemHandlerRef) sm.offSystemEvent(systemHandlerRef);
     if (navAgentsHandlerRef) navigationEmitter.off("navigate_agents", navAgentsHandlerRef);
+    if (navTemplatesHandlerRef) navigationEmitter.off("navigate_templates", navTemplatesHandlerRef);
     if (overlayErrorHandlerRef)
       navigationEmitter.off("overlay_error", overlayErrorHandlerRef);
     if (highlightHandlerRef) navigationEmitter.off("highlight", highlightHandlerRef);
@@ -125,6 +129,20 @@ export async function GET(req: Request) {
       };
       navAgentsHandlerRef = navAgentsHandler;
       navigationEmitter.on("navigate_agents", navAgentsHandler);
+
+      const navTemplatesHandler = (event: NavigateTemplatesEvent) => {
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ type: "navigate_templates", ...event })}\n\n`,
+            ),
+          );
+        } catch {
+          navigationEmitter.off("navigate_templates", navTemplatesHandler);
+        }
+      };
+      navTemplatesHandlerRef = navTemplatesHandler;
+      navigationEmitter.on("navigate_templates", navTemplatesHandler);
 
       const overlayErrorHandler = (event: OverlayErrorEvent) => {
         try {
@@ -209,8 +227,39 @@ export async function GET(req: Request) {
       // A comment line is ignored by every SSE parser but forces the flush.
       controller.enqueue(encoder.encode(": connected\n\n"));
 
+      // Each active session's REAL state. A connection can open mid-turn — a
+      // page reload, or the client's EventSource reconnecting after sleep, a
+      // network blip or a dev recompile — and `thinking` is only ever emitted
+      // at turn start, so announcing `connected` here told the client a
+      // working session was idle: the Stop button vanished and the next
+      // message skipped the steer path. A busy session is `streaming` (the
+      // client's mid-turn status), never `thinking`, which the client treats
+      // as a turn START and would split the in-flight reply in two.
+      //
+      // Then its pending approvals, oldest first. A request is emit-only —
+      // never in the message cache — so a client that (re)connects while a
+      // turn waits on one would show the turn busy with no card to answer:
+      // the agent blocks until the user presses Stop. The reducer ignores a
+      // pendingId it already shows, so an EventSource reconnect can't double
+      // a card.
       for (const sid of sm.getActiveSessionIds()) {
-        send(sid, { type: "agent-status", status: "connected" });
+        const entry = sm.getSession(sid);
+        send(sid, {
+          type: "agent-status",
+          status: isSessionMidTurn(entry) ? "streaming" : "connected",
+        });
+        const pending = [...(entry?.pendingApprovals?.values() ?? [])].sort(
+          (a, b) => a.createdAt - b.createdAt,
+        );
+        for (const p of pending) {
+          send(sid, {
+            type: "agent-permission-request",
+            pendingId: p.pendingId,
+            toolCall: p.toolCall,
+            options: p.options,
+            reason: p.reason ?? "acp",
+          });
+        }
       }
 
       // Keep-alive: an idle stream that sends nothing for minutes can be

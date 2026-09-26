@@ -89,14 +89,16 @@ your own tool list through **Path B** below — `libi.analysis_transcribe_audio`
 Whisper-only.
 
 If this skill ships a reference for your provider — `references/providers/<id>.md` under
-this skill — read it before you start: it names the tool that returns the `words` array
-Path B wants, what it actually buys over Whisper, and how it bills.
+this skill — read it before you start: it says what that provider's transcript actually
+carries (some return flat text only, with no timing and no speaker labels, and then they
+cannot label speakers either), what it buys over Whisper, and how it bills.
 
 If you have no `transcription` provider, say so plainly rather than sending the user
 shopping: libi's own transcription provider is on-device Whisper, and it does not
 diarize, so speaker labels need an STT tool on a provider MCP the user connects
-themselves. `libi.list_providers()` shows what is connected. Let them decide between
-connecting one and accepting a non-diarized transcript.
+themselves, whose result actually carries them.
+`libi.list_providers()` shows what is connected. Let them decide between connecting one
+and accepting a non-diarized transcript.
 
 ## Path B — your own STT provider
 
@@ -110,7 +112,11 @@ ships for it — the agent drives the pipeline itself:
 3. Save: `libi.analysis_save_audio_chunk({ chunkId, text, words, language?,
    languageProbability? })` (chunk-relative timestamps; server offsets
    them) — or `libi.analysis_save_audio_chunk_from_file({ chunkId,
-   jsonPath })` when the payload is large.
+   jsonPath })` when the payload is large. Save only a result that carries
+   word timings. A provider that returns flat text only is NOT saved here: a
+   save marks the chunks done with no timings, Whisper skips chunks already
+   done, and the file could never be captioned. Hand that text to the user
+   instead, and use Whisper for anything timed.
 4. Auto-aggregates when the last chunk lands.
 
 ## Long files

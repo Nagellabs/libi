@@ -50,6 +50,41 @@ function codexNoteFor(def: ProviderDef, flavor: ShellFlavor | undefined): string
   return `Add asks for your key and saves it as ${def.codexKeyEnv} ${where}, where Codex reads it. Restart libi and Codex afterwards.`;
 }
 
+/** The entry name the catalog's Codex add gives the provider (`codex mcp add <name> …`). */
+function codexEntryName(def: ProviderDef): string | undefined {
+  return def.commands ? /^codex mcp add (\S+)/.exec(def.commands.codex)?.[1] : undefined;
+}
+
+/**
+ * Test mode: libi attaches its stdio fakes to Codex under the real entry names, and codex merges an ACP entry into
+ * a config entry of the same name field by field, so a real HTTP entry of that name makes codex refuse its whole
+ * config (`TEST_MODE_STDIO_FAKE_NAMES` in lib/mcp-config.ts). No Add of such a provider on Codex, and an entry that
+ * is already there is named as the cause.
+ */
+function testModeCodexNote(
+  def: ProviderDef,
+  agentId: SetupAgentId,
+  model: ChipModel,
+  fakes: string[] | undefined,
+): { note: string; blocksAdd: boolean } | null {
+  if (agentId !== "codex" || !fakes?.length) return null;
+  if (model.state === "not-added") {
+    const name = codexEntryName(def);
+    if (!name || !fakes.includes(name)) return null;
+    return {
+      note: `Test mode: libi gives Codex its own fake ${def.name} under the name ${name}, and a real ${def.name} entry of that name would make Codex refuse its whole config. Add it outside test mode.`,
+      blocksAdd: true,
+    };
+  }
+  if (model.detected?.transport === "http" && fakes.includes(model.detected.name)) {
+    return {
+      note: `Test mode: this entry has the name libi's fake ${def.name} uses, so Codex refuses its whole config and its chats in libi can't start. Remove it, or run libi outside test mode.`,
+      blocksAdd: true,
+    };
+  }
+  return null;
+}
+
 /** Whether this agent's add asks for a key: its catalog command carries the key, or Codex reads it from its environment. */
 function takesKey(def: ProviderDef, agentId: SetupAgentId): boolean {
   if (!def.commands) return false;
@@ -62,6 +97,8 @@ const REMOTE_PROVIDERS = PROVIDER_CATALOG.filter((d) => d.kind === "remote-mcp")
 
 /** Detection re-reads this often while a command may be running in the tab's terminal. */
 const DETECTION_POLL_MS = 3000;
+/** And this often while libi is asking Claude Code whether it has signed in to an entry (`signInCheck`). */
+const SIGN_IN_CHECK_POLL_MS = 1500;
 
 interface ChipModel {
   state: ChipState;
@@ -79,8 +116,9 @@ function readyCli(agentId: SetupAgentId, status: AgentStatus | undefined): Setup
 }
 
 function detectedEntry(agentId: SetupAgentId, detected: DetectedMcp): DetectedProviderEntry | null {
-  if (agentId === "codex") return { agentId: "codex", name: detected.name };
-  return detected.scope ? { agentId: "claude-code", name: detected.name, scope: detected.scope } : null;
+  // The transport tells a remove whether there is a sign-in to clear (a local entry of a sign-in provider has a key).
+  if (agentId === "codex") return { agentId: "codex", name: detected.name, transport: detected.transport };
+  return detected.scope ? { agentId: "claude-code", name: detected.name, scope: detected.scope, transport: detected.transport } : null;
 }
 
 /**
@@ -138,9 +176,9 @@ function providerAction(action: SetupAction | undefined): ProviderScriptAction |
 /**
  * The line under the row whose add, replace or sign-in is open in the terminal, once detection shows what it did.
  * "Start a new chat" only when the acting agent's entry is Connected. An add or replace of a provider the user
- * signs in to with an account that is not signed in yet says to sign in instead: Claude Code's add finishes before
- * any sign-in, and libi can't see Claude Code's sign-in at all. After a Sign in libi can't see, it says nothing.
- * A chip that lists its setup steps (`stepped`) says what is left in its own next step, so the row adds nothing.
+ * signs in to with an account that is not signed in yet says to sign in instead. After a Sign in libi can't see,
+ * it says nothing. A chip that lists its setup steps (`stepped`) says what is left in its own next step, so the
+ * row adds nothing.
  */
 function rowNotice(
   def: ProviderDef,
@@ -148,8 +186,11 @@ function rowNotice(
   action: string | null | undefined,
   state: ChipState,
   stepped: boolean,
+  launcherAfterStart = false,
 ): RowNotice | null {
   if (action !== "provider-add" && action !== "provider-replace" && action !== "provider-sign-in") return null;
+  // Its launcher came after this agent's process in libi started: the chip says to restart libi, not to start a chat.
+  if (state === "connected" && launcherAfterStart) return null;
   if (state === "connected") {
     return { tone: "ready", text: `${def.name} is connected. Start a new chat to use it — an agent loads its MCP servers when a chat starts.` };
   }
@@ -197,7 +238,16 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
   const terminalLive = Boolean(terminal && !terminal.exited && !terminal.gone);
   const endedTerminalId = terminal && (terminal.exited || terminal.gone) ? terminal.id : null;
   const visible = useDocumentVisible();
-  const providersQuery = useProviders({ enabled: visible, refetchInterval: terminalLive ? DETECTION_POLL_MS : false });
+  // A Claude sign-in that ends in the terminal is announced by the script, and the server asks Claude Code once
+  // then (`lib/providers/sign-in-markers.ts`); the 3 s poll picks the answer up. Opening the tab, or coming back to
+  // it, re-asks about an entry not signed in (`revalidateOnLook`).
+  const providersQuery = useProviders({
+    enabled: visible,
+    // While Claude Code is being asked whether it has signed in to an entry, poll until it has answered.
+    refetchInterval: (data) =>
+      terminalLive ? DETECTION_POLL_MS : data?.connected.some((row) => row.signInCheck === "pending") ? SIGN_IN_CHECK_POLL_MS : false,
+    revalidateOnLook: true,
+  });
   const statusQuery = useAllAgentStatus();
   const flavor = useShellFlavor().data;
   const scriptsDirQuery = useSetupScriptsDir();
@@ -366,9 +416,17 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
                 // This row's command for the agent shown, while it is open in the tab's terminal.
                 const acting = anchor?.providerId === def.id && anchor.agentId === agent.id;
                 const liveAction = terminalLive && acting ? providerAction(terminal?.action) : null;
-                const steps = providerSetupSteps({ def, agentId: agent.id, state: model.state, scopeUnreadable, liveAction });
+                const steps = providerSetupSteps({
+                  def,
+                  agentId: agent.id,
+                  state: model.state,
+                  scopeUnreadable,
+                  liveAction,
+                  transport: model.detected?.transport,
+                });
                 const { cli, entry } = model;
                 const actionable = !docsOnly && cli !== null;
+                const testMode = testModeCodexNote(def, agent.id, model, providers?.testModeCodexFakes);
                 // Not signed in, or libi can't see the sign-in: Sign in, with Remove beside it.
                 const signInState = model.state === "needs-sign-in" || model.state === "sign-in-unknown";
                 // A docs-only provider has nothing to add; it shows the agent only when that agent already has it.
@@ -384,25 +442,35 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
                         actionsEnabled: Boolean(flavor && scriptsDir),
                         note: agent.id === "codex" ? codexNoteFor(def, flavor) : undefined,
                         keyed: takesKey(def, agent.id),
+                        missingCommand: model.state === "cant-start" ? model.detected?.missingCommand : undefined,
+                        windowsHost: flavor === "powershell",
                         stale: model.stale,
                         steps: steps ?? undefined,
-                        signInHint:
-                          model.state === "sign-in-unknown"
-                            ? `libi can't see whether ${agent.name} has signed in to ${def.name}. If you already have, it's ready to use.`
-                            : undefined,
+                        terminalSubmitted: Boolean(liveAction && terminal?.submitted),
+                        signInHint: signInHintFor(model, agent.name, def.name),
+                        launcherAfterStart: model.detected?.launcherAfterStart === true,
+                        testModeNote: testMode?.note,
                         onRetry: retryProviders,
                         onAdd:
-                          actionable && cli && model.state === "not-added"
+                          actionable && cli && model.state === "not-added" && !testMode?.blocksAdd
                             ? () =>
                                 run(def, agent.id, "provider-add", (f, dir) => providerAddCommand(cli, f, def, dir), (f) =>
                                   explainSetupCommand({ action: "provider-add", agentId: agent.id, provider: def, flavor: f }),
                                 )
                             : undefined,
+                        // Needs key: a new key. Can't start: the catalog's current add in place of an entry whose
+                        // launcher is missing. Both are the same remove-then-add script.
                         onReplace:
-                          actionable && cli && entry && model.state === "needs-key"
+                          actionable && cli && entry && (model.state === "needs-key" || model.state === "cant-start") && !testMode?.blocksAdd
                             ? () =>
                                 run(def, agent.id, "provider-replace", (f, dir) => providerReplaceCommand(cli, f, def, entry, dir), (f) =>
-                                  explainSetupCommand({ action: "provider-replace", agentId: agent.id, provider: def, flavor: f }),
+                                  explainSetupCommand({
+                                    action: "provider-replace",
+                                    agentId: agent.id,
+                                    provider: def,
+                                    flavor: f,
+                                    missingCommand: model.state === "cant-start" ? model.detected?.missingCommand : undefined,
+                                  }),
                                 )
                             : undefined,
                         onSignIn:
@@ -413,7 +481,7 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
                                 )
                             : undefined,
                         onRemove:
-                          actionable && cli && entry && (model.state === "connected" || signInState)
+                          actionable && cli && entry && (model.state === "connected" || model.state === "cant-start" || signInState)
                             ? () =>
                                 run(def, agent.id, "provider-remove", (f, dir) => providerRemoveCommand(cli, f, entry, def, dir), (f) =>
                                   explainSetupCommand({
@@ -422,13 +490,16 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
                                     provider: def,
                                     flavor: f,
                                     scope: "scope" in entry ? String(entry.scope) : undefined,
+                                    transport: entry.transport,
                                   }),
                                 )
                             : undefined,
                       };
                 // A last known state is not what the command just did.
                 const notice =
-                  acting && !model.stale ? rowNotice(def, agent.name, terminal?.action, model.state, steps !== null) : null;
+                  acting && !model.stale
+                    ? rowNotice(def, agent.name, terminal?.action, model.state, steps !== null, model.detected?.launcherAfterStart === true)
+                    : null;
                 return (
                   <ProviderRow
                     key={def.id}
@@ -455,6 +526,19 @@ export function ProvidersTab({ provider }: { provider: string | null }) {
       </p>
     </div>
   );
+}
+
+/**
+ * Why a `sign-in-unknown` chip can't say whether the agent is ready. Claude Code answers when libi asks it
+ * (`lib/providers/claude-signin-probe.ts`): while it is being asked, the line says so; when it gave no answer libi
+ * could read, and for a Codex entry codex gives no answer for, it says libi can't tell.
+ */
+function signInHintFor(model: ChipModel, agentName: string, providerName: string): string | undefined {
+  if (model.state !== "sign-in-unknown") return undefined;
+  if (model.detected?.signInCheck === "pending") return `Asking ${agentName} whether it has signed in to ${providerName}.`;
+  return model.detected?.agent === "claude"
+    ? `${agentName} didn't say whether it has signed in to ${providerName}. If you already have, it's ready to use.`
+    : `libi can't see whether ${agentName} has signed in to ${providerName}. If you already have, it's ready to use.`;
 }
 
 function ReadError({

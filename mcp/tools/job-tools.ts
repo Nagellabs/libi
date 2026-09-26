@@ -17,11 +17,37 @@ import {
   LibiServerUnavailableError,
 } from "@/mcp/jobs-client";
 import type { ToolResult } from "./types";
+import { frameDroppedOverlay } from "./body-message";
 import type {
   CancelJobParams,
   GetJobStatusParams,
   ListJobsParams,
 } from "./schemas";
+
+/**
+ * An export job's result carries `droppedOverlays`, whose messages are mostly
+ * text a failing overlay BODY produced — untrusted. They reach the agent here
+ * too (a polled export), so they get the same bound and mark as
+ * libi.export_video's result and renderDiagnostics (`./body-message.ts`); a
+ * dropped VIDEO keeps libi's own mark and loses its name, the same way.
+ */
+export function frameDroppedOverlaysInResult(resultJson: string | null): string | null {
+  if (!resultJson) return resultJson;
+  try {
+    const result: unknown = JSON.parse(resultJson);
+    if (!result || typeof result !== "object") return resultJson;
+    const dropped = (result as { droppedOverlays?: unknown }).droppedOverlays;
+    if (!Array.isArray(dropped)) return resultJson;
+    const framed = dropped.map((d: unknown) =>
+      d && typeof d === "object" && typeof (d as { message?: unknown }).message === "string"
+        ? frameDroppedOverlay(d as { id: string; message: string })
+        : d,
+    );
+    return JSON.stringify({ ...result, droppedOverlays: framed });
+  } catch {
+    return resultJson;
+  }
+}
 
 export async function getJobStatus(
   params: GetJobStatusParams,
@@ -30,7 +56,7 @@ export async function getJobStatus(
     const snap = await getJobStatusFromServer(params.jobId);
     return {
       success: true,
-      data: snap as unknown as Record<string, unknown>,
+      data: { ...snap, resultJson: frameDroppedOverlaysInResult(snap.resultJson) } as unknown as Record<string, unknown>,
     };
   } catch (err) {
     if (err instanceof LibiServerUnavailableError) {

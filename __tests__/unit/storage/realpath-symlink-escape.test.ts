@@ -55,4 +55,17 @@ describe("LocalFileStorage realpath containment for HTTP-served reads", () => {
     expect(fs.realpathSync(real)).toBe(real);
     expect(fs.readFileSync(real, "utf-8")).toBe("data");
   });
+
+  // F11 (final review): a name that resolves to the piece folder ITSELF (a symlink to `.`, or an
+  // empty / `.` name that got past a route) is not a file in it.
+  it("refuses a path that resolves to the piece folder itself", async () => {
+    tempBase = fs.mkdtempSync(path.join(os.tmpdir(), "libi-realpath-self-"));
+    const storage = new LocalFileStorage(tempBase);
+    const pieceDir = path.join(tempBase, "piece1");
+    fs.mkdirSync(pieceDir, { recursive: true });
+    fs.symlinkSync(".", path.join(pieceDir, "self.mp4"));
+
+    await expect(storage.realPathForRead("piece1", "self.mp4")).rejects.toThrow(/piece directory/);
+    await expect(storage.realPathForRead("piece1", ".")).rejects.toThrow(/piece directory/);
+  });
 });

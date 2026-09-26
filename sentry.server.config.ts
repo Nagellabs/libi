@@ -126,6 +126,18 @@ Sentry.init({
   // Low-rate performance tracing (slow-operation visibility without volume).
   tracesSampleRate: 0.1,
 
+  // Propagate trace headers to NO host. Unset, the SDK's fetch and http
+  // instrumentation adds `sentry-trace` + `baggage` (release, environment,
+  // public key, trace ids) to EVERY outgoing request — the catalog's use
+  // notice, fal, ElevenLabs, update probes — and does so even for a user who
+  // opted out, because the opt-out gates the transport, not the
+  // instrumentation. The privacy policy says the use notice carries nothing
+  // else, and no libi backend consumes libi traces. This process is also the
+  // packaged Electron main process (Next runs in-process there), so its own
+  // requests are covered too. Pinned by __tests__/unit/sentry/trace-propagation.test.ts
+  // and, on the wire, __tests__/integration/sentry/use-notice-trace-headers.test.ts.
+  tracePropagationTargets: [],
+
   // Ship structured logs into Sentry (you already use pino — keep its
   // `redact` paths configured so secrets are stripped at the source too).
   enableLogs: true,

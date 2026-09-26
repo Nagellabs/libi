@@ -43,7 +43,10 @@ the whole track in one call from the file's existing word timings.
    (bottom-safe anchor + canvas-scaled font) so they never overflow the frame
    bottom, on any resolution. Re-running **replaces** the same track in place (no
    duplicates). Returns `{ captionGroupId, cueCount }`. No manual cue math, no
-   per-cue `add_overlay` loop.
+   per-cue `add_overlay` loop. If `cueCount` comes back `0`, no track was
+   created (and any previous one for this file was removed, per
+   `removedCueCount`) — read the `hint` and tell the user why, rather than
+   silently moving on.
 
 3. **Refine (optional).**
    - Restyle the WHOLE track: re-run with a different `style` (or use the

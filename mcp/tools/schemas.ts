@@ -5,6 +5,7 @@
 import { z } from "zod/v3";
 import { aiGenerationMetaSchema } from "@/lib/ai-generation/types";
 import { PROSE_EXAMPLE_SECTION_KEYS } from "@/mcp/manual-sections";
+import { TEMPLATE_KEY_RE, TEMPLATE_LIMITS } from "@/lib/templates/scaffold";
 
 /**
  * The one place `mcpId` / `extensionId` is collapsed to a single id.
@@ -304,7 +305,7 @@ export const updateMcpServerSchema = z.object({
   requireApproval: z
     .boolean()
     .optional()
-    .describe("Prompt the user before every tool this extension owns."),
+    .describe("true = prompt the user before every tool this extension owns. false is refused: only the user turns a prompt off."),
 });
 
 export const uploadFileSchema = z.object({
@@ -764,6 +765,13 @@ export const updateOverlaySchema = z.object({
   trim: z.object({ start: z.number(), end: z.number() }).optional(),
   // VIDEO overlays only — how the source frame fills the rect.
   fit: z.enum(["cover", "contain"]).optional(),
+  // IMAGE / VIDEO overlays — repoint the layer at another file of this piece.
+  // The handler has always gated this patch (`validateOverlayFileId`); the
+  // schema exposes it because `libi.apply_template` leaves an unfilled media
+  // slot as a placeholder layer and tells the agent to fill it exactly this way
+  // (`lib/templates/materialize.ts`) — without the field zod stripped it and
+  // the fill silently did nothing.
+  fileId: z.string().optional().describe("Image/video overlays — point the layer at another file of this piece."),
   rect: OverlayRectSchema.optional(),
   z: z.number().optional(),
   opacity: z.number().optional(),
@@ -812,6 +820,158 @@ export const updateOverlaySchema = z.object({
   captionFromFileId: z.string().optional(),
 });
 export type UpdateOverlayParams = z.infer<typeof updateOverlaySchema>;
+
+/**
+ * Names an agent reaches for when it means a code/three overlay's JS source.
+ * `drawFunction` / `sceneFunction` are the STORED names (and `drawFunction` is a
+ * real field of tracked-code content), which is why they get sent here — but
+ * add_overlay's field is `body`, and update_overlay takes no code at all.
+ * Compared lowercase.
+ */
+const CODE_FIELD_ALIASES = new Set([
+  "body", "drawfunction", "scenefunction", "draw", "drawfn", "drawfunc", "scene",
+  "scenefn", "scenefunc", "code", "sourcecode", "source", "script", "js", "jsx",
+  "javascript", "function", "func", "fn", "render", "renderfn", "renderfunction",
+  "program", "drawcode", "scenecode", "codebody", "drawbody",
+]);
+
+/** Names an agent reaches for when it means the timeline label (seen live: `name`, `label`). */
+const LABEL_FIELD_ALIASES = new Set(["name", "label", "title", "trackname", "tracklabel"]);
+
+function editDistance(a: string, b: string): number {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const up = row[j]!;
+      row[j] = Math.min(up + 1, row[j - 1]! + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = up;
+    }
+  }
+  return row[b.length]!;
+}
+
+/** The tool field a misspelled key most likely meant (≤2 edits, keys of 4+ chars). */
+function nearestField(key: string, fields: readonly string[]): string | undefined {
+  if (key.length < 4) return undefined;
+  let best: string | undefined;
+  let bestDistance = 3;
+  for (const field of fields) {
+    const d = editDistance(key.toLowerCase(), field.toLowerCase());
+    if (d < bestDistance) [best, bestDistance] = [field, d];
+  }
+  return best;
+}
+
+/**
+ * Enforce the `additionalProperties: false` a tool's JSON Schema already
+ * advertises. zod's default `strip` drops an unknown key silently, so a
+ * misnamed field used to "succeed" with the field ignored — add_overlay with
+ * `drawFunction` wrote the scaffolded starter and returned success:true. The
+ * refusal names each unknown key and what to send instead; the handler never
+ * runs, so nothing is written. `.strict()` keeps the advertised schema
+ * byte-identical and `.shape` intact (no refine — see addOverlaySchema).
+ *
+ * Only the MCP registration uses these. The editor's PATCH route parses
+ * `updateOverlaySchema` itself and keeps stripping.
+ */
+function refuseUnknownFields<T extends z.ZodRawShape>(
+  schema: z.ZodObject<T>,
+  hintFor: (key: string, fields: readonly string[]) => string,
+  outcome: string,
+) {
+  const fields = Object.keys(schema.shape);
+  return z
+    .object(schema.shape, {
+      errorMap: (issue, ctx) =>
+        issue.code === z.ZodIssueCode.unrecognized_keys
+          ? {
+              message: `Unknown field${issue.keys.length > 1 ? "s" : ""}: ${issue.keys
+                .map((k) => `\`${k}\` — ${hintFor(k, fields)}`)
+                .join(" ")} ${outcome}`,
+            }
+          : { message: ctx.defaultError },
+    })
+    .strict();
+}
+
+function didYouMean(key: string, fields: readonly string[]): string {
+  if (LABEL_FIELD_ALIASES.has(key.toLowerCase())) return "the timeline label is `displayName`.";
+  const near = nearestField(key, fields);
+  return near ? `did you mean \`${near}\`?` : "not a field of this tool; see its input schema.";
+}
+
+/** The two guesses an agent makes most on the overlay tools: the words of a
+ *  text overlay as `text` (the field is `content`), and a top-level
+ *  `width`/`height` (size lives in `rect`). Exact keys only. */
+function overlayGuessHint(key: string): string | null {
+  if (key === "text") return "a text overlay's words go in `content`.";
+  if (key === "width" || key === "height") return "size goes in `rect: { x, y, width, height }`.";
+  return null;
+}
+
+/** add_overlay as registered on MCP: unknown fields are refused, not dropped. */
+export const addOverlayToolSchema = refuseUnknownFields(
+  addOverlaySchema,
+  (key, fields) => {
+    if (CODE_FIELD_ALIASES.has(key.toLowerCase())) {
+      return "a code or three overlay's JS source goes in `body`.";
+    }
+    const guess = overlayGuessHint(key);
+    if (guess) return guess;
+    // `overlayId` is update_overlay's key, not a settable field; `Object.hasOwn`
+    // keeps prototype names (`constructor`, `toString`) out of this branch.
+    if (key === "overlayId") {
+      return "add_overlay assigns the id and returns it as `overlayId`; do not send one.";
+    }
+    if (Object.hasOwn(updateOverlaySchema.shape, key)) {
+      return "set it with libi.update_overlay once the overlay exists; add_overlay does not take it.";
+    }
+    return didYouMean(key, fields);
+  },
+  "Nothing was created. Resend with the correct field names.",
+);
+
+/** update_overlay as registered on MCP: unknown fields (and any code) are refused. */
+export const updateOverlayToolSchema = refuseUnknownFields(
+  updateOverlaySchema,
+  (key, fields) => {
+    if (CODE_FIELD_ALIASES.has(key.toLowerCase())) {
+      return "update_overlay never takes code. Edit the file at the overlay's `codeFilePath` (from libi.add_overlay or libi.get_overlays) with your file tools.";
+    }
+    return overlayGuessHint(key) ?? didYouMean(key, fields);
+  },
+  "Nothing was changed.",
+);
+
+/** Canvas-size guesses on create_piece: a piece is created at the default
+ *  frame and resized afterwards. `fps` is NOT one of them: no tool sets a
+ *  piece's frame rate (update_composition_dimensions takes width/height only
+ *  and would silently drop it), so its hint says so. */
+const CANVAS_FIELD_GUESSES = new Set(["width", "height", "aspect", "dimensions"]);
+
+/**
+ * create_piece as registered on MCP: unknown fields are refused, not dropped.
+ * `create_piece({ width, height })` used to make a 1080×1920 piece and report
+ * success with the size silently gone (CH-2). Made strict because that field
+ * produced a visibly wrong result — the other tools stay lenient on purpose
+ * (a global strict mode would fail every harmless extra an older skill copy
+ * sends). The editor's REST route does not use this.
+ */
+export const createPieceToolSchema = refuseUnknownFields(
+  createPieceSchema,
+  (key, fields) => {
+    if (CANVAS_FIELD_GUESSES.has(key)) {
+      return "set the canvas with libi.update_composition_dimensions({ pieceId, width, height }) after creating the piece.";
+    }
+    if (key === "fps") {
+      return "a piece's frame rate can't be set: a new piece is 30 fps and no libi tool changes it. Create the piece without `fps`, and tell the user it stays at 30 fps.";
+    }
+    return didYouMean(key, fields);
+  },
+  "Nothing was created.",
+);
 
 export const getOverlaysSchema = z.object({ pieceId: z.string() });
 export type GetOverlaysParams = z.infer<typeof getOverlaysSchema>;
@@ -1063,7 +1223,7 @@ export const analysisSaveAudioChunkSchema = z.object({
 
 export const analysisSaveAudioChunkFromFileSchema = z.object({
   chunkId: z.string().describe("ID returned from libi.analysis_chunk_audio"),
-  jsonPath: z.string().describe("Absolute path to a JSON file containing { text, words: [...], language_code?, language_probability? }. Same shape as ElevenLabs returns."),
+  jsonPath: z.string().describe("Absolute path to a JSON file containing { text, words: [...], language_code?, language_probability? } (the shape of ElevenLabs' Speech-to-Text REST API; its hosted MCP returns flat text only, which is not saved here)."),
 });
 
 export const analysisGetAudioChunksSchema = z.object({
@@ -1164,7 +1324,7 @@ export type ShowExtensionParams = z.infer<typeof showExtensionSchema>;
 
 export const suggestProviderSchema = z.object({
   kind: z
-    .enum(["image", "video", "music", "voice", "sfx", "transcription"])
+    .enum(["image", "video", "music", "voice", "sfx", "transcription", "social"])
     .describe("The capability you need and do not have."),
   reason: z
     .string()
@@ -2369,7 +2529,7 @@ export const addStoryboardCardSchema = {
   pieceId: z.string(),
   card: z
     .object({
-      id: z.string().optional().describe("Stable card id (e.g. \"s1-hook\"). Auto-generated if omitted."),
+      id: z.string().optional().describe("Stable card id (e.g. \"s1-hook\"): letters, digits, - and _, dots only between them. Auto-generated if omitted."),
       title: z.string(),
       role: z.string().optional().describe("Scene role, e.g. hook / reveal / b-roll. Default \"scene\"."),
       kind: z.string().optional().describe("Default \"ai-video\"."),
@@ -2532,7 +2692,7 @@ export const renderOverlayFramesSchema = z.object({
     .min(1)
     .max(8)
     .optional()
-    .describe("Composition timestamps (seconds) to rasterize. 1–8 times. If omitted, provide overlayId and the tool renders that overlay's start / middle / end."),
+    .describe("Composition timestamps (seconds) to rasterize. 1–8 times, each before the end of the piece (a time at or past the end is refused with an error naming the duration and the last valid time). A time within 1 ms of a frame's time renders exactly that frame, so a renderDiagnostics `time` passed back as given renders the frame that failed; each result names the `frame` it drew. If omitted, provide overlayId and the tool renders that overlay's start / middle / end."),
   overlayId: z
     .string()
     .min(1)
@@ -2579,6 +2739,128 @@ export type ApplyOverlayPresetParams = z.infer<typeof applyOverlayPresetSchema>;
 
 export const deleteOverlayPresetSchema = z.object({ presetId: z.string() });
 export type DeleteOverlayPresetParams = z.infer<typeof deleteOverlayPresetSchema>;
+
+// ── Templates (spec §5) ──────────────────────────────────────────────────────
+// The key regex and the count/length ceilings come from `lib/templates/scaffold.ts`,
+// the contract `validateScaffold` enforces — re-typing them here is how a tool
+// starts accepting a slot the scaffold then rejects.
+const templateOrderSchema = z.enum(["trending", "most-used", "newest"]);
+const templateScopeSchema = z.enum(["local", "public", "all"]);
+const templateSlotKindSchema = z.enum(["text", "image", "video", "audio"]);
+
+export const createTemplateFromPieceSchema = z.object({
+  pieceId: z.string(),
+  name: z.string().min(1).max(TEMPLATE_LIMITS.nameChars),
+  description: z.string().max(TEMPLATE_LIMITS.descriptionChars),
+  tags: z
+    .array(z.string())
+    .max(TEMPLATE_LIMITS.tags)
+    .optional()
+    .describe("Up to 10 tags, lowercase letters/digits/hyphens."),
+  overlayIds: z.array(z.string()).optional().describe("Overlays to include. Default: every overlay in the piece."),
+  slots: z
+    .array(
+      z.object({
+        key: z.string().regex(TEMPLATE_KEY_RE).describe("^[a-z][a-z0-9-]{0,39}$"),
+        kind: templateSlotKindSchema,
+        label: z.string().min(1).max(80),
+        hint: z.string().max(300).optional(),
+        required: z.boolean().optional(),
+        fromOverlayKey: z
+          .string()
+          .optional()
+          .describe("The overlay (its id, or its slug key) or audio clip this slot replaces."),
+      }),
+    )
+    .max(TEMPLATE_LIMITS.slots)
+    .optional(),
+});
+export type CreateTemplateFromPieceParams = z.infer<typeof createTemplateFromPieceSchema>;
+
+export const updateTemplateSchema = z.object({
+  templateId: z.string(),
+  name: z.string().min(1).max(TEMPLATE_LIMITS.nameChars).optional(),
+  description: z.string().max(TEMPLATE_LIMITS.descriptionChars).optional(),
+  tags: z.array(z.string()).max(TEMPLATE_LIMITS.tags).optional(),
+  reextractFromPieceId: z
+    .string()
+    .optional()
+    .describe("Re-capture overlays/clips/media from this piece; index.md is kept."),
+});
+export type UpdateTemplateParams = z.infer<typeof updateTemplateSchema>;
+
+export const listTemplatesSchema = z.object({
+  order: templateOrderSchema.optional(),
+  scope: templateScopeSchema.optional(),
+});
+export type ListTemplatesParams = z.infer<typeof listTemplatesSchema>;
+
+export const searchTemplatesSchema = z.object({
+  query: z.string().max(200),
+  tags: z.array(z.string()).max(TEMPLATE_LIMITS.tags).optional(),
+  scope: templateScopeSchema.optional(),
+  order: templateOrderSchema.optional(),
+  limit: z.number().int().min(1).max(50).optional(),
+});
+export type SearchTemplatesParams = z.infer<typeof searchTemplatesSchema>;
+
+export const getTemplateSchema = z.object({ templateId: z.string() });
+export type GetTemplateParams = z.infer<typeof getTemplateSchema>;
+
+export const applyTemplateSchema = z.object({
+  templateId: z.string().optional(),
+  cloudId: z
+    .string()
+    .optional()
+    .describe(
+      "A public catalog template's id (from list/search_templates, scope 'public'). libi installs it first — downloaded and checked, or updated to the catalog's newer version — then applies it. Pass templateId OR cloudId, never both.",
+    ),
+  pieceId: z.string().optional().describe("Apply into this piece. Omit with newPiece to create one."),
+  newPiece: z
+    .object({ name: z.string().max(120).optional() })
+    .optional()
+    .describe("Create a new piece to apply into. Without a name it is called \"From template\" for a public or installed template (never the author's listing name), or the template's own name for a local one."),
+  slotValues: z.record(z.string()).optional().describe("slot key → text, or a fileId of this piece, or an https URL."),
+  mode: z.enum(["append", "replace"]).optional(),
+  confirmReplace: z
+    .boolean()
+    .optional()
+    .describe("Required true for mode 'replace' — it clears the piece's overlays and clips."),
+  copy: z
+    .number()
+    .int()
+    .min(1)
+    .max(99)
+    .optional()
+    .describe(
+      "Which copy of this apply this is (default 1). An identical call within 5 minutes of one that succeeded is answered from memory, so a retry never doubles anything; to apply the same template with the same values again ON PURPOSE — a second copy appended into the same piece, or another new piece — pass copy: 2, then 3, ….",
+    ),
+});
+export type ApplyTemplateParams = z.infer<typeof applyTemplateSchema>;
+
+export const publishTemplateSchema = z.object({
+  templateId: z.string().min(1).describe("The local template to prepare for publishing (from list_templates / create_template_from_piece)."),
+  exampleVideo: z
+    .union([
+      // Strict: exactly one source. A second key is refused, not silently dropped.
+      z.object({ fileId: z.string().min(1) }).strict().describe("An existing video file on a piece."),
+      z.object({ path: z.string().min(1) }).strict().describe("An absolute path to an mp4/mov on this machine."),
+      z.object({ exportPieceId: z.string().min(1) }).strict().describe("Export this piece first and use the result (runs for tens of seconds to minutes)."),
+    ])
+    .describe("Required: the short example the catalog shows on the template's card. Made now — exported first for exportPieceId, then trimmed to 15 s and scaled to ≤ 1280 px, with a poster frame — and the user reviews exactly that."),
+  nickname: z.string().min(2).max(32).optional().describe("Optional — only when the user names one. Every creator already has a public nickname (a random default like \"Brave Otter 4821\" until they rename it); this one replaces it on every template this install published, once the user publishes."),
+  // Accepted and ignored: older copies of the templates skill (still on users'
+  // machines) send it. It no longer means anything — this tool never
+  // publishes; the user does, on the Templates page.
+  confirm: z.boolean().optional().describe("Ignored. Only the user can publish, on libi's Templates page."),
+});
+export type PublishTemplateParams = z.infer<typeof publishTemplateSchema>;
+
+export const deleteTemplateSchema = z.object({ templateId: z.string() });
+export type DeleteTemplateParams = z.infer<typeof deleteTemplateSchema>;
+
+export const showTemplatesSchema = z.object({ templateId: z.string().optional() });
+export type ShowTemplatesParams = z.infer<typeof showTemplatesSchema>;
 
 // ── Caption styles (agent-authored static looks) ─────────────────────────────
 // A caption STYLE is a static look (color + optional stroke/shadow/background +
@@ -2687,3 +2969,70 @@ export const devSlowJobSchema = {
       "Stop reporting progress after N ticks while continuing to work — reproduces a job whose remaining work sits inside one opaque unit (a multi-GB single file). Use to inspect the decaying/withdrawn ETA and the 'no progress for Xm' line.",
     ),
 };
+
+// ---------------------------------------------------------------------------
+// Social posting (`mcp/tools/social-tools.ts`). Draft-only by construction:
+// `postPieceSchema` has no `publishNow`, no `scheduledFor` and no `when` — a
+// schema that cannot express "publish" is what makes an accidental publish
+// impossible, rather than a check the implementation has to remember.
+// ---------------------------------------------------------------------------
+
+export const socialStatusSchema = z.object({});
+export type SocialStatusParams = z.infer<typeof socialStatusSchema>;
+
+export const postPieceSchema = z.object({
+  pieceId: z.string().describe("The piece to post."),
+  targets: z
+    .array(
+      z.object({
+        platform: z.enum(["instagram", "tiktok"]),
+        accountId: z
+          .string()
+          .optional()
+          .describe("Required only when that platform has several connected accounts (libi.social_status lists them)."),
+        instagramType: z
+          .enum(["reel", "feed", "story"])
+          .optional()
+          .describe("Instagram only. Defaults to the user's own setting."),
+      }),
+    )
+    .optional()
+    .describe(
+      "Where to post. Omit = every connected Instagram and TikTok account, Instagram as the user's default type. accountId is required only when a platform has several accounts. This tool builds Instagram and TikTok posts only — for a Facebook, X or YouTube account, use the provider's own MCP tools directly.",
+    ),
+  caption: z
+    .string()
+    .max(2200)
+    .optional()
+    .describe("The caption. Omit to leave it empty for the user to fill in the Posting tab."),
+  exportPath: z
+    .string()
+    .optional()
+    .describe(
+      "An existing export of this piece. Omit to reuse the piece's most recent export when it has one, and otherwise export now at the piece's own size.",
+    ),
+});
+export type PostPieceParams = z.infer<typeof postPieceSchema>;
+
+export const socialLinkPostSchema = z.object({
+  pieceId: z.string().describe("The piece the post was made from."),
+  providerPostId: z.string().describe("The post id Zernio returned."),
+  exportPath: z.string().optional().describe("The export the post carries, when you know it."),
+});
+export type SocialLinkPostParams = z.infer<typeof socialLinkPostSchema>;
+
+/**
+ * Only for an ad that is NOT a boosted post. An ad boosting one of the
+ * piece's posts is found by the provider's own `effective_instagram_media_id`
+ * filter and needs no link — linking one would store a row that answers a
+ * question already answered.
+ */
+export const socialLinkAdSchema = z.object({
+  pieceId: z.string().describe("The piece the ad's creative came from."),
+  providerAdId: z.string().describe("The ad id Zernio returned (its `_id`)."),
+  platformAdId: z
+    .string()
+    .optional()
+    .describe("The ad network's own ad id (Meta's ad id), when you know it."),
+});
+export type SocialLinkAdParams = z.infer<typeof socialLinkAdSchema>;

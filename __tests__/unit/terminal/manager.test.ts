@@ -424,7 +424,8 @@ describe("setup terminals", () => {
   function setupManager(
     opts: {
       onSetupTerminalOpen?: (s: "agents" | "global-setup" | "providers") => void;
-      onSetupTerminalExit?: (s: "agents" | "global-setup" | "providers") => void;
+      onSetupTerminalExit?: (s: "agents" | "global-setup" | "providers", id: string) => void;
+      onSetupTerminalOutput?: (id: string, data: string) => void;
       now?: () => number;
     } = {},
   ) {
@@ -575,6 +576,23 @@ describe("setup terminals", () => {
     ptys[0].emitExit(0);
     ptys[1].emitExit(0);
     expect(exited).toEqual(["global-setup"]);
+  });
+
+  // The setup scripts announce a Claude Code sign-in's start and end in their output (lib/providers/sign-in-markers.ts).
+  it("hands the owner every chunk a setup terminal prints, with its id, and its id again when it goes; never a chat terminal's", () => {
+    const out: string[] = [];
+    const exits: string[] = [];
+    const { manager, ptys } = setupManager({
+      onSetupTerminalOutput: (id, data) => out.push(`${id}:${data}`),
+      onSetupTerminalExit: (_s, id) => exits.push(id),
+    });
+    const setup = manager.create({ cliId: "shell", purpose: "setup", surface: "providers" });
+    manager.create({ cliId: "shell" });
+    ptys[0].emitData("[libi sign-in start: elevenlabs]\r\n");
+    ptys[1].emitData("chat output");
+    expect(out).toEqual([`${setup.id}:[libi sign-in start: elevenlabs]\r\n`]);
+    ptys[0].emitExit(0);
+    expect(exits).toEqual([setup.id]);
   });
 
   it("tells the owner when a setup terminal opens — never for a chat terminal — and a replaced one reports its exit before the next opens", () => {

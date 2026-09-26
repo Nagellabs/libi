@@ -1,0 +1,2 @@
+# Mismatch artefacts the spec writes beside a baseline on a failing compare run.
+*.actual.png

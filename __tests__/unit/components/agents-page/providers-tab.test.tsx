@@ -24,11 +24,20 @@ import { findProvider } from "@/lib/providers/catalog";
  * stubbed fetch, so the command a button opens is observable in the POST body.
  */
 
-type ProvidersOpts = { enabled?: boolean; refetchInterval?: number | false };
+type ProvidersData = { connected: unknown[]; error?: string; codex?: "stale" | "unread" };
+type ProvidersOpts = {
+  enabled?: boolean;
+  refetchInterval?: number | false | ((data: ProvidersData | undefined) => number | false);
+  revalidateOnLook?: boolean;
+};
 const providersOpts: ProvidersOpts[] = [];
+/** The poll interval the tab asked for, given the answer it would see now. */
+const pollInterval = (o: ProvidersOpts | undefined) =>
+  typeof o?.refetchInterval === "function" ? o.refetchInterval({ connected, error: providersError, codex: providersCodex }) : o?.refetchInterval;
 let connected: unknown[] = [];
 let providersError: string | undefined;
 let providersCodex: "stale" | "unread" | undefined;
+let testModeCodexFakes: string[] | undefined;
 let providersLoading = false;
 let legacy: unknown[] = [];
 let status: Record<string, AgentStatus> | undefined;
@@ -62,7 +71,7 @@ vi.mock("@/lib/queries/providers", async () => {
       providersOpts.push(o);
       useQuery({ queryKey: ["providers"], queryFn: () => (providersFetches(), null), staleTime: Infinity });
       return {
-        data: providersLoading ? undefined : { connected, error: providersError, codex: providersCodex },
+        data: providersLoading ? undefined : { connected, error: providersError, codex: providersCodex, testModeCodexFakes },
         isLoading: providersLoading,
         refetch: refetchProviders,
       };
@@ -132,6 +141,9 @@ vi.mock("@/components/terminal/setup-terminal", async () => {
           <button className="cursor-pointer" onClick={() => host.markGone(surface, entry.id)}>
             simulate-gone
           </button>
+          <button className="cursor-pointer" onClick={() => host.markSubmitted(surface, entry.id)}>
+            simulate-enter
+          </button>
         </div>
       );
     },
@@ -147,7 +159,9 @@ import { providerSetupSteps } from "@/lib/providers/setup-steps";
 const COMBINED_CAPTION = "One command does both steps: it adds Higgsfield, then opens your browser to sign in, and waits until you finish.";
 /** What a step says while its command is live in the tab's terminal. */
 const ADD_RUNNING = "Press Enter in the terminal below to run it.";
-const SIGN_IN_RUNNING = "Finish signing in in your browser. If it didn't open, or you stopped it, sign in again:";
+// Nothing has run until the user presses Enter in the terminal, so a running sign-in step says to press it first.
+const SIGN_IN_RUNNING = "Press Enter in the terminal below to run it; your browser then opens to sign in.";
+const SIGN_IN_SUBMITTED = "Finish signing in in your browser. If it didn't open, or you stopped it, sign in again:";
 /** For building a RegExp that matches one of the constants above literally. */
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -228,6 +242,7 @@ beforeEach(() => {
   connected = [];
   providersError = undefined;
   providersCodex = undefined;
+  testModeCodexFakes = undefined;
   providersLoading = false;
   legacy = [];
   status = { "claude-code": ready("/u/bin/claude"), codex: notInstalled() };
@@ -268,11 +283,12 @@ beforeEach(() => {
 });
 
 describe("Providers tab — rows and chips", () => {
-  it("lists fal.ai, Higgsfield and ElevenLabs only — on-device extensions live on the libi MCP tab", () => {
+  it("lists fal.ai, Higgsfield, Zernio and ElevenLabs only — on-device extensions live on the libi MCP tab", () => {
     renderTab();
     expect(screen.getAllByTestId(/^provider-row-/).map((e) => e.getAttribute("data-testid"))).toEqual([
       "provider-row-fal",
       "provider-row-higgsfield",
+      "provider-row-zernio",
       "provider-row-elevenlabs",
     ]);
     expect(screen.queryByTestId("provider-row-ace-step")).not.toBeInTheDocument();
@@ -305,7 +321,7 @@ describe("Providers tab — rows and chips", () => {
     connected = [{ agent: "codex", name: "my-thing", providerId: null, transport: "stdio", status: "connected" }];
     renderTab();
     expect(screen.queryByText("my-thing")).toBeNull();
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(3);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
     showAgent("codex");
     expect(screen.queryByText("my-thing")).toBeNull();
     expect(screen.getByTestId("chip-fal-codex")).toHaveTextContent("Not added");
@@ -324,20 +340,23 @@ describe("Providers tab — rows and chips", () => {
     bothReady();
     connected = [
       { agent: "claude", name: "fal-ai", providerId: "fal", transport: "http", status: "connected", scope: "user" },
-      { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected" },
+      { agent: "codex", name: "fal-ai", providerId: "fal", transport: "http", status: "connected" },
       { agent: "codex", name: "higgsfield", providerId: "higgsfield", transport: "http", status: "connected", signIn: "signed-in" },
+      { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected" },
     ];
     renderTab();
     expect(screen.getByTestId("chip-fal-claude-code-change-key")).toHaveTextContent(
       "Need a new key, or this one stopped working? Remove it from Claude Code, then add it again — Add asks for your key.",
     );
     // Not added yet: there is no key to change.
-    expect(screen.queryByTestId("chip-elevenlabs-claude-code-change-key")).toBeNull();
+    expect(screen.queryByTestId("chip-higgsfield-claude-code-change-key")).toBeNull();
     showAgent("codex");
-    expect(screen.getByTestId("chip-elevenlabs-codex-change-key")).toHaveTextContent("Remove it from Codex, then add it again");
-    // A provider you sign in to with your account has no key.
-    expect(screen.getByTestId("chip-higgsfield-codex")).not.toHaveTextContent(/new key/);
-    expect(screen.queryByTestId("chip-higgsfield-codex-change-key")).toBeNull();
+    expect(screen.getByTestId("chip-fal-codex-change-key")).toHaveTextContent("Remove it from Codex, then add it again");
+    // A provider you sign in to with your account has no key — ElevenLabs too, since it moved to its hosted server.
+    for (const id of ["higgsfield", "elevenlabs"]) {
+      expect(screen.getByTestId(`chip-${id}-codex`)).not.toHaveTextContent(/new key/);
+      expect(screen.queryByTestId(`chip-${id}-codex-change-key`)).toBeNull();
+    }
   });
 
   it("a Needs key chip offers Replace and no remove-and-add line", () => {
@@ -350,13 +369,134 @@ describe("Providers tab — rows and chips", () => {
 
   it("a Codex entry that is disabled says so, with no action — codex mcp add cannot enable it", () => {
     bothReady();
-    connected = [{ agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "disabled" }];
+    connected = [{ agent: "codex", name: "fal-ai", providerId: "fal", transport: "http", status: "disabled" }];
     renderTab();
     showAgent("codex");
-    const chip = screen.getByTestId("chip-elevenlabs-codex");
+    const chip = screen.getByTestId("chip-fal-codex");
     expect(chip).toHaveTextContent("Disabled");
     expect(chip).toHaveTextContent("Enable it in your Codex config");
     expect(within(chip).queryByRole("button")).toBeNull();
+  });
+
+  // A local entry whose launcher is missing: Claude Code logs `Executable not found in $PATH: uvx` and the chat has
+  // no tools from it, so the chip must never read Connected. It names the command and offers the two ways out.
+  it("a Claude entry whose launcher is missing says Can't start, names the command, and offers Add again and Remove", () => {
+    bothReady();
+    connected = [
+      { agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx", scope: "user" },
+    ];
+    renderTab();
+    const chip = screen.getByTestId("chip-elevenlabs-claude-code");
+    expect(chip).toHaveTextContent("Can't start: uvx can't be found");
+    expect(chip).not.toHaveTextContent("Connected");
+    expect(within(chip).getByText("uvx").tagName).toBe("CODE");
+    expect(screen.getByTestId("chip-elevenlabs-claude-code-cant-start")).toHaveTextContent(
+      "Claude Code can't run ElevenLabs's MCP server without uvx, and libi can't find uvx on this computer, so its tools won't show up in your chats. Add it again to use libi's current setup for ElevenLabs, or remove it.",
+    );
+    // "Isn't installed" can be false (installed after libi started); the chip says only what libi saw.
+    expect(chip).not.toHaveTextContent(/isn't installed/);
+    expect(within(chip).getByRole("button", { name: "Add again on Claude Code" })).toBeInTheDocument();
+    expect(within(chip).getByRole("button", { name: "Remove from Claude Code" })).toBeInTheDocument();
+    // A new key is not the fix, and it is not connected: none of the connected lines.
+    expect(screen.queryByTestId("chip-elevenlabs-claude-code-change-key")).toBeNull();
+    // Nothing counts it as connected beside the agent's name.
+    expect(screen.getByTestId("providers-agent-option-claude-code")).not.toHaveTextContent(/connected/i);
+  });
+
+  it("Add again types the replace script (remove, then the catalog's add) with the detected scope, and says why", async () => {
+    bothReady();
+    connected = [
+      { agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx", scope: "local" },
+    ];
+    renderTab();
+    await click("elevenlabs", /add again on claude code/i);
+    const entry = { agentId: "claude-code" as const, name: "elevenlabs", scope: "local" as const };
+    expect(lastPostedCommand()).toBe(providerReplaceCommand(CLAUDE_CLI, "posix", findProvider("elevenlabs"), entry, SCRIPTS));
+    const terminal = screen.getByTestId("setup-terminal-providers");
+    expect(terminal).toHaveAttribute("data-scripts", linked("replace-provider.sh", "add-provider.sh"));
+    expect(terminal.getAttribute("data-explanation")).toMatch(/^Your ElevenLabs entry in Claude Code can't start because libi can't find uvx on this computer\./);
+    await click("elevenlabs", /remove from claude code/i);
+    // A local entry: its remove skips the sign-out it never had.
+    expect(lastPostedCommand()).toBe(providerRemoveCommand(CLAUDE_CLI, "posix", { ...entry, transport: "stdio" }, findProvider("elevenlabs"), SCRIPTS));
+    expect(lastPostedCommand()).toMatch(/ --no-sign-out$/);
+  });
+
+  // An older LOCAL ElevenLabs server that starts (uv installed, key set) keeps working: Connected with Remove, no
+  // sign-in stepper, and a Remove that neither signs out nor says it does.
+  it("a working local ElevenLabs entry reads Connected with Remove only, and its Remove skips the sign-out", async () => {
+    bothReady();
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected", scope: "user" }];
+    renderTab();
+    expect(screen.queryAllByTestId(/^setup-step-elevenlabs-claude-code/)).toHaveLength(0);
+    const chip = screen.getByTestId("chip-elevenlabs-claude-code");
+    expect(chip).toHaveTextContent("Connected");
+    expect(within(chip).getAllByRole("button").map((b) => b.textContent)).toEqual(["Remove from Claude Code"]);
+    await click("elevenlabs", /remove from claude code/i);
+    expect(lastPostedCommand()).toMatch(/remove-provider\.sh elevenlabs claude \S+ elevenlabs user --no-sign-out$/);
+    const explanation = screen.getByTestId("setup-terminal-providers").getAttribute("data-explanation");
+    expect(explanation).toMatch(/with any key saved in its entry/);
+    expect(explanation).not.toMatch(/Signs Claude Code out/);
+  });
+
+  // Owner-reported 2026-09-25: the step said "Finish signing in in your browser" the moment Sign in was clicked,
+  // before anything ran. It says to press Enter until the terminal reports that the user did.
+  it("a running sign-in step says to press Enter until the command is submitted, then to finish in the browser", async () => {
+    bothReady();
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected", signIn: "unknown", scope: "user" }];
+    renderTab();
+    await click("elevenlabs", /sign in on claude code/i);
+    const signIn = screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in");
+    expect(signIn).toHaveTextContent(SIGN_IN_RUNNING);
+    expect(signIn).not.toHaveTextContent(/Finish signing in/);
+    fireEvent.click(screen.getByRole("button", { name: "simulate-enter" }));
+    expect(screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in")).toHaveTextContent(SIGN_IN_SUBMITTED);
+  });
+
+  it("on Windows the chip adds that a launcher installed since libi started needs a restart of libi", () => {
+    bothReady();
+    flavor = "powershell";
+    connected = [
+      { agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx", scope: "user" },
+    ];
+    renderTab();
+    expect(screen.getByTestId("chip-elevenlabs-claude-code-cant-start")).toHaveTextContent(
+      "libi can't find uvx on this computer, so its tools won't show up in your chats. If you just installed uvx, restart libi. Add it again",
+    );
+  });
+
+  it("off Windows there is no restart line", () => {
+    bothReady();
+    connected = [
+      { agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx", scope: "user" },
+    ];
+    renderTab();
+    expect(screen.getByTestId("chip-elevenlabs-claude-code-cant-start")).not.toHaveTextContent(/restart/i);
+  });
+
+  it("a Codex entry whose launcher is missing offers the same two actions for Codex", async () => {
+    bothReady();
+    connected = [{ agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx" }];
+    renderTab();
+    showAgent("codex");
+    const chip = screen.getByTestId("chip-elevenlabs-codex");
+    expect(chip).toHaveTextContent("Can't start: uvx can't be found");
+    await click("elevenlabs", /add again on codex/i);
+    expect(lastPostedCommand()).toBe(
+      providerReplaceCommand(CODEX_CLI, "posix", findProvider("elevenlabs"), { agentId: "codex", name: "elevenlabs" }, SCRIPTS),
+    );
+    await click("elevenlabs", /remove from codex/i);
+    expect(lastPostedCommand()).toBe(
+      providerRemoveCommand(CODEX_CLI, "posix", { agentId: "codex", name: "elevenlabs", transport: "stdio" }, findProvider("elevenlabs"), SCRIPTS),
+    );
+  });
+
+  it("a Claude entry that can't start and arrived without its scope offers only Retry", () => {
+    bothReady();
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "cant-start", missingCommand: "uvx" }];
+    renderTab();
+    const chip = screen.getByTestId("chip-elevenlabs-claude-code");
+    expect(chip).toHaveTextContent("Can't start: uvx can't be found");
+    expect(within(chip).getAllByRole("button").map((b) => b.textContent)).toEqual(["Retry"]);
   });
 
   it("Higgsfield links its MCP docs, says there is no key, and offers Add on both agents", () => {
@@ -376,6 +516,15 @@ describe("Providers tab — rows and chips", () => {
     expect(within(codexRow).queryByTestId("setup-terminal-providers")).toBeNull();
   });
 
+  it("Zernio says there is no key but never claims generations use credits — it posts, it doesn't generate", () => {
+    bothReady();
+    renderTab();
+    const row = screen.getByTestId("provider-row-zernio");
+    expect(row).toHaveTextContent("No key: you sign in with your Zernio account in your browser.");
+    expect(row).not.toHaveTextContent(/credits/i);
+    expect(row).not.toHaveTextContent(/generations/i);
+  });
+
   it("shows the Codex note where it describes Codex, and never a desktop-app limitation", () => {
     bothReady();
     renderTab();
@@ -384,7 +533,11 @@ describe("Providers tab — rows and chips", () => {
     expect(screen.getByTestId("provider-row-fal")).toHaveTextContent(
       "Add asks for your key and saves it as FAL_KEY in your shell profile, where Codex reads it. Restart libi and Codex afterwards.",
     );
-    expect(screen.getByTestId("provider-row-elevenlabs")).toHaveTextContent(/Needs uv/);
+    // ElevenLabs is its hosted server: nothing to install, and Codex's add is also its sign-in.
+    expect(screen.getByTestId("provider-row-elevenlabs")).toHaveTextContent(
+      "One command does both steps: it adds ElevenLabs, then opens your browser to sign in, and waits until you finish.",
+    );
+    expect(screen.getByTestId("provider-row-elevenlabs")).not.toHaveTextContent(/\buvx?\b/);
     expect(document.body.textContent).not.toMatch(/desktop app/i);
   });
 
@@ -393,13 +546,13 @@ describe("Providers tab — rows and chips", () => {
     expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(1);
     expect(screen.getByTestId("provider-row-elevenlabs").className).toMatch(/ring-2/);
     fireEvent.click(screen.getByRole("button", { name: /show all providers/i }));
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(3);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
     expect(screen.queryByRole("button", { name: /show all providers/i })).toBeNull();
   });
 
   it("a ?provider= that names no third-party provider shows every row, unhighlighted", () => {
     renderTab({ provider: "ace-step" });
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(3);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
     expect(screen.queryByRole("button", { name: /show all providers/i })).toBeNull();
     for (const row of screen.getAllByTestId(/^provider-row-/)) expect(row.className).not.toMatch(/ring-2/);
   });
@@ -930,7 +1083,7 @@ describe("Providers tab — typed commands", () => {
     expect(screen.getByTestId("setup-terminal-providers")).toHaveAttribute("data-scripts", linked("replace-provider.sh", "add-provider.sh"));
     showAgent("codex");
     await click("elevenlabs", /remove from codex/i);
-    expect(lastPostedCommand()).toBe(`sh ${SCRIPTS}/remove-provider.sh elevenlabs codex /u/bin/codex elevenlabs`);
+    expect(lastPostedCommand()).toBe(`sh ${SCRIPTS}/remove-provider.sh elevenlabs codex /u/bin/codex elevenlabs --no-sign-out`);
     expect(screen.getByTestId("setup-terminal-providers")).toHaveAttribute("data-scripts", linked("remove-provider.sh"));
     // Removing a connected entry is not a row that flipped to Connected.
     expect(screen.queryByText(/start a new chat to use it/i)).toBeNull();
@@ -1022,7 +1175,7 @@ describe("Providers tab — typed commands", () => {
     expect(commandCarriesNoKeyMaterial(lastPostedCommand())).toBe(true);
   });
 
-  it("a Claude Higgsfield entry reads Added · sign in to use — never Connected, since libi can't see Claude Code's sign-in — and offers Sign in and Remove", async () => {
+  it("a Claude Higgsfield entry Claude Code gave no readable answer for reads Added · sign in to use — never Connected — and offers Sign in and Remove", async () => {
     bothReady();
     connected = [
       { agent: "claude", name: "higgsfield", providerId: "higgsfield", transport: "http", status: "connected", signIn: "unknown", scope: "local" },
@@ -1031,7 +1184,7 @@ describe("Providers tab — typed commands", () => {
     const chip = screen.getByTestId("chip-higgsfield-claude-code");
     expect(chip).toHaveTextContent("Added · sign in to use");
     expect(chip).not.toHaveTextContent("Connected");
-    expect(chip).toHaveTextContent("libi can't see whether Claude Code has signed in to Higgsfield. If you already have, it's ready to use.");
+    expect(chip).toHaveTextContent("Claude Code didn't say whether it has signed in to Higgsfield. If you already have, it's ready to use.");
     // The add is done (kept, disabled), Sign in is the step to take, and Remove sits under the steps.
     expect(within(chip).getAllByRole("button").map((b) => b.textContent)).toEqual([
       "Added to Claude Code",
@@ -1087,19 +1240,20 @@ describe("Providers tab — typed commands", () => {
   it("after an add, a Higgsfield row that still needs a sign-in says so in the chip's sign-in step — no notice under the row, and never that it is connected or ready", async () => {
     bothReady();
     const { rerender } = renderTab();
-    await click("higgsfield", /add to claude code/i);
-    // Claude Code's add writes the entry at once; libi can't see a sign-in, so detection reads it as unknown.
+    await click("higgsfield", /add to claude code and sign in/i);
+    // Claude Code's add writes the entry at once, then the same command signs in; Claude Code says it isn't yet.
     connected = [
-      { agent: "claude", name: "higgsfield", providerId: "higgsfield", transport: "http", status: "connected", signIn: "unknown", scope: "user" },
+      { agent: "claude", name: "higgsfield", providerId: "higgsfield", transport: "http", status: "needs-sign-in", scope: "user" },
     ];
     rerender(tabUi());
     const row = screen.getByTestId("provider-row-higgsfield");
     expect(within(row).queryByTestId("provider-notice-higgsfield")).toBeNull();
     expect(row).not.toHaveTextContent(/is connected|start a new chat to use it/i);
-    // The add's terminal is still open, but the add is done: step 2 is the one to take now.
+    // The add is done, and its command is still finishing the sign-in, which keeps its own Sign in to start over.
     const claudeSignIn = screen.getByTestId("setup-step-higgsfield-claude-code-sign-in");
     expect(screen.getByTestId("setup-step-higgsfield-claude-code-add")).toHaveAttribute("data-status", "done");
-    expect(claudeSignIn).toHaveAttribute("data-status", "current");
+    expect(claudeSignIn).toHaveAttribute("data-status", "running");
+    expect(claudeSignIn).toHaveTextContent(SIGN_IN_RUNNING);
     expect(within(claudeSignIn).getByRole("button", { name: "Sign in on Claude Code" })).toBeEnabled();
 
     // Codex writes its entry before the browser sign-in finishes; until it does, its add is still finishing the sign-in.
@@ -1183,9 +1337,23 @@ describe("Providers tab — setup steps", () => {
     screen.getByTestId(`setup-step-higgsfield-${agentId}-${stepId}`);
   const buttonTexts = (testId: string) => within(screen.getByTestId(testId)).getAllByRole("button").map((b) => b.textContent);
 
-  it("Claude Code not added: step 1 Add is current, step 2 Sign in is shown disabled until step 1 is done, and there is no Remove", async () => {
-    bothReady();
-    renderTab();
+  it("an agent whose add does not sign in: step 1 Add is current, step 2 Sign in is shown disabled until step 1 is done, and there is no Remove", () => {
+    // No catalog provider has such an agent today (both agents' adds sign in); the catalog data allows one.
+    const def = { ...findProvider("higgsfield"), addSignsIn: ["codex"] as const };
+    const onAdd = vi.fn();
+    render(
+      <AgentChip
+        providerId="higgsfield"
+        providerName="Higgsfield"
+        agentId="claude-code"
+        agentName="Claude Code"
+        state="not-added"
+        actionsEnabled
+        steps={providerSetupSteps({ def, agentId: "claude-code", state: "not-added" })!}
+        onAdd={onAdd}
+        onSignIn={vi.fn()}
+      />,
+    );
     const add = step("claude-code", "add");
     expect(add).toHaveAttribute("data-status", "current");
     expect(add).toHaveAttribute("aria-current", "step");
@@ -1203,21 +1371,36 @@ describe("Providers tab — setup steps", () => {
     expect(locked.parentElement).toHaveClass("cursor-not-allowed");
     expect(within(add).getByRole("button", { name: "Add to Claude Code" }).parentElement).not.toHaveClass("cursor-not-allowed");
     expect(buttonTexts("chip-higgsfield-claude-code")).toEqual(["Add to Claude Code", "Sign in on Claude Code"]);
-    // Only steps one action performs together are drawn as one block.
+    // Only steps one action performs together are drawn as one block, and their connector in the border color.
     expect(add).not.toHaveClass("bg-muted/20");
+    expect(add.querySelector('[aria-hidden].w-px')).toHaveClass("bg-border");
+    expect(add.querySelector('[aria-hidden].w-px')).not.toHaveClass("bg-primary");
     // The steps are an ordered list, in order.
     expect(add.closest("ol")).toBe(signIn.closest("ol"));
     expect(add.compareDocumentPosition(signIn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    await click("higgsfield", /^add to claude code$/i);
+    fireEvent.click(within(add).getByRole("button", { name: "Add to Claude Code" }));
+    expect(onAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("Claude Code not added: ONE action adds and signs in — libi's add script runs Claude Code's own mcp login after the add — posting the add", async () => {
+    bothReady();
+    renderTab();
+    expect(step("claude-code", "add")).toHaveAttribute("data-status", "current");
+    expect(step("claude-code", "sign-in")).toHaveAttribute("data-status", "current");
+    expect(buttonTexts("chip-higgsfield-claude-code")).toEqual(["Add to Claude Code and sign in"]);
+    const chip = screen.getByTestId("chip-higgsfield-claude-code");
+    expect(within(chip).getAllByText(COMBINED_CAPTION)).toHaveLength(1);
+    for (const id of ["add", "sign-in"] as const) expect(step("claude-code", id)).toHaveClass("bg-muted/20");
+    await click("higgsfield", /^add to claude code and sign in$/i);
     expect(lastPostedCommand()).toBe(`sh ${SCRIPTS}/add-provider.sh higgsfield claude /u/bin/claude`);
+    expect(screen.getByTestId("setup-terminal-providers").getAttribute("data-explanation")).toBe(
+      "Adds the Higgsfield MCP server to Claude Code's user settings (~/.claude.json), then opens your browser to sign in with your Higgsfield account; the command waits until you finish. Claude Code keeps the sign-in, and libi never sees it. There is no key, and generations use your Higgsfield credits.",
+    );
   });
 
   it("Codex not added: both steps and ONE action that does both sit in one block, captioned once with what it does, posting the add", async () => {
     bothReady();
     renderTab();
-    // A chip whose steps are separate actions draws its connector in the border color.
-    expect(step("claude-code", "add").querySelector('[aria-hidden].w-px')).toHaveClass("bg-border");
-    expect(step("claude-code", "add").querySelector('[aria-hidden].w-px')).not.toHaveClass("bg-primary");
     showAgent("codex");
     expect(step("codex", "add")).toHaveAttribute("data-status", "current");
     expect(step("codex", "sign-in")).toHaveAttribute("data-status", "current");
@@ -1279,13 +1462,14 @@ describe("Providers tab — setup steps", () => {
   it("while a chip's command is live in the terminal, the steps it performs say what is left and keep their actions, so a click types the command again", async () => {
     bothReady();
     renderTab();
-    await click("higgsfield", /^add to claude code$/i);
+    await click("higgsfield", /^add to claude code and sign in$/i);
     expect(step("claude-code", "add")).toHaveAttribute("data-status", "running");
     expect(step("claude-code", "add")).toHaveTextContent(ADD_RUNNING);
-    const claudeAdd = within(step("claude-code", "add")).getByRole("button", { name: "Add to Claude Code" });
+    expect(step("claude-code", "sign-in")).toHaveAttribute("data-status", "running");
+    expect(step("claude-code", "sign-in")).toHaveTextContent(SIGN_IN_RUNNING);
+    const claudeAdd = within(screen.getByTestId("chip-higgsfield-claude-code")).getByRole("button", { name: "Add to Claude Code and sign in" });
     expect(claudeAdd).toBeEnabled();
-    expect(claudeAdd).toHaveAccessibleDescription(ADD_RUNNING);
-    expect(step("claude-code", "sign-in")).toHaveAttribute("data-status", "locked");
+    expect(claudeAdd).toHaveAccessibleDescription(new RegExp(escapeRegExp(ADD_RUNNING)));
     // Only the chip the terminal is for.
     showAgent("codex");
     expect(step("codex", "add")).toHaveAttribute("data-status", "current");
@@ -1321,7 +1505,7 @@ describe("Providers tab — setup steps", () => {
   it("an add that failed leaves its terminal open and nothing added: the step still says to run it, and Add stays clickable and types the add again", async () => {
     bothReady();
     const { rerender } = renderTab();
-    await click("higgsfield", /^add to claude code$/i);
+    await click("higgsfield", /^add to claude code and sign in$/i);
     const addCommand = `sh ${SCRIPTS}/add-provider.sh higgsfield claude /u/bin/claude`;
     expect(lastPostedCommand()).toBe(addCommand);
     // The script exited with an error: the shell is still live, and detection still finds no entry.
@@ -1330,10 +1514,10 @@ describe("Providers tab — setup steps", () => {
     expect(within(screen.getByTestId("provider-row-higgsfield")).getByTestId("setup-terminal-providers")).toBeInTheDocument();
     expect(screen.getByTestId("chip-higgsfield-claude-code")).toHaveTextContent("Not added");
     expect(step("claude-code", "add")).toHaveAttribute("data-status", "running");
-    expect(step("claude-code", "sign-in")).toHaveAttribute("data-status", "locked");
-    const add = within(step("claude-code", "add")).getByRole("button", { name: "Add to Claude Code" });
+    expect(step("claude-code", "sign-in")).toHaveAttribute("data-status", "running");
+    const add = within(screen.getByTestId("chip-higgsfield-claude-code")).getByRole("button", { name: "Add to Claude Code and sign in" });
     expect(add).toBeEnabled();
-    await click("higgsfield", /^add to claude code$/i);
+    await click("higgsfield", /^add to claude code and sign in$/i);
     expect(posts()).toHaveLength(2);
     expect(posts().map(([, init]) => (JSON.parse(String(init!.body)) as { initialInput: string }).initialInput)).toEqual([addCommand, addCommand]);
     expect(step("claude-code", "add")).toHaveAttribute("data-status", "running");
@@ -1442,14 +1626,15 @@ describe("Providers tab — setup steps", () => {
     renderTab();
     for (const agentId of AGENT_IDS) {
       showAgent(agentId);
-      expect(screen.queryAllByTestId(/^setup-step-(fal|elevenlabs)-/), agentId).toHaveLength(0);
-      expect(document.querySelectorAll('[data-testid^="chip-fal-"] ol, [data-testid^="chip-elevenlabs-"] ol'), agentId).toHaveLength(0);
+      expect(screen.queryAllByTestId(/^setup-step-fal-/), agentId).toHaveLength(0);
+      expect(document.querySelectorAll('[data-testid^="chip-fal-"] ol'), agentId).toHaveLength(0);
     }
     showAgent("claude-code");
     expect(buttonTexts("chip-fal-claude-code")).toEqual(["Remove from Claude Code"]);
     showAgent("codex");
     expect(buttonTexts("chip-fal-codex")).toEqual(["Add to Codex"]);
-    expect(buttonTexts("chip-elevenlabs-codex")).toEqual(["Add to Codex"]);
+    // ElevenLabs signs in with an account now: it lists its steps like Higgsfield.
+    expect(screen.queryAllByTestId(/^setup-step-elevenlabs-codex/).length).toBeGreaterThan(0);
   });
 });
 
@@ -1457,9 +1642,122 @@ describe("Providers tab — detection polling and refresh", () => {
   it("polls detection every 3 s only while the setup terminal is open, and only while the page is visible", async () => {
     bothReady();
     renderTab();
-    expect(providersOpts.at(-1)).toMatchObject({ enabled: true, refetchInterval: false });
+    expect(providersOpts.at(-1)).toMatchObject({ enabled: true });
+    expect(pollInterval(providersOpts.at(-1))).toBe(false);
     await click("fal", /add to claude code/i);
-    expect(providersOpts.at(-1)).toMatchObject({ refetchInterval: 3000 });
+    expect(pollInterval(providersOpts.at(-1))).toBe(3000);
+  });
+
+  it("while libi is asking Claude Code whether it has signed in, the chip says so and detection is re-read every 1.5 s until it answers", () => {
+    bothReady();
+    connected = [
+      {
+        agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected",
+        signIn: "unknown", signInCheck: "pending", scope: "user",
+      },
+    ];
+    renderTab();
+    const chip = screen.getByTestId("chip-elevenlabs-claude-code");
+    expect(chip).toHaveTextContent("Asking Claude Code whether it has signed in to ElevenLabs.");
+    expect(chip).not.toHaveTextContent(/didn't say|can't see/);
+    expect(pollInterval(providersOpts.at(-1))).toBe(1500);
+    // Answered: no more polling without a terminal.
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected", scope: "user" }];
+    expect(pollInterval(providersOpts.at(-1))).toBe(false);
+  });
+
+  it("a Codex local entry whose launcher came after Codex started in libi says to restart libi, never Connected", () => {
+    bothReady();
+    connected = [{ agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected", launcherAfterStart: true }];
+    renderTab();
+    showAgent("codex");
+    const chip = screen.getByTestId("chip-elevenlabs-codex");
+    expect(chip).toHaveTextContent("Added · restart libi to use");
+    expect(chip).not.toHaveTextContent(/^Connected/);
+    expect(screen.getByTestId("chip-elevenlabs-codex-restart-to-use")).toHaveTextContent(
+      "libi's Codex was started before the program that runs ElevenLabs's MCP server was on its PATH, so its chats here can't start it yet. Restart libi to use it.",
+    );
+    expect(within(chip).getByRole("button", { name: "Remove from Codex" })).toBeEnabled();
+  });
+
+  // Test mode attaches libi's stdio fakes to Codex under `fal-ai` and `elevenlabs`; codex merges a same-name config
+  // entry field by field, so a real HTTP one makes codex refuse its whole config (lib/mcp-config.ts).
+  it("in test mode, Codex offers no add of a provider whose fake has its entry name, and says why; Claude Code still does", () => {
+    bothReady();
+    testModeCodexFakes = ["fal-ai", "elevenlabs"];
+    renderTab();
+    showAgent("codex");
+    for (const [id, name, entry] of [["elevenlabs", "ElevenLabs", "elevenlabs"], ["fal", "fal.ai", "fal-ai"]] as const) {
+      const chip = screen.getByTestId(`chip-${id}-codex`);
+      expect(screen.getByTestId(`chip-${id}-codex-test-mode`)).toHaveTextContent(
+        `Test mode: libi gives Codex its own fake ${name} under the name ${entry}, and a real ${name} entry of that name would make Codex refuse its whole config. Add it outside test mode.`,
+      );
+      for (const button of within(chip).queryAllByRole("button", { name: /add to codex/i })) expect(button).toBeDisabled();
+    }
+    // Higgsfield has no fake: its add is offered as always.
+    expect(within(screen.getByTestId("chip-higgsfield-codex")).getByRole("button", { name: /add to codex/i })).toBeEnabled();
+    expect(screen.queryByTestId("chip-higgsfield-codex-test-mode")).toBeNull();
+    showAgent("claude-code");
+    expect(within(screen.getByTestId("chip-elevenlabs-claude-code")).getByRole("button", { name: /add to claude code/i })).toBeEnabled();
+    expect(screen.queryByTestId("chip-elevenlabs-claude-code-test-mode")).toBeNull();
+  });
+
+  it("in test mode, a real HTTP Codex entry under a fake's name is named as what stops Codex's chats, with Remove", async () => {
+    bothReady();
+    testModeCodexFakes = ["fal-ai", "elevenlabs"];
+    connected = [
+      { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "needs-sign-in" },
+      // A local entry merges command over command: no conflict, no note.
+      { agent: "codex", name: "fal-ai", providerId: "fal", transport: "stdio", status: "connected" },
+    ];
+    renderTab();
+    showAgent("codex");
+    expect(screen.getByTestId("chip-elevenlabs-codex-test-mode")).toHaveTextContent(
+      "Test mode: this entry has the name libi's fake ElevenLabs uses, so Codex refuses its whole config and its chats in libi can't start. Remove it, or run libi outside test mode.",
+    );
+    expect(screen.queryByTestId("chip-fal-codex-test-mode")).toBeNull();
+    await click("elevenlabs", /^remove from codex$/i);
+    expect(lastPostedCommand()).toBe(`sh ${SCRIPTS}/remove-provider.sh elevenlabs codex /u/bin/codex elevenlabs`);
+  });
+
+  it("an entry Claude Code says needs authentication reads Sign in needed, and Sign in runs signin-provider for it", async () => {
+    bothReady();
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "needs-sign-in", scope: "user" }];
+    renderTab();
+    const chip = screen.getByTestId("chip-elevenlabs-claude-code");
+    expect(chip).toHaveTextContent("Sign in needed");
+    expect(screen.getByTestId("setup-step-elevenlabs-claude-code-add")).toHaveAttribute("data-status", "done");
+    expect(screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in")).toHaveAttribute("data-status", "current");
+    await click("elevenlabs", /^sign in on claude code$/i);
+    expect(lastPostedCommand()).toBe(`sh ${SCRIPTS}/signin-provider.sh elevenlabs claude /u/bin/claude elevenlabs`);
+  });
+
+  it("while Claude Code's sign-in runs, its step says what to do in the browser and not that Claude Code didn't say", async () => {
+    bothReady();
+    // During a sign-in the server holds its probe back, so a fresh entry reads unknown (lib/providers/claude-signin-probe.ts).
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected", signIn: "unknown", scope: "user" }];
+    const { rerender } = renderTab();
+    const signIn = () => screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in");
+    expect(signIn()).toHaveTextContent("Claude Code didn't say whether it has signed in to ElevenLabs.");
+    await click("elevenlabs", /^sign in on claude code$/i);
+    rerender(tabUi());
+    expect(signIn()).toHaveAttribute("data-status", "running");
+    expect(signIn()).not.toHaveTextContent("didn't say");
+  });
+
+  it("asks for Claude Code's sign-ins to be re-checked when the user looks, and a sign-in that lands flips the step to done", () => {
+    bothReady();
+    const { rerender } = renderTab();
+    // The tab's fetches that are not polls re-check an entry not signed in (lib/queries/providers.ts).
+    expect(providersOpts.at(-1)).toMatchObject({ revalidateOnLook: true });
+    expect("recheck" in providersOpts.at(-1)!).toBe(false);
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "needs-sign-in", scope: "user" }];
+    rerender(tabUi());
+    expect(screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in")).toHaveAttribute("data-status", "current");
+    // The script announced the sign-in's end; the server asked Claude Code once; the poll brings the answer.
+    connected = [{ agent: "claude", name: "elevenlabs", providerId: "elevenlabs", transport: "http", status: "connected", scope: "user" }];
+    rerender(tabUi());
+    expect(screen.getByTestId("setup-step-elevenlabs-claude-code-sign-in")).toHaveAttribute("data-status", "done");
   });
 
   it("stops reading detection while nobody can see the window", () => {
@@ -1489,7 +1787,7 @@ describe("Providers tab — detection polling and refresh", () => {
     await new Promise((r) => setTimeout(r, 50));
     expect(providersFetches).toHaveBeenCalledTimes(1);
     expect(refetchProviders).not.toHaveBeenCalled();
-    expect(providersOpts.at(-1)).toMatchObject({ refetchInterval: false });
+    expect(pollInterval(providersOpts.at(-1))).toBe(false);
   });
 
   it.each(["simulate-exit", "simulate-gone"])(
@@ -1502,7 +1800,7 @@ describe("Providers tab — detection polling and refresh", () => {
 
       fireEvent.click(screen.getByRole("button", { name: ending }));
       expect(refetchProviders).toHaveBeenCalledTimes(1);
-      expect(providersOpts.at(-1)).toMatchObject({ refetchInterval: false });
+      expect(pollInterval(providersOpts.at(-1))).toBe(false);
 
       // A second report about the same terminal is not a second ending.
       fireEvent.click(screen.getByRole("button", { name: /simulate-exit/ }));

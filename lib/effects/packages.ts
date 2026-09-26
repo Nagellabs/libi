@@ -1,4 +1,5 @@
 // lib/effects/packages.ts
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { getLibiHome } from "@/lib/libi-home";
@@ -46,17 +47,20 @@ export function loadCustomEffectsFromDisk(
   return { defs, errors };
 }
 
-/** One entry in the client payload: the validated manifest + its raw animate source. */
+/** One entry in the client payload: the validated manifest, its raw animate
+ *  source, and the source's sha256 (the page's curve key). */
 export interface CustomEffectPayloadEntry {
   meta: CustomEffectManifest;
   source: string;
+  sourceHash: string;
 }
 
 /**
  * Build the client-facing payload — every custom package's manifest + `animate.js`
- * source, re-read fresh from disk. ONLY packages whose source compiles cleanly via
- * the client-safe `compileCustomEffect` are included, so the browser never receives
- * a poison source it would then fail to compile. NEVER throws.
+ * source (and its sha256), re-read fresh from disk. ONLY packages that pass
+ * `compileCustomEffect`'s validation and parse are included. The page never
+ * compiles or runs the source: it hands it to the effect sandbox, which answers
+ * with sampled numbers (lib/effects/custom-curves.ts). NEVER throws.
  */
 export function loadCustomEffectPayload(
   root = customEffectsDir(),
@@ -73,7 +77,9 @@ export function loadCustomEffectPayload(
       );
       const source = readFileSync(join(dir, "animate.js"), "utf8");
       // Only ship sources the client will be able to compile.
-      if (compileCustomEffect(meta, source).ok) custom.push({ meta, source });
+      if (compileCustomEffect(meta, source).ok) {
+        custom.push({ meta, source, sourceHash: createHash("sha256").update(source, "utf8").digest("hex") });
+      }
     } catch {
       // Skip unreadable / invalid packages — never surface to the client.
     }

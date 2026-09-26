@@ -68,8 +68,15 @@ export const ESSENTIAL_SECTION_KEYS: readonly string[] = [
  * DrawContext sections instead and never saw the gate. `manual-truth.test.ts`
  * now pins the planning section as inlined, so the next creep fails a test
  * rather than a user.
+ *
+ * Raised to 18_432 on 2026-09-23: the DrawContext (1.5 KB) had not fit since
+ * the 2026-09-18 raise and was skipped silently, and the index line for the new
+ * "When a code overlay breaks" section then pushed Draw Function Format out as
+ * well. Under the overlay sandbox the DrawContext is the exact list of what a
+ * body may read, so both body sections are pinned as inlined too
+ * (`manual-truth.test.ts`). With every essential inlined the index is ~17.9 KB.
  */
-export const DEFAULT_INDEX_BUDGET_BYTES = 16_384;
+export const DEFAULT_INDEX_BUDGET_BYTES = 18_432;
 
 /** The reserved key that returns the manual unchanged. */
 export const ALL_SECTIONS_KEY = "all";

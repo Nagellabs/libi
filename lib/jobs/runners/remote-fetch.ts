@@ -4,7 +4,7 @@ import fsAsync from "node:fs/promises";
 import type { JobRunner, JobContext } from "@/lib/jobs/types";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 import { assertPublicHttpUrl } from "@/lib/net/url-guard";
-import { fetchAndStoreRemoteFile, fetchRemoteBuffer } from "@/lib/net/fetch-and-store";
+import { fetchAndStoreRemoteFile, fetchRemoteBuffer, REMOTE_FETCH_MAX_URLS } from "@/lib/net/fetch-and-store";
 import { getLibiHome } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 
@@ -15,9 +15,21 @@ import { serverLogger as logger } from "@/lib/logger";
 export { readBodyWithCap, MAX_BYTES } from "@/lib/net/fetch-and-store";
 
 const remoteFetchParamsSchema = z.object({
-  urls: z.array(z.string()).min(1).max(20),
+  urls: z.array(z.string()).min(1).max(REMOTE_FETCH_MAX_URLS),
   pieceId: z.string().nullable(),
   autoUpload: z.boolean().default(true),
+  /** The urls came from a template's author: store media only, under a type
+   *  derived from the media allowlist, never the one the server declared
+   *  (`lib/net/fetch-and-store.ts`). `apply_template` sets it. */
+  mediaOnly: z.boolean().default(false),
+  /** The name to store each url under, index for index (null: the url's own
+   *  basename). `apply_template` names a stranger's hosted assets
+   *  `template-asset-<n><ext>`, so the author's file name never reaches the
+   *  piece. A plain name: no separator, no leading dot. */
+  filenames: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/).nullable()).max(REMOTE_FETCH_MAX_URLS).optional(),
+}).refine((p) => p.filenames === undefined || p.filenames.length === p.urls.length, {
+  message: "filenames must name each url",
+  path: ["filenames"],
 });
 
 export type RemoteFetchParams = z.infer<typeof remoteFetchParamsSchema>;
@@ -59,7 +71,7 @@ export const remoteFetchRunner: JobRunner<RemoteFetchParams, RemoteFetchResult> 
   mcpToolId: makeMcpToolId("libi", "libi.import_remote_files"),
 
   async run(ctx: JobContext<RemoteFetchParams>): Promise<RemoteFetchResult> {
-    const { urls, pieceId, autoUpload } = ctx.params;
+    const { urls, pieceId, autoUpload, mediaOnly } = ctx.params;
 
     // Resume from checkpoint if available.
     const prior = (ctx.resumeState as RemoteFetchResult | null)?.items ?? [];
@@ -76,7 +88,7 @@ export const remoteFetchRunner: JobRunner<RemoteFetchParams, RemoteFetchResult> 
       // fallback name would have the second silently overwrite the first —
       // leaving the first item reporting a `localPath` and a `bytes` count for
       // bytes that are no longer there.
-      const filename = urlBasename(url) || `download-${i}.bin`;
+      const filename = ctx.params.filenames?.[i] || urlBasename(url) || `download-${i}.bin`;
 
       // Per-URL isolation: one bad url must never fail the other nineteen.
       try {
@@ -88,6 +100,7 @@ export const remoteFetchRunner: JobRunner<RemoteFetchParams, RemoteFetchResult> 
             guard: assertPublicHttpUrl,
             pieceId,
             filename,
+            mediaOnly,
           });
           items.push({
             url,
@@ -100,6 +113,7 @@ export const remoteFetchRunner: JobRunner<RemoteFetchParams, RemoteFetchResult> 
             url,
             guard: assertPublicHttpUrl,
             filename,
+            mediaOnly,
           });
           const dir = path.join(
             getLibiHome(),

@@ -2503,7 +2503,7 @@ describe("what a signal to the child reaches", () => {
     vi.restoreAllMocks();
   });
 
-  it("spawns a wrapper child as its own process group off Windows, with a stdin pipe it never writes to, and the never-healthy kill goes through its tree", async () => {
+  it("spawns a wrapper child as its own process group off Windows, with a stdin pipe, and the never-healthy kill goes through its tree", async () => {
     vi.spyOn(os, "platform").mockReturnValue("darwin");
     const child = fakeChild();
     const spawn = vi.fn(() => child);
@@ -2526,6 +2526,31 @@ describe("what a signal to the child reaches", () => {
     expect((spawn.mock.calls[0] as unknown[])[2]).toMatchObject({ detached: true, stdio: ["pipe", "pipe", "pipe"] });
     expect(killTree).toHaveBeenCalledWith(child, "SIGKILL");
     expect(child.kill).toHaveBeenCalledTimes(1);
+  });
+
+  // The lifeline carries nothing: the jobs-caller token it once carried guarded
+  // only `template_publish`, which `POST /api/jobs` now refuses from every caller.
+  it("writes nothing to the child's stdin lifeline", async () => {
+    const { PassThrough } = await import("node:stream");
+    const written: string[] = [];
+    const spawn = vi.fn(() => {
+      const c = fakeChild() as ReturnType<typeof fakeChild> & { stdin: InstanceType<typeof PassThrough> };
+      c.stdin = new PassThrough();
+      c.stdin.on("data", (d: Buffer) => written.push(d.toString()));
+      return c;
+    });
+    const handle = await startMcpHttpChild({
+      spawn: spawn as never,
+      fetch: (async () => new Response(HEALTHY_BODY, { status: 200 })) as never,
+      portFile: tmpPortFile(),
+      entry: plainEntry,
+      pickPort: async () => 3999,
+      isFree: async () => true,
+      signalGroup: vi.fn(),
+    });
+    await new Promise((r) => setImmediate(r));
+    expect(written).toEqual([]);
+    await handle.stop();
   });
 
   it("keeps the compiled entry, a single process, in libi's own group, still with the stdin pipe", async () => {

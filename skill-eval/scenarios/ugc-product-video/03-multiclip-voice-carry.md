@@ -54,6 +54,6 @@ assertions:
 - Used the `@Image1` / `@Audio1` reference tokens ONLY on the reference-to-video
   call (never injected them into a plain image-to-video prompt).
 - Kept native audio on for all clips; the spoken lines come from the generations.
-- Did NOT reach for ElevenLabs `voice_clone`/`text_to_speech` to unify the voice —
+- Did NOT reach for ElevenLabs' `creative_generate_speech` / voice changer to unify the voice —
   the `@Audio1` carry is the default; cloning is the explicit opt-in fallback (the
   same default that governs a stitch's faceless AI inserts as of 2026-06-08).

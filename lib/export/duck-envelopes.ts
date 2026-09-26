@@ -3,6 +3,7 @@ import { join } from "path";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { duckGainCurve } from "@/lib/audio/duck-law";
 import type { DuckSettings } from "@/lib/engine/types";
+import { onFileTimeline } from "@/lib/export/export-base";
 
 /**
  * Renders each ducked clip's gain curve to a WAV that the export graph
@@ -37,6 +38,11 @@ export interface PlacedSidechain {
    * different level than the editor showed.
    */
   volume: number;
+  /** ffprobe index of the audio stream the preview plays from this file
+   *  (probeMedia's primaryAudioStreamIndex). Unknown → ffmpeg's own pick. */
+  audioStream?: number;
+  /** How to read the file's audio onto its timeline (ProbedMedia.audioRead). */
+  read?: { inputArgs: string[]; ptsShift: number };
 }
 
 export interface DuckEnvelopeInput {
@@ -54,10 +60,23 @@ export interface DuckEnvelopeInput {
 }
 
 /** Decode a whole audio file to mono float samples at `ENVELOPE_SAMPLE_RATE`. */
-async function decodeMono(path: string, scratchDir: string, signal?: AbortSignal): Promise<Float32Array> {
-  const raw = join(scratchDir, `sc-${Buffer.from(path).toString("base64url").slice(-24)}.f32`);
+async function decodeMono(
+  path: string,
+  scratchDir: string,
+  signal?: AbortSignal,
+  audioStream?: number,
+  read?: { inputArgs: string[]; ptsShift: number },
+): Promise<Float32Array> {
+  const raw = join(scratchDir, `sc-${Buffer.from(`${path}#${audioStream ?? ""}`).toString("base64url").slice(-24)}.f32`);
+  const map = audioStream !== undefined ? ["-map", `0:${audioStream}`] : [];
   await runFfmpeg(
-    ["-y", "-i", path, "-vn", "-ac", "1", "-ar", String(ENVELOPE_SAMPLE_RATE), "-f", "f32le", raw],
+    // From the file's start: a track that starts late is padded with silence
+    // (onFileTimeline). Decoded bare, a raw output starts at the track's
+    // first sample, and `placeOnTimeline` would put the sidechain early by its
+    // lead, ducking before the voice starts. `read` is the probe's fix for a
+    // file ffmpeg reads off its timeline (ProbedMedia.audioRead).
+    ["-y", ...(read?.inputArgs ?? []), "-i", path, ...map, "-vn", "-af", onFileTimeline(read?.ptsShift),
+      "-ac", "1", "-ar", String(ENVELOPE_SAMPLE_RATE), "-f", "f32le", raw],
     { op: "export_duck_envelope_decode", context: { path }, signal },
   );
   const buf = await fs.readFile(raw);
@@ -140,10 +159,11 @@ export async function renderDuckEnvelopes(opts: {
     // not a curve per clip multiplied together (that double-ducks on overlap).
     const timeline = new Float32Array(timelineSamples);
     for (const sidechain of input.sidechains) {
-      let samples = decoded.get(sidechain.path);
+      const key = `${sidechain.path}#${sidechain.audioStream ?? ""}`;
+      let samples = decoded.get(key);
       if (!samples) {
-        samples = await decodeMono(sidechain.path, opts.outDir, opts.signal);
-        decoded.set(sidechain.path, samples);
+        samples = await decodeMono(sidechain.path, opts.outDir, opts.signal, sidechain.audioStream, sidechain.read);
+        decoded.set(key, samples);
       }
       placeOnTimeline(samples, sidechain, timelineSamples, ENVELOPE_SAMPLE_RATE, timeline);
     }

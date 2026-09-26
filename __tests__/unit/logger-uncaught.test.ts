@@ -32,3 +32,24 @@ describe("uncaughtException handler", () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("process-level handlers register once per process", () => {
+  // The dev server re-evaluates lib/logger.ts on every recompile of a route
+  // that imports it. A module-scope `process.on(...)` then added one more
+  // listener each time: server.log showed MaxListenersExceededWarning (11
+  // uncaughtException listeners), and one exception logged up to 11 duplicate
+  // "Uncaught exception (continuing)" fatals (QA 2026-09-25, bug 5).
+  it("re-evaluating the module does not add another uncaughtException or unhandledRejection listener", async () => {
+    await import("@/lib/logger");
+    const uncaught = process.listenerCount("uncaughtException");
+    const rejection = process.listenerCount("unhandledRejection");
+
+    for (let i = 0; i < 3; i++) {
+      vi.resetModules();
+      await import("@/lib/logger");
+    }
+
+    expect(process.listenerCount("uncaughtException")).toBe(uncaught);
+    expect(process.listenerCount("unhandledRejection")).toBe(rejection);
+  });
+});

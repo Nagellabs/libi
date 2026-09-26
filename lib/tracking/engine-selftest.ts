@@ -23,8 +23,27 @@ import {
   trackingModelsDir,
 } from "@/lib/tracking/engine-deps";
 import { buildUvEnv, trackingVenvDir } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 
 const pexec = promisify(execFile);
+
+/** `pexec`, with uv's offline failure turned into one plain sentence (the raw
+ *  text is logged by uvNetworkFailureMessage). This is what
+ *  `libi.verify_install` relays when the first self-test after the
+ *  managed-Python switch cannot download libi's Python. */
+async function selftestExec(
+  ...args: Parameters<typeof pexec>
+): Promise<{ stdout: string; stderr: string }> {
+  try {
+    const r = await pexec(...args);
+    return { stdout: String(r.stdout), stderr: String(r.stderr) };
+  } catch (err) {
+    const stderr = String((err as { stderr?: unknown }).stderr ?? "");
+    const offline = uvNetworkFailureMessage("object tracking", stderr);
+    if (offline) throw new Error(offline, { cause: err });
+    throw err;
+  }
+}
 
 export interface EngineSelftestResult {
   ok: boolean;
@@ -33,7 +52,7 @@ export interface EngineSelftestResult {
 
 export async function runEngineSelftest(): Promise<EngineSelftestResult> {
   const proj = sidecarProjectDir();
-  const { stdout } = await pexec(
+  const { stdout } = await selftestExec(
     uvPath(),
     // `--frozen`: never rewrite the shipped uv.lock (read-only in the packaged app).
     ["run", "--frozen", "python", "track_runner.py", "--selftest"],

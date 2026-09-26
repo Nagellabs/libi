@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   makeRun,
+  makeListCodex,
   removeArgsFor,
   spawnShapeFor,
   type ExecFileLike,
@@ -199,6 +200,19 @@ describe("makeRun backs up the codex config it is about to have rewritten", () =
     });
     expect(calls).toHaveLength(3);
     expect(listCodexConfigBackups(codexHome)).toHaveLength(1);
+  });
+
+  it("names the copy holding the pre-write bytes — new or already on disk", async () => {
+    // First run: a fresh copy, reported both as the new copy and as the prior config.
+    const { impl } = fakeExecFile([{ ok: true }, { ok: true }]);
+    const run = makeRun(impl);
+    const first = await run("/usr/local/bin/codex", codexMcpAddArgs(URL), "/tmp", { CODEX_HOME: codexHome });
+    expect(first.priorConfig).toBe(first.configBackup);
+    // Same bytes again (the fake never rewrote the file): no new copy, but the
+    // existing one still holds exactly what codex is about to rewrite.
+    const second = await run("/usr/local/bin/codex", codexMcpAddArgs(URL), "/tmp", { CODEX_HOME: codexHome });
+    expect(second.configBackup).toBeUndefined();
+    expect(second.priorConfig).toBe(first.configBackup);
   });
 
   it("does not copy for claude, nor for a read-only codex subcommand", async () => {
@@ -496,5 +510,38 @@ describe("connectCommand output", () => {
     );
     expect(text).not.toContain("choose Every folder");
     expect(text).toContain("[libi] ✓ Codex skills: 30 skills in /home/me/.agents/skills\n");
+  });
+});
+
+// The read `libi connect` makes before deciding whether to run `codex mcp add`
+// at all. Only a FRESH listing counts; anything else is no information, and
+// connect then adds as it always did.
+describe("makeListCodex", () => {
+  const entries = [{ name: "libi", enabled: true, transport: { type: "streamable_http", url: `${URL}?agent=codex` } }];
+  const realCodexHome = process.env.CODEX_HOME;
+  afterEach(() => {
+    if (realCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = realCodexHome;
+  });
+
+  it("returns a fresh listing's entries, read from the home the add will write", async () => {
+    process.env.CODEX_HOME = "/scoped/codex";
+    const read = vi.fn(async () => ({ state: "fresh" as const, entries }));
+    expect(await makeListCodex(read)("/usr/local/bin/codex")).toEqual(entries);
+    expect(read).toHaveBeenCalledWith({ command: "/usr/local/bin/codex", args: [] }, { codexHome: "/scoped/codex" });
+  });
+
+  it("defaults to ~/.codex — codex's own default — when CODEX_HOME is unset", async () => {
+    delete process.env.CODEX_HOME;
+    const read = vi.fn(async () => ({ state: "fresh" as const, entries }));
+    await makeListCodex(read)("/usr/local/bin/codex");
+    expect(read).toHaveBeenCalledWith(expect.anything(), { codexHome: path.join(os.homedir(), ".codex") });
+  });
+
+  it("anything but a fresh listing is no information → null", async () => {
+    const unread = vi.fn(async () => ({ state: "unread" as const }));
+    expect(await makeListCodex(unread)("/usr/local/bin/codex")).toBeNull();
+    const stale = vi.fn(async () => ({ state: "stale" as const, entries, reason: "failed" as const, readAt: 0 }));
+    expect(await makeListCodex(stale)("/usr/local/bin/codex")).toBeNull();
   });
 });

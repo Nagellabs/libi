@@ -127,6 +127,23 @@ describe("serveFileWithRange", () => {
     expect(res.status).toBe(304);
   });
 
+  // A directory stats fine but cannot be read: it used to go out as a 200 whose
+  // stream then failed. Before the ETag short-circuit, too — a 304 for a folder
+  // would say "your cached copy is still good" about something that is not a file.
+  it("answers 404 for a directory, with the caller's headers, and never a 304", async () => {
+    const res = serveFileWithRange({
+      filePath: dir,
+      contentType: "video/mp4",
+      etag: '"abc"',
+      request: new Request("http://x/file", { headers: { "If-None-Match": '"abc"', Range: "bytes=0-9" } }),
+      extraHeaders: { "X-Content-Type-Options": "nosniff" },
+    });
+    expect(res.status).toBe(404);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("accept-ranges")).toBeNull();
+    expect(await res.text()).toBe("Not found");
+  });
+
   it("does not throw on client cancel mid-stream", async () => {
     // Regression: a client disconnect while bytes are still queued used to
     // raise an unhandled `Invalid state: Controller is already closed` from

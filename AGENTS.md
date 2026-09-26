@@ -43,7 +43,12 @@ Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export`, `overla
 `analysis`, `tracking-engine`, `tracking-pyenv`, `matte`, `mcp-config`, `mcp-http`,
 `session-manager`, `lifecycle`, `snapshot`, `codex-config`, `terminal`, `analytics`,
 `onboarding`, `skills`, `video-download`, `providers`, `db`, `agent-cli`, `agent-install`,
-`libi-registration`, `process-manager`, `agent-registry`, `session-event-handler`.
+`libi-registration`, `process-manager`, `agent-registry`, `session-event-handler`, `social`,
+`templates`, `templates-cloud` (the publish and install jobs, the use reporter, the pending-publish route, publish requests and their confirm),
+`overlay-sandbox`, `uv-env` (op `uv_offline`: a uv run that could not download its managed Python or packages;
+`python_prefetched` / `python_prefetch_failed` / `python_prefetch_schedule_failed`: the background Python prefetch),
+`e2e` (the test-only `/api/e2e/*` routes: `run_tool_refused`, `run_tool_failed`),
+`dep-install` (binary placement, the cross-process `install_lock_*` ops, `partial_swept` / `partial_sweep_failed`).
 
 ## Hard rules
 
@@ -85,9 +90,13 @@ Every one of these has broken something. Do not relax one without evidence.
   `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, and for Codex on macOS the
   `Contents/Resources` of `ChatGPT.app` / `Codex.app` in `/Applications` and `~/Applications`;
   on Windows `%USERPROFILE%\.local\bin`, and for Codex `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`);
-  rejects any hit inside libi's own tree; realpaths the hit; runs `--version` under a hard 3 s
-  bound — so a cold resolve including `--version` is bounded at about 6.5 s; and compares
-  against `AGENT_CLI_MIN_VERSION` (`lib/agents/cli/min-versions.ts`). The
+  rejects any hit inside libi's own tree; realpaths every hit (deduping by realpath); runs
+  `--version` on each in search order under a hard 3 s bound per copy and takes the FIRST that
+  meets `AGENT_CLI_MIN_VERSION` (`lib/agents/cli/min-versions.ts`) — none does → the first
+  copy's answer, as before. It stops at the first qualifying copy (usually one spawn) and checks
+  at most `AGENT_CLI_MAX_VERSION_CANDIDATES` (4), so a cold resolve is about 6.5 s when the first
+  copy answers and bounded at about 15.5 s if every copy hangs. First-hit-only is what let an old
+  `/opt/homebrew/bin/claude` shadow a current fnm one when the login-shell probe missed fnm. The
   status route, the process manager (which sets `CLAUDE_CODE_EXECUTABLE` / `CODEX_PATH` from
   it), provider detection, libi-registration detection and `libi connect` all read it. At
   session start (`staleOk`) a remembered result is served without waiting on a re-probe, and
@@ -102,6 +111,11 @@ Every one of these has broken something. Do not relax one without evidence.
   `session/prompt`, so a clean Claude `session/new` is never proof of sign-in, and a Claude turn whose
   reply OPENS with `Failed to authenticate` is an observed rejection (`lib/agents/session-event-handler.ts`).
 - The studio server, its MCP children and its API routes never write an agent's config (no `mcp add` / `mcp remove`, installers, or sign-in). Every such write is a command printed into a setup terminal that the user submits. The one exception is the `libi connect` CLI, which the user runs by hand in their own project. The builder is `lib/agents/setup/commands.ts`; the terminals are `purpose: "setup"` PTYs owned by the Agents page.
+- libi never stores a provider API key, and never writes an agent's config. One exception: a provider the user
+  connects for libi's own UI may grant libi an OAuth token, obtained through a browser sign-in the user completes,
+  held in the OS keychain (or a private 0600 file under npx), never in the database, never in an API response, and
+  revocable both in libi and at the provider. Today that is Zernio, for the Social page and a piece's Posting tab
+  (`lib/social/`); the agent's own Zernio sign-in is a separate entry libi never reads.
 - Never hand-edit `~/.codex/config.toml`. Codex re-serializes it and ate users' TOML; the
   only writers are codex's own `mcp add` / `mcp remove` — typed by the user in a setup
   terminal, or run by the `libi connect` CLI the user invokes.
@@ -114,6 +128,28 @@ Every one of these has broken something. Do not relax one without evidence.
   the nameless request correlates by `toolCallId` to a `tool_call` update carrying
   `rawInput.server` / `.tool`. It could only ever fire in `ask` mode, since codex's own
   Guardian approves MCP calls in the auto modes (`lib/approval/extensions.ts` LIMITATIONS).
+  The permission route takes `browserOnlyRefusal`: a card is answered from libi's page,
+  never by a header-less loopback client.
+- **An agent can prepare a publish; only the user can publish.** `libi.publish_template`
+  runs the local preflight, then its `template_publish_prepare` job makes the request's OWN
+  example and poster (`lib/templates/cloud/publish-request-media.ts`) and records a publish
+  request (`lib/templates/cloud/publish-requests.ts`) — nothing leaves the machine. The
+  review plays exactly those files and the publish job sends exactly them, re-deriving
+  nothing: never "resolve the example at publish time" again. The user publishes from the
+  Templates page's review panel, whose confirm route is the ONLY thing that starts `template_publish` (in-process,
+  `lib/templates/cloud/publish-confirm.ts`); `POST /api/jobs` refuses the kind from every
+  caller and `/api/jobs/:id/retry` never re-runs it (`lib/jobs/user-started-kinds.ts`). Never
+  give a publish back to an approval card, a `confirm` flag or a tool call: a card never shows
+  under bypass, a settings allow-rule, Codex or `libi connect`. The confirm is bound to the
+  reviewed content's fingerprint (template + the request's media bytes), single-use, and needs
+  the browser-only checks (`browserOnlyRefusal`) plus a `confirmCode` no tool, tool result or
+  log line ever carries. The same checks guard visibility, the nickname and the creator key's
+  import and reveal; the approval card's answer, the approval mode and an extension's "Require
+  approval" switch (`libi.update_mcp_server` may only turn it ON); social publish / schedule /
+  edit / delete / retry (an agent's `libi.post_piece` draft is exempt), connect / disconnect and
+  the social settings; the catalog report; and a chat's Restart session
+  (`POST /api/sessions/:id/restart`). Honest limits in `lib/approval/extensions.ts`
+  LIMITATIONS.
 - **Never canonicalize a codex tool call from its TITLE.** Titles are presentation and have
   changed shape twice (`<server>/<tool>`, now `mcp.<server>.<tool>`); the `tool_call` update
   carries `rawInput: { server, tool }`, which is the contract. Use `toolIdForCall`
@@ -154,6 +190,19 @@ Every one of these has broken something. Do not relax one without evidence.
   third-party MCP, and the in-app session gets exactly one `mcpServers` entry — except in
   test mode, where the fake fal-ai / ElevenLabs stdio servers ride along under their real
   names (`lib/mcp-config.ts#getMcpServersForAcp`).
+- **The proxy checks the loopback Host on every `/api` request, reads included** (DNS
+  rebinding; `lib/security/request-guard.ts#evaluateRequestOrigin`). It does NOT refuse
+  cross-site GETs in general. The opaque-origin sandbox, test-mode catalog media at
+  `127.0.0.1` under a `localhost` page, and the PDF viewer all read cross-site legitimately.
+  A GET with an outside effect (it spends the creator key, calls the site, or writes)
+  refuses cross-site requests itself, navigations included, with `crossSiteSubresourceRefusal`.
+  Today that is `/api/templates/cloud/mine`, `/api/templates/cloud/catalog`,
+  `/api/templates/cloud/catalog/[cloudId]` (a public template's page reads the site and its template.json),
+  `/api/templates/cloud/asset-stream` (it fetches a public template's link-only audio/video from a third-party host,
+  SSRF-checked on every hop — lib/templates/cloud/asset-stream.ts),
+  `/api/templates/cloud/creator` (it spends the creator key on the site's approval read), and the
+  GETs of `/api/templates/cloud/author` and `/api/templates/cloud/key` (they create the creator
+  identity, with its default nickname, on first view).
 - **A chat's third-party MCP servers are read when its session is created — including the
   standby libi pre-creates for the next New chat.** A provider added after the standby was made
   (Providers tab, or the user's own `claude mcp add`) is missing from the chat it becomes, while
@@ -161,6 +210,14 @@ Every one of these has broken something. Do not relax one without evidence.
   `openNewSession` discards a standby whose agent MCP config changed since, or that overlapped a
   setup terminal (`lib/sessions/standby-freshness.ts`, `lib/terminal/setup-activity.ts`), and that
   chat starts fresh. Don't drop the check to win back the standby's ~2 s.
+- **Restarting a chat is CLOSE, then load — for both adapters** (`SessionManager.restartSession`, the
+  session menu's Restart session; user-only route). A `session/load` of a session the adapter still
+  holds re-reads nothing: claude-agent-acp returns early on an unchanged fingerprint and keeps its
+  `claude` child; codex-acp re-attaches to the live thread. Measured 2026-09-25: a server added to the
+  config after the session was created started on close + load, never on load alone. Neither needs the
+  adapter PROCESS restarted (one process serves every chat of an agent); it is replaced only when the
+  close or the load goes unanswered within its bound, and never while another chat on it is working
+  or being opened; idle chats on it drop their ACP session and reload on their next message.
 - Nothing writes CLAUDE.md, AGENTS.md, `.mcp.json` or `settings.local.json` into any folder.
   Instructions are tiered: a short core in the MCP `instructions` field plus
   `libi.read_manual` for the rest — SECTIONED (`mcp/manual-sections.ts`), because the
@@ -168,6 +225,107 @@ Every one of these has broken something. Do not relax one without evidence.
   the index plus the pre-first-edit essentials, a key returns one section, `"all"` the
   lot; skills are the only files on disk (`.claude/skills`,
   `.agents/skills`), mirrored by `libi connect` and into `~/.libi/agent`.
+
+**Overlay sandbox**
+- **Custom effect bodies (`animate.js`: `libi.add_effect` / `update_effect` / git
+  installs) never run in the app origin either** — not in the preview, not on `/render`.
+  The effect sampler (`lib/sandbox/effect-sampler.ts`), a sandbox of its own on the same
+  runtime bundle, runs the body and answers with a numeric table (1025 samples of every
+  `TransformDelta` field, `lib/effects/curve.ts`); the page validates every number and
+  interpolates (`lib/effects/custom-curves.ts`). The preview draws identity until a curve
+  lands and repaints; the export samples every custom slot before its first frame and a
+  failure fails it naming the effect. The server only PARSES a body
+  (`compile-custom.ts`), never calls it; an import-boundary test keeps both body runners
+  out of every page bundle.
+- **Storyboard sketch bodies run server-side, in a Node child that locks itself before a
+  body runs** (`lib/storyboard/render/lock-runtime.ts`): Node's permission model does not
+  gate the network, so after one trusted warm-up render the worker refuses every further
+  module resolution and leaves only a data-only `process` — otherwise a body could speak
+  to libi's loopback routes itself. A render library that loads something lazily must be
+  warmed before the lock, never by loosening it; a Node without `module.registerHooks`
+  renders nothing.
+- **Code, three and tracked-code bodies never compile in the app origin, or on any main
+  thread.** They run in a CLASSIC `blob:` Worker (`lib/sandbox/runtime-entry.ts`: a module
+  worker does not load at an opaque origin, and the worker's base URL is its blob, so the
+  bundle inlines every dependency), spawned by a sandboxed supervisor iframe that never
+  runs a body (`lib/sandbox/supervisor.ts`; `connect-src 'none'` in
+  `lib/security/csp.ts#buildOverlayRuntimeCsp`). `renderFrame` calls no body. The regex
+  denylist in `lib/ai/scene-validator.ts` is defense in depth, not the boundary: a
+  `composition.json` can arrive by routes no tool call saw. No "trusted" flag that skips
+  the sandbox, no user-facing toggle. `LIBI_OVERLAY_SANDBOX=0` is dev-only and
+  preview-only (refused when packaged or under `NODE_ENV=production`; export always
+  sandboxes — `lib/sandbox/mode.ts`).
+- Nothing in `lib/sandbox/runtime/` may touch `document`, `window` or `Image`; a worker has
+  none. Hence `drawSvg`/`svgToImage` do not work in the sandbox (Blink rasterizes SVG only
+  on a document) — tell bodies to use `new Path2D(svgPathData)`. `runtime/harden.ts` stubs
+  or deletes every escape and task source it lists (`fetch`, `Worker`, `MessageChannel`,
+  `scheduler`, …) on every owner in the prototype chain, and after boot locks the worker's
+  own `postMessage` so a body cannot flood the supervisor thread. A task source neither
+  stubbed there nor owner-tagged (`runtime/async-owner.ts`) is one a wedge can hide behind.
+- A body sees exactly the documented context
+  (`lib/sandbox/runtime/compile.ts#buildDrawBodyContext`) plus the helper bag — no
+  `sourceCanvas`, `overlays`, `tracks`, `assets`. `loadImage` accepts `data:` URLs and
+  this piece's own image files (`/api/files/by-id/<id>/content`); anything else, `blob:`
+  included, is refused.
+- **Known limits, stated plainly.** All bodies of a piece share ONE worker realm (spec A3):
+  a body can patch shared intrinsics, and alter or read its sibling overlays in the same
+  piece, or get them dropped. Only the runtime's own channel is protected (its primitives
+  are captured before any body runs). That is why the Templates flag
+  `PUBLIC_CODE_TEMPLATES` (`lib/templates/cloud/constants.ts`) must
+  stay `false` until bodies run in one worker per provenance. Async work the runtime
+  cannot tag (a browser promise, an event listener) falls back to a heuristic suspect
+  when it wedges the worker. Custom effect bodies likewise share one sampler worker realm.
+  Three open sandbox re-review findings also block `PUBLIC_CODE_TEMPLATES`: an async-switch flood is blamed on the thread holder before
+  its sender, so an unpatched storm can get a sibling dropped (R-M1), and the
+  worker truncates error text with the live `String.prototype.slice`, so a body
+  can make every error it posts IPC-sized (R-M2), and `errorMessage` (`serve.ts`) tells
+  an oversized layer by a live-realm `instanceof OversizedLayerError` and reads its
+  `layerSize`, both forgeable by a body (R2-M3). A three body's shader that never
+  ends hangs the GPU process, which no worker restart can fix. Every availability bound
+  (port message budget, layer size, frame liveness) is enforced by the host
+  (`lib/sandbox/host.ts`); the worker's own rate limits are only hygiene.
+- **Watchdog (spec A4).** The worker has one thread, so the host times only the head of a
+  per-port FIFO: a queued request's clock starts when the one ahead answers (budgets:
+  `lib/sandbox/host.ts`: a load `LOAD_TIMEOUT_MS` 5 s; a render that measures a content
+  fit 5 s plus `PROBE_EXTRA_BUDGET_MS` 3 s per further fit, so up to 20 s on the first
+  frame of a keyframed-size tween segment — a wedge there is caught that late; any other
+  render 2 s — `renderBudget`, whose fit LRU mirrors the worker's). On expiry the supervisor
+  `terminate()`s the worker and spawns a fresh one; the host replays every other cached
+  source, and the dropped overlay retries only when its source changes. NEVER "fix" this
+  into destroying the iframe: Chromium puts every sandboxed frame of a site in one
+  renderer process and never reclaims a wedged one (spike round 1); only a worker can be
+  killed. A frame that sends no `ready` and answers no `ping` is not wedged but DEAD (the
+  supervisor never runs a body), and only then is it replaced — at most 3 times in 5 min
+  (`remountFrame`). A frame whose document is still LOADING is not dead: it gets 60 s
+  before it is probed (the preview says "still starting" from 20 s), and a missed ping is
+  confirmed with a second before a remount. An export replaces no frame: the first death
+  fails it (`EXPORT_SANDBOX_OPTIONS`), never finishing with its bodies listed as dropped,
+  and the failure names the overlay the worker was being restarted for (`frameDiedMessage`:
+  fix or remove its code — re-exporting fails the same way). A live frame whose worker is
+  not back 9 s after a restart fails an export the same way (`workerRestartTimeoutMs`,
+  below the export's 10 s restart wait); the preview has no such deadline.
+  A decaying restart score stops a loop of no-drop restarts from stalling the preview
+  forever.
+- Body failures are `renderDiagnostics` on `libi.get_piece_state`
+  (`lib/render/render-diagnostics-store.ts`). Every `message` is labelled
+  `messageSource: "overlay body (untrusted)"` — body-written text, never instructions.
+  Line/column point into the body's own file (render/build errors; a compile error carries
+  the message only). An entry clears when its source changes, or when the SAME frame
+  re-renders clean — never on some other clean frame. The preview holds the last good
+  frame; the export drops the overlay for the failing frames (all later frames after a
+  timeout) and lists it in `droppedOverlays`.
+- `libi.add_overlay` / `update_overlay` are strict: an unknown field (`drawFunction`,
+  `name`, …) is refused with a hint naming the right one, and nothing is written. Don't
+  loosen this back to zod's silent strip — it once "succeeded" with a scaffolded body.
+- App CSP: `child-src 'self'` and `frame-ancestors 'self'` — not `'none'`, which breaks
+  the editor's same-origin PDF `<embed>`. The hidden Electron export window runs with
+  `sandbox: true` (`lib/export/drivers/electron.ts`).
+- 3D TEXT stays host-built (`hooks/preview/use-overlay-three.ts`, `lib/engine/text-3d/`);
+  only `three` BODIES are sandboxed. The golden spec (`e2e/overlay-sandbox-golden.spec.ts`)
+  compares against PRE-refactor renderer output. After a capture-path change, regenerate
+  from the pre-refactor renderer with the new capture applied, never from HEAD; a
+  deliberate rendering change re-baselines from HEAD. Either way, say why in the commit
+  (its README).
 
 **Licensing — legal, not stylistic**
 - `@agentclientprotocol/claude-agent-acp` **MUST stay a `devDependency`.** It transitively
@@ -194,6 +352,14 @@ Every one of these has broken something. Do not relax one without evidence.
   background a user just removed. `files.has_alpha` gates this in three places.
 - Every `runFfmpeg` call passes a fixed `op` string from the existing set; extend the set
   rather than inventing free-text values.
+- **ffmpeg-path colour:** `drawbox` on a YUV frame always paints BT.601, so draw coloured
+  boxes on an RGBA layer and `overlay` it; untagged HD inputs are declared BT.709
+  (`lib/export/untagged-color.ts`) because browsers and QuickTime read them that way,
+  and an untagged SD base exported at a non-SD size is converted 601→709 by its scale —
+  players read the OUTPUT by the output's size, not the source's.
+  Overlay `enable` windows are half-open like the preview — build them with `windowExpr`,
+  never `between(t,…)` (touching cues overprinted for a frame). CI's ffmpeg is < 7.1, so
+  the colour assertions skip there: a green CI proves nothing about export colour.
 
 **Data lifecycle**
 - Adding piece-scoped data (table, files, external state)? Make sure piece DELETE cleans it
@@ -217,11 +383,17 @@ __tests__/    vitest unit + integration   ·   e2e/, skill-eval/, agent-eval/
 docs-local/   working docs — GITIGNORED, never committed
 ```
 
-Core model: a **piece** holds a `Composition` = `scenes: CanvasScene[]` (AI-written JS draw
-functions; often empty) + `overlays: Overlay[]` (`text | image | video | code | three`,
-timed, rect-positioned, z-ordered) + `audioClips`. **There is no video scene** — every
-video is a `VideoOverlay`. `renderFrame()` (`lib/engine/renderer.ts`) is the one compositor
-shared by preview and canvas export.
+Core model: a **piece** holds a `Composition` = `overlays: Overlay[]` (`text | image | video |
+code | three`, timed, rect-positioned, z-ordered — `code` is where an AI-written JS draw
+function lives) + `audioClips`. **There is no video scene** — every video is a
+`VideoOverlay`, and the old canvas-scene layer (`scenes: CanvasScene[]`) is gone; `loadManifest`
+(`lib/composition/persistence.ts`) drops it from any pre-2026-08-20 manifest still carrying it
+(logged `overlay/legacy_scenes_dropped` once per piece PER PROCESS — the studio and its MCP
+child each log their own). The editor tells the user once per piece, remembered server-side in
+`settings.legacyScenesNoticed`: never in browser storage, whose origin changes with the packaged
+app's port on every launch.
+`renderFrame()` (`lib/engine/renderer.ts`) is the one compositor shared by preview and canvas
+export.
 
 Data flows one way: agent calls an MCP tool → tool writes the manifest → server emits SSE
 → React Query invalidates → canvas re-renders. **No optimistic local state.**

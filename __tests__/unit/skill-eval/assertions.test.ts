@@ -92,3 +92,37 @@ describe("endpoint fidelity matching", () => {
     expect(r.pass).toBe(true);
   });
 });
+
+describe("where: exists", () => {
+  const stamped: TraceCall[] = [
+    { tool: "posts_create_post", provider: "zernio", input: { is_draft: true, metadata: { libi: { pieceId: "p1" } } } },
+    { tool: "posts_create_post", provider: "zernio", input: { is_draft: true, metadata: {} } },
+  ];
+
+  it("matches only the calls that actually carried the path", () => {
+    const [r] = evaluate(stamped, [
+      { provider: "zernio", tool: "posts_create_post", where: "input.metadata.libi.pieceId exists", count: "==1" },
+    ]);
+    expect(r.pass).toBe(true);
+    expect(r.matchedCount).toBe(1);
+  });
+
+  it("fails `present` when nothing carried the path", () => {
+    const [r] = evaluate(stamped, [
+      { provider: "zernio", where: "input.metadata.libi.mediaUrl exists", expect: "present" },
+    ]);
+    expect(r.pass).toBe(false);
+  });
+
+  /**
+   * Why `exists` had to be added at all: `null` is not a literal here, so the
+   * obvious spelling matches every call in the trace — including the one that
+   * never sent the field — and an assertion written that way can never fail.
+   */
+  it("`!= null` is NOT an existence check (the trap this replaces)", () => {
+    const [r] = evaluate(stamped, [
+      { provider: "zernio", where: "input.metadata.libi.pieceId != null", count: "==2" },
+    ]);
+    expect(r.pass).toBe(true);
+  });
+});

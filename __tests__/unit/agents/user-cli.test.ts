@@ -6,6 +6,7 @@ import {
   _resetMainWorktreeRootCache,
   classifyCliPath,
   findUserCli,
+  findUserCliCandidates,
   libiTreeRoots,
   libiInstallRoots,
 } from "@/lib/agents/user-cli";
@@ -50,6 +51,37 @@ describe("classifyCliPath", () => {
 
   it("an empty root claims nothing (it would otherwise resolve against the cwd)", () => {
     expect(classifyCliPath(path.join(process.cwd(), "node_modules/.bin/codex"), [""])).toBe("user");
+  });
+});
+
+describe("findUserCliCandidates", () => {
+  const opts = (paths: string[], extra: Partial<Parameters<typeof findUserCliCandidates>[1]> = {}) => ({
+    isExecutable: exec(paths),
+    realpath: (p: string) => p,
+    libiRoots: ["/repo"],
+    platform: "darwin" as const,
+    ...extra,
+  });
+
+  it("returns every user copy in search order, skipping libi's own", () => {
+    const r = findUserCliCandidates(["claude"], opts(
+      ["/repo/node_modules/.bin/claude", "/fnm/bin/claude", "/opt/homebrew/bin/claude"],
+      { searchDirs: ["/repo/node_modules/.bin", "/fnm/bin", "/opt/homebrew/bin", "/usr/local/bin"] },
+    ));
+    expect(r).toEqual(["/fnm/bin/claude", "/opt/homebrew/bin/claude"]);
+  });
+
+  it("dedupes by realpath: two spellings of one binary are one candidate (the first spelling)", () => {
+    const r = findUserCliCandidates(["claude"], opts(
+      ["/a/claude", "/b/claude", "/c/claude"],
+      { searchDirs: ["/a", "/b", "/c"], realpath: (p: string) => (p === "/c/claude" ? "/c/claude" : "/real/claude") },
+    ));
+    expect(r).toEqual(["/a/claude", "/c/claude"]);
+  });
+
+  it("none, or only libi's own → empty", () => {
+    expect(findUserCliCandidates(["claude"], opts([], { searchDirs: ["/x"] }))).toEqual([]);
+    expect(findUserCliCandidates(["claude"], opts(["/repo/node_modules/.bin/claude"], { searchDirs: ["/repo/node_modules/.bin"] }))).toEqual([]);
   });
 });
 

@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { hashSpec } from "@/lib/uv-env/hash-spec";
 import { formatStderrTail } from "@/lib/music/generate";
 import { packageRoot } from "@/lib/runtime/package-root";
@@ -138,6 +139,20 @@ export function parseAnalyzeOutput<T>(jsonText: string): T {
   return j as T;
 }
 
+/**
+ * What a non-zero `uv run … analyze.py` exit means. Exit 2 is ambiguous:
+ * analyze.py uses it for a bad argument (argparse prints `usage:` first), and
+ * uv uses it for ITS OWN failures — offline, a resolver error — which used to
+ * be reported as `usage_error`. Exported for its test.
+ */
+export function analyzeFailureMessage(code: number | null, stderr: string): string {
+  const offline = uvNetworkFailureMessage("music analysis", stderr);
+  if (offline) return `offline: ${offline}`;
+  if (code === 2 && /^usage:/m.test(stderr)) return `usage_error: ${formatStderrTail(stderr)}`;
+  if (code === 2 && /^error:/m.test(stderr)) return `uv_error: ${formatStderrTail(stderr)}`;
+  return `exited ${code}: ${formatStderrTail(stderr)}`;
+}
+
 function runUv(args: string[], timeoutMs = 5 * 60_000): Promise<void> {
   const uv = requireUvBinary(MusicAnalyzeError, "Music analysis");
   return new Promise((resolve, reject) => {
@@ -159,9 +174,11 @@ function runUv(args: string[], timeoutMs = 5 * 60_000): Promise<void> {
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (code === 0) resolve();
-      else if (code === 2) reject(new MusicAnalyzeError(`usage_error: ${formatStderrTail(err)}`));
-      else reject(new MusicAnalyzeError(`exited ${code}: ${formatStderrTail(err)}`));
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new MusicAnalyzeError(analyzeFailureMessage(code, err)));
     });
   });
 }

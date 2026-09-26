@@ -51,7 +51,7 @@ import { upsertSegment } from "@/lib/tracking/segment-store";
 import { summarizeTrack } from "@/lib/tracking/summary";
 import { applySegmentResult, shouldPersistLostSegment } from "@/lib/tracking/apply-segment-result";
 import { mixedBoxSemantics } from "@/lib/tracking/segments";
-import { overlayCodeRelPath } from "@/lib/overlays/paths";
+import { overlayCodeFilePath } from "@/lib/overlays/code-files";
 import { readTrack, writeTrack } from "@/lib/tracking/storage";
 import { agentAnchorId, upsertAgentAnchor } from "@/lib/tracking/manual-anchors";
 import { detectShotRanges } from "@/lib/tracking/shot-fanout";
@@ -840,9 +840,8 @@ export async function addTrackedOverlay(
     "overlay.add.tracked",
   );
   // For code-kind tracked content, the persistence seam wrote content.jsx;
-  // return its path so the agent can edit the draw function directly.
-  const codeFilePath =
-    params.content.kind === "code" ? overlayCodeRelPath(id, "content.jsx") : undefined;
+  // return its ABSOLUTE path (same helper as add_overlay / get_overlays).
+  const codeFilePath = await overlayCodeFilePath(params.pieceId, overlay);
   return { success: true, data: { overlayId: id, ...(codeFilePath ? { codeFilePath } : {}) } };
 }
 
@@ -1799,7 +1798,13 @@ const TRACKING_EXTENSION_ID = "libi-tracking";
 export async function verifyInstall(
   params: VerifyInstallParams,
 ): Promise<
-  ToolResult<{ ok: boolean; installed: boolean; missing: string[]; versions: Record<string, string> }>
+  ToolResult<{
+    ok: boolean;
+    installed: boolean;
+    missing: string[];
+    versions: Record<string, string>;
+    error?: string;
+  }>
 > {
   // This tool verifies the TRACKING engine and only that: it GETs
   // /api/tracking/verify, whose answer is about the uv Python sidecar and the
@@ -1876,5 +1881,17 @@ export async function verifyInstall(
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: `verify endpoint returned non-JSON body: ${msg}` };
   }
-  return { success: true, data: { ok: body.ok, installed: body.installed, missing: body.missing, versions: body.versions } };
+  // `error` is WHY the self-test failed (a timeout, a sidecar crash, uv
+  // offline). Dropping it left the agent with `ok:false` and nothing to tell
+  // the user.
+  return {
+    success: true,
+    data: {
+      ok: body.ok,
+      installed: body.installed,
+      missing: body.missing,
+      versions: body.versions,
+      ...(body.error ? { error: body.error } : {}),
+    },
+  };
 }

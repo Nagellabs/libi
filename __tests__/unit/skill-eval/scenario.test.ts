@@ -153,3 +153,92 @@ describe("parseScenario — fixtures", () => {
     ).toThrow(/may not escape the repo/);
   });
 });
+
+describe("social frontmatter", () => {
+  const withSocial = (value: string): string =>
+    `---\nid: s\nsocial: ${value}\n---\n\n## Prompt\nPost it.\n`;
+
+  it("defaults to none — the state every non-social scenario boots in", () => {
+    expect(parseScenario(`---\nid: s\n---\n\n## Prompt\nHi.\n`, "x.md").social).toBe("none");
+  });
+
+  it("parses connected and disconnected", () => {
+    expect(parseScenario(withSocial("connected"), "x.md").social).toBe("connected");
+    expect(parseScenario(withSocial("disconnected"), "x.md").social).toBe("disconnected");
+  });
+
+  it("throws on a typo rather than booting the opposite branch", () => {
+    expect(() => parseScenario(withSocial("conected"), "x.md")).toThrow(/social/);
+  });
+});
+
+/** Seeds the harness's freshly-created piece to a non-default canvas size before the
+ *  prompt is sent (`POST /api/pieces` always creates 1920×1080) — so a scenario whose fit
+ *  gate needs a 9:16 piece does not depend on the agent choosing to resize the canvas,
+ *  which is a different skill's behaviour. */
+describe("pieceDimensions frontmatter", () => {
+  const withFm = (fm: string) => `---\nid: demo\n${fm}\n---\n\n## Prompt\nDo a thing.\n`;
+
+  it("defaults to undefined — the piece stays at 1920x1080", () => {
+    expect(parseScenario(withFm("title: D"), "demo.md").pieceDimensions).toBeUndefined();
+  });
+
+  it("parses a [width, height] pair", () => {
+    expect(parseScenario(withFm("pieceDimensions: [1080, 1920]"), "demo.md").pieceDimensions).toEqual([1080, 1920]);
+  });
+
+  it("rejects a pair that isn't exactly two entries", () => {
+    expect(() => parseScenario(withFm("pieceDimensions: [1080]"), "demo.md")).toThrow(/pieceDimensions/);
+    expect(() => parseScenario(withFm("pieceDimensions: [1080, 1920, 1]"), "demo.md")).toThrow(/pieceDimensions/);
+  });
+
+  it("rejects non-positive-integer entries", () => {
+    expect(() => parseScenario(withFm("pieceDimensions: [0, 1920]"), "demo.md")).toThrow(/pieceDimensions/);
+    expect(() => parseScenario(withFm("pieceDimensions: [1080.5, 1920]"), "demo.md")).toThrow(/pieceDimensions/);
+    expect(() => parseScenario(withFm("pieceDimensions: [-1080, 1920]"), "demo.md")).toThrow(/pieceDimensions/);
+  });
+});
+
+describe("parseScenario — transcript_matches is checked at parse time", () => {
+  // A bad pattern used to surface only in evaluate(), AFTER a paid live run, and the throw
+  // escaped before the run report was written — so the transcript was lost with it.
+  const withPattern = (re: string) =>
+    SAMPLE.replace(
+      "  - { endpoint_id: \"bytedance/seedance-2.0/*\", count: \">=1\" }",
+      `  - transcript_matches: '${re}'\n    expect: present`,
+    );
+
+  it("accepts a usable pattern", () => {
+    expect(parseScenario(withPattern(String.raw`\[tool-call \w+\]`), "ok.md").assertions).toHaveLength(4);
+  });
+
+  it("refuses an invalid pattern, naming the file", () => {
+    expect(() => parseScenario(withPattern("("), "bad.md")).toThrow(/bad\.md.*not a valid regular expression/);
+  });
+
+  it("refuses a pattern that matches the empty string", () => {
+    expect(() => parseScenario(withPattern("x*"), "empty.md")).toThrow(/empty\.md.*empty string/);
+  });
+
+  it("the code-overlays scenarios parse", async () => {
+    const { readFileSync, readdirSync } = await import("node:fs");
+    const dir = "skill-eval/scenarios/code-overlays";
+    for (const f of readdirSync(dir)) parseScenario(readFileSync(`${dir}/${f}`, "utf8"), f);
+  });
+});
+
+describe("catalogCreator frontmatter", () => {
+  const withCreator = (value: string): string => `---\nid: s\ncatalogCreator: ${value}\n---\n\n## Prompt\nPublish it.\n`;
+
+  it("is undefined when absent — the harness then boots the catalog with every creator approved", () => {
+    expect(parseScenario(`---\nid: s\n---\n\n## Prompt\nHi.\n`, "x.md").catalogCreator).toBeUndefined();
+  });
+
+  it("parses each status", () => {
+    for (const v of ["none", "pending", "approved", "rejected"] as const) expect(parseScenario(withCreator(v), "x.md").catalogCreator).toBe(v);
+  });
+
+  it("throws on an unknown value, naming the key", () => {
+    expect(() => parseScenario(withCreator("vip"), "x.md")).toThrow(/catalogCreator/);
+  });
+});

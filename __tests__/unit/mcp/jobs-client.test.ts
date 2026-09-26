@@ -299,6 +299,30 @@ describe("mcp/jobs-client", () => {
       ).rejects.toBeInstanceOf(CancelledError);
     });
 
+    // A caller that must tell "my job was cancelled" from "the job I attached
+    // to was cancelled by someone else" (libi.apply_template's install: the
+    // chat's Stop cancels the job itself, and must not be re-run).
+    it("tells onEnqueued whether this call created the job or attached to one", async () => {
+      const seen: Array<{ status: string; jobId: string }> = [];
+      mockEnqueueThenSse("job-1", makeSseResponse([{ event: "cancelled", data: { jobId: "job-1" } }]));
+      await expect(runJobViaServer("tracking", { fileId: "f1" }, { onEnqueued: (e) => seen.push(e) })).rejects.toBeInstanceOf(CancelledError);
+      expect(seen).toEqual([{ status: "new", jobId: "job-1" }]);
+
+      seen.length = 0;
+      vi.restoreAllMocks();
+      getCurrentPortMock.mockReturnValue(19999);
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ status: "attached_running", jobId: "job-2", clientKey: "ck", existingJob: { jobId: "job-2", pieceId: null, startedAt: "x" } }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          ),
+        )
+        .mockResolvedValueOnce(makeSseResponse([{ event: "cancelled", data: { jobId: "job-2" } }]));
+      await expect(runJobViaServer("tracking", { fileId: "f1" }, { onEnqueued: (e) => seen.push(e) })).rejects.toBeInstanceOf(CancelledError);
+      expect(seen).toEqual([{ status: "attached_running", jobId: "job-2" }]);
+    });
+
     it("aborts the SSE reader and rejects when caller aborts mid-stream", async () => {
       // Build a stream that emits one progress then hangs — until we cancel.
       const encoder = new TextEncoder();

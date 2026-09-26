@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `templates_cloud_id_unique` ON `templates` (`cloud_id`) WHERE "templates"."cloud_id" IS NOT NULL;

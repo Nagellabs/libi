@@ -2,6 +2,9 @@
 
 import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { LoaderCircle } from "lucide-react";
+import { isSetupAgentId } from "@/lib/agents/setup/registry";
+import { useRestartSession, useSessionRestarting } from "@/lib/queries/session-restart";
 import { getSessionIcon } from "@/lib/sessions/session-icons";
 import { useEditorState } from "@/lib/editor-state-context";
 import {
@@ -66,6 +69,19 @@ function SessionStateMark({ sessionId }: { sessionId: string }) {
   const pendingApprovals = usePendingApprovalCount(sessionId);
   const working = useSessionGenerating(sessionId);
   const unviewed = useSessionUnviewed(sessionId);
+  const restarting = useSessionRestarting(sessionId);
+
+  // A restart the user started outranks everything: it is what the row is doing right now, and
+  // it ends each of the other three (the turn is cancelled, the cards resolve). A wait the user
+  // started is named where they look, with a spinner (AGENTS.md → Loading states).
+  if (restarting) {
+    return (
+      <span className="ml-auto flex shrink-0 items-center gap-1 text-xs text-muted-foreground group-data-[collapsible=icon]:hidden">
+        <LoaderCircle aria-hidden className="size-3 motion-safe:animate-spin" />
+        Restarting…
+      </span>
+    );
+  }
 
   if (pendingApprovals > 0) {
     const label = `${pendingApprovals} pending approval${pendingApprovals > 1 ? "s" : ""}`;
@@ -155,6 +171,14 @@ export default function SidebarSessionList() {
   const [contextMenu, setContextMenu] = useState<SessionContextMenuState | null>(
     null,
   );
+  // Only highlight the active session when the user is actually viewing the
+  // editor — on other routes (e.g. /settings) nothing should appear selected.
+  const highlightActive = pathname === "/editor";
+  // The chat on screen says its own failed restart (an in-chat note); the hook toasts any other.
+  const restartSession = useRestartSession({
+    isViewed: (sessionId) => highlightActive && sessionId === activeSessionId,
+  });
+  const menuRestarting = useSessionRestarting(contextMenu?.sessionId ?? null);
 
   const handleSwitch = (sessionId: string) => {
     // Navigate first so the user sees the editor (and its connecting skeleton)
@@ -192,9 +216,15 @@ export default function SidebarSessionList() {
     setContextMenu(null);
   };
 
-  // Only highlight the active session when the user is actually viewing the
-  // editor — on other routes (e.g. /settings) nothing should appear selected.
-  const highlightActive = pathname === "/editor";
+  // A restart applies to an agent chat — every row of this list while an agent (Claude Code,
+  // Codex) is the surface. The Terminal surface lists PTYs, not chats, and has its own menu.
+  const canRestart = activeProviderId !== null && isSetupAgentId(activeProviderId);
+  const handleRestart = () => {
+    if (!contextMenu) return;
+    const { sessionId } = contextMenu;
+    setContextMenu(null);
+    restartSession.mutate(sessionId);
+  };
 
   // Terminal surface: the sidebar shows live terminal sessions instead of
   // ACP chat sessions. Branch AFTER the hooks above so hook order is stable
@@ -278,7 +308,12 @@ export default function SidebarSessionList() {
         </SidebarGroup>
       ))}
       {contextMenu && (
-        <SessionContextMenu state={contextMenu} onCopyId={handleCopyId} />
+        <SessionContextMenu
+          state={contextMenu}
+          onCopyId={handleCopyId}
+          onRestart={canRestart ? handleRestart : undefined}
+          restarting={menuRestarting}
+        />
       )}
     </>
   );

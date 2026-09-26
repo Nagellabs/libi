@@ -5,6 +5,10 @@ import { isStoryboardBusyError } from "@/lib/storyboard/lock";
 import { loadManifest, EMPTY_MANIFEST } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { findUnvalidatedGeneratedClips, type UnvalidatedClip } from "@/lib/composition/generated-asset-gate";
+import type { RenderDiagnosticRecord, UnattributedRenderDiagnostic } from "@/lib/render/render-diagnostics-types";
+import { studioBaseUrl } from "@/mcp/notify";
+import { mcpLogger as logger } from "@/lib/logger";
+import { frameBodyMessage as frame, type Framed } from "./body-message";
 import type {
   GetPieceStateParams,
   CommitDraftParams,
@@ -17,16 +21,76 @@ export interface ToolResultSuccess<T> { success: true; data: T }
 export interface ToolResultFailure { success: false; error: string; data?: unknown }
 export type ToolResult<T> = ToolResultSuccess<T> | ToolResultFailure;
 
-export async function getPieceStateTool(params: GetPieceStateParams): Promise<ToolResult<{
+/** What the studio holds for a piece's bodies (spec §4.7). */
+export interface PieceRenderDiagnostics {
+  diagnostics: RenderDiagnosticRecord[];
+  unattributed: UnattributedRenderDiagnostic[];
+}
+
+const NO_DIAGNOSTICS: PieceRenderDiagnostics = { diagnostics: [], unattributed: [] };
+
+// Body-authored text is bounded and marked wherever it reaches the agent
+// (`./body-message.ts`); re-exported for the callers that read it from here.
+export { DIAGNOSTIC_MESSAGE_SOURCE, MAX_AGENT_MESSAGE_CHARS, type Framed } from "./body-message";
+
+/** The studio keeps body-layer failures in memory (another process); read
+ *  them over HTTP. Unreachable studio ⇒ empty — never a failed tool call. */
+async function fetchRenderDiagnostics(pieceId: string): Promise<PieceRenderDiagnostics> {
+  const base = studioBaseUrl();
+  if (!base) return NO_DIAGNOSTICS;
+  try {
+    const res = await fetch(`${base}/api/pieces/${encodeURIComponent(pieceId)}/render-diagnostics`, {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return NO_DIAGNOSTICS;
+    const body = (await res.json()) as Partial<PieceRenderDiagnostics>;
+    return {
+      diagnostics: Array.isArray(body.diagnostics) ? body.diagnostics : [],
+      unattributed: Array.isArray(body.unattributed) ? body.unattributed : [],
+    };
+  } catch (err) {
+    logger.warn(
+      { tag: "overlay-sandbox", op: "diagnostics_fetch_failed", pieceId, err },
+      "overlay-sandbox: could not read render diagnostics",
+    );
+    return NO_DIAGNOSTICS;
+  }
+}
+
+export interface GetPieceStateDeps {
+  fetchDiagnostics?: (pieceId: string) => Promise<PieceRenderDiagnostics>;
+}
+
+export async function getPieceStateTool(
+  params: GetPieceStateParams,
+  deps: GetPieceStateDeps = {},
+): Promise<ToolResult<{
   pieceId: string;
   hasDraft: boolean;
   snapshotSummary: string | null;
   snapshotCommittedAt: number | null;
   recentSnapshots: { id: string; committedAt: number; summary: string; actor: string }[];
+  /** Body-layer failures the preview (or an export) observed, latest per
+   *  overlay, with the absolute code file to fix (spec §4.7). Empty when clean.
+   *  `message` is body-authored: bounded, and marked by `messageSource`. */
+  renderDiagnostics: Framed<RenderDiagnosticRecord>[];
+  /** Runtime failures no overlay can be blamed for (a CSP refusal, an
+   *  untagged async throw, a font that would not install), last 5 minutes. */
+  unattributedRenderDiagnostics: Framed<UnattributedRenderDiagnostic>[];
 }>> {
   try {
-    const state = await getPieceState(params.pieceId);
-    return { success: true, data: state };
+    const [state, diags] = await Promise.all([
+      getPieceState(params.pieceId),
+      (deps.fetchDiagnostics ?? fetchRenderDiagnostics)(params.pieceId),
+    ]);
+    return {
+      success: true,
+      data: {
+        ...state,
+        renderDiagnostics: diags.diagnostics.map(frame),
+        unattributedRenderDiagnostics: diags.unattributed.map(frame),
+      },
+    };
   } catch (err) {
     return { success: false, error: (err as Error).message };
   }

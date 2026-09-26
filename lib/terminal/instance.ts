@@ -2,10 +2,13 @@ import { invalidateAgentCliMemo } from "@/lib/agents/cli/resolve";
 import { __clearLibiRegistrationMemo } from "@/lib/agents/libi-registration";
 import { getLibiAgentDir } from "@/lib/libi-home";
 import { __clearProviderMemo } from "@/lib/providers/detect";
+import { endClaudeLoginsOf, noteClaudeLoginEnded, noteClaudeLoginStarted } from "@/lib/providers/claude-signin-probe";
+import { createSignInMarkerReader, type SignInMarker } from "@/lib/providers/sign-in-markers";
 import { serverLogger as logger } from "@/lib/logger";
 import { TerminalManager } from "./manager";
 import { realPtyFactory } from "./pty";
 import { noteSetupTerminalClosed, noteSetupTerminalOpened } from "./setup-activity";
+import type { SetupSurface } from "./types";
 
 /**
  * globalThis singleton — in `next dev`, route-handler modules are
@@ -35,7 +38,15 @@ const SETUP_TERMINAL_SWEEP_MS = 60_000;
  * after the previous terminal was already killed), from `pty.onExit`, and from
  * the reaper interval (a throw inside a timer).
  */
-export function handleSetupTerminalExit(): void {
+export function handleSetupTerminalExit(_surface?: SetupSurface, id?: string): void {
+  if (id !== undefined) {
+    markerReaders.delete(id);
+    try {
+      endClaudeLoginsOf(id);
+    } catch {
+      logger.warn({ tag: "terminal", op: "setup_exit_hook_failed" }, "could not end the sign-ins a setup terminal was running");
+    }
+  }
   try {
     noteSetupTerminalClosed();
   } catch {
@@ -70,6 +81,34 @@ export function handleSetupTerminalExit(): void {
   }
 }
 
+/** One marker reader per live setup terminal (`lib/providers/sign-in-markers.ts`). */
+const markerReaders = new Map<string, (chunk: string) => SignInMarker[]>();
+
+/**
+ * A setup terminal printed something. libi's setup scripts announce where Claude Code's `mcp login` starts and
+ * ends, and Claude Code must not be asked about that entry in between (`lib/providers/claude-signin-probe.ts`).
+ * Never throws: it runs inside the PTY's data handler.
+ */
+export function handleSetupTerminalOutput(id: string, data: string): void {
+  try {
+    let read = markerReaders.get(id);
+    if (!read) {
+      read = createSignInMarkerReader();
+      markerReaders.set(id, read);
+    }
+    for (const marker of read(data)) {
+      if (marker.phase === "start") noteClaudeLoginStarted(marker.entry, id);
+      else noteClaudeLoginEnded(marker.entry);
+      logger.info(
+        { tag: "providers", op: `claude_signin_${marker.phase}`, entry: marker.entry, terminal: id },
+        marker.phase === "start" ? "a setup terminal's Claude Code sign-in started" : "a setup terminal's Claude Code sign-in ended",
+      );
+    }
+  } catch {
+    logger.warn({ tag: "terminal", op: "setup_output_hook_failed" }, "could not read a setup terminal's output for sign-in markers");
+  }
+}
+
 const g = globalThis as unknown as { __libiTerminalManager?: TerminalManager };
 
 export function getTerminalManager(): TerminalManager {
@@ -78,6 +117,7 @@ export function getTerminalManager(): TerminalManager {
       cwd: () => getLibiAgentDir(),
       onSetupTerminalOpen: noteSetupTerminalOpened,
       onSetupTerminalExit: handleSetupTerminalExit,
+      onSetupTerminalOutput: handleSetupTerminalOutput,
     });
     // Reap abandoned setup terminals. Started inside this block so a dev
     // re-evaluation of the module cannot stack a second interval; unref'd so

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { serverLogger as logger } from "@/lib/logger";
 import { testRoutesEnabled } from "@/lib/security/test-routes";
-import { codexAppBundleDirs, findUserCli, libiTreeRoots, type UserCliSource } from "@/lib/agents/user-cli";
+import { codexAppBundleDirs, findUserCli, findUserCliCandidates, libiTreeRoots, type UserCliSource } from "@/lib/agents/user-cli";
 import type { SetupAgentId } from "@/lib/agents/setup/commands";
 import { AGENT_CLI_MIN_VERSION } from "./min-versions";
 import {
@@ -25,24 +25,35 @@ import { endGroup, killGroup, releaseStdout, watchExit } from "./process-group";
  *
  * Order: login-shell PATH (fresh, bounded — `login-shell-path.ts`) → this
  * process's PATH → known install folders. A hit inside libi's own tree is
- * rejected (`findUserCli`'s `libi-internal`). The hit is realpath'd (fnm/nvm
- * shims move per shell), then `--version` is run under a HARD 3 s bound
- * (`runCliVersion`); a binary that fails, hangs or prints no semver is
- * `foundButBroken`. Memoized 30 s per agent: fresh while the found path still
- * leads to the same realPath and that file's mtime is unchanged.
+ * rejected (`findUserCli`'s `libi-internal`). Every copy found is a candidate
+ * (deduped by realpath — fnm/nvm shims move per shell); each is `--version`ed
+ * in order under a HARD 3 s bound (`runCliVersion`), and the first meeting the
+ * minimum wins — at most AGENT_CLI_MAX_VERSION_CANDIDATES are checked. None
+ * does → the FIRST copy's answer: below the minimum, or `foundButBroken` for a
+ * binary that fails, hangs or prints no semver. Memoized 30 s per agent (the
+ * copy chosen): fresh while the found path still leads to the same realPath
+ * and that file's mtime is unchanged.
  */
 export const CLI_BIN_NAME: Record<SetupAgentId, string> = { "claude-code": "claude", codex: "codex" };
 export const AGENT_CLI_MEMO_MS = 30_000;
-/** No caller waits longer than this for `--version`, whatever the binary does. */
+/** No caller waits longer than this for ONE `--version`, whatever the binary does. */
 export const AGENT_CLI_VERSION_TIMEOUT_MS = 3_000;
 /**
+ * At most this many copies of a CLI are version-checked per resolution (one at a
+ * time, each under AGENT_CLI_VERSION_TIMEOUT_MS), so a path full of hung binaries
+ * still settles in bounded time. The common case — the first copy qualifies — is one.
+ */
+export const AGENT_CLI_MAX_VERSION_CANDIDATES = 4;
+/**
  * The longest `holdEventLoop` keeps a process alive: the login-shell probe's worst
- * case (timeout, SIGTERM, grace, SIGKILL, exit wait) plus the `--version` bound, and
- * a second of slack. Every path settles inside it; the hold exists only so that
+ * case (timeout, SIGTERM, grace, SIGKILL, exit wait) plus the `--version` bound for
+ * every candidate checked, and a second of slack. Every path settles inside it; the hold exists only so that
  * nothing ends the process first, and it is dropped the moment the resolution settles.
  */
 export const AGENT_CLI_RESOLVE_HOLD_MS =
-  LOGIN_SHELL_PROBE_TIMEOUT_MS + LOGIN_SHELL_PROBE_KILL_GRACE_MS + LOGIN_SHELL_PROBE_EXIT_WAIT_MS + AGENT_CLI_VERSION_TIMEOUT_MS + 1_000;
+  LOGIN_SHELL_PROBE_TIMEOUT_MS + LOGIN_SHELL_PROBE_KILL_GRACE_MS + LOGIN_SHELL_PROBE_EXIT_WAIT_MS +
+  AGENT_CLI_MAX_VERSION_CANDIDATES * AGENT_CLI_VERSION_TIMEOUT_MS +
+  1_000;
 /** `--version` prints one line; anything past this is not read. */
 const VERSION_STDOUT_CAP = 64 * 1024;
 
@@ -370,51 +381,92 @@ async function doResolve(agentId: SetupAgentId, deps: ResolveAgentCliDeps, gen: 
   const dirs = await searchDirs();
   const findOpts = { searchDirs: dirs, realpath, libiRoots: deps.libiRoots ?? libiTreeRoots(), platform };
   const baseIsExecutable = deps.isExecutable ?? defaultIsExecutable;
-  // On Windows a native .exe ANYWHERE in the search order beats a .cmd shim in an earlier
-  // folder. `findUserCli` loops folders outside spellings, so run an .exe-only pass first.
-  let found: UserCliSource = { kind: "none" };
-  if (platform === "win32") {
-    found = findUserCli([CLI_BIN_NAME[agentId]], {
-      ...findOpts,
-      isExecutable: (p) => /\.exe$/i.test(p) && baseIsExecutable(p),
-    });
-  }
-  if (found.kind !== "user") {
-    found = findUserCli([CLI_BIN_NAME[agentId]], { ...findOpts, isExecutable: baseIsExecutable });
-  }
+  const binName = CLI_BIN_NAME[agentId];
+  // Every user copy, in search order. On Windows a native .exe ANYWHERE in the search order
+  // goes ahead of a .cmd shim in an earlier folder (the scan loops folders outside spellings,
+  // so the .exe copies are gathered in a pass of their own first).
+  const all = findUserCliCandidates([binName], { ...findOpts, isExecutable: baseIsExecutable });
+  const candidates =
+    platform === "win32"
+      ? dedupeByRealpath(
+          [...findUserCliCandidates([binName], { ...findOpts, isExecutable: (p) => /\.exe$/i.test(p) && baseIsExecutable(p) }), ...all],
+          realpath,
+        )
+      : all;
+  const foundKind: UserCliSource["kind"] =
+    candidates.length > 0 ? "user" : findUserCli([binName], { ...findOpts, isExecutable: baseIsExecutable }).kind;
 
-  let value: ResolvedAgentCli = null;
-  let realPath: string | null = null;
-  if (found.kind === "user") {
-    realPath = realpath(found.path);
-    // What the adapter will exec — and so what `--version` must run. For a Windows Claude `.cmd`
-    // that is the shim's TARGET (`.js` → through node, native `.exe` → directly): spawning the
-    // `.cmd` itself fails with EINVAL. Codex keeps its real path.
-    const execPath = execPathFor(agentId, realPath, platform, readFile);
-    const shape = spawnViaNodeIfScript(agentId === "claude-code" ? execPath : realPath, realpath, readFile);
-    const versionCmd = { command: shape.command, args: [...shape.args, "--version"] };
-    const injected = deps.spawnVersion;
-    const res = injected ? await boundedVersion(() => injected(versionCmd)) : await runCliVersion(versionCmd);
-    const version = res.ok ? parseFirstSemver(res.stdout) : null;
-    if (version === null) {
-      value = { foundButBroken: true, path: found.path };
-    } else {
-      const minimum = (deps.minimum ?? AGENT_CLI_MIN_VERSION)[agentId];
-      value = { path: found.path, realPath, execPath, version, meetsMinimum: satisfiesMinimum(version, minimum) };
+  // The first copy meeting the minimum wins — the first on the path is not always the one that
+  // works (QA 0.1.15: fnm's current claude missed by the login-shell probe, an old Homebrew one
+  // hit first). Checks stop at the first qualifying copy (the common case is one spawn) and at
+  // AGENT_CLI_MAX_VERSION_CANDIDATES. None qualifies → the FIRST copy's answer, as before.
+  let first: { value: Exclude<ResolvedAgentCli, null>; realPath: string } | null = null;
+  let chosen: { value: Exclude<ResolvedAgentCli, null>; realPath: string } | null = null;
+  let checkedCount = 0;
+  let chosenIndex = 0; // only meaningful once something is picked — see `chosenIndex` in `fields` below
+  for (const [index, candidate] of candidates.slice(0, AGENT_CLI_MAX_VERSION_CANDIDATES).entries()) {
+    const result = await checkCandidate(agentId, candidate, deps, { platform, realpath, readFile });
+    checkedCount++;
+    first ??= result;
+    if (isUsableCli(result.value)) {
+      chosen = result;
+      chosenIndex = index;
+      break;
     }
   }
+  const picked = chosen ?? first;
+  const value: ResolvedAgentCli = picked?.value ?? null;
+  const realPath = picked?.realPath ?? null;
   if (gen === generationOf(agentId)) {
     if (value !== null && realPath !== null) memo.set(agentId, { at: now(), value, realPath, mtime: mtimeOf(realPath) });
     else memo.delete(agentId); // not found: never memoized
   }
   const fields = {
-    tag: "agent-cli", op: "resolve", agentId, found: found.kind,
+    tag: "agent-cli", op: "resolve", agentId, found: foundKind, candidates: candidates.length,
+    // `checked`: how many copies were actually --version-checked this resolution (bounded by
+    // AGENT_CLI_MAX_VERSION_CANDIDATES). `chosenIndex`: the returned copy's position among
+    // `candidates` (0 when nothing qualified — the first copy's answer is what's returned then),
+    // null when no candidate existed at all. No paths in either field.
+    checked: checkedCount, chosenIndex: value !== null ? chosenIndex : null,
     broken: value !== null && "foundButBroken" in value, version: value && "version" in value ? value.version : null,
   };
   // A missing CLI is never memoized, so it is re-resolved on every status poll: debug, not info.
   if (value === null) logger.debug(fields, "no user CLI found");
   else logger.info(fields, "resolved the user's CLI");
   return value;
+}
+
+/** Runs `--version` for ONE found copy (bounded by AGENT_CLI_VERSION_TIMEOUT_MS) and reads the answer. */
+async function checkCandidate(
+  agentId: SetupAgentId,
+  foundPath: string,
+  deps: ResolveAgentCliDeps,
+  io: { platform: NodeJS.Platform; realpath: (p: string) => string; readFile: (p: string) => string },
+): Promise<{ value: Exclude<ResolvedAgentCli, null>; realPath: string }> {
+  const realPath = io.realpath(foundPath);
+  // What the adapter will exec — and so what `--version` must run. For a Windows Claude `.cmd`
+  // that is the shim's TARGET (`.js` → through node, native `.exe` → directly): spawning the
+  // `.cmd` itself fails with EINVAL. Codex keeps its real path.
+  const execPath = execPathFor(agentId, realPath, io.platform, io.readFile);
+  const shape = spawnViaNodeIfScript(agentId === "claude-code" ? execPath : realPath, io.realpath, io.readFile);
+  const versionCmd = { command: shape.command, args: [...shape.args, "--version"] };
+  const injected = deps.spawnVersion;
+  const res = injected ? await boundedVersion(() => injected(versionCmd)) : await runCliVersion(versionCmd);
+  const version = res.ok ? parseFirstSemver(res.stdout) : null;
+  if (version === null) return { value: { foundButBroken: true, path: foundPath }, realPath };
+  const minimum = (deps.minimum ?? AGENT_CLI_MIN_VERSION)[agentId];
+  return { value: { path: foundPath, realPath, execPath, version, meetsMinimum: satisfiesMinimum(version, minimum) }, realPath };
+}
+
+/** Keeps the first spelling of each binary (by realpath), in order. */
+function dedupeByRealpath(paths: string[], realpath: (p: string) => string): string[] {
+  const seen = new Set<string>();
+  return paths.filter((p) => {
+    const real = realpath(p);
+    if (seen.has(real)) return false;
+    seen.add(real);
+    return true;
+  });
 }
 
 /**

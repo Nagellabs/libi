@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from "vitest";
 import { renderFrame } from "@/lib/engine/renderer";
-import type { Composition, DrawContext } from "@/lib/engine/types";
+import type { Composition } from "@/lib/engine/types";
+import type { LayerSource } from "@/lib/engine/layer-source";
+import { fakeBitmap, fakeLayers } from "@/__tests__/helpers/fake-layers";
 
 /**
  * QA 2026-09-18 N1: when a code overlay's body threw, `drawOverlay`'s own
@@ -15,6 +17,11 @@ import type { Composition, DrawContext } from "@/lib/engine/types";
  * current clip, `restore` pops it (a no-op when empty, like the real thing),
  * `clip` intersects with the last `rect`. Every clearRect / fillRect / draw
  * records the clip in force when it ran.
+ *
+ * Bodies render in the sandbox now (spec §4.4) and never touch this ctx; the
+ * host-side hazards left are a LayerSource that throws, and any host draw step
+ * that leaves save/clip unbalanced — `misbehaving` below stands in for the
+ * latter by touching the ctx from inside `get`.
  */
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -58,6 +65,18 @@ function codeOverlay(id: string, z: number, rect = { x: 10, y: 10, width: 30, he
   return { id, kind: "code" as const, startTime: 0, duration: 2, z, rect, opacity: 1, drawFunction: "" };
 }
 
+/** A LayerSource whose `get` runs `fn` on the frame's ctx — a stand-in for a
+ *  host draw step that leaves the state stack unbalanced. */
+function misbehaving(ctx: CanvasRenderingContext2D, fn: (ctx: CanvasRenderingContext2D) => void): LayerSource {
+  return {
+    request() {},
+    get() {
+      fn(ctx);
+      return null;
+    },
+  };
+}
+
 function comp(overlays: ReturnType<typeof codeOverlay>[]): Composition {
   return { id: "c", name: "c", width: 100, height: 100, fps: 30, overlays };
 }
@@ -65,15 +84,15 @@ function comp(overlays: ReturnType<typeof codeOverlay>[]): Composition {
 describe("renderFrame keeps the canvas state stack balanced per overlay", () => {
   it("a throwing overlay leaves no save/clip behind; the next frame clears unclipped", () => {
     const { canvas, stack, log, currentClip } = trackingCanvas();
-    const compiled = { bad: () => { throw new Error("qa-boom"); } };
+    const layers = fakeLayers({}, { throwOnGet: ["bad"] });
     const c = comp([codeOverlay("bad", 0)]);
 
-    renderFrame(canvas, c, 0, {}, undefined, undefined, compiled);
+    renderFrame(canvas, c, 0, {}, undefined, undefined, layers);
     expect(stack).toHaveLength(0);
     expect(currentClip()).toBeNull();
 
     log.length = 0;
-    renderFrame(canvas, c, 1, {}, undefined, undefined, compiled);
+    renderFrame(canvas, c, 1, {}, undefined, undefined, layers);
     const clear = log.find((e) => e.op === "clearRect");
     expect(clear?.clip).toBeNull();
     expect(stack).toHaveLength(0);
@@ -81,58 +100,51 @@ describe("renderFrame keeps the canvas state stack balanced per overlay", () => 
 
   it("a later overlay in the same frame draws with only its OWN clip", () => {
     const { canvas, log } = trackingCanvas();
-    const good = vi.fn((d: DrawContext) => { d.ctx.fillRect(0, 0, 1, 1); });
-    const compiled = { bad: () => { throw new Error("qa-boom"); }, good };
+    const layers = fakeLayers({ good: fakeBitmap() }, { throwOnGet: ["bad"] });
     const c = comp([
       codeOverlay("bad", 0, { x: 10, y: 10, width: 30, height: 30 }),
       codeOverlay("good", 1, { x: 50, y: 50, width: 20, height: 20 }),
     ]);
-    renderFrame(canvas, c, 0, {}, undefined, undefined, compiled);
-    expect(good).toHaveBeenCalledTimes(1);
-    const fill = log.filter((e) => e.op === "fillRect").at(-1);
-    expect(fill?.clip).toEqual({ x: 50, y: 50, w: 20, h: 20 });
+    renderFrame(canvas, c, 0, {}, undefined, undefined, layers);
+    expect(layers.requests.filter((r) => r.overlayId === "good")).toHaveLength(1);
+    const draw = log.filter((e) => e.op === "drawImage").at(-1);
+    expect(draw?.clip).toEqual({ x: 50, y: 50, w: 20, h: 20 });
   });
 
-  it("a body that throws after pushing its OWN save+clip is unwound too", () => {
-    const { canvas, stack, currentClip } = trackingCanvas();
-    const compiled = {
-      bad: (d: DrawContext) => {
-        d.ctx.save();
-        d.ctx.save();
-        d.ctx.beginPath();
-        d.ctx.rect(0, 0, 5, 5);
-        d.ctx.clip();
-        throw new Error("mid-draw");
-      },
-    };
-    renderFrame(canvas, comp([codeOverlay("bad", 0)]), 0, {}, undefined, undefined, compiled);
+  it("a draw that throws after pushing its OWN save+clip is unwound too", () => {
+    const { canvas, ctx, stack, currentClip } = trackingCanvas();
+    const layers = misbehaving(ctx, (c) => {
+      c.save();
+      c.save();
+      c.beginPath();
+      c.rect(0, 0, 5, 5);
+      c.clip();
+      throw new Error("mid-draw");
+    });
+    renderFrame(canvas, comp([codeOverlay("bad", 0)]), 0, {}, undefined, undefined, layers);
     expect(stack).toHaveLength(0);
     expect(currentClip()).toBeNull();
   });
 
-  it("a body that returns with an unbalanced save (no throw) is unwound too", () => {
-    const { canvas, stack, currentClip } = trackingCanvas();
-    const compiled = {
-      leaky: (d: DrawContext) => {
-        d.ctx.save();
-        d.ctx.beginPath();
-        d.ctx.rect(0, 0, 5, 5);
-        d.ctx.clip();
-      },
-    };
-    renderFrame(canvas, comp([codeOverlay("leaky", 0)]), 0, {}, undefined, undefined, compiled);
+  it("a draw that returns with an unbalanced save (no throw) is unwound too", () => {
+    const { canvas, ctx, stack, currentClip } = trackingCanvas();
+    const layers = misbehaving(ctx, (c) => {
+      c.save();
+      c.beginPath();
+      c.rect(0, 0, 5, 5);
+      c.clip();
+    });
+    renderFrame(canvas, comp([codeOverlay("leaky", 0)]), 0, {}, undefined, undefined, layers);
     expect(stack).toHaveLength(0);
     expect(currentClip()).toBeNull();
   });
 
-  it("a body that over-restores cannot pop state it didn't push", () => {
+  it("a draw that over-restores cannot pop state it didn't push", () => {
     const { canvas, ctx, stack } = trackingCanvas();
     // Simulate a caller that holds its own saved state around the frame.
     ctx.save();
-    const compiled = {
-      greedy: (d: DrawContext) => { d.ctx.restore(); d.ctx.restore(); d.ctx.restore(); },
-    };
-    renderFrame(canvas, comp([codeOverlay("greedy", 0)]), 0, {}, undefined, undefined, compiled);
+    const layers = misbehaving(ctx, (c) => { c.restore(); c.restore(); c.restore(); });
+    renderFrame(canvas, comp([codeOverlay("greedy", 0)]), 0, {}, undefined, undefined, layers);
     expect(stack).toHaveLength(1);
   });
 });

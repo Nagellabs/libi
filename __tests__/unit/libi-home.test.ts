@@ -127,6 +127,28 @@ describe("libi-home skills helpers", () => {
     expect(fs.existsSync(path.join(tmp, "skills"))).toBe(true);
   });
 
+  it.skipIf(process.platform === "win32")(
+    "ensureLibiDirs re-tightens an already-loose social dir and its grant files",
+    async () => {
+      // `mkdirSync({ mode: 0o700 })` does nothing to a directory that already
+      // exists, so an install that created `social/` under a loose umask keeps
+      // it — which is the whole reason this runs every boot.
+      const social = path.join(tmp, "social");
+      fs.mkdirSync(social, { recursive: true });
+      fs.chmodSync(social, 0o755);
+      const tokens = path.join(social, "zernio.tokens.json");
+      fs.writeFileSync(tokens, "{}");
+      fs.chmodSync(tokens, 0o644);
+
+      const { ensureLibiDirs, getLibiSocialDir } = await import("@/lib/libi-home");
+      ensureLibiDirs();
+
+      expect(getLibiSocialDir()).toBe(social);
+      expect(fs.statSync(social).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(tokens).mode & 0o777).toBe(0o600);
+    },
+  );
+
   it("getBundledSkillsDir prefers cwd-based path when it exists", async () => {
     const { getBundledSkillsDir } = await import("@/lib/libi-home");
     const dir = getBundledSkillsDir();

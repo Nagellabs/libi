@@ -1,0 +1,56 @@
+{
+  "_id": "post_partial_1",
+  "status": "partial",
+  "content": "New drop, live now",
+  "createdAt": "2026-09-18T08:00:00.000Z",
+  "scheduledFor": "2026-09-18T08:00:00.000Z",
+  "timezone": "Asia/Bangkok",
+  "mediaItems": [{ "type": "video", "url": "https://cdn.example/drop.mp4" }],
+  "platforms": [
+    {
+      "platform": "instagram",
+      "accountId": {
+        "_id": "6aae6b468d284ffb211ade1e",
+        "platform": "instagram",
+        "username": "nagellabs",
+        "displayName": "Nagel Labs",
+        "profilePicture": "https://cdn.example/ig-avatar.jpg",
+        "profileId": "6aae6a1e8d284ffb211adc02",
+        "isActive": true
+      },
+      "status": "published",
+      "platformPostId": "17999000000000001",
+      "platformPostUrl": "https://www.instagram.com/reel/abc/",
+      "platformSpecificData": { "contentType": "reel", "shareToFeed": true, "isAiGenerated": true }
+    },
+    {
+      "platform": "tiktok",
+      "accountId": {
+        "_id": "6aae6ba98d284ffb211ae03a",
+        "platform": "tiktok",
+        "username": "nagellabs",
+        "displayName": "Nagel Labs",
+        "profilePicture": "https://cdn.example/tt-avatar.jpg",
+        "profileId": "6aae6a1e8d284ffb211adc02",
+        "isActive": true
+      },
+      "status": "failed",
+      "publishAttempts": 1,
+      "errorMessage": "Selected privacy level 'SELF_ONLY' is not available for this creator"
+    }
+  ],
+  "tiktokSettings": {
+    "privacy_level": "SELF_ONLY",
+    "allow_comment": true,
+    "allow_duet": false,
+    "allow_stitch": false,
+    "video_made_with_ai": true,
+    "content_preview_confirmed": true,
+    "express_consent_given": true
+  },
+  "tags": ["libi"],
+  "metadata": {
+    "libi": { "pieceId": "piece_2", "pieceName": "Drop teaser", "exportFile": "export_1080x1920.mp4", "appVersion": "0.1.16" },
+    "usageCounted": true
+  }
+}

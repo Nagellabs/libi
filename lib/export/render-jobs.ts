@@ -43,6 +43,13 @@ export interface RenderPayload {
    * composition.
    */
   frameRange?: { startFrame: number; endFrameExclusive: number };
+  /**
+   * When present (and `frameRange` is not), the render page renders only these
+   * composition frames, ascending — the verify render behind
+   * `libi.render_overlay_frames`. The file holds one frame per entry, in order,
+   * from t=0.
+   */
+  frames?: number[];
 }
 
 export interface RenderJobInit {

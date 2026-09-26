@@ -21,6 +21,10 @@ vi.mock("@/lib/agents/libi-registration", async () => {
   };
 });
 
+// The login-shell PATH the resolver's probe last delivered: none unless a case sets one.
+const login = vi.hoisted(() => ({ dirs: null as string[] | null }));
+vi.mock("@/lib/agents/cli/login-shell-path", () => ({ lastLoginShellPathDirs: () => login.dirs }));
+
 import { captureStandbyFreshness, staleStandbyReason } from "@/lib/sessions/standby-freshness";
 import { __resetSetupActivity, noteSetupTerminalClosed, noteSetupTerminalOpened } from "@/lib/terminal/setup-activity";
 
@@ -51,6 +55,7 @@ beforeEach(() => {
   process.env.CLAUDE_CONFIG_DIR = claudeDir;
   process.env.CODEX_HOME = codexHome;
   __resetSetupActivity();
+  login.dirs = null;
 });
 
 afterEach(() => {
@@ -192,5 +197,26 @@ describe("staleStandbyReason — setup terminals", () => {
   it("keeps only digests: no key from the config appears in what is captured", () => {
     write(claudeJson(), { mcpServers: { "fal-ai": FAL } });
     expect(JSON.stringify(captureStandbyFreshness("claude-code"))).not.toContain("test-key");
+  });
+});
+
+// A launcher installed after the standby was made (uv, so `uvx`) is on the PATH a new Claude chat gets
+// (lib/agents/agent-path.ts), but not on the standby's: its local MCP servers would not start.
+describe("staleStandbyReason — the PATH a new chat gets", () => {
+  it("a Claude Code standby is stale once the login shell's PATH adds a folder libi's own PATH lacks", () => {
+    process.env.PATH = ["/usr/bin", "/bin"].join(path.delimiter);
+    const created = captureStandbyFreshness("claude-code");
+    expect(staleStandbyReason("claude-code", created)).toBeNull();
+    login.dirs = ["/usr/bin"];
+    expect(staleStandbyReason("claude-code", created)).toBeNull();
+    login.dirs = ["/Users/me/.local/bin"];
+    expect(staleStandbyReason("claude-code", created)).toBe("path_changed");
+  });
+
+  it("a Codex standby is not: its PATH is its process's, which a new standby on it would not change", () => {
+    process.env.PATH = ["/usr/bin", "/bin"].join(path.delimiter);
+    const created = captureStandbyFreshness("codex");
+    login.dirs = ["/Users/me/.local/bin"];
+    expect(staleStandbyReason("codex", created)).toBeNull();
   });
 });

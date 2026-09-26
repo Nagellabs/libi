@@ -1,4 +1,5 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
+import path from "node:path";
 import { createTestDb } from "../../../helpers/test-db";
 import { mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
@@ -68,6 +69,16 @@ vi.mock("child_process", async () => {
 });
 
 // Mock fs and os
+// The yt-dlp-uv verify() also reads the launcher and checks the entry point
+// it execs exists (lib/video-download/launcher.ts). This file drives install
+// STATUS off mocked fs lstat/realpath; the launcher-target rules have their own
+// real-filesystem tests (yt-dlp-launcher-heal.test.ts, yt-dlp-uv-token.test.ts).
+// So here the launcher is healthy whenever the wrapper itself "exists".
+vi.mock("@/lib/video-download/launcher", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/video-download/launcher")>()),
+  checkYtDlpLauncher: () => ({ ok: true, launcher: "/fake/bin/yt-dlp", target: "/fake/uv/tools/yt-dlp/bin/yt-dlp" }),
+}));
+
 vi.mock("fs", async () => {
   const actual = await vi.importActual<typeof import("fs")>("fs");
   return {
@@ -108,14 +119,24 @@ import { getLibiBinDir, getLibiModelsDir } from "@/lib/libi-home";
 import { TRACKING_PYENV_TOKEN } from "@/mcp/registry/installers/tracking-pyenv";
 import { YT_DLP_UV_TOKEN } from "@/mcp/registry/installers";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
+import { ytDlpLauncherPath } from "@/lib/video-download/launcher";
+import { exeSuffix } from "@/lib/platform";
 
 // The bin/models dirs resolve against the isolated LIBI_HOME set by the
 // global setup (a fresh os.tmpdir() path — NOT literally "~/.libi"). The
 // fs.existsSync mocks below must therefore match the *actual* resolved
 // directories, not a hardcoded ".libi/..." substring (which never appears
 // in the temp path and silently makes every bundled-binary look missing).
-const BIN_DIR = getLibiBinDir();
-const MODELS_DIR = getLibiModelsDir();
+//
+// Every path is compared with `/` (`slash`), whatever the host: the product
+// joins with the host's `path`, which is `\` on Windows. Binaries carry the
+// product's own `exeSuffix()` (`.exe` on Windows), and the yt-dlp launcher is
+// whatever `ytDlpLauncherPath()` names (`yt-dlp.cmd` on Windows).
+const slash = (p: unknown): string | null => (typeof p === "string" ? p.replace(/\\/g, "/") : null);
+const BIN_DIR = slash(getLibiBinDir())!;
+const MODELS_DIR = slash(getLibiModelsDir())!;
+const EXE = exeSuffix();
+const YT_DLP_LAUNCHER = `/bin/${path.basename(ytDlpLauncherPath())}`;
 
 // Derive per-binary install tokens + the set of requireBundled binaries
 // straight from the bundled defs, so a future pinnedInstallToken bump or a
@@ -138,6 +159,14 @@ for (const def of BUNDLED_MCP_SERVERS) {
 describe("DependencyManager", () => {
   let db: ReturnType<typeof createTestDb>;
 
+  // The first ensureAll in this file pays for importing playwright-core (the chromium installer's verify imports it
+  // dynamically). Cold — the Windows QA VM right after `npm ci` — that import alone ran "marks installed when binary
+  // found on system PATH" past its 5 s budget; warm, under the same suite's load, it took ~0.6 s and ensureAll
+  // itself ~60 ms. Paid here, so each test's budget covers only what it tests.
+  beforeAll(async () => {
+    await import("playwright-core");
+  }, 60_000);
+
   beforeEach(() => {
     db = createTestDb();
     vi.mocked(getDb).mockReturnValue(db as never);
@@ -154,8 +183,9 @@ describe("DependencyManager", () => {
     // Default the marker read to "always matches" so deps with a
     // pinnedInstallToken pass the marker check when their files exist.
     // Individual tests can override to simulate drift.
-    vi.mocked(fs.readFileSync).mockImplementation((p) => {
-      if (typeof p === "string" && p.endsWith(".install-token")) {
+    vi.mocked(fs.readFileSync).mockImplementation((raw) => {
+      const p = slash(raw);
+      if (p !== null && p.endsWith(".install-token")) {
         // The tracking-pyenv custom installer manages its own token marker
         // under <LIBI_HOME>/models/tracking/.install-token. Return the REAL
         // TRACKING_PYENV_TOKEN (imported, not hardcoded) so
@@ -177,7 +207,7 @@ describe("DependencyManager", () => {
         // `${BIN_DIR}/<binary>.install-token` (raw-binary deps) or
         // `${root}/<binary>/.install-token` (files[] deps).
         for (const [binary, token] of TOKEN_BY_BINARY) {
-          if (p.endsWith(`/${binary}.install-token`) || p.endsWith(`/${binary}/.install-token`)) {
+          if (p.endsWith(`/${binary}${EXE}.install-token`) || p.endsWith(`/${binary}/.install-token`)) {
             return token;
           }
         }
@@ -228,18 +258,19 @@ describe("DependencyManager", () => {
     // PATH branch (they need a feature-complete bundled build, e.g. drawtext),
     // so "found on PATH" is not enough — their bundled binary must exist in
     // BIN_DIR. Mark those present so the marker check (above) decides status.
-    vi.mocked(fs.existsSync).mockImplementation((p) => {
-      if (typeof p !== "string") return false;
+    vi.mocked(fs.existsSync).mockImplementation((raw) => {
+      const p = slash(raw);
+      if (p === null) return false;
       return (
         p.includes("ms-playwright/chromium") ||
         p.startsWith(`${MODELS_DIR}/mediapipe-vision/`) ||
-        [...REQUIRE_BUNDLED_BINS].some((b) => p === `${BIN_DIR}/${b}`)
+        [...REQUIRE_BUNDLED_BINS].some((b) => p === `${BIN_DIR}/${b}${EXE}`)
       );
     });
     // yt-dlp's custom installer verifies via lstat+realpath of the
     // ~/.libi/bin/yt-dlp symlink — pretend the symlink exists.
     vi.mocked(fs.lstatSync).mockImplementation((p) => {
-      if (typeof p === "string" && p.endsWith("/bin/yt-dlp")) {
+      if (slash(p)?.endsWith(YT_DLP_LAUNCHER)) {
         return { isSymbolicLink: () => true } as unknown as fs.Stats;
       }
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
@@ -266,19 +297,20 @@ describe("DependencyManager", () => {
     //   - yt-dlp → <LIBI_HOME>/bin/yt-dlp  (symlink installed by yt-dlp-uv custom installer)
     //   - chromium → ~/Library/Caches/ms-playwright/chromium-<rev>/ (Playwright's own cache)
     //   - mediapipe-vision → <LIBI_HOME>/models/mediapipe-vision/{wasm,models}/...
-    vi.mocked(fs.existsSync).mockImplementation((p) => {
-      if (typeof p !== "string") return false;
+    vi.mocked(fs.existsSync).mockImplementation((raw) => {
+      const p = slash(raw);
+      if (p === null) return false;
       return (
-        p === `${BIN_DIR}/ffmpeg` ||
-        p === `${BIN_DIR}/ffprobe` ||
-        p === `${BIN_DIR}/uv` ||
+        p === `${BIN_DIR}/ffmpeg${EXE}` ||
+        p === `${BIN_DIR}/ffprobe${EXE}` ||
+        p === `${BIN_DIR}/uv${EXE}` ||
         p.includes("ms-playwright/chromium") ||
         p.startsWith(`${MODELS_DIR}/mediapipe-vision/`)
       );
     });
     // yt-dlp symlink present.
     vi.mocked(fs.lstatSync).mockImplementation((p) => {
-      if (typeof p === "string" && p.endsWith("/bin/yt-dlp")) {
+      if (slash(p)?.endsWith(YT_DLP_LAUNCHER)) {
         return { isSymbolicLink: () => true } as unknown as fs.Stats;
       }
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
@@ -310,8 +342,7 @@ describe("DependencyManager", () => {
     // tracking-pyenv installer parses before downloading models) delegate
     // to the real fs so the install can progress to the failing fetch.
     vi.mocked(fs.readFileSync).mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
-      const [p] = args;
-      if (typeof p === "string" && p.endsWith(".install-token")) {
+      if (slash(args[0])?.endsWith(".install-token")) {
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }
       return realFs.readFileSync(...args);
@@ -343,11 +374,11 @@ describe("DependencyManager", () => {
     seedDatabase(db as never);
     vi.mocked(execSync).mockReturnValue(Buffer.from("/usr/local/bin/bin"));
     vi.mocked(fs.existsSync).mockImplementation(
-      (p) => typeof p === "string" && p.includes("ms-playwright/chromium"),
+      (p) => slash(p)?.includes("ms-playwright/chromium") === true,
     );
     // yt-dlp symlink present so the custom installer's verify returns truthy.
     vi.mocked(fs.lstatSync).mockImplementation((p) => {
-      if (typeof p === "string" && p.endsWith("/bin/yt-dlp")) {
+      if (slash(p)?.endsWith(YT_DLP_LAUNCHER)) {
         return { isSymbolicLink: () => true } as unknown as fs.Stats;
       }
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });

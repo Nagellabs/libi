@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { renderHook, act } from "@testing-library/react";
 import { useOverlayImages } from "@/hooks/preview/use-overlay-images";
 import type { Composition, Overlay } from "@/lib/engine/types";
 
@@ -80,5 +80,27 @@ describe("useOverlayImages", () => {
 
     rerender({ c: null });
     expect(result.current.images).toEqual({});
+  });
+
+  it("publishes a new snapshot when an element finishes loading, so a consumer that needs DECODED images re-runs (Task 9 fix round 1, I2)", () => {
+    const { result, rerender } = renderHook(
+      ({ c }: { c: Composition | null }) => useOverlayImages(c),
+      { initialProps: { c: comp([imageOverlay("o1", "f1")]) } },
+    );
+    const before = result.current.images;
+    const img = before.o1;
+    act(() => {
+      img.dispatchEvent(new Event("load"));
+    });
+    expect(result.current.images).not.toBe(before);
+    expect(result.current.images.o1).toBe(img); // the same element, a new snapshot
+
+    // A load from an element the store already let go of publishes nothing.
+    rerender({ c: comp([imageOverlay("o1", "f2")]) });
+    const afterSwap = result.current.images;
+    act(() => {
+      img.dispatchEvent(new Event("load"));
+    });
+    expect(result.current.images).toBe(afterSwap);
   });
 });

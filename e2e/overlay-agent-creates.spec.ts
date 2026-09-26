@@ -1,76 +1,27 @@
 import { test, expect } from "@playwright/test";
-import fs from "fs";
-import path from "path";
-import { execFileSync } from "child_process";
-import { openEditor } from "./helpers/app";
+import { openEditor, runTool, seedPieceWithVideo } from "./helpers/app";
 
 test.describe("Overlay — agent creates", () => {
   let pieceId = "";
 
   test.beforeAll(async ({ request }) => {
-    // Seed: piece + upload tiny.mp4 + create a video scene (NO overlay yet).
-    const pRes = await request.post("/api/pieces");
-    pieceId = (await pRes.json()).id as string;
-
-    const fixturePath = path.resolve(
-      __dirname, "..", "__tests__", "helpers", "fixtures", "tiny.mp4",
-    );
-    const fixtureBuf = fs.readFileSync(fixturePath);
-    const mediaDuration = Number(
-      execFileSync("ffprobe", [
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        fixturePath,
-      ], { encoding: "utf8" }).trim(),
-    );
-
-    await request.post(`/api/pieces/${pieceId}/upload`, {
-      multipart: {
-        file: { name: "tiny.mp4", mimeType: "video/mp4", buffer: fixtureBuf },
-        mediaDuration: String(mediaDuration),
-      },
-    });
-    const filesRes = await request.get(`/api/pieces/${pieceId}/files`);
-    const { files } = await filesRes.json();
-    const fileId = files.find((f: { filename: string }) => f.filename === "tiny.mp4")?.id;
-    await request.post("/api/e2e/run-tool", {
-      data: { tool: "libi.add_overlay", args: { pieceId, kind: "video", fileId, displayName: "base" } },
-    });
+    // 1920x1080, so the canvas sampling below can place the text by
+    // composition coordinates. tiny.mp4 is a black clip.
+    ({ pieceId } = await seedPieceWithVideo(request, { fixture: "tiny.mp4", width: 1920, height: 1080 }));
   });
 
   test("agent-added text overlay appears in the preview canvas", async ({ page, request }) => {
-    await openEditor(page);
-    await expect(page.locator('[data-testid="editor-panel"]')).toBeVisible({
-      timeout: 20_000,
-    });
+    await openEditor(page, pieceId);
 
     const canvas = page.locator('[data-testid="preview-canvas"]');
     await expect(canvas).toBeVisible();
 
-    // Agent dispatch — server-side. Fires refresh_query SSE so the editor
-    // re-fetches composition and re-renders the canvas.
-    await request.post("/api/e2e/run-tool", {
-      data: {
-        tool: "libi.add_text_overlay",
-        args: {
-          pieceId, content: "agent-text", startTime: 0, duration: 2,
-          rect: { x: 100, y: 100, width: 400, height: 80 },
-          font: "48px Inter", color: "#ffffff", align: "center", z: 0, opacity: 1,
-        },
-      },
-    });
-
-    // Poll the canvas pixels where the overlay should draw — the text is
-    // white on a black/dark video base, so a sample at the overlay's
-    // composition-space center should have at least one bright pixel
-    // once the SSE invalidation + re-render completes.
-    await expect.poll(async () => {
-      return await canvas.evaluate((el: HTMLCanvasElement) => {
+    // White pixels in a 40x20 strip at the text overlay's composition-space
+    // center (300, 140) — its rect below is (100,100) 400x80.
+    const textIsDrawn = () =>
+      canvas.evaluate((el: HTMLCanvasElement) => {
         const ctx = el.getContext("2d");
         if (!ctx) return false;
-        // Composition is 1920x1080; text overlay rect is (100,100) 400x80.
-        // Sample a 40x20 strip at its center (300, 140).
         const cx = Math.round((300 / 1920) * el.width);
         const cy = Math.round((140 / 1080) * el.height);
         try {
@@ -90,6 +41,29 @@ test.describe("Overlay — agent creates", () => {
         }
         return false;
       });
-    }, { timeout: 10_000 }).toBe(true);
+
+    // Nothing bright there before the agent acts — otherwise the poll below
+    // would pass without the overlay ever drawing.
+    expect(await textIsDrawn()).toBe(false);
+
+    // Agent dispatch — server-side. Fires refresh_query SSE so the editor
+    // re-fetches composition and re-renders the canvas.
+    await runTool(request, "libi.add_overlay", {
+      pieceId,
+      kind: "text",
+      content: "agent-text",
+      startTime: 0,
+      duration: 2,
+      rect: { x: 100, y: 100, width: 400, height: 80 },
+      font: "48px Inter",
+      color: "#ffffff",
+      align: "center",
+      z: 1,
+      opacity: 1,
+    });
+
+    // The text is white on the black video base, so the strip gains a bright
+    // pixel once the SSE invalidation + re-render completes.
+    await expect.poll(textIsDrawn, { timeout: 10_000 }).toBe(true);
   });
 });

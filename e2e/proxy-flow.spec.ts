@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { openEditor } from "./helpers/app";
+import { fixturePath, openEditor, probeDurationSeconds } from "./helpers/app";
 import fs from "fs";
 import path from "path";
 
@@ -7,11 +7,10 @@ import path from "path";
  * Proxy flow e2e. Creates a piece, uploads tiny.mp4 (probing duration in
  * the browser so mediaDuration is set — the piece-scoped upload route
  * trusts the client for that field). Polls proxy-status until ready, then
- * creates a video scene via the E2E tool dispatch, reloads the editor,
- * and asserts the preview's hidden <video> element reads the /proxy URL
- * (not /content). This guards the useVideoSources URL-swap fix: without
- * it, the source would stay pointed at /content even after the proxy
- * becomes ready.
+ * adds a video overlay via the E2E tool dispatch, reloads the editor,
+ * and asserts the preview's video decode reads the /proxy URL (not
+ * /content). This guards the useVideoSources URL-swap fix: without it, the
+ * source would stay pointed at /content even after the proxy becomes ready.
  */
 
 test.describe("Proxy pipeline", () => {
@@ -29,7 +28,7 @@ test.describe("Proxy pipeline", () => {
     }
 
     // Open the editor BEFORE uploading so we can probe duration in-browser.
-    await openEditor(page);
+    await openEditor(page, seededPieceId);
 
     // Upload the fixture via the piece-scoped upload route, probing duration
     // in the page first (mirrors video-preview.spec.ts approach — the server
@@ -105,11 +104,11 @@ test.describe("Proxy pipeline", () => {
       status = await page.evaluate(
         async ({ pieceId, id }) => {
           const r = await fetch(`/api/pieces/${pieceId}/files`);
-          const list = (await r.json()) as Array<{
-            id: string;
-            proxyStatus?: string | null;
-          }>;
-          return list.find((f) => f.id === id)?.proxyStatus ?? "unknown";
+          // The route answers `{ files: FileRecord[] }`.
+          const { files } = (await r.json()) as {
+            files: Array<{ id: string; proxyStatus?: string | null }>;
+          };
+          return files.find((f) => f.id === id)?.proxyStatus ?? "unknown";
         },
         { pieceId: seededPieceId, id: fileId },
       );
@@ -121,18 +120,18 @@ test.describe("Proxy pipeline", () => {
     // Verify the editor's preview now reads the proxy URL.
     // Create a video scene from the uploaded file so the scene is rendered.
     const createResult = await page.evaluate(
-      async ({ pieceId, fileId }) => {
+      async ({ pieceId, fileId, duration }) => {
         const resp = await fetch("/api/e2e/run-tool", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             tool: "libi.add_overlay",
-            args: { pieceId, kind: "video", fileId, displayName: "tiny" },
+            args: { pieceId, kind: "video", fileId, displayName: "tiny", startTime: 0, duration },
           }),
         });
         return { status: resp.status, body: await resp.json() };
       },
-      { pieceId: seededPieceId, fileId },
+      { pieceId: seededPieceId, fileId, duration: probeDurationSeconds(fixturePath("tiny.mp4")) },
     );
     if (!createResult.body?.success) {
       throw new Error(
@@ -140,31 +139,37 @@ test.describe("Proxy pipeline", () => {
       );
     }
 
-    // Reload to pick up the new scene + SSE refresh.
+    // The preview decodes video with MediaBunny over fetch
+    // (hooks/preview/use-video-sources.ts → MediaBunnyFrameSource), not a
+    // <video> element, so what it reads is observable as requests. Record the
+    // FETCH requests for this file across the reload — only those: the
+    // resources panel's thumbnail is a <video src=…/proxy> too
+    // (components/editor/asset-thumbnail.tsx), a `media` request, and counting
+    // it would pass this spec with the preview still on /content.
+    const fileRequests: Array<{ path: string }> = [];
+    page.on("request", (req) => {
+      const p = new URL(req.url()).pathname;
+      if (req.resourceType() === "fetch" && p.startsWith(`/api/files/by-id/${fileId}/`)) {
+        fileRequests.push({ path: p });
+      }
+    });
+
+    // Reload to pick up the new overlay.
     await page.reload();
     await expect(page.locator("[data-testid=\"editor-panel\"]")).toBeVisible({
       timeout: 30_000,
     });
 
-    // Wait for the canvas to appear (scene rendered).
+    // Wait for the canvas to appear (overlay rendered).
     const canvas = page.locator("[data-testid=\"preview-canvas\"]");
     await expect(canvas).toBeVisible({ timeout: 15_000 });
 
-    // Poll for the hidden <video> element to pick up the proxy URL. The
-    // composition effect runs after the composition query resolves, so
-    // the <video> may not be attached on the first microtask.
-    let videoSrc: string | null = null;
-    for (let i = 0; i < 40; i++) {
-      videoSrc = await page.evaluate(() => {
-        const v = document.querySelector("video");
-        return v?.getAttribute("src") ?? null;
-      });
-      if (videoSrc && videoSrc.includes("/proxy")) break;
-      await page.waitForTimeout(250);
-    }
-
-    expect(videoSrc).not.toBeNull();
-    expect(videoSrc).toContain("/api/files/by-id/");
-    expect(videoSrc).toContain("/proxy"); // not /content
+    // The video source reads the PROXY. (The audio engine reads the original,
+    // /content, and turns to the proxy only when the original's audio track
+    // can't be decoded — tiny.mp4's AAC can — so a /proxy request here is the
+    // video decode: lib/audio/web-audio-engine.ts, hooks/preview/use-web-audio-master.ts.)
+    await expect
+      .poll(() => fileRequests.map((r) => r.path), { timeout: 15_000 })
+      .toContain(`/api/files/by-id/${fileId}/proxy`);
   });
 });

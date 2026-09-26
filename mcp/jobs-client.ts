@@ -107,6 +107,14 @@ interface RunOpts<R = unknown> extends EnqueueOpts {
   /** Caller-controlled abort. Aborting closes the SSE reader and rejects
    *  the outer promise. */
   signal?: AbortSignal;
+  /** Called once the server has answered the enqueue (after the stale
+   *  failed/cancelled-row retry below): `new` when THIS call created the job,
+   *  `attached_running` when it joined one someone else started,
+   *  `matching_completed` for a cached terminal row. It fires before the
+   *  terminal event, so a caller whose run then rejects with `CancelledError`
+   *  can tell its own job being stopped (the chat's Stop button cancels the
+   *  job, not this request) from a stop on a job it merely attached to. */
+  onEnqueued?: (enqueue: { status: "new" | "attached_running" | "matching_completed"; jobId: string }) => void;
   /** Unused at runtime; carried only so TypeScript can infer the result
    *  generic from a typed caller. */
   __r?: R;
@@ -270,6 +278,16 @@ export async function enqueueJobOnServer(
     throw new Error("internal server error");
   }
 
+  if (res.status === 403) {
+    let parsed: { error?: string } = {};
+    try {
+      parsed = (await res.json()) as { error?: string };
+    } catch {
+      /* fallthrough */
+    }
+    throw new Error(parsed.error ?? "the libi studio refused this job");
+  }
+
   throw new Error(`unexpected status ${res.status} from /api/jobs`);
 }
 
@@ -389,6 +407,11 @@ export async function runJobViaServer<R = unknown>(
       forceNew: true,
     });
   }
+
+  opts.onEnqueued?.({
+    status: enqueueResp.status,
+    jobId: enqueueResp.status === "matching_completed" ? enqueueResp.existingJob.jobId : enqueueResp.jobId,
+  });
 
   // `matching_completed`: the server attached us to a terminal cached row
   // and is NOT scheduling another runner pass. There is no SSE stream to

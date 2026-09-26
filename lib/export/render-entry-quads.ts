@@ -16,7 +16,7 @@
  */
 import type { Overlay, TextOverlay } from "@/lib/engine/types";
 import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
-import type { SharedThreeRenderer } from "@/lib/engine/three-overlay";
+import type { SharedThreeRenderer } from "@/lib/engine/three-renderer";
 import { classifyTransform, resolveOverlayTransform } from "@/lib/engine/overlay-transform";
 
 /** True when an overlay needs a spatial textured-quad to render: an
@@ -42,7 +42,7 @@ export function selectSpatialOverlays(overlays: Overlay[]): Overlay[] {
 }
 
 /** Injected dependencies for the export quad builder. Production wires the real
- *  three-overlay + overlay-quad browser implementations; tests pass stubs. */
+ *  three-renderer + overlay-quad browser implementations; tests pass stubs. */
 export interface BuildOverlaySpatialDeps {
   createSharedThreeRenderer: () => Promise<SharedThreeRenderer>;
   buildQuadInstance: (shared: SharedThreeRenderer) => Promise<OverlayQuadInstance>;

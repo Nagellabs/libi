@@ -5,6 +5,7 @@ import { textUsesThreeInstance } from "@/lib/overlays/three-d-mode";
 import { overlayHasKeyframes, overlayHasNonIdentityTransform, textNeedsBrowserRender } from "./overlay-predicates";
 import { baseTimeRange, resolveExportBase, streamCopyPreservesFraming } from "./export-base";
 import { MAX_SHADOW_LAYERS, shadowLayerCount } from "./text-runs";
+import { isUnfilledSlotFileId, unfilledSlotLabel } from "@/lib/templates/unfilled-slot";
 
 export type ExportShape =
   | { tag: "stream-copy-trim" }
@@ -103,6 +104,18 @@ export function classifyExportShape(comp: Composition): ExportShape {
   const hasOverlays = (comp.overlays?.length ?? 0) > 0;
   const hasAudio = (comp.audioClips?.length ?? 0) > 0;
   if (!hasOverlays && !hasAudio) return { tag: "error", reason: "nothing to export" };
+
+  // An applied template's media slot nobody filled has no file behind it; every
+  // backend would either throw on the unknown id or silently drop the layer.
+  // Refuse, and say which slot. (Hidden layers were stripped before this.)
+  for (const o of comp.overlays ?? []) {
+    if ((o.kind === "image" || o.kind === "video") && isUnfilledSlotFileId(o.fileId)) {
+      return {
+        tag: "error",
+        reason: `the template slot "${unfilledSlotLabel(o)}" has no media yet — fill it, or hide or remove that layer, before exporting`,
+      };
+    }
+  }
 
   const overlays = comp.overlays;
   const hasCodeOverlay = Array.isArray(overlays) && overlays.some((o) => o.kind === "code");

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getJobManager } from "@/lib/jobs/manager";
-import { JobNotFoundError } from "@/lib/jobs/types";
+import { isJobNotFoundError } from "@/lib/jobs/types";
 
 /** Minimal JSON `{ status }` payload — used by the in-page Playwright runner
  *  to poll for cancel signals without setting up an SSE stream from inside
@@ -14,7 +14,7 @@ export async function GET(
     const snap = await getJobManager().getStatus(id);
     return NextResponse.json({ status: snap.status });
   } catch (err) {
-    if (err instanceof JobNotFoundError) {
+    if (isJobNotFoundError(err)) {
       return NextResponse.json({ status: "unknown" });
     }
     throw err;

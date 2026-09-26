@@ -38,7 +38,10 @@ describe("add_overlay (three)", () => {
     });
     expect(res.success).toBe(true);
     const overlayId = (res.data as { overlayId: string }).overlayId;
-    expect((res.data as { codeFilePath?: string }).codeFilePath).toBe(`overlays/${overlayId}/scene.jsx`);
+    // Absolute — the agent opens this directly with its own file tools.
+    expect((res.data as { codeFilePath?: string }).codeFilePath).toBe(
+      new LocalFileStorage(tempDir).localPath("p1", `overlays/${overlayId}/scene.jsx`),
+    );
     const manifest = await loadManifest("p1");
     expect(manifest.overlays?.some((o) => o.kind === "three")).toBe(true);
   });

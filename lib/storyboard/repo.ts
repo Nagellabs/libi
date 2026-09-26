@@ -29,6 +29,7 @@ import {
 import { migrateRawCardSketches } from "./migrate-sketches";
 import { DEFAULT_ROUGH_RENDER } from "./default-render-unit";
 import { withStoryboardLock } from "./lock";
+import { isSafeStoryboardId } from "@/lib/security/pieceId";
 
 /** Lazy, idempotent migration: lift legacy single-file artifacts into the
  *  versioned clips list + keyframeGen spec. A card that already has `clips`
@@ -245,6 +246,16 @@ export async function addStoryboardCard(
   input: NewCardInput,
   manifestFields?: { overview?: string; budgetUsd?: number },
 ): Promise<StoryboardCard> {
+  // The id names the card's folder (`storyboard/cards/<id>/`), and the sketch route refuses any
+  // id outside this shape — so a card written under one could never be served. Checked before
+  // the lock: a refused id writes nothing.
+  const requestedId = input.id?.trim();
+  if (requestedId && !isSafeStoryboardId(requestedId)) {
+    throw new Error(
+      `invalid card id ${JSON.stringify(requestedId.slice(0, 80))}: use letters, digits, "-" and "_", ` +
+        `with dots only between them (e.g. "s1-hook"), or omit it to get one generated`,
+    );
+  }
   return mutateStoryboard(pieceId, async (loaded) => {
     const sb: Storyboard =
       loaded ?? {
@@ -254,7 +265,7 @@ export async function addStoryboardCard(
         cards: [],
       };
     const order = sb.cards.length;
-    const id = input.id?.trim() || `card_${order + 1}`;
+    const id = requestedId || `card_${order + 1}`;
     if (sb.cards.some((c) => c.id === id)) {
       throw new Error(`card id already exists: ${id}`);
     }

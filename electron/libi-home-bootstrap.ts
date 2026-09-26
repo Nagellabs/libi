@@ -58,8 +58,27 @@
 // pinning the name in dev would repoint a bare `electron .` (no `LIBI_HOME`)
 // out of Electron's shared profile and directly INTO the packaged app's real
 // userData, letting a dev run scribble on an installed user's data.
+//
+// ── LIBI_USER_DATA_DIR: a second packaged Libi beside the first ────────────
+// QA needs to boot a candidate build while the operator's own Libi.app keeps
+// running. It can't by default: userData is pinned above for every packaged
+// launch, `main.ts` takes Electron's single-instance lock keyed on it, and
+// LIBI_HOME defaults from it — so a second copy just focuses the first and
+// quits. `LIBI_USER_DATA_DIR`, when set to an ABSOLUTE path, replaces the
+// pinned directory before anything reads it: the second copy gets its own
+// lock, its own Chromium profile, and (unless LIBI_HOME is set explicitly) its
+// own libi home.
+//
+// An explicit opt-in only. Nothing in libi ever sets it. A relative or empty
+// value is IGNORED rather than resolved — relative to what? a Finder launch's
+// cwd is `/` — and the directory must exist or be creatable; either failure
+// falls back to the default and says so in the sync log. Dev ignores it:
+// dev's profile is `<LIBI_HOME>/electron-profile` (main.ts), and LIBI_HOME is
+// already the per-worktree knob there.
 import { app } from "electron";
+import fs from "fs";
 import path from "path";
+import { mainSyncLog } from "./sync-log";
 
 /**
  * The packaged app's identity on disk — the `Application Support/<name>`
@@ -68,18 +87,60 @@ import path from "path";
  */
 export const LIBI_APP_NAME = "libi";
 
+/** The QA opt-in described in the header. Never set by libi itself. */
+export const USER_DATA_DIR_ENV = "LIBI_USER_DATA_DIR";
+
+/**
+ * Judge a `LIBI_USER_DATA_DIR` value: `null` when unset (nothing to do or
+ * say), `{ dir }` — normalized — when it is an absolute path on THIS platform,
+ * otherwise `{ ignored }` with the reason. Absoluteness follows
+ * `process.platform`, so `C:\QA` is honoured on Windows and ignored on macOS.
+ */
+export function resolveUserDataOverride(
+  value: string | undefined,
+): { dir: string } | { ignored: string } | null {
+  if (value === undefined) return null;
+  const trimmed = value.trim();
+  if (!trimmed) return { ignored: "empty value" };
+  const flavour = process.platform === "win32" ? path.win32 : path.posix;
+  if (!flavour.isAbsolute(trimmed)) return { ignored: `not an absolute path: ${JSON.stringify(value)}` };
+  // Drive-relative (`C:QA`) is not absolute per win32.isAbsolute; UNC and
+  // `C:\…` are. resolve() on an absolute path never consults the cwd.
+  return { dir: flavour.resolve(trimmed) };
+}
+
 if (app.isPackaged) {
+  // Decided before the pin so the pin below is the ONLY setPath and still
+  // precedes every read. Creating the directory here (not later) is what
+  // lets a bad value fall back instead of failing inside Chromium.
+  const override = resolveUserDataOverride(process.env[USER_DATA_DIR_ENV]);
+  let userDataDir = path.join(app.getPath("appData"), LIBI_APP_NAME);
+  let overrideNote: string | null = null;
+  if (override && "dir" in override) {
+    try {
+      fs.mkdirSync(override.dir, { recursive: true });
+      userDataDir = override.dir;
+      overrideNote = `${USER_DATA_DIR_ENV}: userData → ${override.dir}`;
+    } catch (err) {
+      overrideNote = `${USER_DATA_DIR_ENV} ignored (cannot create ${override.dir}: ${(err as Error).message}); using ${userDataDir}`;
+    }
+  } else if (override) {
+    overrideNote = `${USER_DATA_DIR_ENV} ignored (${override.ignored}); using ${userDataDir}`;
+  }
+
   // Order is the whole point of this block, and the reason the pin and the
   // read live together rather than in two places that can drift apart: the
   // identity must be fixed BEFORE anything resolves userData.
   app.setName(LIBI_APP_NAME);
-  app.setPath("userData", path.join(app.getPath("appData"), LIBI_APP_NAME));
+  app.setPath("userData", userDataDir);
 
   // Only now is `userData` the directory we mean. Note this runs even when
   // `LIBI_HOME` is already set: `userData` is also Chromium's profile root
   // (cookies, GPUCache, SingletonLock), which needs pinning independently of
   // where libi's own data is told to go.
   process.env.LIBI_HOME ??= app.getPath("userData");
-}
 
-export {};
+  // Logged after LIBI_HOME is published so the line lands in THIS instance's
+  // `<LIBI_HOME>/logs/electron-main-sync.log`, not the operator's.
+  if (overrideNote) mainSyncLog(`libi-home-bootstrap: ${overrideNote}`);
+}

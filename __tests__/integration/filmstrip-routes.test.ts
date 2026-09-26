@@ -96,6 +96,41 @@ describe("filmstrip routes", () => {
     expect(new TextDecoder().decode(body)).toBe("JPGBYTES");
   });
 
+  it("serve: a sprite whose name contains `...` is served (T1, 2026-09-25)", async () => {
+    const name = "Morning_vibe_happyhippie_...-filmstrip.jpg";
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, name), Buffer.from("JPGBYTES"));
+    insertFile({ filmstripFilename: name, filmstripStatus: "ready", filmstripFrames: 20, filmstripHeight: 48 });
+    const res = await serveGET(
+      new Request("http://localhost/api/files/by-id/f1/filmstrip"),
+      { params: Promise.resolve({ fileId: FID }) },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("serve: a sprite whose name contains a literal `%` is served (fix round 1)", async () => {
+    const name = "100%-filmstrip.jpg";
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    fs.writeFileSync(path.join(pdir, name), Buffer.from("JPGBYTES"));
+    insertFile({ filmstripFilename: name, filmstripStatus: "ready", filmstripFrames: 20, filmstripHeight: 48 });
+    const res = await serveGET(
+      new Request("http://localhost/api/files/by-id/f1/filmstrip"),
+      { params: Promise.resolve({ fileId: FID }) },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("serve: a traversal-shaped sprite name is refused", async () => {
+    insertFile({ filmstripFilename: "../x-filmstrip.jpg", filmstripStatus: "ready", filmstripFrames: 20, filmstripHeight: 48 });
+    const res = await serveGET(
+      new Request("http://localhost/api/files/by-id/f1/filmstrip"),
+      { params: Promise.resolve({ fileId: FID }) },
+    );
+    expect(res.status).toBe(400);
+  });
+
   it("status: returns JSON snapshot of the filmstrip columns", async () => {
     insertFile({
       filmstripFilename: "clip-filmstrip.jpg",
@@ -171,5 +206,21 @@ describe("filmstrip routes", () => {
       { params: Promise.resolve({ fileId: "nope" }) },
     );
     expect(res.status).toBe(404);
+  });
+
+  // F14 (final review): a sprite that resolves outside the piece folder is a 404, never a throw.
+  it("serve: 404 when the sprite resolves outside the piece folder", async () => {
+    const pdir = path.join(tempDir, PIECE);
+    fs.mkdirSync(pdir, { recursive: true });
+    const outside = path.join(tempDir, "outside-secret.jpg");
+    fs.writeFileSync(outside, "SECRET");
+    fs.symlinkSync(outside, path.join(pdir, "clip-filmstrip.jpg"));
+    insertFile({ filmstripFilename: "clip-filmstrip.jpg", filmstripStatus: "ready" });
+
+    const res = await serveGET(new Request("http://localhost/api/files/by-id/f1/filmstrip"), { params: Promise.resolve({ fileId: FID }) });
+    expect(res.status).toBe(404);
+    const text = await res.text();
+    expect(text).not.toContain("SECRET");
+    expect(text).not.toContain(tempDir);
   });
 });

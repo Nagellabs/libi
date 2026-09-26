@@ -86,7 +86,7 @@ interface PersistedEditorState {
    * null when the referenced entity no longer exists at restore time.
    */
   lastPieceId: string | null;
-  lastEditorTab: "preview" | "storyboard" | "assets" | "objects";
+  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting";
   lastAssetId: string | null;
   /** Last active tab inside the asset preview panel. */
   lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
@@ -266,7 +266,8 @@ function loadState(): PersistedEditorState {
           parsed.lastEditorTab === "preview" ||
           parsed.lastEditorTab === "storyboard" ||
           parsed.lastEditorTab === "assets" ||
-          parsed.lastEditorTab === "objects"
+          parsed.lastEditorTab === "objects" ||
+          parsed.lastEditorTab === "posting"
             ? parsed.lastEditorTab
             : DEFAULTS.lastEditorTab,
         lastAssetId:
@@ -414,8 +415,8 @@ interface EditorStateContextValue {
   // restore-on-load logic always has a fresh anchor.
   lastPieceId: string | null;
   setLastPieceId: (id: string | null) => void;
-  lastEditorTab: "preview" | "storyboard" | "assets" | "objects";
-  setLastEditorTab: (tab: "preview" | "storyboard" | "assets" | "objects") => void;
+  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting";
+  setLastEditorTab: (tab: "preview" | "storyboard" | "assets" | "objects" | "posting") => void;
   lastAssetId: string | null;
   setLastAssetId: (id: string | null) => void;
   lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
@@ -821,7 +822,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   );
 
   const setLastEditorTab = useCallback(
-    (tab: "preview" | "storyboard" | "assets" | "objects") => {
+    (tab: "preview" | "storyboard" | "assets" | "objects" | "posting") => {
       lastEditorTabRef.current = tab;
       setLastEditorTabState(tab);
       persist();
@@ -1106,6 +1107,18 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
         (current.get("provider") ?? undefined) === provider;
       if (!here) router.push(`/agents?${params.toString()}`);
       if (extensionId) window.dispatchEvent(new CustomEvent(MCP_SCROLL_EVENT, { detail: { mcpId: extensionId } }));
+    });
+  }, [router]);
+
+  // `navigate_templates` (libi.show_templates) — same shared singleton
+  // EventSource, same reason as the effect above.
+  useEffect(() => {
+    return subscribeBroadcast((data) => {
+      if (data.type !== "navigate_templates") return;
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams({ tab: "mine" });
+      if (typeof data.templateId === "string") params.set("template", data.templateId);
+      router.push(`/templates?${params.toString()}`);
     });
   }, [router]);
 

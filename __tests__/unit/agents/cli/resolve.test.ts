@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  AGENT_CLI_MEMO_MS, AGENT_CLI_VERSION_TIMEOUT_MS, invalidateAgentCliMemo, isUsableCli, knownInstallDirs, resolveAgentCli, runCliVersion, testAgentCliDirs,
+  AGENT_CLI_MAX_VERSION_CANDIDATES, AGENT_CLI_MEMO_MS, AGENT_CLI_RESOLVE_HOLD_MS, AGENT_CLI_VERSION_TIMEOUT_MS, invalidateAgentCliMemo, isUsableCli, knownInstallDirs, resolveAgentCli, runCliVersion, testAgentCliDirs,
 } from "@/lib/agents/cli/resolve";
 import { GROUP_EXIT_WAIT_MS, GROUP_KILL_GRACE_MS } from "@/lib/agents/cli/process-group";
 import { resolveCmdShimNativeTarget } from "@/lib/agents/cli/spawn-shape";
@@ -112,17 +112,17 @@ describe.skipIf(process.platform === "win32")("resolveAgentCli — posix, real f
     const r = await resolveAgentCli("claude-code", { ...posix, searchDirs: async () => [path.dirname(file)] });
     expect(r).toEqual({ path: file, realPath: file, execPath: file, version: "2.1.250", meetsMinimum: true });
     expect(isUsableCli(r)).toBe(true);
-  });
+  }, 15_000);
 
   it("not found → null", async () => {
     expect(await resolveAgentCli("codex", { ...posix, searchDirs: async () => [dir] })).toBeNull();
-  });
+  }, 15_000);
 
   it("a hit inside libi's own tree is rejected (libi-internal)", async () => {
     const file = bin("codex", 'echo "codex-cli 0.160.0"');
     const r = await resolveAgentCli("codex", { ...posix, libiRoots: [dir], searchDirs: async () => [path.dirname(file)] });
     expect(r).toBeNull();
-  });
+  }, 15_000);
 
   it("symlink / fnm-style shim: realPath is the target, path is the link", async () => {
     const real = bin("claude", 'echo "2.1.245 (Claude Code)"', "real");
@@ -132,27 +132,27 @@ describe.skipIf(process.platform === "win32")("resolveAgentCli — posix, real f
     const r = await resolveAgentCli("claude-code", { ...posix, searchDirs: async () => [linkDir] });
     expect(r && "realPath" in r ? r.realPath : null).toBe(real);
     expect(r && "path" in r ? r.path : null).toBe(path.join(linkDir, "claude"));
-  });
+  }, 15_000);
 
   it("below the minimum: found, meetsMinimum false", async () => {
     const file = bin("claude", 'echo "2.0.1 (Claude Code)"');
     const r = await resolveAgentCli("claude-code", { ...posix, searchDirs: async () => [path.dirname(file)] });
     expect(r && "meetsMinimum" in r ? r.meetsMinimum : null).toBe(false);
-  });
+  }, 15_000);
 
   it("broken binary (non-zero exit) → foundButBroken with the path", async () => {
     const file = bin("codex", "exit 1");
     expect(await resolveAgentCli("codex", { ...posix, searchDirs: async () => [path.dirname(file)] })).toEqual({
       foundButBroken: true, path: file,
     });
-  });
+  }, 15_000);
 
   it("--version output without a semver → foundButBroken", async () => {
     const file = bin("codex", 'echo "nope"');
     expect(await resolveAgentCli("codex", { ...posix, searchDirs: async () => [path.dirname(file)] })).toEqual({
       foundButBroken: true, path: file,
     });
-  });
+  }, 15_000);
 
   it("--version that hangs past 3 s → foundButBroken, and the hung process is gone afterwards (by pid)", async () => {
     const pidFile = path.join(dir, "hang.pid");
@@ -206,7 +206,7 @@ describe.skipIf(process.platform === "win32")("resolveAgentCli — posix, real f
     const r = await resolveAgentCli("claude-code", { ...posix, searchDirs: async () => [path.dirname(file)] });
     expect(isUsableCli(r)).toBe(true);
     expect(timers.mock.calls.filter((call) => call[1] === AGENT_CLI_VERSION_TIMEOUT_MS)).toHaveLength(1);
-  });
+  }, 15_000);
 
   it("a --version that ignores SIGTERM and backgrounds a child holding stdout: the caller is released at the bound, the whole group is killed (both pids), and the next caller is not blocked", async () => {
     const shPidFile = path.join(dir, "sh.pid");
@@ -256,7 +256,7 @@ describe.skipIf(process.platform === "win32")("resolveAgentCli — posix, real f
     invalidateAgentCliMemo();
     const r3 = await resolveAgentCli("claude-code", { ...base, loginShellPathDirs: async () => [], processPathDirs: () => [] });
     expect(r3 && "version" in r3 ? r3.version : null).toBe("2.1.248");
-  });
+  }, 15_000);
 });
 
 describe("resolveAgentCli — memo", () => {
@@ -480,6 +480,161 @@ describe("resolveAgentCli — memo", () => {
     const [a, b] = await Promise.all([resolveAgentCli("claude-code", deps), resolveAgentCli("claude-code", deps)]);
     expect(isUsableCli(a) && isUsableCli(b)).toBe(true);
     expect(spawnVersion).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * QA 0.1.15 (M1): with fnm's per-shell dir missing from the login-shell probe, an older
+ * `/opt/homebrew/bin/claude` was the first hit and readiness flapped to "update needed"
+ * although a current copy sat later on the search path. Every copy is a candidate now.
+ */
+describe("resolveAgentCli — several copies on the search path (injected, host-independent)", () => {
+  type Spawn = { command: string; args: string[] };
+  const versionsBy = (versions: Record<string, string | null>) =>
+    vi.fn<(spawn: Spawn) => Promise<{ ok: boolean; stdout: string }>>(async ({ command }) => {
+      const v = versions[command];
+      return v === null || v === undefined ? { ok: false, stdout: "" } : { ok: true, stdout: `${v} (Claude Code)` };
+    });
+  const several = (paths: string[]) => ({
+    platform: "darwin" as const,
+    libiRoots: ["/nowhere/libi"],
+    minimum: MIN,
+    realpath: (p: string) => p,
+    mtimeOf: () => 1,
+    now: () => 5,
+    searchDirs: async () => paths.map((p) => path.posix.dirname(p)),
+    isExecutable: (p: string) => paths.includes(p),
+  });
+  const commands = (spawn: ReturnType<typeof versionsBy>) => spawn.mock.calls.map(([c]) => c.command);
+
+  it("an earlier copy below the minimum, a later one meeting it → the later one, meetsMinimum true", async () => {
+    const spawnVersion = versionsBy({ "/opt/homebrew/bin/claude": "2.1.226", "/Users/me/.local/bin/claude": "2.1.278" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/opt/homebrew/bin/claude", "/Users/me/.local/bin/claude"]), spawnVersion });
+    expect(r).toMatchObject({ path: "/Users/me/.local/bin/claude", realPath: "/Users/me/.local/bin/claude", version: "2.1.278", meetsMinimum: true });
+    expect(commands(spawnVersion)).toEqual(["/opt/homebrew/bin/claude", "/Users/me/.local/bin/claude"]);
+  });
+
+  it("an earlier BROKEN copy, a later one meeting the minimum → the later one", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": null, "/b/claude": "2.1.300" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion });
+    expect(r).toMatchObject({ path: "/b/claude", meetsMinimum: true });
+  });
+
+  it("every copy below the minimum → the FIRST one, meetsMinimum false (today's answer)", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": "2.1.200", "/b/claude": "2.1.226" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion });
+    expect(r).toMatchObject({ path: "/a/claude", version: "2.1.200", meetsMinimum: false });
+    expect(spawnVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it("a first copy that is broken and a second below the minimum → the first one's answer (foundButBroken)", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": null, "/b/claude": "2.1.226" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion });
+    expect(r).toEqual({ foundButBroken: true, path: "/a/claude" });
+  });
+
+  it("the first copy meets the minimum → exactly one --version spawn", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": "2.1.300", "/b/claude": "2.1.226" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion });
+    expect(r).toMatchObject({ path: "/a/claude", meetsMinimum: true });
+    expect(commands(spawnVersion)).toEqual(["/a/claude"]);
+  });
+
+  it("two spellings of one binary (same realpath) are checked once", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": "2.1.226", "/c/claude": "2.1.300" });
+    const r = await resolveAgentCli("claude-code", {
+      ...several(["/a/claude", "/b/claude", "/c/claude"]),
+      realpath: (p: string) => (p === "/b/claude" ? "/a/claude" : p),
+      spawnVersion,
+    });
+    expect(r).toMatchObject({ path: "/c/claude", meetsMinimum: true });
+    expect(commands(spawnVersion)).toEqual(["/a/claude", "/c/claude"]);
+  });
+
+  it("checks at most 4 copies, so the worst case stays bounded", async () => {
+    expect(AGENT_CLI_MAX_VERSION_CANDIDATES).toBe(4);
+    const paths = ["/a", "/b", "/c", "/d", "/e", "/f"].map((d) => `${d}/claude`);
+    const spawnVersion = versionsBy({ ...Object.fromEntries(paths.map((p) => [p, "2.1.100"])), "/e/claude": "2.1.300" });
+    const r = await resolveAgentCli("claude-code", { ...several(paths), spawnVersion });
+    expect(r).toMatchObject({ path: "/a/claude", meetsMinimum: false });
+    expect(spawnVersion).toHaveBeenCalledTimes(AGENT_CLI_MAX_VERSION_CANDIDATES);
+  });
+
+  it("the resolve log carries checked (copies version-checked) and chosenIndex (position among candidates, no paths)", async () => {
+    const info = vi.spyOn(serverLogger, "info");
+    const spawnVersion = versionsBy({ "/a/claude": "2.1.226", "/b/claude": "2.1.226", "/c/claude": "2.1.300" });
+    const r = await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude", "/c/claude"]), spawnVersion });
+    expect(r).toMatchObject({ path: "/c/claude", meetsMinimum: true });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ tag: "agent-cli", op: "resolve", agentId: "claude-code", candidates: 3, checked: 3, chosenIndex: 2 }),
+      expect.any(String),
+    );
+  });
+
+  it("the resolve log's chosenIndex is 0 when the first copy qualifies, or nothing qualifies", async () => {
+    const info = vi.spyOn(serverLogger, "info");
+    const firstQualifies = versionsBy({ "/a/claude": "2.1.300", "/b/claude": "2.1.226" });
+    await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion: firstQualifies });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "resolve", checked: 1, chosenIndex: 0 }),
+      expect.any(String),
+    );
+    info.mockClear();
+    invalidateAgentCliMemo("claude-code"); // else the still-fresh memo from the call above answers without logging
+    const noneQualifies = versionsBy({ "/a/claude": "2.1.100", "/b/claude": "2.1.200" });
+    await resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude"]), spawnVersion: noneQualifies });
+    expect(info).toHaveBeenCalledWith(
+      expect.objectContaining({ op: "resolve", checked: 2, chosenIndex: 0 }),
+      expect.any(String),
+    );
+  });
+
+  it("hung copies are bounded one by one: two hung, the third ok → answered at 2 × the bound", async () => {
+    vi.useFakeTimers();
+    const spawnVersion = vi.fn(async ({ command }: Spawn) =>
+      command === "/c/claude" ? { ok: true, stdout: "2.1.300 (Claude Code)" } : new Promise<{ ok: boolean; stdout: string }>(() => undefined),
+    );
+    let settled = false;
+    const p = resolveAgentCli("claude-code", { ...several(["/a/claude", "/b/claude", "/c/claude"]), spawnVersion }).finally(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(2 * VERSION_BOUND_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await p).toMatchObject({ path: "/c/claude", meetsMinimum: true });
+  });
+
+  it("the event-loop hold covers every candidate's --version bound", () => {
+    expect(AGENT_CLI_RESOLVE_HOLD_MS).toBeGreaterThan(AGENT_CLI_MAX_VERSION_CANDIDATES * AGENT_CLI_VERSION_TIMEOUT_MS);
+  });
+
+  it("the copy chosen is the one memoized: the next call spawns nothing and serves it", async () => {
+    const spawnVersion = versionsBy({ "/a/claude": "2.1.226", "/b/claude": "2.1.300" });
+    const deps = { ...several(["/a/claude", "/b/claude"]), spawnVersion };
+    await resolveAgentCli("claude-code", deps);
+    const again = await resolveAgentCli("claude-code", deps);
+    expect(again).toMatchObject({ path: "/b/claude", meetsMinimum: true });
+    expect(spawnVersion).toHaveBeenCalledTimes(2);
+  });
+
+  it("windows: a native .exe below the minimum and a later .cmd meeting it → the .cmd", async () => {
+    const shim = '@ECHO off\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n';
+    const spawnVersion = vi.fn(async ({ command, args }: Spawn) =>
+      command.endsWith("claude.exe") ? { ok: true, stdout: "2.1.200 (Claude Code)" } : args.length > 1 ? { ok: true, stdout: "2.1.300 (Claude Code)" } : { ok: false, stdout: "" },
+    );
+    const r = await resolveAgentCli("claude-code", {
+      platform: "win32",
+      libiRoots: ["C:\\libi"],
+      minimum: MIN,
+      realpath: (p: string) => p,
+      mtimeOf: () => 1,
+      readFile: () => shim,
+      searchDirs: async () => ["C:\\npm", "C:\\Users\\me\\.local\\bin"],
+      isExecutable: (p: string) => p === "C:\\npm\\claude.cmd" || p === "C:\\Users\\me\\.local\\bin\\claude.exe",
+      spawnVersion,
+    });
+    expect(r).toMatchObject({ path: "C:\\npm\\claude.cmd", meetsMinimum: true });
+    expect(spawnVersion.mock.calls[0]?.[0].command).toBe("C:\\Users\\me\\.local\\bin\\claude.exe");
   });
 });
 

@@ -12,6 +12,7 @@ import { lifecycleEvents } from "@/lib/server/lifecycle/events";
 import { getLibiAgentDir } from "@/lib/libi-home";
 import { stripLegacyAgentDirFiles } from "@/mcp/workspace";
 import { runBootHousekeeping } from "@/lib/server/lifecycle/housekeeping";
+import { schedulePythonPrefetch } from "@/lib/uv-env/python-prefetch";
 import type { CategoryBDeps } from "@/lib/server/lifecycle/category-b";
 import type { LifecycleEvent } from "@/lib/server/lifecycle/types";
 import type { McpHttpChildHandle } from "@/lib/server/lifecycle/mcp-http-child";
@@ -46,6 +47,10 @@ vi.mock("@/mcp/workspace", () => ({
 // the suite would prune the developer's actual `~/Library/Caches/ms-playwright`.
 vi.mock("@/lib/server/lifecycle/housekeeping", () => ({
   runBootHousekeeping: vi.fn(async () => {}),
+}));
+// Likewise the Python prefetch: scheduled for real it would run `uv python install`.
+vi.mock("@/lib/uv-env/python-prefetch", () => ({
+  schedulePythonPrefetch: vi.fn(),
 }));
 
 const baseDeps: CategoryBDeps = {
@@ -373,6 +378,14 @@ describe("runCategoryB housekeeping", () => {
     vi.mocked(runBootHousekeeping).mockClear();
     await runCategoryB(baseDeps);
     await vi.waitFor(() => expect(runBootHousekeeping).toHaveBeenCalledTimes(1));
+  });
+
+  it("schedules the background Python prefetch (Y4) without awaiting it", async () => {
+    vi.mocked(schedulePythonPrefetch).mockClear();
+    await runCategoryB(baseDeps);
+    await vi.waitFor(() => expect(schedulePythonPrefetch).toHaveBeenCalledTimes(1));
+    // Called with no delay override: the default keeps it out of the boot window.
+    expect(vi.mocked(schedulePythonPrefetch).mock.calls[0]).toEqual([]);
   });
 });
 

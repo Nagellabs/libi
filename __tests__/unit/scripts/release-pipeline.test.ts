@@ -238,7 +238,10 @@ describe("the release workflows: what must never drift", () => {
     const script = readFileSync(path.join(ROOT, "scripts/release-npm.js"), "utf8");
     const marker = script.indexOf("published=true");
     expect(marker).toBeGreaterThan(script.indexOf('dryRun ? ["publish", "--dry-run"] : ["publish"]'));
-    expect(marker).toBeLessThan(script.indexOf("const VERIFY_ATTEMPTS"));
+    // VERIFY_ATTEMPTS/VERIFY_DELAY_MS now live in ./lib/release-verify.js
+    // (tested there); the verify loop itself still starts well after
+    // `published=true` is written.
+    expect(marker).toBeLessThan(script.indexOf("for (let attempt = 1; attempt <= VERIFY_ATTEMPTS"));
   });
 
   it("references exactly the secrets that exist in the `release` environment", () => {

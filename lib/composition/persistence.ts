@@ -334,30 +334,90 @@ export async function hasManifest(pieceId: string): Promise<boolean> {
   return storage.exists(pieceId, MANIFEST_FILE);
 }
 
+/**
+ * True only when the DB positively has no row for this piece — i.e. it was deleted. An open
+ * editor keeps asking for a deleted piece's composition for a moment, and the first-snapshot
+ * write below would re-create `<storage>/<pieceId>/snapshots/current.json` after the piece
+ * DELETE removed the folder (final review P3). A DB that can't be reached (some test contexts)
+ * answers false, so the write goes ahead exactly as before.
+ */
+function pieceRowIsGone(pieceId: string): boolean {
+  try {
+    const [row] = getDb().select({ id: pieces.id }).from(pieces).where(eq(pieces.id, pieceId)).limit(1).all();
+    return !row;
+  } catch {
+    return false;
+  }
+}
+
+/** The lazy first-snapshot write, skipped for a piece that no longer exists. */
+async function initCurrentSnapshot(pieceId: string, manifest: CompositionManifest): Promise<void> {
+  if (await loadCurrentSnapshot(pieceId)) return;
+  if (pieceRowIsGone(pieceId)) {
+    logger.info({ tag: "snapshot", op: "init_skipped_piece_gone", pieceId }, "no snapshot written for a deleted piece");
+    return;
+  }
+  await saveCurrentSnapshot(pieceId, manifest);
+}
+
+/** Pieces whose dropped canvas scenes this process has already logged. */
+const legacyScenesLogged = new Set<string>();
+
+/**
+ * Drop the retired canvas-scene layer (`scenes` / `sceneOrder`) from a manifest
+ * read from disk, and return how many scenes it held.
+ *
+ * A pre-2026-08-20 manifest (libi 0.1.0 / 0.1.1) may still carry them. The
+ * canvas-scene layer is gone (f0e0a410); ignore both rather than throwing, so
+ * an old manifest still opens (as its overlays) instead of failing to load.
+ * Nothing is rewritten here — the file keeps them until the piece is next
+ * saved. Logged once per piece per process (piece id and count only, never a
+ * scene's content): loadManifest runs on nearly every request.
+ */
+function dropLegacyScenes(pieceId: string, manifest: CompositionManifest): number {
+  const legacy = manifest as { scenes?: unknown; sceneOrder?: unknown };
+  // Inline `scenes` (0.1.0/0.1.1), else `sceneOrder` alone: the pre-0.1.0 format
+  // kept each scene in a `scene-*.json` shard beside the manifest.
+  const count = Array.isArray(legacy.scenes)
+    ? legacy.scenes.length
+    : Array.isArray(legacy.sceneOrder)
+      ? legacy.sceneOrder.length
+      : 0;
+  delete legacy.scenes;
+  delete legacy.sceneOrder;
+  if (count > 0 && !legacyScenesLogged.has(pieceId)) {
+    legacyScenesLogged.add(pieceId);
+    logger.warn(
+      { tag: "overlay", op: "legacy_scenes_dropped", pieceId, count },
+      "piece has canvas scenes from libi 0.1.0/0.1.1; they are no longer supported and are not loaded",
+    );
+  }
+  return count;
+}
+
 /** Load the composition manifest, or return a default if none exists */
 export async function loadManifest(pieceId: string): Promise<CompositionManifest> {
+  return (await readManifest(pieceId)).manifest;
+}
+
+/** `loadManifest`, plus how many legacy canvas scenes the file held (dropped). */
+async function readManifest(pieceId: string): Promise<{ manifest: CompositionManifest; legacyScenes: number }> {
   const storage = await getStorage();
 
   if (!(await storage.exists(pieceId, MANIFEST_FILE))) {
     // Initialize snapshot too so the piece's two-state invariant holds from creation.
-    if (!(await loadCurrentSnapshot(pieceId))) {
-      await saveCurrentSnapshot(pieceId, EMPTY_MANIFEST);
-    }
+    await initCurrentSnapshot(pieceId, EMPTY_MANIFEST);
     // Return a fresh clone — callers mutate the manifest they receive
     // (addOverlayToManifest, addAudioClip, …). Handing out
     // the shared EMPTY_MANIFEST constant lets one piece's edits leak into
     // every other file-less piece loaded afterwards.
-    return structuredClone(EMPTY_MANIFEST);
+    return { manifest: structuredClone(EMPTY_MANIFEST), legacyScenes: 0 };
   }
 
   const data = await storage.read(pieceId, MANIFEST_FILE);
   const manifest = JSON.parse(data.toString("utf-8")) as CompositionManifest;
 
-  // A pre-2026-08-20 manifest may still carry `scenes` / `sceneOrder`. The
-  // canvas-scene layer is gone; ignore both rather than throwing, so an old
-  // manifest still opens (as its overlays) instead of failing to load.
-  delete (manifest as { scenes?: unknown }).scenes;
-  delete (manifest as { sceneOrder?: unknown }).sceneOrder;
+  const legacyScenes = dropLegacyScenes(pieceId, manifest);
 
   // Drop the legacy `rotation` (degrees) field: storage now has a single rotation
   // authority (transform3d.rotation.z). Pre-2026-07 manifests may still carry it;
@@ -387,11 +447,9 @@ export async function loadManifest(pieceId: string): Promise<CompositionManifest
 
   // Lazy snapshot init for legacy pieces. Runs AFTER hydrate so the snapshot
   // captures the inline body (self-contained).
-  if (!(await loadCurrentSnapshot(pieceId))) {
-    await saveCurrentSnapshot(pieceId, manifest);
-  }
+  await initCurrentSnapshot(pieceId, manifest);
 
-  return manifest;
+  return { manifest, legacyScenes };
 }
 
 /** Save the composition manifest */
@@ -484,12 +542,14 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
   }
 }
 
-/** Load the full composition. Thin wrapper over `loadManifest`, kept because
- *  callers read as "load the composition" rather than "load a JSON file". */
+/** Load the full composition. `loadManifest`, plus `legacyScenes`: how many
+ *  canvas scenes from libi 0.1.0/0.1.1 the file still held — dropped, not
+ *  loaded (the editor tells the user once; see GET …/composition). */
 export async function loadComposition(pieceId: string): Promise<{
   manifest: CompositionManifest;
+  legacyScenes: number;
 }> {
-  return { manifest: await loadManifest(pieceId) };
+  return readManifest(pieceId);
 }
 
 
@@ -515,6 +575,9 @@ export async function addOverlayToManifest(
   await saveManifest(pieceId, manifest);
 }
 
+/** Keys `updateOverlayInManifest` never takes from a patch. */
+const PATCH_PROTECTED_KEYS = ["id", "kind", "drawFunction", "sceneFunction"] as const;
+
 /** Update an overlay by id. Returns false if not found. */
 export async function updateOverlayInManifest(
   pieceId: string,
@@ -530,6 +593,17 @@ export async function updateOverlayInManifest(
   // inspector to turn a styling field — background/stroke/shadow/reveal — back
   // off). A plain `JSON.stringify` would drop `undefined`, so callers must send
   // `null` (not `undefined`) to clear.
+  // An overlay's identity and its code are never patchable: `id`/`kind` are
+  // excluded by the type but not at runtime (a preset's fields, a JSON body),
+  // and a code body reaches a piece only through the write paths that validate
+  // it (`add_overlay`, the watched `codeFilePath`). A patch that tried is logged
+  // and the keys dropped — the rest of it still applies.
+  const refused = PATCH_PROTECTED_KEYS.filter((k) => k in (patch as Record<string, unknown>));
+  if (refused.length > 0) {
+    patch = { ...patch };
+    for (const k of refused) delete (patch as Record<string, unknown>)[k];
+    logger.warn({ tag: "overlay", op: "patch_protected_keys_dropped", pieceId, overlayId, keys: refused }, "overlay patch tried to set protected keys");
+  }
   const merged = { ...overlays[i], ...patch } as Record<string, unknown>;
   // A text overlay with no anchor is un-migrated (add_overlay / legacy): the
   // preview wraps it at the width BUILD-time normalization derives, which it

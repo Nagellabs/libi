@@ -134,6 +134,59 @@ export function uvEnvVars(): Record<string, string> {
 }
 
 /**
+ * `UV_PYTHON_PREFERENCE` for every uv libi runs: use ONLY a uv-managed CPython,
+ * downloaded into `<LIBI_HOME>/uv/python` (UV_PYTHON_INSTALL_DIR).
+ *
+ * uv's default (`managed`) prefers a managed interpreter but still DISCOVERS
+ * system ones, and discovery EXECUTES the first `python3` on PATH to query it.
+ * On a Mac without the Command Line Tools that is the `/usr/bin/python3` stub:
+ * running it pops the "install developer tools" dialog and exits 1, and uv
+ * treats a failed interpreter query as FATAL ("Failed to inspect Python
+ * interpreter from first executable in the search path") before it ever
+ * considers downloading one. A broken pyenv/asdf shim fails the same way.
+ * Reproduced with libi's own uv 0.11.32 (2026-09-25 review). `only-managed`
+ * never looks at PATH, so a fresh machine goes straight to the managed
+ * download, and an interpreter libi controls is the only one it ever uses.
+ *
+ * Existing environments built on a system Python are NOT broken by this: uv
+ * (0.11.32 and 0.12.19, verified 2026-09-25) removes and recreates a project
+ * venv or an ephemeral `--with` env on the managed interpreter the next time it
+ * is used, relinking packages from UV_CACHE_DIR — a one-time managed-CPython
+ * download (~24 MB compressed per minor version) and no user action.
+ *
+ * Overrides an inherited value, like the locations below; a caller's `extra`
+ * can still override it.
+ */
+export const UV_PYTHON_PREFERENCE = "only-managed";
+
+/**
+ * `UV_PYTHON_DOWNLOADS` for every uv libi runs: let uv download that managed
+ * CPython. Required by `only-managed` — with downloads off there is no
+ * interpreter uv may use at all, so a user whose login shell exports
+ * `UV_PYTHON_DOWNLOADS=never|manual` (the desktop app imports it), or whose
+ * `~/.config/uv/uv.toml` says `python-downloads = "never"`, would lose every
+ * uv feature ("Python downloads are set to 'never'") where their system Python
+ * used to serve. The env var outranks the user's uv.toml — verified with uv
+ * 0.11.32 on 2026-09-25 (config `never` + env `automatic` → downloads) — so
+ * libi does not need `UV_NO_CONFIG`, and does not set it: a user's uv config
+ * can carry what their network needs (an index URL, native TLS), which libi's
+ * own installs should keep honouring.
+ */
+export const UV_PYTHON_DOWNLOADS = "automatic";
+
+/**
+ * uv's own interpreter-selection variables. Each one defeats
+ * `only-managed` when inherited from a profile (reproduced with uv 0.11.32):
+ * `UV_NO_MANAGED_PYTHON=1` (and `UV_MANAGED_PYTHON`, its opposite flag) makes
+ * EVERY uv call fail "cannot be used with --python-preference", and
+ * `UV_PYTHON=<a broken pyenv shim>` sends each call that passes no `--python`
+ * of its own — `uv sync`, `uv run --frozen`, the tracking selftest, the YOLOE
+ * export — to inspect that shim, failing "Failed to inspect Python
+ * interpreter". libi's own `UV_PYTHON_*` settings are set after the strip.
+ */
+const UV_INTERPRETER_SELECTION_VARS = new Set(["UV_PYTHON", "UV_NO_MANAGED_PYTHON", "UV_MANAGED_PYTHON"]);
+
+/**
  * Variables that select a Python interpreter or site-packages the user owns.
  * Matched case-insensitively: Windows environment names are, so `pythonpath`
  * there is the same variable as `PYTHONPATH`. No legitimate lower-case
@@ -141,7 +194,13 @@ export function uvEnvVars(): Record<string, string> {
  */
 function isUserPythonEnvVar(key: string): boolean {
   const name = key.toUpperCase();
-  return name === "PYTHONHOME" || name === "PYTHONPATH" || name === "VIRTUAL_ENV" || name.startsWith("CONDA_");
+  return (
+    name === "PYTHONHOME" ||
+    name === "PYTHONPATH" ||
+    name === "VIRTUAL_ENV" ||
+    name.startsWith("CONDA_") ||
+    UV_INTERPRETER_SELECTION_VARS.has(name)
+  );
 }
 
 /**
@@ -149,7 +208,8 @@ function isUserPythonEnvVar(key: string): boolean {
  *
  * Inherits `process.env` (uv and the Python it spawns need HOME, TMPDIR, LANG,
  * proxy vars, …), prepends `<LIBI_HOME>/bin` to PATH so uv-spawned children
- * find libi's ffmpeg/uv/node, then pins the `UV_*` locations.
+ * find libi's ffmpeg/uv/node, then pins the `UV_*` locations,
+ * `UV_PYTHON_PREFERENCE=only-managed` and `UV_PYTHON_DOWNLOADS=automatic`.
  *
  * `extra` is layered last so a caller can add job-specific variables
  * (`UV_PROJECT_ENVIRONMENT`, `LIBI_TRACK_MODELS`, `NO_COLOR`, …).
@@ -174,8 +234,8 @@ export function buildUvEnv(
   // every spawn call site expects to hand to child_process — and drop the
   // user's own Python environment on EVERY surface (desktop, npx, dev): since
   // the desktop app imports the login shell's variables, a `PYTHONHOME` /
-  // `VIRTUAL_ENV` / `CONDA_*` from the profile would otherwise point uv's
-  // Python at an interpreter libi does not manage.
+  // `VIRTUAL_ENV` / `CONDA_*` / `UV_PYTHON` from the profile would otherwise
+  // point uv's Python at an interpreter libi does not manage.
   for (const key of Object.keys(env)) {
     if (typeof env[key] !== "string") delete env[key];
     else if (isUserPythonEnvVar(key)) delete env[key];
@@ -185,6 +245,10 @@ export function buildUvEnv(
   env.PATH = `${getLibiBinDir()}${pathSep}${process.env.PATH ?? ""}`;
 
   Object.assign(env, uvEnvVars(), {
+    // Only a uv-managed interpreter, which uv may download — see
+    // UV_PYTHON_PREFERENCE and UV_PYTHON_DOWNLOADS above.
+    UV_PYTHON_PREFERENCE,
+    UV_PYTHON_DOWNLOADS,
     // Keeps CPython from writing bytecode next to the shipped .py sources.
     PYTHONPYCACHEPREFIX: pythonPycachePrefix(),
     // Harmless to processes that never load ultralytics; set on the shared

@@ -1,8 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEditorState } from "@/lib/editor-state-context";
 import { navigateEmitter } from "@/hooks/sessions/use-agent-chat";
+import { attachEditorNavigate } from "@/lib/agents/agent-handoff";
 import { useCompositionRefreshSubscription } from "@/hooks/editor/use-composition-refresh-subscription";
 import type { FileRecord } from "@/lib/db/schema/types";
 import EditorLayout from "@/components/layout/editor-layout";
@@ -36,6 +38,7 @@ import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import { FirstLaunchGate } from "@/components/onboarding/first-launch-gate";
 import { readinessAllowsChat, readinessMessage } from "@/lib/agents/agent-readiness";
 import { agentSetupHref } from "@/lib/agents/setup/registry";
+import { openPostingTab, subscribeExportDialogRequest, subscribePostingIntent } from "@/hooks/social/use-posting-intent";
 
 /**
  * A first launch belongs on the Agents tab, with the persona question over it —
@@ -63,6 +66,25 @@ function EditorLoadingScreen() {
       </SidebarInset>
     </>
   );
+}
+
+/**
+ * Does this agent navigate event choose a piece? Mirrors the piece-choosing
+ * branches of `handleNavigate` below (`folder` only reveals a folder in the
+ * resources panel; an event missing the ids it needs is ignored there).
+ */
+function navigateOpensPiece(event: { target: string; pieceId: string; fileId?: string }): boolean {
+  switch (event.target) {
+    case "piece":
+    case "preview":
+    case "storyboard":
+    case "posting":
+      return !!event.pieceId;
+    case "asset":
+      return !!event.pieceId && !!event.fileId;
+    default:
+      return false;
+  }
 }
 
 function EditorWorkspace() {
@@ -94,7 +116,17 @@ function EditorWorkspace() {
   const piecesQuery = usePieces();
   const createPiece = useCreatePiece();
 
-  // Active piece managed as state (not URL param)
+  // Active piece managed as state (not URL param) — with ONE exception: a
+  // `?piece=` deep link (e.g. the Social page's "Made from <piece>" link,
+  // components/social/post-row.tsx / post-detail-sheet.tsx), read once by the
+  // restore effect below and stripped from the URL immediately after.
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  const deepLinkPieceId = searchParams.get("piece");
+  // `&post=` rides along from the Social page's "Piece" link: which of the
+  // piece's posts the user came from, so the Posting tab opens on THAT one.
+  const deepLinkPostId = searchParams.get("post");
   const [activePieceId, setActivePieceId] = useState<string | null>(null);
 
   // Folder reveal request in the resources panel (driven by libi.show_folder).
@@ -205,13 +237,20 @@ function EditorWorkspace() {
   ]);
 
   // Editor panel tab state
-  const [editorTab, setEditorTab] = useState<"preview" | "storyboard" | "assets" | "objects">("preview");
+  const [editorTab, setEditorTab] = useState<"preview" | "storyboard" | "assets" | "objects" | "posting">("preview");
   const [selectedAsset, setSelectedAsset] = useState<FileRecord | null>(null);
 
   // ── Restore the previously-opened piece / tab / asset on mount ─────
   //
   // Strategy:
-  //  - If `lastPieceId` is saved AND the piece still exists, set it as
+  //  - If a `?piece=` deep link is present AND the piece exists, open THAT
+  //    piece on its Posting tab (the one caller today, the Social page's
+  //    "Made from <piece>" link — components/social/post-row.tsx /
+  //    post-detail-sheet.tsx — used to hardcode a bare `/editor`, which
+  //    silently opened whatever piece the localStorage restore below picked
+  //    instead) and strip the param so it doesn't linger across later
+  //    in-app navigation.
+  //  - Else if `lastPieceId` is saved AND the piece still exists, set it as
   //    active and restore the tab + (best-effort) the asset.
   //  - Otherwise, do nothing — the user will see the "no piece open"
   //    empty state and pick something from the resources tree.
@@ -231,7 +270,12 @@ function EditorWorkspace() {
     restoreAttemptedRef.current = true;
     setRestoreAttempted(true);
 
-    if (lastPieceId && pieces.some((p) => p.id === lastPieceId)) {
+    if (deepLinkPieceId && pieces.some((p) => p.id === deepLinkPieceId)) {
+      setActivePieceId(deepLinkPieceId);
+      setEditorTab("posting");
+      if (deepLinkPostId) openPostingTab({ pieceId: deepLinkPieceId, focusPostId: deepLinkPostId });
+      router.replace(pathname, { scroll: false });
+    } else if (lastPieceId && pieces.some((p) => p.id === lastPieceId)) {
       setActivePieceId(lastPieceId);
       setEditorTab(lastEditorTab);
       if (lastAssetId) {
@@ -253,7 +297,7 @@ function EditorWorkspace() {
       }
     }
     // else: leave activePieceId null → empty state renders below.
-  }, [piecesQuery.data, lastPieceId, lastEditorTab, lastAssetId]);
+  }, [piecesQuery.data, deepLinkPieceId, deepLinkPostId, lastPieceId, lastEditorTab, lastAssetId, router, pathname]);
 
   // Persist piece / tab / asset on changes — only after restore has been
   // attempted, so the initial null state of the editor page doesn't
@@ -467,6 +511,18 @@ function EditorWorkspace() {
 
   // Handle navigation events forwarded from the chat SSE
   const handleNavigate = useCallback((event: { target: string; pieceId: string; fileId?: string; id?: string }) => {
+    // A navigation that OPENS a piece outranks the "reopen the last piece"
+    // restore. The restore waits for the pieces list, so such an event applied
+    // before that list arrives (the one parked by a hand-off, applied as this
+    // page attaches) would otherwise be overwritten by the previously open
+    // piece — which is exactly what the Task-13 walk-through saw after Use on
+    // /templates. An event that opens no piece (a folder reveal) must NOT end
+    // the restore: that would leave the "no piece open" state, overwrite the
+    // saved last piece / asset with null, and ignore a `?piece=` deep link.
+    if (navigateOpensPiece(event) && !restoreAttemptedRef.current) {
+      restoreAttemptedRef.current = true;
+      setRestoreAttempted(true);
+    }
     if (event.target === "folder" && event.id) {
       // Bump the nonce so a repeated reveal of the same folder still re-fires.
       const folderId = event.id;
@@ -504,6 +560,11 @@ function EditorWorkspace() {
     } else if (event.target === "storyboard" && event.pieceId) {
       setActivePieceId(event.pieceId);
       setEditorTab("storyboard");
+    } else if (event.target === "posting" && event.pieceId) {
+      // openPostingTab's own subscription (below) switches the piece and the
+      // tab — the same path the export dialog's "Post…" uses, so both hand-
+      // offs behave identically instead of this branch duplicating the logic.
+      openPostingTab({ pieceId: event.pieceId, providerPostId: event.id ?? null });
     }
   }, [resourcesVisible, toggleResources, setAssetOriginFolderId, setAssetCurrentFolderId]);
 
@@ -513,9 +574,41 @@ function EditorWorkspace() {
   // get silently dropped (user then had to ask "show me the piece"). This
   // mirrors useGlobalRefreshQuerySubscription; the per-session onNavigate
   // path is retained but is now redundant for delivery.
+  //
+  // Attaching also claims any event a hand-off parked for this page while it
+  // was not mounted yet (Use on /templates, Ask the agent on /social — see
+  // lib/agents/agent-handoff.ts) and ends that hand-off: from here on this
+  // listener handles every navigate event itself.
   useEffect(() => {
-    return navigateEmitter.on(handleNavigate);
+    const off = navigateEmitter.on(handleNavigate);
+    const { pending, detach } = attachEditorNavigate();
+    if (pending) handleNavigate(pending);
+    return () => {
+      off();
+      detach();
+    };
   }, [handleNavigate]);
+
+  // Any `openPostingTab` call — the export dialog's "Post…", or the agent's
+  // `posting` navigate target above — switches to that piece and the Posting
+  // tab. `usePostingIntent` alone can't do this: it only reads intents for a
+  // piece already known to be active, which is exactly backwards here.
+  useEffect(() => {
+    return subscribePostingIntent((intent) => {
+      setActivePieceId(intent.pieceId);
+      setEditorTab("posting");
+    });
+  }, []);
+
+  // The Posting tab's "Export & post" (no export yet) asks for the real
+  // export dialog, which lives inside the Timeline tab's PreviewPlayer and
+  // unmounts along with it — confirmed live: with the Posting tab active, the
+  // export-dialog-request store had zero listeners. Switching here is what
+  // gives PreviewPlayer a chance to mount and immediately consume the
+  // pending request it stored (see `use-posting-intent.ts`).
+  useEffect(() => {
+    return subscribeExportDialogRequest(() => setEditorTab("preview"));
+  }, []);
 
   // If the active piece errors (deleted externally), clear it AND any
   // asset still selected from that piece — otherwise viewMode would stay

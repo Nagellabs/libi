@@ -107,6 +107,24 @@ describe("editor-state-context asset panel state", () => {
     expect(stored.lastSessionId).toBe("sess-7");
   });
 
+  it("persists and restores lastEditorTab: 'posting' across a reload", () => {
+    const { result, unmount } = renderHook(() => useEditorState(), {
+      wrapper: ({ children }) => <EditorStateProvider>{children}</EditorStateProvider>,
+    });
+    act(() => result.current.setLastEditorTab("posting"));
+    expect(result.current.lastEditorTab).toBe("posting");
+    const stored = JSON.parse(localStorage.getItem("libi:editor-state")!);
+    expect(stored.lastEditorTab).toBe("posting");
+    unmount();
+
+    // A fresh provider (the "reload") reads the persisted value back through
+    // the same validation ladder that would silently drop an unlisted tab.
+    const { result: reloaded } = renderHook(() => useEditorState(), {
+      wrapper: ({ children }) => <EditorStateProvider>{children}</EditorStateProvider>,
+    });
+    expect(reloaded.current.lastEditorTab).toBe("posting");
+  });
+
   it("persists and restores lastAssetTab", () => {
     const { result } = renderHook(() => useEditorState(), {
       wrapper: ({ children }) => <EditorStateProvider>{children}</EditorStateProvider>,

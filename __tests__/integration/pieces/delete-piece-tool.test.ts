@@ -1,16 +1,23 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import { createTestDb, resetTestDb, seedPiece } from "../../helpers/test-db";
 import { getDb } from "@/lib/db/client";
 import { pieces } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
 import { deletePiece } from "@/mcp/tools/piece-discovery-tools";
 import { getOpenedPieceId, setOpenedPieceId } from "@/lib/editor-state";
+import { notify } from "@/mcp/notify";
 
 describe("deletePiece (MCP tool)", () => {
-  beforeEach(() => createTestDb());
+  // The tool tells the studio a piece is gone over HTTP — never from a test.
+  let pieceDeleted: MockInstance<(pieceId: string) => void>;
+  beforeEach(() => {
+    createTestDb();
+    pieceDeleted = vi.spyOn(notify, "pieceDeleted").mockImplementation(() => {});
+  });
   afterEach(() => {
     resetTestDb();
     setOpenedPieceId(null);
+    pieceDeleted.mockRestore();
   });
 
   it("deletes the piece and reports success + wasOpen:false", async () => {
@@ -39,5 +46,14 @@ describe("deletePiece (MCP tool)", () => {
     setOpenedPieceId("b");
     await deletePiece({ pieceId: "a" });
     expect(getOpenedPieceId()).toBe("b");
+  });
+
+  it("tells the studio the piece is gone — the MCP child's own diagnostics store is not the one the preview fills (Task 11 fix M1)", async () => {
+    seedPiece(getDb() as never, { id: "p9" });
+    await deletePiece({ pieceId: "p9" });
+    expect(pieceDeleted).toHaveBeenCalledExactlyOnceWith("p9");
+    pieceDeleted.mockClear();
+    await deletePiece({ pieceId: "never-existed" });
+    expect(pieceDeleted).not.toHaveBeenCalled();
   });
 });

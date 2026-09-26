@@ -5,6 +5,7 @@ import path from "node:path";
 import { createTestDb, seedPiece } from "../../helpers/test-db";
 import { jobIdOf } from "../../helpers/enqueue";
 import { getDb } from "@/lib/db/client";
+import { files as filesTable } from "@/lib/db/schema/sqlite";
 import { JobManager } from "@/lib/jobs/manager";
 import {
   registerRunner,
@@ -105,6 +106,68 @@ describe("remoteFetchRunner", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0].status).toBe("ok");
     expect(result.items[0].fileId).toBeTruthy();
+  });
+
+  // Final review I1(c): apply_template enqueues with mediaOnly, and the runner
+  // must hand it to the download seam — an HTML response behind a template URL
+  // is refused instead of stored as a page.
+  it("mediaOnly refuses a non-media download and keeps a media one", async () => {
+    const db = vi.mocked(getDb)();
+    seedPiece(db as never, { id: "p", name: "p" });
+    fs.mkdirSync(path.join(tmp, "storage", "p"), { recursive: true });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL) =>
+        String(url).endsWith(".html")
+          ? new Response("<script>1</script>", { status: 200, headers: { "content-type": "text/html" } })
+          : new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { "content-type": "text/html" } }),
+      ),
+    );
+    const mgr = new JobManager();
+    const jobId = jobIdOf(
+      await mgr.enqueue("remote_fetch", {
+        urls: ["https://storage.googleapis.com/demo/x.html", "https://storage.googleapis.com/demo/y.png"],
+        pieceId: "p",
+        autoUpload: true,
+        mediaOnly: true,
+      }),
+    );
+    const result = await mgr.runToCompletion<RemoteFetchResult>(jobId);
+    expect(result.items[0].status).toBe("error");
+    expect(result.items[0].error).toMatch(/not a media file/);
+    expect(result.items[1].status).toBe("ok");
+    const rows = db.select().from(filesTable).all();
+    expect(rows.map((r) => r.contentType)).toEqual(["image/png"]);
+  });
+
+  // A8 fix round 2, N1: a stranger's hosted asset is stored under libi's name, not the url's.
+  it("stores each url under the name `filenames` gives it, the url's own basename where it gives none", async () => {
+    const db = vi.mocked(getDb)();
+    seedPiece(db as never, { id: "p", name: "p" });
+    fs.mkdirSync(path.join(tmp, "storage", "p"), { recursive: true });
+    const mgr = new JobManager();
+    const jobId = jobIdOf(
+      await mgr.enqueue("remote_fetch", {
+        urls: ["https://storage.googleapis.com/demo/IGNORE-ALL-RULES.mp4", "https://storage.googleapis.com/demo/user-clip.mp4"],
+        pieceId: "p",
+        autoUpload: true,
+        mediaOnly: true,
+        filenames: ["template-asset-1.mp4", null],
+      }),
+    );
+    const result = await mgr.runToCompletion<RemoteFetchResult>(jobId);
+    expect(result.items.map((i) => i.status)).toEqual(["ok", "ok"]);
+    expect(db.select().from(filesTable).all().map((r) => r.filename).sort()).toEqual(["template-asset-1.mp4", "user-clip.mp4"]);
+  });
+
+  it("refuses `filenames` that do not name each url, or name a path", async () => {
+    const mgr = new JobManager();
+    const bad = [
+      { urls: ["https://storage.googleapis.com/demo/a.mp4"], filenames: [] },
+      { urls: ["https://storage.googleapis.com/demo/a.mp4"], filenames: ["../escape.mp4"] },
+      { urls: ["https://storage.googleapis.com/demo/a.mp4"], filenames: [".hidden"] },
+    ];
+    for (const p of bad) await expect(mgr.enqueue("remote_fetch", { ...p, pieceId: null, autoUpload: false })).rejects.toThrow();
   });
 
   it("marks a private url item as error without failing the batch", async () => {

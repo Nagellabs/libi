@@ -78,6 +78,18 @@ export async function register(): Promise<void> {
     );
   }
 
+  // Test mode only: attach the fake Zernio MCP in THIS process, so the in-app
+  // agent and libi's own social service share one state (lib/social/test-fake.ts).
+  // After runBootPhase, because it writes under LIBI_HOME. Wrapped — a fake
+  // that fails to bind must not break boot.
+  try {
+    const { startFakeZernioIfWanted } = await import("./lib/social/test-fake");
+    await startFakeZernioIfWanted();
+  } catch (err) {
+    const { serverLogger } = await import("./lib/logger");
+    serverLogger.warn({ tag: "social", op: "test_fake.start_failed", err }, "fake zernio failed to start");
+  }
+
   // Analytics: ensure the per-install UUID exists and record first_launch once
   // (GA4 system). MUST run after runBootPhase — the settings table only exists
   // once Category B's db-migrate step has run (fresh installs have no tables).
@@ -100,6 +112,19 @@ export async function register(): Promise<void> {
   } catch (err) {
     const { serverLogger } = await import("./lib/logger");
     serverLogger.warn({ tag: "analytics", op: "boot_init_failed", err }, "Analytics boot init failed");
+  }
+
+  // Public-template use notices. NOT analytics: the privacy policy promises
+  // they are sent whether or not product analytics is on, so they start in
+  // their own block — an analytics failure above must not stop them — and
+  // nothing gates them on an analytics setting. In this process only (never
+  // the MCP child); the rows are the queue, drained every minute.
+  try {
+    const { startUseReporter } = await import("./lib/templates/cloud/use-reporter");
+    startUseReporter();
+  } catch (err) {
+    const { serverLogger } = await import("./lib/logger");
+    serverLogger.warn({ tag: "templates-cloud", op: "use_reporter_start_failed", err }, "Template use reporter failed to start");
   }
 
   const { startStorageWatcher } = await import("./lib/storage-watch/watcher");

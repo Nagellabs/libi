@@ -14,7 +14,7 @@ vi.mock("@/lib/logger", () => ({
   mcpLogger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
 }));
 
-import { backupCodexConfig, listCodexConfigBackups } from "@/lib/codex-config/backup";
+import { backupCodexConfig, ensureCodexConfigBackup, listCodexConfigBackups } from "@/lib/codex-config/backup";
 import { mcpListJson } from "@/lib/codex-config/codex-cli";
 
 const HANDWRITTEN = `[mcp_servers.node_repl]
@@ -84,6 +84,47 @@ describe("backupCodexConfig", () => {
   it("never throws on an unwritable home", () => {
     expect(() => backupCodexConfig("/definitely/not/a/directory")).not.toThrow();
     expect(backupCodexConfig("/definitely/not/a/directory")).toBeNull();
+  });
+});
+
+// `libi connect` needs the copy that holds what codex is about to rewrite, to
+// warn about what the rewrite drops — whether that copy is new or a previous
+// run already took it.
+// QA 2026-09-19 D4: codex keeps config.toml at 0600 (it can hold
+// bearer_token / http_headers); the copy was written 0644, world-readable.
+// POSIX modes don't exist on Windows, so the assertion is skipped there.
+describe("backup file permissions", () => {
+  it.skipIf(process.platform === "win32")("writes the backup owner-only (0600), whatever the source mode or umask", () => {
+    writeConfig(HANDWRITTEN);
+    fs.chmodSync(path.join(home, "config.toml"), 0o644);
+    const prevUmask = process.umask(0);
+    try {
+      const backup = backupCodexConfig(home);
+      expect(backup).toBeTruthy();
+      expect(fs.statSync(backup as string).mode & 0o777).toBe(0o600);
+    } finally {
+      process.umask(prevUmask);
+    }
+  });
+});
+
+describe("ensureCodexConfigBackup", () => {
+  it("a new copy is created: true", () => {
+    writeConfig(HANDWRITTEN);
+    const r = ensureCodexConfigBackup(home);
+    expect(r?.created).toBe(true);
+    expect(fs.readFileSync(r!.path, "utf-8")).toBe(HANDWRITTEN);
+  });
+
+  it("unchanged bytes name the existing copy, created: false, and write nothing", () => {
+    writeConfig(HANDWRITTEN);
+    const first = ensureCodexConfigBackup(home)!;
+    expect(ensureCodexConfigBackup(home)).toEqual({ path: first.path, created: false });
+    expect(listCodexConfigBackups(home)).toHaveLength(1);
+  });
+
+  it("nothing to protect → null", () => {
+    expect(ensureCodexConfigBackup(home)).toBeNull();
   });
 });
 

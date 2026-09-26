@@ -14,6 +14,7 @@ import { useVideoAnalysis } from "@/lib/queries/analysis";
 import { useUpdateFileNotes } from "@/lib/queries/files";
 import { GenerationTabContent } from "./generation-tab-content";
 import { cn } from "@/lib/utils";
+import { playQuietly } from "@/lib/media/play-quietly";
 
 /**
  * Notes tab body. Full-width, always-open textarea (no collapsed state — the
@@ -161,7 +162,7 @@ export function AssetPreviewPanel({
     const m = mediaRef.current;
     if (!m) return;
     m.currentTime = Math.max(0, t);
-    if (m.paused) m.play().catch(() => {});
+    if (m.paused) void playQuietly(m);
   }, []);
 
   const handleLayoutChanged = useCallback(

@@ -132,3 +132,35 @@ describe("Retry cancels an in-flight read before it can land over the fresh answ
     expect(qc.getQueryData(providerKeys.all)).toEqual(freshFromRetry);
   });
 });
+
+// Opening the Providers tab, or coming back to it after a while, re-checks Claude Code's sign-ins
+// (lib/providers/claude-signin-probe.ts). The poll never does.
+describe("useProviders revalidateOnLook", () => {
+  it("the first fetch and one after a 30 s gap read with ?revalidate=1; a fetch soon after one does not", async () => {
+    fetchMock.mockResolvedValue(res(200, { connected: [] }));
+    let clock = 1_000_000;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    try {
+      const { Wrapper } = wrap();
+      const { result } = renderHook(() => useProviders({ refetchInterval: false, revalidateOnLook: true }), { wrapper: Wrapper });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/providers?revalidate=1");
+      clock += 3_000;
+      await result.current.refetch();
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/providers");
+      clock += 30_000;
+      await result.current.refetch();
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/providers?revalidate=1");
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("without it (the social page), never", async () => {
+    fetchMock.mockResolvedValue(res(200, { connected: [] }));
+    const { Wrapper } = wrap();
+    renderHook(() => useProviders({ refetchInterval: false }), { wrapper: Wrapper });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock).toHaveBeenLastCalledWith("/api/providers");
+  });
+});

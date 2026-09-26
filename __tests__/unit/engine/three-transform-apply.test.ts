@@ -100,10 +100,11 @@ vi.mock("@/lib/engine/canvas-text", () => {
 });
 
 import { createSharedThreeRenderer, buildThreeInstance } from "@/lib/engine/three-overlay";
-import type { ThreeOverlayInstance, ThreeFrameApi } from "@/lib/engine/three-overlay";
+import type { ThreeOverlayInstance } from "@/lib/engine/three-overlay";
 import { drawOverlay, type DrawOverlayContext } from "@/lib/engine/overlay-renderer";
 import type { Overlay } from "@/lib/engine/types";
 import { IDENTITY_TRANSFORM3D } from "@/lib/overlays/transform3d";
+import { fakeBitmap, fakeLayers } from "@/__tests__/helpers/fake-layers";
 
 function mockCtx() {
   return {
@@ -156,27 +157,10 @@ describe("ThreeOverlayInstance.applyTransform", () => {
 });
 
 describe('overlay renderer "three" case applies transform3d', () => {
-  function fakeInstance() {
-    const calls: { applyTransform: unknown[]; update: ThreeFrameApi[] } = {
-      applyTransform: [],
-      update: [],
-    };
-    const inst: ThreeOverlayInstance = {
-      update: (api) => {
-        calls.update.push(api);
-      },
-      applyTransform: (t) => {
-        calls.applyTransform.push(t);
-      },
-      render: () => ({ width: 100, height: 100 }) as unknown as HTMLCanvasElement,
-      dispose: () => {},
-      ready: Promise.resolve(),
-    };
-    return { inst, calls };
-  }
-
-  it("calls inst.applyTransform with the overlay's transform3d", () => {
-    const { inst, calls } = fakeInstance();
+  // The body renders in the sandbox now (spec §4.4): the host hands the
+  // out-of-plane transform to the runtime in the layer request.
+  it("requests the layer with the overlay's transform3d", () => {
+    const layers = fakeLayers({ tov: fakeBitmap() });
     const transform3d = {
       position: { x: 5, y: 0, z: 0 },
       rotation: { x: 0, y: 0.5, z: 0 },
@@ -201,18 +185,17 @@ describe('overlay renderer "three" case applies transform3d', () => {
       time: 1,
       totalFrames: 60,
       assets: {},
-      threeScenes: { tov: inst },
+      layers,
     };
     drawOverlay(overlay, drawCtx);
 
-    expect(calls.applyTransform).toHaveLength(1);
-    expect(calls.applyTransform[0]).toEqual(transform3d);
-    // It's also forwarded to update() so a template MAY read it.
-    expect(calls.update[0]?.transform3d).toEqual(transform3d);
+    expect(layers.requests).toHaveLength(1);
+    // rotation.z is already 0, so the spatial part IS the whole transform.
+    expect(layers.requests[0].transform3d).toEqual(transform3d);
   });
 
   it("falls back to IDENTITY when the overlay has no transform3d", () => {
-    const { inst, calls } = fakeInstance();
+    const layers = fakeLayers({ tov2: fakeBitmap() });
     const overlay: Overlay = {
       id: "tov2",
       kind: "three",
@@ -232,11 +215,11 @@ describe('overlay renderer "three" case applies transform3d', () => {
       time: 0,
       totalFrames: 60,
       assets: {},
-      threeScenes: { tov2: inst },
+      layers,
     };
     drawOverlay(overlay, drawCtx);
 
-    expect(calls.applyTransform[0]).toEqual(IDENTITY_TRANSFORM3D);
+    expect(layers.requests[0].transform3d).toEqual(IDENTITY_TRANSFORM3D);
   });
 });
 
@@ -271,7 +254,8 @@ describe("in-plane roll is applied exactly ONCE for self-rolling kinds", () => {
       sceneFunction: "/* unused */",
       transform3d: pureRoll,
     };
-    drawOverlay(overlay, { ...baseCtx(ctx), threeScenes: { t1: fakeInstance() } });
+    // `three` bodies come through the LayerSource now; the host rolls the bitmap.
+    drawOverlay(overlay, { ...baseCtx(ctx), layers: fakeLayers({ t1: fakeBitmap() }) });
     const rotates = (ctx.rotate as ReturnType<typeof vi.fn>).mock.calls;
     expect(rotates).toHaveLength(1);
     expect(rotates[0][0]).toBeCloseTo(roll, 10);

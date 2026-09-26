@@ -14,9 +14,14 @@ import * as path from "node:path";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 
 const renderCompositionFrames = vi.fn();
-vi.mock("@/lib/render/frame-capture", () => ({
+vi.mock("@/lib/render/frame-capture", async () => ({
   renderCompositionFrames: (...a: unknown[]) => renderCompositionFrames(...a),
+  FrameTimesOutOfRangeError: (await vi.importActual<typeof import("@/lib/render/frame-capture")>("@/lib/render/frame-capture"))
+    .FrameTimesOutOfRangeError,
 }));
+
+/** What renderCompositionFrames returns for a time that lands on its own frame (30 fps). */
+const captured = (time: number, p: string) => ({ time, frame: Math.round(time * 30), frameTime: time, path: p });
 
 const loadComposition = vi.fn();
 vi.mock("@/lib/composition/persistence", () => ({
@@ -78,7 +83,7 @@ describe("POST /api/render/frames — contact sheet", () => {
   it("returns a labelled JPEG grid wider than a single frame, for 4 requested times", async () => {
     const times = [0, 1, 2, 3];
     const paths = await Promise.all(times.map((_, i) => writeTestFrame(`frame-${i}.png`)));
-    renderCompositionFrames.mockResolvedValue(times.map((t, i) => ({ time: t, path: paths[i] })));
+    renderCompositionFrames.mockResolvedValue(times.map((t, i) => captured(t, paths[i])));
     loadComposition.mockResolvedValue({ manifest: { overlays: [] }, scenes: [] });
 
     const res = await POST(jsonReq({ pieceId: "p1", atTimes: times, contactSheet: true }));
@@ -103,7 +108,7 @@ describe("POST /api/render/frames — contact sheet", () => {
 
   it("omits contactSheet when not requested", async () => {
     const p = await writeTestFrame("solo.png");
-    renderCompositionFrames.mockResolvedValue([{ time: 0, path: p }]);
+    renderCompositionFrames.mockResolvedValue([captured(0, p)]);
     loadComposition.mockResolvedValue({ manifest: { overlays: [] }, scenes: [] });
 
     const res = await POST(jsonReq({ pieceId: "p1", atTimes: [0] }));
@@ -115,7 +120,7 @@ describe("POST /api/render/frames — contact sheet", () => {
 describe("POST /api/render/frames — unresolvedFonts", () => {
   it("is always present, empty when every live font resolves", async () => {
     const p = await writeTestFrame("solo.png");
-    renderCompositionFrames.mockResolvedValue([{ time: 0, path: p }]);
+    renderCompositionFrames.mockResolvedValue([captured(0, p)]);
     loadComposition.mockResolvedValue({
       manifest: { overlays: [textOverlay("t1", "48px Inter", 0, 4)] },
     });
@@ -127,7 +132,7 @@ describe("POST /api/render/frames — unresolvedFonts", () => {
 
   it("reports a ghost family used by an overlay live at a requested time", async () => {
     const p = await writeTestFrame("solo.png");
-    renderCompositionFrames.mockResolvedValue([{ time: 1, path: p }]);
+    renderCompositionFrames.mockResolvedValue([captured(1, p)]);
     loadComposition.mockResolvedValue({
       manifest: { overlays: [textOverlay("t1", "48px GhostFamilyLive", 0, 4)] },
     });
@@ -139,7 +144,7 @@ describe("POST /api/render/frames — unresolvedFonts", () => {
 
   it("does not report a ghost family only used outside the requested times", async () => {
     const p = await writeTestFrame("solo.png");
-    renderCompositionFrames.mockResolvedValue([{ time: 1, path: p }]);
+    renderCompositionFrames.mockResolvedValue([captured(1, p)]);
     loadComposition.mockResolvedValue({
       manifest: {
         overlays: [
@@ -152,5 +157,49 @@ describe("POST /api/render/frames — unresolvedFonts", () => {
     const res = await POST(jsonReq({ pieceId: "p1", atTimes: [1] }));
     const json = await res.json();
     expect(json.unresolvedFonts).toEqual([]);
+  });
+});
+
+describe("POST /api/render/frames — the frame each time drew (Task 12b re-review 2)", () => {
+  it("N1: every entry names the absolute frame it drew", async () => {
+    const p = await writeTestFrame("f2.png");
+    renderCompositionFrames.mockResolvedValue([{ time: 0.067, frame: 2, frameTime: 2 / 30, path: p }]);
+    loadComposition.mockResolvedValue({ manifest: { overlays: [] } });
+
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [0.067] }))).json();
+    expect(json.frames).toEqual([expect.objectContaining({ time: 0.067, frame: 2, path: p })]);
+  });
+
+  it("N2: a time past the end is a 400 naming, per time, the duration and the last valid time", async () => {
+    const { FrameTimesOutOfRangeError } = await import("@/lib/render/frame-capture");
+    renderCompositionFrames.mockRejectedValue(new FrameTimesOutOfRangeError([5, 60], 30, 150));
+    loadComposition.mockResolvedValue({ manifest: { overlays: [] } });
+
+    const res = await POST(jsonReq({ pieceId: "p1", atTimes: [1, 5, 60] }));
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.duration).toBe(5);
+    expect(json.lastValidTime).toBe(4.967);
+    expect(json.errors.map((e: { time: number }) => e.time)).toEqual([5, 60]);
+    expect(json.error).toContain("4.967");
+  });
+
+  it("N2: fonts are checked at the time of the frame actually drawn, not the time asked for", async () => {
+    const p = await writeTestFrame("last.png");
+    // 4.99 s on a 150-frame piece draws frame 149, at 4.9667 s.
+    renderCompositionFrames.mockResolvedValue([{ time: 4.99, frame: 149, frameTime: 149 / 30, path: p }]);
+    loadComposition.mockResolvedValue({
+      manifest: {
+        overlays: [
+          // On screen at frame 149 but not at 4.99.
+          textOverlay("drawn", "48px GhostOnDrawnFrame", 4.9, 0.08),
+          // Live at 4.99 but not on frame 149.
+          textOverlay("asked", "48px GhostOnlyAtAskedTime", 4.98, 0.02),
+        ],
+      },
+    });
+
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [4.99] }))).json();
+    expect(json.unresolvedFonts).toEqual(["GhostOnDrawnFrame"]);
   });
 });

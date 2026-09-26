@@ -10,6 +10,7 @@ import {
 import { Music } from "lucide-react";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { formatFileSize, formatTimecode } from "@/lib/utils/format";
+import { playQuietly } from "@/lib/media/play-quietly";
 
 /**
  * Audio asset preview: a player card with file metadata, a click-to-seek
@@ -86,7 +87,7 @@ export function AudioAssetView({ asset, mediaRef, onTimeUpdate }: Props) {
     const el = audioRef.current;
     if (!el) return;
     el.currentTime = Math.max(0, t);
-    if (el.paused) el.play().catch(() => {});
+    if (el.paused) void playQuietly(el);
   }, []);
 
   const format = (asset.contentType ?? "")

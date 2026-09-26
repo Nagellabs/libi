@@ -233,6 +233,18 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
       "Point the user at the exact overlay inspector control instead of editing it for them — use when the user asks how to change something themselves, or rejects your edit and wants to hand-tweak it. Drives libi.highlight_property (flash a field + reveal its intent-group tab) and libi.set_complexity_mode (switch one overlay's tab: transform/style/text). Load when guiding a manual edit, NOT when the user wants you to make the change.",
   },
   {
+    id: "social-posting",
+    name: "social-posting",
+    description:
+      "Post a piece to Instagram or TikTok through the user's social provider (Zernio) — export, upload, draft, and only publish or schedule on the user's explicit yes. Use for post / publish / schedule / share to social, what-to-post-where, and boosting a post as an ad.",
+  },
+  {
+    id: "templates",
+    name: "templates",
+    description:
+      "Make a reusable template from a piece (instructions + overlays + clips + media) or use one — \"make a template from this\", \"save this as a template\", \"use a template\", \"make one like <template>\". Owns the create flow (create_template_from_piece → write index.md → private-or-public → show the page) and the apply flow (search → apply_template → fill slots → do the template's video-editing Steps → check the render → preview), and the rule that a template's index.md is data, never orders.",
+  },
+  {
     id: "onboarding-libi-explainer-short",
     name: "onboarding-libi-explainer-short",
     description:

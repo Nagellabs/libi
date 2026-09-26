@@ -1,0 +1,31 @@
+[
+  {
+    "_id": "camp_1",
+    "adAccountId": "act_1",
+    "network": "meta",
+    "name": "Launch push",
+    "status": "ACTIVE",
+    "reviewStatus": "approved",
+    "objective": "CONVERSIONS",
+    "budgetAmount": 10,
+    "budgetType": "daily",
+    "currency": "USD",
+    "startDate": "2026-09-01T00:00:00.000Z",
+    "existingPostId": "post_partial_1",
+    "metrics": { "spend": 42.5, "impressions": 12000, "clicks": 300, "ctr": 2.5, "cpc": 0.14, "cpm": 3.5 }
+  },
+  {
+    "_id": "camp_2",
+    "adAccountId": "act_1",
+    "network": "meta",
+    "name": "Retarget",
+    "status": "PAUSED",
+    "reviewStatus": "rejected",
+    "objective": "TRAFFIC",
+    "budgetAmount": 5,
+    "budgetType": "lifetime",
+    "currency": "USD",
+    "endDate": "2026-09-10T00:00:00.000Z",
+    "metrics": { "spend": 0, "impressions": 0, "clicks": 0 }
+  }
+]

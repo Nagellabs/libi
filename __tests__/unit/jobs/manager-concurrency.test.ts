@@ -55,6 +55,33 @@ describe("JobManager concurrency", () => {
     expect(maxObserved).toBe(1);
   });
 
+  it("activeOrWaiting counts a kind's jobs holding a slot or queued for one (the export lane's `busy` probe)", async () => {
+    const release: Array<() => void> = [];
+    registerRunner({
+      kind: "k-busy",
+      maxConcurrent: 1,
+      paramsSchema: z.object({ v: z.string() }),
+      resumable: false,
+      async run() {
+        await new Promise<void>((r) => release.push(r));
+        return { ok: true };
+      },
+    });
+    const mgr = new JobManager();
+    expect(mgr.activeOrWaiting("k-busy")).toBe(0);
+    const pa = mgr.runToCompletion(jobIdOf(await mgr.enqueue("k-busy", { v: "a" })));
+    const pb = mgr.runToCompletion(jobIdOf(await mgr.enqueue("k-busy", { v: "b" })));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mgr.activeOrWaiting("k-busy")).toBe(2); // one running, one waiting for the slot
+    release[0]();
+    await pa;
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mgr.activeOrWaiting("k-busy")).toBe(1);
+    release[1]();
+    await pb;
+    expect(mgr.activeOrWaiting("k-busy")).toBe(0);
+  });
+
   it("cancelling a queued job releases the waiter without running the runner", async () => {
     let runCount = 0;
     const release: Array<() => void> = [];

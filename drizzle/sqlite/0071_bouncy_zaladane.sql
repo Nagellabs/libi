@@ -1,0 +1,1 @@
+ALTER TABLE `settings` ADD `legacy_scenes_noticed` text;

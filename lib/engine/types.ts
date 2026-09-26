@@ -262,6 +262,14 @@ export interface ImageOverlay extends BaseOverlay {
    * missing" placeholder.
    */
   missing?: boolean;
+  /**
+   * Set when this layer is an applied template's media slot that has no file
+   * yet (`fileId` is `unfilled-<slot key>`, see lib/templates/unfilled-slot.ts):
+   * the label to show in its "add media" placeholder. Runtime-only — never
+   * persisted. Set by `buildComposition`; while set, `missing` is false and
+   * nothing fetches the fileId.
+   */
+  unfilledSlot?: string;
 }
 
 export interface VideoOverlay extends BaseOverlay {
@@ -281,6 +289,14 @@ export interface VideoOverlay extends BaseOverlay {
    * missing" placeholder instead of silently rendering nothing.
    */
   missing?: boolean;
+  /**
+   * Set when this layer is an applied template's media slot that has no file
+   * yet (`fileId` is `unfilled-<slot key>`, see lib/templates/unfilled-slot.ts):
+   * the label to show in its "add media" placeholder. Runtime-only — never
+   * persisted. Set by `buildComposition`; while set, `missing` is false and
+   * nothing fetches the fileId.
+   */
+  unfilledSlot?: string;
   /** Optional trim relative to the source file. */
   trim?: { start: number; end: number };
   /** How the source frame fills the overlay rect. `"cover"` fills the rect,
@@ -296,6 +312,10 @@ export interface VideoOverlay extends BaseOverlay {
    *  UNKNOWN and is treated as a mismatch. */
   sourceWidth?: number | null;
   sourceHeight?: number | null;
+  /** RUNTIME-ONLY: the backing file's display name (`files.name`), hydrated by
+   *  `buildComposition` so the preview's "This video can't be played"
+   *  placeholder can say WHICH clip. NOT part of the persisted overlay shape. */
+  sourceName?: string;
 }
 
 export interface CodeOverlay extends BaseOverlay {

@@ -60,6 +60,12 @@ Sentry.init({
 
   sendDefaultPii: false,
   tracesSampleRate: 0.1,
+  // Propagate trace headers to NO host — the same rule as the server config
+  // (see its comment). The browser default is same-origin only, i.e. the local
+  // studio server; pinning `[]` keeps the rule single and stops a changed SDK
+  // default from widening it. The cost is that a renderer trace no longer
+  // links to the server trace it caused.
+  tracePropagationTargets: [],
   enableLogs: true,
 
   // Session Replay stays OUT, for the original reason: it screen-records the

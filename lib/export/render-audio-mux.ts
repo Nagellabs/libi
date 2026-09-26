@@ -5,6 +5,7 @@ import { getStorage } from "@/lib/storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { buildAudioMixGraph } from "@/lib/export/audio-mix";
+import { probeInputAudio, mixInputMaps } from "@/lib/export/audio-channels";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "@/lib/export/duck-envelopes";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { exportLogger as logger } from "@/lib/logger";
@@ -22,6 +23,8 @@ import { resolveAudioBitrate } from "@/lib/export/quality";
  */
 export function buildRenderMuxArgs(opts: {
   inputPaths: string[]; // [0] = video-only render; [1..] = audio clip sources
+  /** Input options per input index (placed before its `-i`). */
+  inputOptions?: Map<number, string[]>;
   audioChain: string;
   format: "mp4" | "webm";
   audioBitrate?: number;
@@ -29,7 +32,7 @@ export function buildRenderMuxArgs(opts: {
 }): string[] {
   const isWebm = opts.format === "webm";
   const args: string[] = ["-y"];
-  for (const p of opts.inputPaths) args.push("-i", p);
+  opts.inputPaths.forEach((p, i) => args.push(...(opts.inputOptions?.get(i) ?? []), "-i", p));
   args.push("-filter_complex", opts.audioChain);
   args.push("-map", "0:v:0", "-map", "[aout]");
   args.push("-c:v", "copy");
@@ -95,6 +98,28 @@ export async function muxAudioIntoRender(opts: {
   }
   if (usable.length === 0) return opts.videoPath;
 
+  // Each clip input's primary audio stream (the one the preview plays) and its
+  // channel count: stereo whenever any clip is, mono upmixed at unity, and
+  // the same track the editor plays (Review M6).
+  const inputAudio = await probeInputAudio(
+    new Map([...inputIndex.values()].map((idx) => [idx, inputPaths[idx]])),
+  );
+  // A clip whose file has no audio stream (a silent video it was linked to)
+  // contributes nothing, and `[n:a]` for it would fail the whole mux.
+  for (let i = usable.length - 1; i >= 0; i--) {
+    const c = usable[i];
+    if (inputAudio.get(inputIndex.get(c.id)!)?.hasAudio === false) {
+      logger.info(
+        { tag: "export", op: "export_render_audio_mux", clipId: c.id, fileId: c.fileId },
+        "audio clip's file has no audio stream — leaving it out of the mix",
+      );
+      usable.splice(i, 1);
+      inputIndex.delete(c.id);
+    }
+  }
+  if (usable.length === 0) return opts.videoPath;
+  const { inputChannels, inputAudioStream, inputPtsShift } = mixInputMaps(inputAudio);
+
   // Ducked clips are multiplied by a pre-rendered gain curve rather than run
   // through an ffmpeg compressor, so the export applies the preview's own duck.
   // See lib/export/duck-envelopes.ts. Envelopes become inputs after the clips.
@@ -116,6 +141,8 @@ export async function muxAudioIntoRender(opts: {
         trimStart: sc.trimStart ?? 0,
         duration: sc.duration,
         volume: sc.volume,
+        audioStream: inputAudio.get(inputIndex.get(sc.id)!)?.stream,
+        read: inputAudio.get(inputIndex.get(sc.id)!)?.read,
       });
     }
     if (sidechains.length === 0) continue; // no sidechain in the mix — stays undicked
@@ -143,13 +170,20 @@ export async function muxAudioIntoRender(opts: {
     inputIndex,
     envelopeIndex,
     mixDuration: "longest",
+    inputChannels,
+    inputAudioStream,
+    inputPtsShift,
   });
   if (!chain) return opts.videoPath;
 
   const ext = opts.format === "webm" ? "webm" : "mp4";
   const outPath = join(dirname(opts.videoPath), `out-audio.${ext}`);
+  // An input ffmpeg reads off its timeline gets its probe's input options.
+  const inputOptions = new Map<number, string[]>();
+  for (const [idx, a] of inputAudio) if (a.read?.inputArgs.length) inputOptions.set(idx, a.read.inputArgs);
   const args = buildRenderMuxArgs({
     inputPaths,
+    inputOptions,
     audioChain: chain,
     format: opts.format,
     audioBitrate: opts.audioBitrate,

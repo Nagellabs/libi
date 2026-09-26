@@ -88,8 +88,62 @@ fs.mkdirSync(fakeCliDir, { recursive: true });
 const scratchUserHome = (process.env.LIBI_E2E_USER_HOME ??= path.join(scratchHome, "home"));
 fs.mkdirSync(scratchUserHome, { recursive: true });
 
+// social-posting.spec.ts needs the fake Zernio MCP (LIBI_TEST_MODE=1) plus one
+// scenario override — the fake fails every TikTok publish with a fixed
+// provider message (`mcp/dev/fake-zernio/config.ts#failTarget`) — so that spec
+// can exercise "retry a failed target and see the provider's message
+// verbatim" without any other target ever failing. No other spec in this
+// directory talks to Zernio, so this is inert for the rest of the suite.
+const fakeZernioConfigPath = (process.env.LIBI_FAKE_ZERNIO_CONFIG ??= path.join(scratchHome, "fake-zernio-config.json"));
+fs.writeFileSync(
+  fakeZernioConfigPath,
+  JSON.stringify({
+    failTarget: { platform: "tiktok", errorMessage: "TikTok rejected this video: it failed automated content review." },
+  }),
+);
+
+/**
+ * The Playwright browser cache the SPAWNED libi should use for its own
+ * chromium-render / tracking launches.
+ *
+ * `webServer.env` gives that libi a scratch `HOME`, and playwright-core derives
+ * its registry directory from the home — so without this it looks for Chromium
+ * under a brand-new empty directory and every chromium-render path fails with
+ * "Playwright Chromium failed to launch after install" (overlay-sandbox-golden
+ * hit exactly that). Pointing it at the RUNNER's cache adds no new requirement:
+ * these tests already need a Playwright browser install to drive a page, and it
+ * saves a ~173 MB download into a directory each run throws away.
+ *
+ * Safe against libi's boot housekeeping: `pruneStalePlaywrightRevisions`
+ * (lib/server/lifecycle/housekeeping.ts) removes only unpinned revisions
+ * carrying libi's own `.libi-installed` marker file, never Playwright's.
+ */
+function runnerBrowsersPath(): string {
+  const override = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (override && override !== "0") return override;
+  const home = os.homedir();
+  if (process.platform === "darwin") return path.join(home, "Library", "Caches", "ms-playwright");
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "ms-playwright");
+  }
+  return path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "ms-playwright");
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export default defineConfig({
   testDir: "./e2e",
+  // e2e/electron/ belongs to playwright.electron.config.ts (`npm run test:electron`),
+  // which launches the desktop shell against a studio the harness started, with
+  // LIBI_PORT and a scratch LIBI_HOME. Collected here they get neither: the shell
+  // falls back to port 3456 and the specs to `~/.libi` — a developer's real libi
+  // and home, or nothing at all (every launch then waits out its timeout).
+  // A RegExp anchored to THIS folder: a string glob is matched as `**/<glob>`
+  // against the absolute path, so "electron/**" also ignored every spec of a
+  // checkout that merely lives under some `electron` directory.
+  testIgnore: new RegExp(`^${escapeRegExp(path.join(__dirname, "e2e", "electron") + path.sep)}`),
   timeout: 60_000,
   fullyParallel: false,
   retries: 0,
@@ -107,6 +161,9 @@ export default defineConfig({
     timeout: 120_000,
     env: {
       LIBI_HOME: scratchHome,
+      // Chromium for the spawned libi's own render/tracking launches — see
+      // runnerBrowsersPath() above.
+      PLAYWRIGHT_BROWSERS_PATH: runnerBrowsersPath(),
       PORT: e2ePort,
       // Inside a git worktree bin/libi.js's bootstrap picks its own studio
       // port (3461, …) unless the shell already exported LIBI_PORT — without
@@ -127,6 +184,11 @@ export default defineConfig({
       // Connect step into Reconnect.
       CLAUDE_CONFIG_DIR: path.join(scratchHome, "claude-config"),
       HOME: scratchUserHome,
+      // Swaps fal-ai/ElevenLabs for local fakes and starts the fake Zernio
+      // MCP (mcp/dev/fake-zernio) that social-posting.spec.ts drives — see
+      // `lib/social/test-fake.ts`.
+      LIBI_TEST_MODE: "1",
+      LIBI_FAKE_ZERNIO_CONFIG: fakeZernioConfigPath,
     },
   },
 });

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Composition } from "@/lib/engine/types";
 import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
-import type { OverlayRendererPool } from "@/lib/engine/three-overlay";
+import type { OverlayRendererPool } from "@/lib/engine/three-renderer";
 import { overlayNeedsSpatialQuad } from "@/lib/export/render-entry-quads";
 
 /**
@@ -63,7 +63,9 @@ export function useOverlayQuads(composition: Composition | null): {
     }
 
     (async () => {
-      const { createOverlayRendererPool } = await import("@/lib/engine/three-overlay");
+      // The compiler-free leaf: `three-overlay` carries the body compiler,
+      // which no page of the app origin may load (final review M5).
+      const { createOverlayRendererPool } = await import("@/lib/engine/three-renderer");
       const { buildQuadInstance } = await import("@/lib/engine/overlay-quad");
       if (cancelled) return;
       if (!poolRef.current) poolRef.current = createOverlayRendererPool();

@@ -1,0 +1,38 @@
+{
+  "_id": "post_draft_1",
+  "status": "draft",
+  "content": "The desk setup that finally works",
+  "createdAt": "2026-09-20T09:00:00.000Z",
+  "scheduledFor": "2026-09-21T11:00:00.000Z",
+  "timezone": "Asia/Bangkok",
+  "mediaItems": [{ "type": "video", "url": "https://cdn.example/export.mp4" }],
+  "platforms": [
+    {
+      "platform": "instagram",
+      "accountId": "6aae6b468d284ffb211ade1e",
+      "status": "pending",
+      "scheduledFor": "2026-09-21T11:00:00.000Z",
+      "platformSpecificData": { "contentType": "reel", "shareToFeed": true, "isAiGenerated": true }
+    },
+    {
+      "platform": "tiktok",
+      "accountId": "6aae6ba98d284ffb211ae03a",
+      "status": "pending",
+      "scheduledFor": "2026-09-21T11:00:00.000Z"
+    }
+  ],
+  "tiktokSettings": {
+    "privacy_level": "PUBLIC_TO_EVERYONE",
+    "allow_comment": true,
+    "allow_duet": false,
+    "allow_stitch": false,
+    "video_made_with_ai": true,
+    "content_preview_confirmed": true,
+    "express_consent_given": true
+  },
+  "tags": ["libi"],
+  "metadata": {
+    "libi": { "pieceId": "piece_1", "pieceName": "Cutdown v3", "exportFile": "export_1080x1920.mp4", "appVersion": "0.1.16" },
+    "usageCounted": false
+  }
+}

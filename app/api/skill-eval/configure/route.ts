@@ -17,7 +17,7 @@ import { getDb } from "@/lib/db/client";
 import { skills as skillsTable } from "@/lib/db/schema/sqlite";
 import { prepareAgentDir } from "@/mcp/workspace";
 import { EXTENSION_MCP_SERVERS } from "@/mcp/registry/bundled";
-import { invalidateMcpConfig, setTestModeFakesEnabled } from "@/lib/mcp-config";
+import { invalidateMcpConfig, setTestModeFakesEnabled, TEST_MODE_FAKE_NAMES } from "@/lib/mcp-config";
 import { isTestMode } from "@/lib/test-mode";
 import { getLibiAgentDir } from "@/lib/libi-home";
 import { getSessionManager } from "@/lib/sessions/session-manager";
@@ -30,12 +30,14 @@ function enabled(): boolean {
 }
 
 /**
- * The two fakes `getMcpServersForAcp` injects over ACP in test mode, under the
- * REAL upstream names (lib/mcp-config.ts). A scenario's
- * `mcps: [fal-ai]` has always meant "expect the fake fal in front of the
- * agent"; this is the set of names that still mean that.
+ * The three fakes `getMcpServersForAcp` injects over ACP in test mode, under
+ * TEST_MODE_FAKE_NAMES (lib/mcp-config.ts). A scenario's `mcps: [fal-ai]` has
+ * always meant "expect the fake fal in front of the agent"; this is the set of
+ * names that still mean that. `ElevenLabs` is the fake's name before it took
+ * the catalog's `elevenlabs` (2026-09-25), kept so an older scenario resolves.
  */
-const ACP_FAKES = new Set(["fal-ai", "ElevenLabs"]);
+const ACP_FAKE_ALIASES: Record<string, string> = { ElevenLabs: "elevenlabs" };
+const ACP_FAKES = new Set<string>(TEST_MODE_FAKE_NAMES);
 
 /**
  * Names scenarios used for MCPs that libi no longer manages as rows, mapped
@@ -59,7 +61,7 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "skill-eval configure is disabled here" }, { status: 403 });
   }
 
-  let body: { skills?: string[]; mcps?: string[]; agent?: string };
+  let body: { skills?: string[]; mcps?: string[]; agent?: string; approvalMode?: string };
   try {
     body = await req.json();
   } catch {
@@ -68,6 +70,12 @@ export async function POST(req: Request): Promise<Response> {
   const wantSkills = body.skills ?? [];
   const wantMcps = body.mcps ?? [];
   const agent = body.agent ?? "claude-code";
+  // Only the two unattended modes: `ask` would prompt for every tool, and nothing in an
+  // eval answers a card it did not declare (scripts/skill-eval/harness.ts#approvalModeFor).
+  const approvalMode = body.approvalMode ?? "auto-with-generations";
+  if (approvalMode !== "auto" && approvalMode !== "auto-with-generations") {
+    return NextResponse.json({ error: `approvalMode must be auto or auto-with-generations; got ${approvalMode}` }, { status: 400 });
+  }
 
   const db = getDb();
 
@@ -89,8 +97,9 @@ export async function POST(req: Request): Promise<Response> {
   const extensions: string[] = [];
   const unprovidable: string[] = [];
   for (const name of wantMcps) {
-    if (ACP_FAKES.has(name)) {
-      fakes.push(name);
+    const fake = ACP_FAKE_ALIASES[name] ?? name;
+    if (ACP_FAKES.has(fake)) {
+      fakes.push(fake);
       continue;
     }
     const extId = resolveExtensionId(name);
@@ -102,7 +111,7 @@ export async function POST(req: Request): Promise<Response> {
       {
         error:
           `The harness cannot provide these MCPs: ${unprovidable.join(", ")}. ` +
-          "Only the test-mode fakes (fal-ai, ElevenLabs) and libi extensions are available; " +
+          `Only the test-mode fakes (${TEST_MODE_FAKE_NAMES.join(", ")}) and libi extensions are available; ` +
           "libi no longer manages third-party MCP rows.",
       },
       { status: 400 },
@@ -164,7 +173,11 @@ export async function POST(req: Request): Promise<Response> {
   //     an approval-required libi extension fires a blocking approval-request
   //     the harness can't answer, and the run would time out. (The fakes never
   //     prompt.) Set BEFORE switchAgent so the standby it creates inherits it.
-  setApprovalMode(agent, "auto-with-generations");
+  //     A scenario that declares `approve:` asks for `auto` instead: the card it
+  //     is about is then raised on every host, and the harness answers it over
+  //     the permission route like a user's click. Neither mode relaxes a gate —
+  //     a public action prompts in both (decidePermissionAction).
+  setApprovalMode(agent, approvalMode);
 
   // 6. Switch agent + force a fresh standby so the next createSession is wired
   //    with the new skills/MCPs (createSession claims the standby first).
@@ -182,7 +195,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   logger.info(
-    { tag: "skill-eval", op: "configure", skills: wantSkills, mcps: wantMcps, fakes, extensions, agent },
+    { tag: "skill-eval", op: "configure", skills: wantSkills, mcps: wantMcps, fakes, extensions, agent, approvalMode },
     "skill-eval configured",
   );
   return NextResponse.json({ success: true, skills: wantSkills, mcps: wantMcps, fakes, extensions, agent });

@@ -12,6 +12,7 @@ const KIND_LABEL: Record<string, string> = {
   voice: "voice",
   sfx: "sound effects",
   transcription: "transcripts",
+  social: "social posts",
 };
 
 /**

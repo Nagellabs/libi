@@ -11,6 +11,17 @@ export interface BuildCuesOpts {
   lead?: number;
   /** Hold after last word (s). Default 0.4. */
   hold?: number;
+  /** Hard end-of-timeline clamp (s), in the SAME clock as the input words'
+   *  `start`/`end`. No cue's held end may exceed it. A cue whose first word
+   *  starts before it is kept (clamped to end at it); only a cue whose first
+   *  word starts at/after it is dropped. Omit for no clamp. */
+  maxEnd?: number;
+  /** Floor for the lead-in / first cue start (s), in the SAME clock as the
+   *  input words' `start`/`end` (and as `maxEnd`). Default 0. Pass the
+   *  transcribed video overlay's own timeline `startTime` when the caller has
+   *  already shifted the words onto the piece's timeline, so a cue can't
+   *  lead-in before that overlay begins. */
+  minStart?: number;
 }
 
 /** Group spoken words into readable, timed cues. Pure. Ignores non-"word"
@@ -20,6 +31,8 @@ export function buildCaptionCues(words: SttWord[], opts: BuildCuesOpts = {}): Ca
   const maxLines = opts.maxLines ?? 2;
   const lead = opts.lead ?? 0.15;
   const hold = opts.hold ?? 0.4;
+  const maxEnd = opts.maxEnd;
+  const minStart = opts.minStart ?? 0;
   const budget = maxChars * maxLines;
 
   const spoken = words.filter((w) => (w.type ?? "word") === "word" && w.text.trim().length > 0);
@@ -29,7 +42,14 @@ export function buildCaptionCues(words: SttWord[], opts: BuildCuesOpts = {}): Ca
 
   const flush = () => {
     if (buf.length === 0) return;
-    const text = buf.map((w) => w.text).join(" ").replace(/\s+([,.!?])/g, "$1");
+    // Trim each word first: some STT backends (whisper.cpp) prepend a space
+    // to every non-first token, which without trimming leaks into a leading
+    // space on the cue's own text and a doubled space between words.
+    const text = buf
+      .map((w) => w.text.trim())
+      .filter((t) => t.length > 0)
+      .join(" ")
+      .replace(/\s+([,.!?])/g, "$1");
     const start = buf[0].start;
     const end = buf[buf.length - 1].end;
     const cueWords = buf.map((w) => ({ text: w.text, start: w.start, end: w.end }));
@@ -44,9 +64,29 @@ export function buildCaptionCues(words: SttWord[], opts: BuildCuesOpts = {}): Ca
   }
   flush();
 
-  // Apply lead/hold without overlapping the previous cue's post-hold end.
-  return cues.map((c, i) => {
-    const prevEnd = i > 0 ? cues[i - 1].end + hold : -Infinity;
-    return { ...c, start: Math.max(prevEnd, c.start - lead), end: c.end + hold };
+  // Apply lead/hold. The hold must never DELAY the next cue (QA 2026-09-19
+  // D1/D3): each cue starts at max(its first word - lead, minStart, the
+  // previous cue's LAST WORD end) — never at the previous cue's HELD end —
+  // and each cue's held end is then clamped to the next cue's start (which
+  // is never before its own last word end), so cues stay non-overlapping and
+  // every word is on screen, highlighted, when it is spoken.
+  //
+  // When `maxEnd` is given, a cue whose first word starts before it is always
+  // kept, its end clamped to maxEnd (a cue straddling maxEnd ends exactly
+  // there); only cues whose first word starts at/after maxEnd are dropped.
+  const kept = maxEnd == null ? cues : cues.filter((c) => c.start < maxEnd);
+  const starts = kept.map((c, i) =>
+    Math.max(minStart, c.start - lead, i > 0 ? kept[i - 1].end : Number.NEGATIVE_INFINITY),
+  );
+  const out: CaptionCue[] = [];
+  kept.forEach((c, i) => {
+    const start = starts[i];
+    if (maxEnd != null && start >= maxEnd) return; // degenerate (overlapping STT words): no room left
+    let end = c.end + hold;
+    if (i + 1 < kept.length) end = Math.min(end, starts[i + 1]);
+    if (maxEnd != null) end = Math.min(end, maxEnd);
+    end = Math.max(end, start);
+    out.push({ ...c, start, end });
   });
+  return out;
 }

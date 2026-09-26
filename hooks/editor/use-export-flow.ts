@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics/client";
 import type { GraphicsQuality } from "@/lib/engine/types";
 import { DEFAULT_GRAPHICS_QUALITY } from "@/lib/export/quality";
+import type { DroppedOverlay } from "@/lib/export/dropped-overlays";
 
 export type ExportSource = "draft" | "snapshot";
 export type ExportQuality = "source" | "1080p" | "1440p" | "4k" | "custom";
@@ -38,6 +39,9 @@ export interface ExportSuccess {
   backend: string;
   width: number;
   height: number;
+  /** What the export went out without (the job result's own list) — the
+   *  success card and toast name any video clip in it (`droppedClipsNote`). */
+  droppedOverlays?: DroppedOverlay[];
 }
 
 export type ExportStatus =

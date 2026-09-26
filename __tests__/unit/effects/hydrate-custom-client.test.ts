@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import {
-  compileCustomPayload,
+  customEffectDefsFromPayload,
   hydrateCustomEffects,
 } from "@/lib/effects/hydrate-custom-client";
 import { findEffect, clearCustomEffects } from "@/lib/effects/registry";
@@ -17,28 +17,35 @@ const META: CustomEffectManifest = {
 
 afterEach(() => clearCustomEffects());
 
-describe("compileCustomPayload", () => {
-  it("compiles good entries and skips ones whose source fails the sandbox", () => {
-    const { defs, customIds } = compileCustomPayload([
-      { meta: META, source: "return { opacity: progress };" },
-      { meta: { ...META, id: "evil" }, source: "return require('fs');" },
+const HASH = "a".repeat(64);
+
+describe("customEffectDefsFromPayload", () => {
+  it("registers meta-only, curve-backed defs and never runs the source in this realm", () => {
+    const g = globalThis as { __fxRan?: number };
+    delete g.__fxRan;
+    const { defs, customIds } = customEffectDefsFromPayload([
+      { meta: META, source: "globalThis.__fxRan = 1; return { opacity: progress };", sourceHash: HASH },
+      { meta: { ...META, id: "no-hash" }, source: "return {};", sourceHash: "nope" },
+      { meta: { ...META, id: "BAD ID" }, source: "return {};", sourceHash: HASH },
     ]);
     expect(defs.map((d) => d.meta.id)).toEqual(["drift"]);
     expect(customIds.has("drift")).toBe(true);
-    expect(customIds.has("evil")).toBe(false);
+    // No sampler configured: identity, and still nothing ran here.
+    expect(defs[0]!.animate(0.5, {})).toEqual({});
+    expect(g.__fxRan).toBeUndefined();
   });
 
   it("returns empty for an undefined payload", () => {
-    const { defs } = compileCustomPayload(undefined);
+    const { defs } = customEffectDefsFromPayload(undefined);
     expect(defs).toEqual([]);
   });
 });
 
 describe("hydrateCustomEffects", () => {
-  it("fetches, compiles, and registers a disk custom effect into the registry", async () => {
+  it("fetches and registers a disk custom effect into the registry", async () => {
     const fakeFetch = (async () => ({
       ok: true,
-      json: async () => ({ custom: [{ meta: META, source: "return { dx: progress * 10 };" }] }),
+      json: async () => ({ custom: [{ meta: META, source: "return { dx: progress * 10 };", sourceHash: HASH }] }),
     })) as unknown as typeof fetch;
     const n = await hydrateCustomEffects(fakeFetch);
     expect(n).toBe(1);

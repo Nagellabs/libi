@@ -2,9 +2,12 @@
  * Centralized MCP server configuration manager.
  *
  * libi manages ONE MCP server: its own. It never proxies, spawns or passes a
- * third-party MCP — the user's agents own their own lists
+ * third-party MCP TO AN AGENT — the user's agents own their own lists
  * (`~/.claude.json`, `$CODEX_HOME/config.toml`), which libi reads but never
- * writes and never carries a key for. Two delivery shapes exist:
+ * writes and never carries a key for. libi may itself be an MCP *client* of a
+ * third-party server for its own UI (`lib/social/mcp-client.ts`, Zernio); that
+ * connection reaches no agent and nothing here knows about it. Two delivery
+ * shapes exist:
  *
  * 1. **ACP protocol** (in-app agent) — `getMcpServersForAcp` hands
  *    `newSession({ mcpServers })` exactly one entry: libi's HTTP endpoint,
@@ -16,8 +19,8 @@
  *    adapter keeping project/local settingSources enabled.
  *
  *    Test mode is the one exception: the fake fal and fake ElevenLabs
- *    stdio servers ride along under their real names — see
- *    `getMcpServersForAcp` and `setTestModeFakesEnabled`.
+ *    stdio servers, and the fake Zernio HTTP server, ride along under their
+ *    real names — see `getMcpServersForAcp` and `setTestModeFakesEnabled`.
  *
  * 2. **HTTP aggregator** (bring your own CLI) — libi's streamable-HTTP MCP
  *    endpoint serves libi's tools to a CLI the user registered once via
@@ -27,7 +30,10 @@
 import path from "path";
 import { serverLogger as logger } from "@/lib/logger";
 import { buildSpawnEnv } from "@/mcp/registry/spawn-env";
-import { getLibiBinDir } from "@/lib/libi-home";
+import fs from "fs";
+import { getLibiAgentDir, getLibiBinDir } from "@/lib/libi-home";
+import { claudeConfigPath } from "@/lib/agents/libi-registration";
+import { matchProvider, type ProviderId } from "@/lib/providers/catalog";
 import { sqliteBuildDirForChildren } from "@/lib/db/native-binding";
 import { isWindows } from "@/lib/platform";
 import { resolveBundledSpawn } from "@/mcp/registry/local-bin-resolver";
@@ -40,6 +46,7 @@ import {
   LIBI_MCP_FALLBACK_ENTRY_NAME,
 } from "@/lib/mcp/agent-surface";
 import { isTestMode } from "@/lib/test-mode";
+import { fakeZernioUrl } from "@/lib/social/test-fake";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import {
   entryResolutionDiagnostic,
@@ -211,7 +218,7 @@ export function buildLibiHttpEntry(): {
 export const IN_APP_MCP_NAME = LIBI_MCP_ENTRY_NAME;
 
 /**
- * Whether the two test-mode fakes (`fal-ai`, `ElevenLabs`) are attached to ACP
+ * Whether the two test-mode fakes (`fal-ai`, `elevenlabs`) are attached to ACP
  * sessions. Meaningful ONLY when `isTestMode()` — production never reads it.
  *
  * Default `true`, so a plain `LIBI_TEST_MODE=1 npm run dev` behaves exactly as
@@ -230,30 +237,56 @@ export const IN_APP_MCP_NAME = LIBI_MCP_ENTRY_NAME;
  * Flipping it invalidates the per-agent ACP cache — otherwise the standby
  * session built before `configure` ran would keep the stale entry list.
  */
-let testModeFakesOn = true;
+const fakesFlag = globalThis as unknown as { __libiTestModeFakesOn?: boolean };
+/*
+ * On `globalThis`, like the caches below: the Providers route reads it (`GET /api/providers`'s
+ * `testModeCodexFakes`) and may run in another instance of this module than the configure route that sets it.
+ */
+function testModeFakesOn(): boolean {
+  return fakesFlag.__libiTestModeFakesOn ?? true;
+}
 
 /** True when the value actually changed (and an invalidation was fired for
  *  it), so a caller does not have to invalidate again on top — see
  *  `POST /api/skill-eval/configure`. */
 export function setTestModeFakesEnabled(on: boolean): boolean {
-  if (testModeFakesOn === on) return false;
-  testModeFakesOn = on;
+  if (testModeFakesOn() === on) return false;
+  fakesFlag.__libiTestModeFakesOn = on;
   invalidateMcpConfig({ reason: on ? "test-mode-fakes-on" : "test-mode-fakes-off" });
   logger.info({ tag: "mcp-config", op: "test_mode_fakes", enabled: on }, "test-mode fakes toggled");
   return true;
 }
 
 export function testModeFakesEnabled(): boolean {
-  return testModeFakesOn;
+  return testModeFakesOn();
 }
 
 /**
- * The REAL upstream names the two test-mode fakes are attached under, in the
- * order they are pushed. Single-sourced because the instructions core names
+ * The names the three test-mode fakes are attached under, in the order they are
+ * pushed: exactly the entry names the Providers tab's add commands give the
+ * real servers (`lib/providers/catalog.ts`), so each fake REPLACES a real entry
+ * of that name instead of riding beside it (an ACP entry beats a config entry of
+ * the same name; names are case-sensitive). The fake ElevenLabs rode as
+ * `ElevenLabs` until 2026-09-25, beside a real hosted `elevenlabs` with the same
+ * `creative_*` tools, so a test run could spend real credits. Single-sourced because the instructions core names
  * them to the agent (`testModeCoreBanner`) and a banner that named a fake the
  * ACP list did not carry would be exactly the kind of lie that got removed.
+ *
+ * `zernio` is the odd one out: it is an HTTP entry, not a stdio child, because
+ * the agent and libi's own dashboard client must observe ONE state — see
+ * `buildFakeZernioEntry` and `lib/social/test-fake.ts`.
  */
-export const TEST_MODE_FAKE_NAMES = ["fal-ai", "ElevenLabs"] as const;
+export const TEST_MODE_FAKE_NAMES = ["fal-ai", "elevenlabs", "zernio"] as const;
+
+/**
+ * The fakes attached as STDIO children (`fal-ai`, `elevenlabs`). Codex merges an ACP entry into a config entry of
+ * the same name field by field, so a real HTTP entry of one of these names in test mode's scoped CODEX_HOME merges
+ * with the fake into `command` + `url`, and codex refuses its whole config: every in-app Codex chat fails to start.
+ * The Providers tab therefore offers no Codex add of such a provider in test mode, and says to remove an entry
+ * that is already there (`GET /api/providers`'s `testModeCodexFakes`). `zernio`'s fake is HTTP, so a real hosted
+ * `zernio` merges `url` over `url` and is simply replaced.
+ */
+export const TEST_MODE_STDIO_FAKE_NAMES: readonly string[] = [TEST_MODE_FAKE_NAMES[0], TEST_MODE_FAKE_NAMES[1]];
 
 /**
  * Tell the running aggregator to re-read its instructions.
@@ -273,7 +306,7 @@ export function notifyMcpHttpReload(reason: string): void {
   const handle = getMcpHttpChild();
   if (handle && handle.status() !== "running") return;
   const url = `http://127.0.0.1:${getLiveMcpPort()}/reload`;
-  void fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reason, testModeFakes: testModeFakesOn }) })
+  void fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ reason, testModeFakes: testModeFakesOn() }) })
     .catch((err) => logger.debug({ err, tag: "mcp-http", op: "reload_notify_failed", reason }, "aggregator not reachable for reload"));
 }
 
@@ -365,6 +398,33 @@ function toAcpStdioEntry(name: string, entry: McpServerEntry): McpServer {
     command: entry.command,
     args: entry.args ?? [],
     env: Object.entries(entry.env ?? {}).map(([key, value]) => ({ name: key, value })),
+  };
+}
+
+/**
+ * Test-mode only: the in-process fake Zernio, as an HTTP entry.
+ *
+ * `null` until `startFakeZernioIfWanted()` has bound its port — the studio's
+ * `instrumentation.ts` starts it right after the boot phase, and a standby
+ * session built before that would otherwise carry a URL-less entry. That
+ * window is closed by the `invalidateMcpConfig({ reason: "fake-zernio-started" })`
+ * the starter fires, not by guessing a port here.
+ */
+export function buildFakeZernioEntry(): McpServerEntry | null {
+  const url = fakeZernioUrl();
+  return url ? { type: "http", url } : null;
+}
+
+/** The ACP `McpServerHttp` variant, for an entry that already carries a URL. */
+function toAcpHttpEntry(name: string, entry: McpServerEntry): McpServer {
+  if (!("url" in entry)) {
+    throw new Error(`toAcpHttpEntry: ${name} is a stdio entry, not HTTP`);
+  }
+  return {
+    type: "http",
+    name,
+    url: entry.url,
+    headers: Object.entries(entry.headers ?? {}).map(([key, value]) => ({ name: key, value })),
   };
 }
 
@@ -469,15 +529,112 @@ function mcpConfigState(): McpConfigState {
  * alone. `LIBI_MCP_ENTRY_NAME` carries the measurements.
  *
  * TEST MODE: the ONE case where libi passes extra MCPs over ACP — the
- * fake fal and fake ElevenLabs stdio servers, under the REAL upstream names
- * (`fal-ai`, `ElevenLabs`) so the agent walks the identical tool path at zero
- * cost and every call is recorded for the skill-eval harness. `isTestMode()`
- * is forced off in packaged production builds (`lib/test-mode.ts`) and
- * `mcp/dev/**` is excluded from both shipped artifacts.
+ * fake fal and fake ElevenLabs stdio servers and the fake Zernio HTTP server,
+ * under the entry names the Providers tab gives the real servers (`fal-ai`,
+ * `elevenlabs`, `zernio` — TEST_MODE_FAKE_NAMES), so the agent walks the
+ * identical tool path at zero cost, every call recorded for the skill-eval
+ * harness. Claude: the ACP entry beats a config entry of the same name, so
+ * the fake replaces it — and the fakes are attached again under any other name
+ * the user's Claude config gives a real server of theirs
+ * (`claudeTestModeFakeAliases`). Codex does NOT replace it: the override merges into a
+ * config entry of the same name FIELD BY FIELD (the same as the `libi` entry
+ * above), so a user's hosted (`url`) `elevenlabs` or `fal-ai` entry merges
+ * with the stdio fake into `command` + `url` and codex refuses the whole
+ * config. What keeps that away is that test mode reads a scoped CODEX_HOME,
+ * never the user's `~/.codex` (lib/codex-config/canonical.ts), and that the
+ * Providers tab, whose setup terminal writes that scoped home, offers no Codex
+ * add of fal.ai or ElevenLabs in test mode and names such an entry as the cause
+ * when one is there (`TEST_MODE_STDIO_FAKE_NAMES`). A real entry
+ * under ANOTHER name is not touched on either agent. `isTestMode()` is forced off in packaged
+ * production builds (`lib/test-mode.ts`) and `mcp/dev/**` is excluded from
+ * both shipped artifacts.
  *
  * Cached per agent because `?agent=` differs; `invalidateMcpConfig` clears it.
  */
 export function getMcpServersForAcp(agentId: string): McpServer[] {
+  const entries = baseMcpServersForAcp(agentId);
+  if (agentId !== "claude-code" || !isTestMode() || !testModeFakesEnabled()) return entries;
+  const aliases = claudeTestModeFakeAliases(entries, claudeConfigEntries());
+  return aliases.length > 0 ? [...entries, ...aliases] : entries;
+}
+
+/** The provider each test-mode fake stands in for. */
+const FAKE_PROVIDER: Record<(typeof TEST_MODE_FAKE_NAMES)[number], ProviderId> = { "fal-ai": "fal", elevenlabs: "elevenlabs", zernio: "zernio" };
+
+/**
+ * Every MCP server in Claude Code's config that an in-app session sees, by name, with its url when it has one:
+ * the user scope, the agent folder's local scope and its `.mcp.json` — the three places provider detection reads
+ * (`lib/providers/detect.ts`). Nothing else is taken from an entry; a config that can't be read has none.
+ */
+function claudeConfigEntries(): Array<{ name: string; url?: string }> {
+  const read = (file: string): Record<string, unknown> | null => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf-8")) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const agentDir = getLibiAgentDir();
+  const out: Array<{ name: string; url?: string }> = [];
+  const add = (servers: unknown) => {
+    if (!servers || typeof servers !== "object") return;
+    for (const [name, entry] of Object.entries(servers as Record<string, unknown>)) {
+      const url = entry && typeof entry === "object" ? (entry as { url?: unknown }).url : undefined;
+      out.push(typeof url === "string" ? { name, url } : { name });
+    }
+  };
+  const cfg = read(claudeConfigPath());
+  add(cfg?.mcpServers);
+  const projects = cfg?.projects;
+  if (projects && typeof projects === "object") {
+    // Claude Code keys a project by its path, with forward slashes on Windows.
+    const byPath = projects as Record<string, { mcpServers?: unknown } | undefined>;
+    add((byPath[agentDir] ?? byPath[agentDir.replace(/\\/g, "/")])?.mcpServers);
+  }
+  add(read(path.join(agentDir, ".mcp.json"))?.mcpServers);
+  return out;
+}
+
+/**
+ * Test mode, Claude Code: each fake again under every other name the user's Claude config gives a real server of
+ * its provider — the catalog recognises it by any `match.names` spelling in any case (`ElevenLabs`, `eleven_labs`,
+ * `fal`), or by its url's host (`my-voice` at elevenlabs.io). Claude Code replaces a config entry with an ACP
+ * entry only when the names are exactly the same, so under the fake's own name alone an older `ElevenLabs`
+ * (the capitalised local server libi once added) kept its real, keyed server beside the fake, and a test run
+ * could spend real credits. The aliases are worked out afresh for every session, not cached with the rest: the
+ * user's config changes without libi hearing of it. Codex is not given aliases: it merges a same-name entry field
+ * by field instead of replacing it (`TEST_MODE_STDIO_FAKE_NAMES`).
+ */
+export function claudeTestModeFakeAliases(
+  base: readonly McpServer[],
+  configEntries: ReadonlyArray<{ name: string; url?: string }>,
+): McpServer[] {
+  const out: McpServer[] = [];
+  const taken = new Set(base.map((e) => e.name));
+  for (const { name, url } of configEntries) {
+    if (taken.has(name)) continue;
+    const providerId = matchProvider(name, url);
+    const fake = TEST_MODE_FAKE_NAMES.find((f) => FAKE_PROVIDER[f] === providerId);
+    // A fake that is not attached (zernio before its listener is up) has nothing to stand in with.
+    const attached = fake ? base.find((e) => e.name === fake) : undefined;
+    if (!fake || !attached) continue;
+    taken.add(name);
+    if (fake === "fal-ai") out.push(toAcpStdioEntry(name, buildFakeFalEntry()));
+    else if (fake === "elevenlabs") out.push(toAcpStdioEntry(name, buildFakeElevenLabsEntry()));
+    else out.push({ ...attached, name });
+  }
+  if (out.length > 0) {
+    logger.info(
+      { tag: "mcp-config", op: "test_mode_fake_aliases", names: out.map((e) => e.name) },
+      "test mode: fakes also attached under the names of the user's own entries for their providers",
+    );
+  }
+  return out;
+}
+
+/** Libi's own entry, plus the test-mode fakes under their own names: cached per agent. */
+function baseMcpServersForAcp(agentId: string): McpServer[] {
   const state = mcpConfigState();
   const cached = state.cachedAcpByAgent.get(agentId);
   if (cached) return cached;
@@ -495,6 +652,14 @@ export function getMcpServersForAcp(agentId: string): McpServer[] {
       toAcpStdioEntry(TEST_MODE_FAKE_NAMES[0], buildFakeFalEntry()),
       toAcpStdioEntry(TEST_MODE_FAKE_NAMES[1], buildFakeElevenLabsEntry()),
     );
+    const zernio = buildFakeZernioEntry();
+    if (zernio) entries.push(toAcpHttpEntry(TEST_MODE_FAKE_NAMES[2], zernio));
+    else {
+      logger.info(
+        { tag: "mcp-config", op: "fake_zernio_not_ready", agentId },
+        "fake zernio has no URL yet — this session gets no zernio entry",
+      );
+    }
   }
   state.cachedAcpByAgent.set(agentId, entries);
   logger.info(

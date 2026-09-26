@@ -9,7 +9,7 @@ import { probeMedia } from "@/lib/ffmpeg/probe";
 import { alphaRecoverableInPreview } from "@/lib/ffmpeg/alpha";
 import { proxyLogger } from "@/lib/logger";
 import { getLibiStorageDir } from "@/lib/libi-home";
-import { buildProxyArgs } from "@/lib/proxy/args";
+import { buildAudioProxyArgs, buildProxyArgs, proxyStreamsFor } from "@/lib/proxy/args";
 import { evictProxiesIfOverBudget } from "@/lib/proxy/lru";
 import { navigationEmitter } from "@/lib/navigation-events";
 import type { JobContext, JobRunner } from "@/lib/jobs/types";
@@ -43,7 +43,10 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       .limit(1)
       .all();
     if (!file) throw new Error(`file not found: ${ctx.params.fileId}`);
-    if (file.type !== "video") throw new Error(`file is not a video: ${file.id}`);
+    // An audio file gets a proxy only when the preview can't play it itself
+    // (storeFile and the boot sweep decide: lib/ffmpeg/audio-preview.ts).
+    const audioOnly = file.type === "audio";
+    if (file.type !== "video" && !audioOnly) throw new Error(`file is not a video or audio: ${file.id}`);
 
     const sourceDir = file.pieceId
       ? path.join(getLibiStorageDir(), file.pieceId)
@@ -91,7 +94,7 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       .run();
 
     const baseName = path.basename(file.filename, path.extname(file.filename));
-    const proxyName = `${baseName}-proxy.mp4`;
+    const proxyName = `${baseName}-proxy.${audioOnly ? "m4a" : "mp4"}`;
     const proxyPath = path.join(sourceDir, proxyName);
 
     try {
@@ -130,8 +133,13 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       }, 1000);
 
       try {
+        // Map the streams the preview decodes (Review M6). A failed probe
+        // leaves both unknown and the args fall back to the first streams.
+        const sourceProbe = await probeMedia(sourcePath);
         await runFfmpeg(
-          buildProxyArgs(sourcePath, proxyPath, { fps: 30 }),
+          audioOnly
+            ? buildAudioProxyArgs(sourcePath, proxyPath, proxyStreamsFor(sourceProbe))
+            : buildProxyArgs(sourcePath, proxyPath, { fps: 30, ...proxyStreamsFor(sourceProbe) }),
           {
             op: "proxy_gen",
             context: { fileId: file.id, pieceId: file.pieceId },
@@ -159,21 +167,24 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       // from the source) so "downscaled" disclosure is honest. A failed probe
       // must NOT fail the job — leave proxyHeight null and warn.
       let proxyHeight: number | null = null;
-      try {
-        const probed = await probeMedia(proxyPath);
-        if (typeof probed.height === "number" && probed.height > 0) {
-          proxyHeight = probed.height;
-        } else {
+      // An audio proxy has no height.
+      if (!audioOnly) {
+        try {
+          const probed = await probeMedia(proxyPath);
+          if (typeof probed.height === "number" && probed.height > 0) {
+            proxyHeight = probed.height;
+          } else {
+            proxyLogger.warn(
+              { tag: "proxy", op: "probe_height_missing", fileId: file.id, proxyPath },
+              "proxy.probe.height_missing",
+            );
+          }
+        } catch (err) {
           proxyLogger.warn(
-            { tag: "proxy", op: "probe_height_missing", fileId: file.id, proxyPath },
-            "proxy.probe.height_missing",
+            { tag: "proxy", op: "probe_height_failed", fileId: file.id, proxyPath, err },
+            "proxy.probe.height_failed",
           );
         }
-      } catch (err) {
-        proxyLogger.warn(
-          { tag: "proxy", op: "probe_height_failed", fileId: file.id, proxyPath, err },
-          "proxy.probe.height_failed",
-        );
       }
 
       // Update files row — the URL picker reads from here.

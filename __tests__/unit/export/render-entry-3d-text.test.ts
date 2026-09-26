@@ -68,8 +68,8 @@ function fakeInstance(): ThreeOverlayInstance {
 }
 
 describe("overlayNeedsThreeInstance (export 3D-overlay classifier)", () => {
-  it("returns true for a `three` overlay", () => {
-    expect(overlayNeedsThreeInstance(threeOverlay())).toBe(true);
+  it("returns FALSE for a `three` overlay — its body renders in the overlay sandbox, never in the render page's origin", () => {
+    expect(overlayNeedsThreeInstance(threeOverlay())).toBe(false);
   });
 
   it("returns true for a `text` overlay carrying threeD", () => {
@@ -92,11 +92,9 @@ describe("overlayNeedsThreeInstance (export 3D-overlay classifier)", () => {
 describe("buildOverlayThreeScenesWithDeps", () => {
   function makeDeps(): {
     deps: BuildOverlayThreeDeps;
-    buildThreeSpy: ReturnType<typeof vi.fn>;
     buildTextSpy: ReturnType<typeof vi.fn>;
     sharedDispose: ReturnType<typeof vi.fn>;
   } {
-    const buildThreeSpy = vi.fn(async () => fakeInstance());
     const buildTextSpy = vi.fn(async () => fakeInstance());
     const sharedDispose = vi.fn();
     const deps: BuildOverlayThreeDeps = {
@@ -104,27 +102,31 @@ describe("buildOverlayThreeScenesWithDeps", () => {
         renderer: {} as never,
         dispose: sharedDispose,
       })),
-      buildThreeInstance: buildThreeSpy as never,
       buildTextThreeInstance: buildTextSpy as never,
       makeBrowserTextThreeDeps: vi.fn(() => ({} as never)),
     };
-    return { deps, buildThreeSpy, buildTextSpy, sharedDispose };
+    return { deps, buildTextSpy, sharedDispose };
   }
 
-  it("builds an instance for a `three` overlay AND a `text+threeD` overlay", async () => {
-    const { deps, buildThreeSpy, buildTextSpy } = makeDeps();
+  it("builds an instance for a `text+threeD` overlay and NOT for a `three` overlay (bodies are sandboxed)", async () => {
+    const { deps, buildTextSpy } = makeDeps();
     const overlays: Overlay[] = [
       threeOverlay({ id: "t3" }),
       textOverlay({ id: "txt3d", threeD: { depth: 4 } }),
     ];
     const { scenes } = await buildOverlayThreeScenesWithDeps(overlays, deps);
 
-    expect(buildThreeSpy).toHaveBeenCalledTimes(1);
     expect(buildTextSpy).toHaveBeenCalledTimes(1);
-    expect(Object.keys(scenes).sort()).toEqual(["t3", "txt3d"]);
-    // keyed by overlay.id
-    expect(scenes["t3"]).toBeDefined();
-    expect(scenes["txt3d"]).toBeDefined();
+    // keyed by overlay.id; the three body got nothing here
+    expect(Object.keys(scenes)).toEqual(["txt3d"]);
+    expect("buildThreeInstance" in deps).toBe(false);
+  });
+
+  it("a scene of only `three` overlays creates no shared renderer at all", async () => {
+    const { deps } = makeDeps();
+    const { scenes } = await buildOverlayThreeScenesWithDeps([threeOverlay({ id: "t3" })], deps);
+    expect(deps.createSharedThreeRenderer).not.toHaveBeenCalled();
+    expect(scenes).toEqual({});
   });
 
   it("builds for place3d-only text (no threeD) and passes a synthesized depth:0 threeD to the builder", async () => {
@@ -143,11 +145,10 @@ describe("buildOverlayThreeScenesWithDeps", () => {
   });
 
   it("does NOT build for a plain `text` overlay (no threeD) or an image overlay", async () => {
-    const { deps, buildThreeSpy, buildTextSpy } = makeDeps();
+    const { deps, buildTextSpy } = makeDeps();
     const overlays: Overlay[] = [textOverlay(), imageOverlay()];
     const { scenes } = await buildOverlayThreeScenesWithDeps(overlays, deps);
 
-    expect(buildThreeSpy).not.toHaveBeenCalled();
     expect(buildTextSpy).not.toHaveBeenCalled();
     expect(Object.keys(scenes)).toEqual([]);
   });
@@ -164,9 +165,7 @@ describe("buildOverlayThreeScenesWithDeps", () => {
 
   it("dispose() frees every built instance + the shared renderer", async () => {
     const { deps, sharedDispose } = makeDeps();
-    const inst3 = fakeInstance();
     const instText = fakeInstance();
-    (deps.buildThreeInstance as ReturnType<typeof vi.fn>).mockResolvedValueOnce(inst3);
     (deps.buildTextThreeInstance as ReturnType<typeof vi.fn>).mockResolvedValueOnce(instText);
     const overlays: Overlay[] = [
       threeOverlay({ id: "t3" }),
@@ -174,7 +173,6 @@ describe("buildOverlayThreeScenesWithDeps", () => {
     ];
     const { dispose } = await buildOverlayThreeScenesWithDeps(overlays, deps);
     dispose();
-    expect(inst3.dispose).toHaveBeenCalledTimes(1);
     expect(instText.dispose).toHaveBeenCalledTimes(1);
     expect(sharedDispose).toHaveBeenCalledTimes(1);
   });

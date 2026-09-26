@@ -61,6 +61,11 @@ export const electronDriver: RenderDriver = {
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
+        // The render page hosts the sandboxed overlay runtime and needs no
+        // Node or injected script, so the OS-level renderer sandbox costs
+        // nothing and closes the last un-sandboxed renderer on the export
+        // path (spec §4.6).
+        sandbox: true,
       },
     });
     const url = `http://127.0.0.1:${port}/render?jobId=${encodeURIComponent(jobId)}&token=${encodeURIComponent(entry.token)}`;

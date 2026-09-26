@@ -16,6 +16,9 @@ export interface DeleteFolderResult {
   deletedFolderId: string;
   mode: DeleteFolderMode;
   removedPieceCount: number;
+  /** The pieces a cascade deleted — for a caller in another process than the
+   *  studio, which holds per-piece state in memory (render diagnostics). */
+  removedPieceIds: string[];
 }
 
 /**
@@ -33,7 +36,7 @@ export async function deleteFolder(
   const folder = getFolder(folderId);
   if (!folder) throw new Error("folder_not_found");
 
-  let removedPieceCount = 0;
+  const removedPieceIds: string[] = [];
 
   if (mode === "orphan") {
     const parentId = folder.parentFolderId;
@@ -54,7 +57,7 @@ export async function deleteFolder(
     );
     for (const id of idsDeepestFirst) {
       for (const piece of listPiecesInFolder(id)) {
-        if (await deletePieceCompletely(piece.id)) removedPieceCount++;
+        if (await deletePieceCompletely(piece.id)) removedPieceIds.push(piece.id);
       }
       deleteFolderRow(id);
     }
@@ -62,7 +65,7 @@ export async function deleteFolder(
 
   navigationEmitter.emit("refresh_query", { queryKey: "folders" });
   navigationEmitter.emit("refresh_query", { queryKey: "pieces" });
-  return { deletedFolderId: folderId, mode, removedPieceCount };
+  return { deletedFolderId: folderId, mode, removedPieceCount: removedPieceIds.length, removedPieceIds };
 }
 
 function depth(id: string, all: { id: string; parentFolderId: string | null }[]): number {

@@ -12,6 +12,7 @@ vi.mock("@/lib/sessions/session-manager", () => ({
 vi.mock("@/lib/security/test-routes", () => ({ testRoutesEnabled: () => true }));
 
 import { POST } from "@/app/api/skill-eval/configure/route";
+import { getApprovalMode } from "@/lib/approval/settings";
 import {
   getMcpServersForAcp,
   invalidateMcpConfig,
@@ -52,14 +53,26 @@ afterEach(() => {
 });
 
 describe("POST /api/skill-eval/configure", () => {
-  it("accepts fal-ai and ElevenLabs as the ACP-injected fakes and leaves them attached", async () => {
-    const res = await POST(post({ skills: [], mcps: ["fal-ai", "ElevenLabs"], agent: "claude-code" }));
+  // A15: a scenario that declares `approve:` runs under `auto`, so libi's permission handler
+  // is asked (and the public-action card raised) on every host; nothing else is accepted.
+  it("sets auto-with-generations by default, auto on request, and refuses any other mode", async () => {
+    expect((await POST(post({ skills: [], mcps: [], agent: "claude-code" }))).status).toBe(200);
+    expect(getApprovalMode("claude-code")).toBe("auto-with-generations");
+    expect((await POST(post({ skills: [], mcps: [], agent: "claude-code", approvalMode: "auto" }))).status).toBe(200);
+    expect(getApprovalMode("claude-code")).toBe("auto");
+    const bad = await POST(post({ skills: [], mcps: [], agent: "claude-code", approvalMode: "ask" }));
+    expect(bad.status).toBe(400);
+    expect(getApprovalMode("claude-code")).toBe("auto");
+  });
+
+  it("accepts fal-ai and elevenlabs as the ACP-injected fakes and leaves them attached", async () => {
+    const res = await POST(post({ skills: [], mcps: ["fal-ai", "elevenlabs"], agent: "claude-code" }));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.fakes).toEqual(["fal-ai", "ElevenLabs"]);
+    expect(body.fakes).toEqual(["fal-ai", "elevenlabs"]);
     expect(body.extensions).toEqual([]);
     expect(testModeFakesEnabled()).toBe(true);
-    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "ElevenLabs"]);
+    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "elevenlabs"]);
   });
 
   it("resolves libi extension ids", async () => {
@@ -87,10 +100,11 @@ describe("POST /api/skill-eval/configure", () => {
   });
 
   it("attaches BOTH fakes when the list names either one, alongside an extension", async () => {
+    // `ElevenLabs` is the fake's name before it took the catalog's `elevenlabs` (2026-09-25): still accepted.
     const res = await POST(post({ skills: [], mcps: ["libi-tracking", "ElevenLabs"], agent: "claude-code" }));
     expect(res.status).toBe(200);
     expect(testModeFakesEnabled()).toBe(true);
-    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "ElevenLabs"]);
+    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "elevenlabs"]);
   });
 
   it("resolves an extension by display name", async () => {
@@ -143,7 +157,7 @@ describe("POST /api/skill-eval/configure", () => {
     expect(acpNames("claude-code")).toEqual(["libi"]);
     await POST(post({ skills: [], mcps: ["fal-ai"], agent: "claude-code" }));
     expect(testModeFakesEnabled()).toBe(true);
-    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "ElevenLabs"]);
+    expect(acpNames("claude-code")).toEqual(["libi", "fal-ai", "elevenlabs"]);
   });
 
   /**

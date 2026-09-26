@@ -67,6 +67,7 @@ vi.mock("@/lib/engine/canvas-text", () => {
 });
 
 import { createSharedThreeRenderer, buildThreeInstance } from "@/lib/engine/three-overlay";
+import { BodyError } from "@/lib/sandbox/runtime/compile";
 
 beforeEach(() => { renderSpy.mockClear(); setSizeSpy.mockClear(); textCtor.mockClear(); lastCamera = null; });
 
@@ -86,6 +87,42 @@ return ({ progress }) => { label.position.z = progress; };`;
     expect(setSizeSpy).toHaveBeenCalledWith(640, 360, false);
     expect(renderSpy).toHaveBeenCalledTimes(1);
     expect(canvas).toBe((shared as unknown as { renderer: { domElement: unknown } }).renderer.domElement);
+  });
+
+  it("releaseDrawingBuffer shrinks the GL buffer, and the next render sizes it back (sandbox idle eviction, spec §4.9)", async () => {
+    const shared = await createSharedThreeRenderer();
+    const inst = await buildThreeInstance("", "billboard", shared);
+    await inst.ready;
+    inst.render(640, 360);
+    inst.render(640, 360);
+    expect(setSizeSpy).toHaveBeenCalledTimes(1); // unchanged size: no realloc
+    inst.releaseDrawingBuffer?.();
+    expect(setSizeSpy).toHaveBeenLastCalledWith(1, 1, false);
+    inst.render(640, 360);
+    expect(setSizeSpy).toHaveBeenLastCalledWith(640, 360, false);
+    expect(setSizeSpy).toHaveBeenCalledTimes(3);
+  });
+  it("re-sizes when something else resized the shared renderer since its last frame (pool overflow shares one)", async () => {
+    // Beyond MAX_OVERLAY_RENDERERS overlays share the pool's fallback renderer,
+    // and eviction may shrink it: the per-instance size cache alone would then
+    // render into whatever size the buffer was left at.
+    setSizeSpy.mockImplementation((w: number, h: number) => { fakeDomElement.width = w; fakeDomElement.height = h; });
+    try {
+      const shared = await createSharedThreeRenderer();
+      const a = await buildThreeInstance("", "billboard", shared);
+      const b = await buildThreeInstance("", "billboard", shared);
+      a.render(640, 360);
+      b.render(300, 100);
+      setSizeSpy.mockClear();
+      a.render(640, 360);
+      expect(setSizeSpy).toHaveBeenCalledWith(640, 360, false);
+      a.render(640, 360);
+      expect(setSizeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      setSizeSpy.mockReset();
+      fakeDomElement.width = 0;
+      fakeDomElement.height = 0;
+    }
   });
 
   it("a body with no return renders a static scene without throwing", async () => {
@@ -109,5 +146,58 @@ return ({ progress }) => { label.position.z = progress; };`;
     expect(lastCamera!.setViewOffset).not.toHaveBeenCalled();
     expect(lastCamera!.clearViewOffset).toHaveBeenCalled();
     expect(inst.contentBoundsNDC).toBeUndefined();
+  });
+
+  // Final review I2: the compile path used to trust its caller. A body that
+  // reached a piece without the write-time gate (a preset merge, a hand-edited
+  // manifest) ran unvalidated — `createDrawFunction` already re-checks at load,
+  // and now this does too (via the sandbox's `compileThreeBody`).
+  it("refuses a body the three validator rejects, before running it", async () => {
+    const shared = await createSharedThreeRenderer();
+    await expect(buildThreeInstance("globalThis.pwned = 1; return () => {};", "billboard", shared)).rejects.toMatchObject({
+      name: "BodyError",
+      phase: "compile",
+      message: expect.stringMatching(/disallowed pattern/),
+    });
+    expect((globalThis as { pwned?: number }).pwned).toBeUndefined();
+  });
+
+  it("passes the REAL layer size to the body as width/height, and 0/0 when a caller omits it", async () => {
+    const shared = await createSharedThreeRenderer();
+    // A body that throws unless it sees the expected size is the cleanest probe:
+    // a mismatch would surface as a rejected BodyError("build").
+    await expect(
+      buildThreeInstance("if (width !== 640 || height !== 360) throw new Error('bad size');", "billboard", shared, {
+        width: 640,
+        height: 360,
+      }),
+    ).resolves.toBeDefined();
+    // Callers that have no size yet (the preview hook, the export entry) keep the
+    // historical 0/0 — those bodies read camera.aspect.
+    await expect(
+      buildThreeInstance("if (width !== 0 || height !== 0) throw new Error('bad size');", "billboard", shared),
+    ).resolves.toBeDefined();
+  });
+
+  it("a body that throws while building becomes a BodyError('build') on the body's own line", async () => {
+    const shared = await createSharedThreeRenderer();
+    let caught: BodyError | null = null;
+    try {
+      await buildThreeInstance("const a = 1;\nthrow new Error('boom');", "billboard", shared);
+    } catch (e) {
+      caught = e as BodyError;
+    }
+    expect(caught).toBeInstanceOf(BodyError);
+    expect(caught!.phase).toBe("build");
+    expect(caught!.message).toBe("boom");
+    expect(caught!.line).toBe(2);
+  });
+
+  it("rejects a syntactically invalid body at compile, before any scene is built", async () => {
+    const shared = await createSharedThreeRenderer();
+    await expect(buildThreeInstance("return (", "billboard", shared)).rejects.toMatchObject({
+      name: "BodyError",
+      phase: "compile",
+    });
   });
 });

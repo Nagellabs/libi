@@ -5,6 +5,7 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { requireUvBinary } from "@/lib/uv-path";
 import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import {
   ACESTEP_GIT_REPO,
   ACESTEP_GIT_SHA,
@@ -298,9 +299,10 @@ function runUv(
         return;
       }
       if (code !== 0) {
+        const offline = uvNetworkFailureMessage("music generation", err);
         reject(
           new AceStepGenerateError(
-            `acestep exited ${code}: ${formatStderrTail(err)}`,
+            offline ?? `acestep exited ${code}: ${formatStderrTail(err)}`,
           ),
         );
         return;

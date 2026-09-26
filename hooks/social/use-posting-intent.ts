@@ -1,0 +1,160 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+
+/**
+ * A hand-off from somewhere else in the UI (the export dialog's "Post…", the
+ * agent's `libi.show_piece`-style navigate with `target: "posting"`) into the
+ * editor's Posting tab. This is UI-LOCAL state — nothing here persists or
+ * leaves the page, and it never substitutes for the server's own notion of a
+ * post (see `lib/queries/social.ts`). `nonce` lets the same `pieceId` +
+ * `exportPath`/`providerPostId` pair be re-delivered (e.g. exporting the same
+ * piece twice) and still be treated as a fresh intent by a listener that only
+ * reacts to change.
+ */
+export interface PostingIntent {
+  pieceId: string;
+  exportPath?: string | null;
+  providerPostId?: string | null;
+  /** Not "post this" but "show me this one": the Social page's "Piece" link.
+   *  The Posting tab opens on its list, narrowed to this post (or ad) id. */
+  focusPostId?: string | null;
+  nonce: number;
+}
+
+type Listener = (intent: PostingIntent | null) => void;
+
+const g = globalThis as unknown as {
+  __libiPostingIntent?: { current: PostingIntent | null; listeners: Set<Listener>; nonce: number };
+};
+const store = (g.__libiPostingIntent ??= { current: null, listeners: new Set(), nonce: 0 });
+
+/** Open the Posting tab for a piece, optionally pre-selecting an export or
+ *  putting the composer into edit mode for an existing draft. */
+export function openPostingTab(intent: Omit<PostingIntent, "nonce">): void {
+  store.current = { ...intent, nonce: ++store.nonce };
+  for (const listener of store.listeners) listener(store.current);
+}
+
+/** Clear the current intent once the Posting tab has acted on it, so a later
+ *  remount of the tab doesn't replay a stale hand-off. */
+export function consumePostingIntent(): void {
+  store.current = null;
+}
+
+/**
+ * Raw subscription to every `openPostingTab` call, regardless of piece — for
+ * the ONE place (the editor page) that has to react by SWITCHING to that
+ * piece and the Posting tab, which `usePostingIntent(pieceId)` can't do on
+ * its own (it only reads intents for a piece already known to be active).
+ * Called inside a listener callback, never synchronously in an effect body,
+ * so a caller's `setState` here is the sanctioned "react to an external
+ * event" pattern, not a banned setState-in-effect.
+ */
+export function subscribePostingIntent(listener: (intent: PostingIntent) => void): () => void {
+  const wrapped: Listener = (next) => {
+    if (next) listener(next);
+  };
+  store.listeners.add(wrapped);
+  return () => {
+    store.listeners.delete(wrapped);
+  };
+}
+
+/** The latest intent for this piece — `null` once consumed, or if the latest
+ *  intent targets a different piece. */
+export function usePostingIntent(pieceId: string): PostingIntent | null {
+  const [intent, setIntent] = useState<PostingIntent | null>(
+    store.current?.pieceId === pieceId ? store.current : null,
+  );
+  // A pieceId change while mounted (unlikely — callers key by pieceId, but
+  // cheap to be correct) re-syncs from the store DURING RENDER rather than
+  // via a setState-in-effect (which the lint rule bans — cascading renders —
+  // and which would show one stale frame first anyway). Same previous-value
+  // pattern as `export-dialog.tsx`'s `prevPieceName`/`prevDefaults` blocks.
+  const [prevPieceId, setPrevPieceId] = useState(pieceId);
+  if (pieceId !== prevPieceId) {
+    setPrevPieceId(pieceId);
+    setIntent(store.current?.pieceId === pieceId ? store.current : null);
+  }
+  useEffect(() => {
+    const listener: Listener = (next) => setIntent(next && next.pieceId === pieceId ? next : null);
+    store.listeners.add(listener);
+    return () => {
+      store.listeners.delete(listener);
+    };
+  }, [pieceId]);
+  return intent;
+}
+
+// ── Export-dialog request ────────────────────────────────────────────────
+//
+// The Posting tab's "Export & post" must open the REAL export dialog (the one
+// already mounted, uncontrolled, in `components/preview/preview-player.tsx`)
+// rather than duplicate its form. This is the same kind of tiny global signal
+// as the intent above, kept in this file because both exist to let two
+// unrelated parts of the editor hand off to each other without a shared
+// ancestor.
+//
+// The editor's tabs unmount their inactive panel (base-ui `Tabs.Panel`, no
+// `keepMounted`) — confirmed live: PreviewPlayer's listener count read 0 from
+// the Posting tab and 1 the moment the Timeline tab was selected. A request
+// fired while nobody is listening would silently do nothing, so `current`
+// PERSISTS the latest pending piece (like the posting intent above) and a
+// listener that mounts later — because `requestExportDialog` also asks the
+// page to switch to the Timeline tab, see `subscribeExportDialogRequest` —
+// checks it immediately instead of only reacting to future calls.
+
+type ExportDialogListener = (pieceId: string) => void;
+
+const ge = globalThis as unknown as {
+  __libiExportDialogRequest?: { current: string | null; listeners: Set<ExportDialogListener> };
+};
+const exportDialogStore = (ge.__libiExportDialogRequest ??= { current: null, listeners: new Set() });
+
+/** Ask the export dialog for this piece to open — including switching the
+ *  editor to the Timeline tab (`subscribeExportDialogRequest`, wired once at
+ *  the page level) so `useExportDialogRequest` gets a chance to mount and
+ *  see this even when nothing was listening at call time. */
+export function requestExportDialog(pieceId: string): void {
+  exportDialogStore.current = pieceId;
+  for (const listener of exportDialogStore.listeners) listener(pieceId);
+}
+
+/** Raw subscription for the editor page to switch tabs on a request — mirrors
+ *  `subscribePostingIntent` below. */
+export function subscribeExportDialogRequest(listener: ExportDialogListener): () => void {
+  exportDialogStore.listeners.add(listener);
+  return () => {
+    exportDialogStore.listeners.delete(listener);
+  };
+}
+
+/** Subscribe to `requestExportDialog` calls for one piece — including a
+ *  pending one recorded before this mounted (see above). */
+export function useExportDialogRequest(pieceId: string, onRequest: () => void): void {
+  // Latest-callback ref, written in a deps-less effect (never during render)
+  // so the listener always calls the current `onRequest` without
+  // re-subscribing — same pattern as `export-success-toast.tsx`'s dismiss
+  // timer.
+  const onRequestRef = useRef(onRequest);
+  useEffect(() => {
+    onRequestRef.current = onRequest;
+  });
+  useEffect(() => {
+    if (exportDialogStore.current === pieceId) {
+      exportDialogStore.current = null;
+      onRequestRef.current();
+    }
+    const listener: ExportDialogListener = (id) => {
+      if (id === pieceId) {
+        exportDialogStore.current = null;
+        onRequestRef.current();
+      }
+    };
+    exportDialogStore.listeners.add(listener);
+    return () => {
+      exportDialogStore.listeners.delete(listener);
+    };
+  }, [pieceId]);
+}

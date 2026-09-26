@@ -4,7 +4,7 @@
 // build before any other module in this bundle is evaluated — see
 // `./libi-home-bootstrap` for why that ordering matters.
 import "./libi-home-bootstrap";
-import { app, BrowserWindow, Notification, ipcMain, shell, dialog } from "electron";
+import { app, BrowserWindow, Notification, ipcMain, shell, dialog, safeStorage } from "electron";
 import http from "http";
 import path from "path";
 import fs from "fs";
@@ -94,10 +94,12 @@ mainSyncLog(`main.ts: isDev=${isDev} __dirname=${__dirname}`);
 // file to a server that no longer existed. Seen on a fresh Windows install.
 //
 // Electron keys the lock on userData, which `./libi-home-bootstrap` pinned
-// before this line ran and which is the packaged LIBI_HOME. It is taken before
-// anything below starts work: no shell-environment probe, no splash, no
-// runtime, no server, no port file. The app already running receives
-// `second-instance` (registered below) and comes to the front.
+// before this line ran and which is the packaged LIBI_HOME. A QA copy started
+// with `LIBI_USER_DATA_DIR=<absolute dir>` has had userData moved there by the
+// same bootstrap, so it locks its own folder and runs beside the operator's.
+// It is taken before anything below starts work: no shell-environment probe,
+// no splash, no runtime, no server, no port file. The app already running
+// receives `second-instance` (registered below) and comes to the front.
 //
 // Packaged only. Dev cannot hit this bug: dev Electron starts no server and
 // writes no port files (Next runs in `bin/libi.js`'s own process), so a second
@@ -560,6 +562,42 @@ app.on("ready", async () => {
   }
   process.env.LIBI_SHELL_API_MIN = String(MIN_SHELL_API_VERSION);
   process.env.LIBI_SHELL_API_MAX = String(MAX_SHELL_API_VERSION);
+
+  // ── The keychain cipher, BEFORE anything can serve a request ─────────────
+  // Hands the runtime a `safeStorage`-backed cipher for libi's own
+  // social-provider grant (lib/social/token-store.ts). This has to happen
+  // here, as early as the runtime exists and well before `startNextServer()`
+  // below: with no cipher registered the store falls back to a PLAINTEXT
+  // `enc: "none"` file, so a grant written in that window would be persisted
+  // in the clear on a keychain-capable machine (and an existing encrypted one
+  // would read as "not connected"). It used to run at the tail of this
+  // handler, after the server was already answering.
+  // Feature-detected — the export is additive, so an older runtime that
+  // predates it simply keeps its private 0600 file and SHELL_API_VERSION is
+  // unchanged.
+  if (typeof runtime.api.registerSecretCipher === "function") {
+    const encryptionAvailable = safeStorage.isEncryptionAvailable();
+    if (encryptionAvailable) {
+      runtime.api.registerSecretCipher({
+        label: "keychain",
+        encrypt: (plain: string) => safeStorage.encryptString(plain),
+        decrypt: (blob: Buffer) => safeStorage.decryptString(blob),
+      });
+    }
+    // The ONLY signal that a packaged build is keeping the grant in a plain
+    // file — `isEncryptionAvailable()` is false on a Linux box with no
+    // keyring, and silence there is how we would never find out. No secret,
+    // and nothing about whether a grant exists.
+    mainSyncLog(
+      encryptionAvailable
+        ? "main.ts: secret cipher registered (OS keychain); social grants are encrypted at rest"
+        : "main.ts: safeStorage reports encryption UNAVAILABLE; social grants fall back to a private 0600 file",
+    );
+  } else {
+    mainSyncLog(
+      "main.ts: runtime predates registerSecretCipher; social grants fall back to a private 0600 file",
+    );
+  }
   // A rejected candidate with a working fallback is NOT a user-facing error —
   // the app works. It is logged and nothing else.
   for (const r of resolved.rejections) {

@@ -21,6 +21,7 @@ vi.mock("mediabunny", () => ({
   UrlSource: class {},
   AudioBufferSink: class {},
   ALL_FORMATS: [],
+  Logging: { on: () => () => {} },
 }));
 
 interface Conn { from: string; to: string }

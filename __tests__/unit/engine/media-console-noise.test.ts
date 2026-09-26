@@ -20,6 +20,7 @@ const AUDIO_GC =
   "An AudioSample was garbage collected without first being closed. For proper resource management," +
   " make sure to call close() on all your AudioSamples as soon as you're done using them.";
 const RETRY = "Retrying failed fetch. Error:";
+const HEVC_SPS = "Error parsing HEVC SPS:";
 
 describe("isBenignMediaConsoleError", () => {
   it("matches the VideoSample GC diagnostic — the message that blocked the editor", () => {
@@ -32,6 +33,11 @@ describe("isBenignMediaConsoleError", () => {
 
   it("matches the per-attempt retry line, which arrives with an Error argument", () => {
     expect(isBenignMediaConsoleError([RETRY, new TypeError("Failed to fetch")])).toBe(true);
+  });
+
+  it("does NOT match the SPS parse lines: HEVC is handled per file by sps-diagnostics, AVC stays a real error", () => {
+    expect(isBenignMediaConsoleError([HEVC_SPS, new Error("Invalid exponential-Golomb code.")])).toBe(false);
+    expect(isBenignMediaConsoleError(["Error parsing AVC SPS:", new Error("x")])).toBe(false);
   });
 
   it("does NOT match an ordinary application error", () => {
@@ -51,6 +57,11 @@ describe("isBenignMediaConsoleError", () => {
 
   it("survives non-string arguments without throwing", () => {
     expect(isBenignMediaConsoleError([null, undefined, 42, { a: 1 }])).toBe(false);
+  });
+
+  it("every pattern is still a string the installed mediabunny logs (drift guard for upgrades)", () => {
+    const bundle = readFileSync(join(process.cwd(), "node_modules/mediabunny/dist/bundles/mediabunny.mjs"), "utf8");
+    for (const entry of BENIGN_MEDIA_CONSOLE_ERRORS) expect(bundle, entry.pattern).toContain(entry.pattern);
   });
 
   it("every documented pattern carries a reason", () => {

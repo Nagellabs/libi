@@ -8,6 +8,8 @@ export { sleep } from "./sleep-tool";
 export * from "./overlay-tools";
 export * from "./caption-tools";
 export * from "./overlay-preset-tools";
+export * from "./template-tools";
+export * from "./template-cloud-tools";
 export * from "./caption-style-tools";
 export * from "./effect-tools";
 export * from "./effect-package-tools";

@@ -2,21 +2,24 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Composition } from "@/lib/engine/types";
-import type { ThreeOverlayInstance, OverlayRendererPool } from "@/lib/engine/three-overlay";
+import type { ThreeOverlayInstance, OverlayRendererPool } from "@/lib/engine/three-renderer";
 import { textUsesThreeInstance, withSynthesizedThreeD } from "@/lib/overlays/three-d-mode";
 
 /**
- * Builds + caches a ThreeOverlayInstance per `three` overlay. Owns the single
- * shared WebGLRenderer's lifecycle. Instances build asynchronously (lazy three
- * import + canvas-text rasterization); until an overlay's instance is ready it is absent from
- * the returned map and the renderer's `case "three"` no-ops (no flash, no throw).
+ * Builds + caches a ThreeOverlayInstance per 3D-TEXT overlay (place3d / threeD).
+ * `three` BODIES render in the overlay sandbox (hooks/preview/use-overlay-layers.ts)
+ * and never touch this hook. 3D text is host code, not an untrusted body, so it
+ * stays in this origin. Owns the per-overlay WebGLRenderer pool's lifecycle.
+ * Instances build asynchronously (lazy three import + canvas-text
+ * rasterization); until an overlay's instance is ready it is absent from the
+ * returned map and the renderer falls back to flat 2D text (no flash, no throw).
  *
- * Re-builds an instance when its `sceneFunction` or `cameraPreset` changes;
- * disposes instances for overlays that were removed.
+ * Re-builds an instance when its text, font, colour, 3D mode or extrusion
+ * changes; disposes instances for overlays that were removed.
  *
- * When a rebuild throws (the agent saved a broken `scene.jsx`), the previously
- * built instance is RETAINED (last-good — no flash to empty) and the error is
- * surfaced in `errors` so the overlay error badge can render over the rect.
+ * When a rebuild throws, the previously built instance is RETAINED (last-good —
+ * no flash to empty) and the error is surfaced in `errors` so the overlay error
+ * badge can render over the rect.
  */
 export function useOverlayThreeScenes(composition: Composition | null): {
   threeScenes: Record<string, ThreeOverlayInstance>;
@@ -52,7 +55,6 @@ export function useOverlayThreeScenes(composition: Composition | null): {
   useEffect(() => {
     let cancelled = false;
     const all = composition?.overlays ?? [];
-    const threeOverlays = all.filter((o) => o.kind === "three");
     // Text overlays in 3D mode (place3d) OR with extrusion (`threeD`) get a built
     // three instance, rendered by the unified renderer's `case "text"` (falls back
     // to flat 2D when absent). place3d-without-extrusion is the common "tilt my
@@ -61,7 +63,7 @@ export function useOverlayThreeScenes(composition: Composition | null): {
     const textThreeOverlays = all.filter((o) => textUsesThreeInstance(o));
 
     // Dispose instances whose overlay was removed.
-    const liveIds = new Set([...threeOverlays, ...textThreeOverlays].map((o) => o.id));
+    const liveIds = new Set(textThreeOverlays.map((o) => o.id));
     let removedAny = false;
     for (const id of Object.keys(instRef.current)) {
       if (!liveIds.has(id)) {
@@ -83,7 +85,7 @@ export function useOverlayThreeScenes(composition: Composition | null): {
     // Republish so a removed overlay's stale key doesn't linger in state while
     // sibling instances remain. Harmless to render (renderFrame only looks up by
     // live overlay id) — this just keeps the published map honest.
-    const totalThree = threeOverlays.length + textThreeOverlays.length;
+    const totalThree = textThreeOverlays.length;
     if (removedAny && totalThree > 0) publish();
 
     if (totalThree === 0) {
@@ -98,14 +100,16 @@ export function useOverlayThreeScenes(composition: Composition | null): {
     if (errChanged) setErrors({ ...errRef.current });
 
     (async () => {
-      const { createOverlayRendererPool, buildThreeInstance } = await import("@/lib/engine/three-overlay");
+      // The compiler-free leaf: `three-overlay` carries the body compiler,
+      // which no page of the app origin may load (final review M5).
+      const { createOverlayRendererPool } = await import("@/lib/engine/three-renderer");
       if (!poolRef.current) poolRef.current = createOverlayRendererPool();
       if (cancelled) return;
 
       let changed = false;
       let errsChanged = false;
 
-      const onBuilt = (id: string, inst: import("@/lib/engine/three-overlay").ThreeOverlayInstance, sig: string) => {
+      const onBuilt = (id: string, inst: import("@/lib/engine/three-renderer").ThreeOverlayInstance, sig: string) => {
         instRef.current[id]?.dispose();
         instRef.current[id] = inst;
         sigRef.current[id] = sig;
@@ -118,23 +122,6 @@ export function useOverlayThreeScenes(composition: Composition | null): {
         errRef.current[id] = err instanceof Error ? err.message : String(err);
         errsChanged = true;
       };
-
-      // ── `three` overlays (scene bodies) ──
-      for (const o of threeOverlays) {
-        if (o.kind !== "three") continue;
-        const sig = `${o.cameraPreset ?? "billboard"}::${o.sceneFunction}`;
-        if (sigRef.current[o.id] === sig && instRef.current[o.id]) continue;
-        try {
-          const renderer = await poolRef.current.acquire(o.id);
-          if (cancelled) return;
-          const inst = await buildThreeInstance(o.sceneFunction, o.cameraPreset, renderer);
-          await inst.ready;
-          if (cancelled) { inst.dispose(); return; }
-          onBuilt(o.id, inst, sig);
-        } catch (err) {
-          onError(o.id, err);
-        }
-      }
 
       // ── `text` overlays carrying `threeD` ──
       if (textThreeOverlays.length > 0) {

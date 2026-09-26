@@ -2,10 +2,9 @@
 
 import * as React from "react";
 import Link from "next/link";
-import { BookOpen, Bot, Loader2, Plus, Settings } from "lucide-react";
+import { BookOpen, Bot, LayoutTemplate, Loader2, Plus, Settings, Share2 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 
-import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { LibiMark } from "@/components/brand/libi-mark";
 import AgentSelector from "@/components/sessions/agent-selector";
 import SidebarSessionList from "@/components/sessions/sidebar-session-list";
@@ -332,7 +331,6 @@ export function AppSidebar(props: AppSidebarProps) {
             these across multiple <SidebarMenu>s reintroduces the footer's
             gap-2 between groups and breaks the alignment. */}
         <SidebarMenu>
-          <ThemeToggle />
           <SidebarMenuItem>
             <SidebarMenuButton
               render={<Link href="/instructions" />}
@@ -353,6 +351,23 @@ export function AppSidebar(props: AppSidebarProps) {
             >
               <Bot className="size-4" />
               <span>Agents</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton render={<Link href="/social" />} tooltip="Social" isActive={pathname.startsWith("/social")} className="cursor-pointer">
+              <Share2 className="size-4" />
+              <span>Social</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              render={<Link href="/templates" />}
+              tooltip="Templates"
+              isActive={pathname.startsWith("/templates")}
+              className="cursor-pointer"
+            >
+              <LayoutTemplate className="size-4" />
+              <span>Templates</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

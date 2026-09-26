@@ -322,3 +322,21 @@ describe("TerminalView insert-text queueing", () => {
     }
   });
 });
+
+// The setup terminal re-arms its Enter guard whenever something reaches the screen (components/terminal/setup-terminal.tsx).
+describe("TerminalView onOutput", () => {
+  it("fires for the attach snapshot and for each chunk of PTY output, and not for a control message", async () => {
+    const { default: TerminalView } = await import("@/components/terminal/terminal-view");
+    const onOutput = vi.fn();
+    render(<TerminalView terminalId="t1" onOutput={onOutput} />);
+    await flushMicrotasks();
+    const socket = instances[0];
+    act(() => socket.open());
+    act(() => socket.snapshot("prompt $ "));
+    expect(onOutput).toHaveBeenCalledTimes(1);
+    act(() => socket.onmessage?.({ data: new TextEncoder().encode("sh add-provider.sh").buffer as ArrayBuffer }));
+    expect(onOutput).toHaveBeenCalledTimes(2);
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "exit", exitCode: 0 }) }));
+    expect(onOutput).toHaveBeenCalledTimes(2);
+  });
+});

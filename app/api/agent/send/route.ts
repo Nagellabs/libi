@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionManager } from "@/lib/sessions/session-manager";
+import { isAgentHistoryMissing } from "@/lib/sessions/history-missing";
 import { formatFileSize } from "@/lib/utils/format";
 import { trackServerEvent } from "@/lib/analytics/server";
 import { markAnalyticsMilestoneOnce } from "@/lib/db/settings";
@@ -62,6 +63,11 @@ export async function POST(request: Request) {
     try {
       await sm.activateSession(sessionId);
     } catch (err) {
+      // The agent has no transcript for this chat, so no retry can succeed: a 409 the chat reads as
+      // "this chat can't be continued" (it disables the composer) rather than a Retry that loops.
+      if (isAgentHistoryMissing(err)) {
+        return NextResponse.json({ error: err.message, historyMissing: true }, { status: 409 });
+      }
       logger.warn(
         { tag: "session-manager", op: "send_reactivate_failed", sessionId, err },
         `Could not re-activate ${sessionId} for send`,

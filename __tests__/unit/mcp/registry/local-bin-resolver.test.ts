@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { resolveBundledSpawn } from "@/mcp/registry/local-bin-resolver";
+import { adapterBinFileNames } from "@/lib/agents/adapter-tree";
 import type { BundledMcpDef } from "@/mcp/registry/types";
 
 const baseDef: BundledMcpDef = {
@@ -21,6 +22,18 @@ const baseDef: BundledMcpDef = {
 
 function makeRoot(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "libi-resolver-test-"));
+}
+
+/**
+ * The bin shim(s) npm writes for `name` on this host, and the one the resolver must answer. Off Windows that is
+ * the bare `<name>`; on Windows cmd-shim writes an extensionless BASH script plus `<name>.cmd` (and `.ps1`), and
+ * only the `.cmd` is spawnable — `adapterBinFileNames`, the product's own list, names it.
+ */
+function writeBinShim(binDir: string, name: string): string {
+  fs.writeFileSync(path.join(binDir, name), "#!/bin/sh\n");
+  const expected = path.join(binDir, adapterBinFileNames(name, process.platform)[0]);
+  if (!fs.existsSync(expected)) fs.writeFileSync(expected, "@ECHO off\r\n");
+  return expected;
 }
 
 describe("resolveBundledSpawn", () => {
@@ -64,7 +77,7 @@ describe("resolveBundledSpawn", () => {
       JSON.stringify({ version: "0.9.0" }),
     );
     fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
-    fs.writeFileSync(path.join(root, "node_modules", ".bin", "pkg-bin"), "#!/bin/sh\n");
+    writeBinShim(path.join(root, "node_modules", ".bin"), "pkg-bin");
 
     const def: BundledMcpDef = {
       ...baseDef,
@@ -102,8 +115,7 @@ describe("resolveBundledSpawn", () => {
       JSON.stringify({ version: "1.0.0" }),
     );
     fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
-    const binPath = path.join(root, "node_modules", ".bin", "pkg-bin");
-    fs.writeFileSync(binPath, "#!/bin/sh\n");
+    const binPath = writeBinShim(path.join(root, "node_modules", ".bin"), "pkg-bin");
 
     const def: BundledMcpDef = {
       ...baseDef,
@@ -125,8 +137,7 @@ describe("resolveBundledSpawn", () => {
       JSON.stringify({ version: "1.0.0" }),
     );
     fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
-    const binPath = path.join(root, "node_modules", ".bin", "pkg");
-    fs.writeFileSync(binPath, "#!/bin/sh\n");
+    const binPath = writeBinShim(path.join(root, "node_modules", ".bin"), "pkg");
 
     const def: BundledMcpDef = {
       ...baseDef,

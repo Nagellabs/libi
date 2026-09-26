@@ -26,6 +26,7 @@ import { isWindows } from "@/lib/platform";
 import { serverLogger as logger } from "@/lib/logger";
 import { markLibiInstalledRevisions } from "@/lib/server/lifecycle/housekeeping";
 import { playwrightChromiumRevision } from "@/lib/playwright/paths";
+import { checkYtDlpLauncher } from "@/lib/video-download/launcher";
 
 /**
  * Force-rebuild lever for the uv-managed yt-dlp install. Custom-installer deps
@@ -45,6 +46,9 @@ import { playwrightChromiumRevision } from "@/lib/playwright/paths";
  * large YouTube download. Only a re-install repairs those.
  */
 export const YT_DLP_UV_TOKEN = "yt-dlp-uv@2026-09-09";
+
+/** The last unusable-launcher cause verify() logged — see its target check. */
+let lastUnusableLauncherLogged = "";
 
 /**
  * The requirement uv installs — `yt-dlp[default]`, never bare `yt-dlp`.
@@ -79,13 +83,22 @@ export const YT_DLP_UV_REQUIREMENT = "yt-dlp[default]";
 
 /** argv for the `uv tool install` that provisions yt-dlp (uv binary aside).
  *  `--reinstall` implies `--refresh`, so a token bump lands the CURRENT
- *  upstream release rather than no-opping on what is already there. */
+ *  upstream release rather than no-opping on what is already there.
+ *
+ *  `--force` lets uv overwrite an entry point it no longer tracks in
+ *  UV_TOOL_BIN_DIR (`<LIBI_HOME>/uv/tools-bin`, libi's own dir). Without it a
+ *  REPAIR fails whenever the tool venv is gone but its old link is not — the
+ *  exact state of a launcher whose target vanished (`error: Executable already
+ *  exists: yt-dlp (use --force to overwrite)`, reproduced 2026-09-25 by
+ *  deleting `uv/tools`). Nothing else writes that directory, so there is
+ *  nothing of the user's to clobber. */
 export function ytDlpUvInstallArgs(): string[] {
   return [
     "tool",
     "install",
     YT_DLP_UV_REQUIREMENT,
     "--reinstall",
+    "--force",
     "--python",
     "3.12",
     "--with",
@@ -241,6 +254,28 @@ const INSTALLERS: Record<string, CustomInstaller> = {
         token = "";
       }
       if (token !== YT_DLP_UV_TOKEN) return null;
+      // The launcher is a wrapper FILE, not a link, so the two checks above
+      // never see where it points. Read the entry point it execs and require
+      // it (and its Python) to exist: a launcher whose target is gone is not
+      // installed, so `ensureDep` reinstalls it instead of the job spawning a
+      // dead exec (exit 126/127). That is what broke video download for every
+      // libi on the owner's machine when a worktree whose home had baked its
+      // own path into the shared launcher was deleted (2026-09-25).
+      const health = checkYtDlpLauncher();
+      if (!health.ok) {
+        // verify() runs on every status poll; say it once per distinct cause.
+        const key = `${health.reason}:${health.target ?? ""}`;
+        if (key !== lastUnusableLauncherLogged) {
+          lastUnusableLauncherLogged = key;
+          logger.info(
+            { tag: "video-download", op: "launcher_unusable", reason: health.reason, target: health.target },
+            "yt-dlp launcher present but not runnable; treating yt-dlp as not installed",
+          );
+        }
+        return null;
+      }
+      // Healthy again: a later break of the same kind must be logged again.
+      lastUnusableLauncherLogged = "";
       return target;
     },
     install: {

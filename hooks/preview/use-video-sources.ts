@@ -27,6 +27,16 @@ import {
 } from "@/lib/preview/tuning";
 import { useEditorState } from "@/lib/editor-state-context";
 
+/** One mountable video source: its preview URL (+ the original to fall back to
+ *  when that URL is a proxy), timeline span, and decode-height cap. */
+interface RegistryEntry {
+  url: string;
+  fallbackUrl?: string;
+  startSec: number;
+  endSec: number;
+  decodeHeight: number;
+}
+
 /** The effective decode action a source is currently in, so `applyBudget` can be
  *  idempotent — it only issues a transition when this changes, never re-issuing
  *  `warm()`/`pause()`/`prime()` on a steady source (the per-tick churn that
@@ -108,9 +118,7 @@ export function useVideoSources(
   // frame tick, hysteretic) attaches the near set and disposes the far set.
   const maxHeightRef = useRef(maxDecodeHeight);
   maxHeightRef.current = maxDecodeHeight;
-  const registry = useRef<
-    Map<string, { url: string; startSec: number; endSec: number; decodeHeight: number }>
-  >(new Map());
+  const registry = useRef<Map<string, RegistryEntry>>(new Map());
   const clipsRef = useRef<Array<{ id: string; startSec: number; endSec: number }>>([]);
   // Last-good thumbnail per recently-disposed source → seeds adoptLastGood on a
   // re-mount so a scrub-back never black-flashes. Bounded (LRU) so retention
@@ -137,8 +145,8 @@ export function useVideoSources(
   }, []);
 
   const attach = useCallback(
-    (id: string, url: string, decodeHeight: number) => {
-      const source = new MediaBunnyFrameSource(url, decodeHeight);
+    (id: string, url: string, decodeHeight: number, fallbackUrl?: string) => {
+      const source = new MediaBunnyFrameSource(url, decodeHeight, { fallbackUrl });
       source.setTelemetryLabel(id);
       // Seed the last-good from a retained thumb (re-mount / scrub-back) so the
       // fresh empty ring HOLDS the prior frame instead of a BLACK flash.
@@ -196,14 +204,14 @@ export function useVideoSources(
         if (!r) continue;
         const ex = map.current.get(id);
         if (!ex) {
-          attach(id, r.url, r.decodeHeight);
+          attach(id, r.url, r.decodeHeight, r.fallbackUrl);
           changed = true;
         } else if (ex.url !== r.url || ex.maxHeight !== r.decodeHeight) {
           // URL / preview-quality / rect-bucket swap: carry the last-good across so
           // the reattach holds the frame instead of flashing black (adoptLastGood).
           retainThumb(id, ex.source.lastGoodFrame());
           detach(id);
-          attach(id, r.url, r.decodeHeight);
+          attach(id, r.url, r.decodeHeight, r.fallbackUrl);
           changed = true;
         }
       }
@@ -238,10 +246,7 @@ export function useVideoSources(
       return;
     }
     const cap = maxDecodeHeight;
-    const reg = new Map<
-      string,
-      { url: string; startSec: number; endSec: number; decodeHeight: number }
-    >();
+    const reg = new Map<string, RegistryEntry>();
     // Scenes are canvas-only — they decode no video. Every video source in the
     // composition is an overlay.
     for (const o of composition.overlays ?? []) {
@@ -251,8 +256,13 @@ export function useVideoSources(
         // win); a full-frame rect lands in the top bucket ⇒ unchanged. Uses the
         // AUTHORED rect height (comp px) so a resize only re-attaches on a bucket
         // crossing, never per drag pixel.
+        const originalUrl = `/api/files/by-id/${o.fileId}/content`;
+        const url = o.videoUrl ?? originalUrl;
         reg.set(o.id, {
-          url: o.videoUrl ?? `/api/files/by-id/${o.fileId}/content`,
+          url,
+          // A proxy that can't be played falls back to the original ONCE
+          // (MediaBunnyFrameSource; lib/engine/media-load-failure.ts).
+          fallbackUrl: url !== originalUrl ? originalUrl : undefined,
           startSec: o.startTime,
           endSec: o.startTime + o.duration,
           decodeHeight: bucketDecodeHeight(o.rect.height, cap),

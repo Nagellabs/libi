@@ -10,7 +10,7 @@ vi.mock("@/lib/approval/settings", () => ({
 }));
 
 import { getApprovalMode } from "@/lib/approval/settings";
-import { decidePermissionAction } from "@/lib/agents/session-event-handler";
+import { decidePermissionAction, SessionEventHandler } from "@/lib/agents/session-event-handler";
 import {
   isApprovalRequiredExtensionTool,
   isExtensionInstallTool,
@@ -381,5 +381,65 @@ describe("isExtensionInstallTool", () => {
     expect(isExtensionInstallTool("libi.generate_music")).toBe(false);
     expect(isExtensionInstallTool("libi.music_list_styles")).toBe(false);
     expect(isExtensionInstallTool("libi.compute_object_track")).toBe(false);
+  });
+});
+
+/**
+ * 2026-09-24 — "an agent can prepare a publish; only you can publish."
+ * `libi.publish_template` only records a publish request (the user publishes
+ * it on the Templates page), so the approval card is no longer the guard and
+ * the tool is an ordinary call: no special reason, no trimmed options, no
+ * special answer for an unknown session. The guard is structural — see the
+ * LIMITATIONS in lib/approval/extensions.ts.
+ */
+describe("publish_template is an ordinary tool call — the Templates page is the guard", () => {
+  const ALL = ["reject_once", "allow_once", "allow_always"] as const;
+  const WIRES = ["mcp__libi__libi_publish_template", "mcp__libi-app__libi_publish_template", "mcp.libi.libi.publish_template"];
+
+  it("auto modes allow it like any libi tool; ask mode asks like any tool", async () => {
+    for (const mode of ["auto", "auto-with-generations"] as const) {
+      setApprovalMode("claude-code", mode);
+      for (const wire of WIRES) expect(await decidePermissionAction("claude-code", req(wire, [...ALL])), `${mode}: ${wire}`).toEqual({ kind: "auto-allow", optionId: "opt-1-allow_once" });
+    }
+    setApprovalMode("claude-code", "ask");
+    for (const wire of WIRES) expect(await decidePermissionAction("claude-code", req(wire, [...ALL])), wire).toEqual({ kind: "prompt", reason: "acp" });
+  });
+
+  it("a prompt for it offers every option the agent sent, Always Allow included", async () => {
+    setApprovalMode("claude-code", "ask");
+    const emit = vi.fn();
+    const session = { agentId: "claude-code", pendingApprovals: new Map() };
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      emit,
+      (() => session) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+    void handler.handlePermissionRequest(req("mcp__libi__libi_publish_template", [...ALL]));
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    const event = emit.mock.calls[0][1] as { type: string; reason: string; options: Array<{ kind: string }> };
+    expect(event).toMatchObject({ type: "agent-permission-request", reason: "acp" });
+    expect(event.options.map((o) => o.kind)).toEqual([...ALL]);
+  });
+});
+
+// A request libi cannot route (its session is not in the map — a race with a
+// session teardown, or a standby never claimed) is answered with the first
+// allow option so the agent does not hang.
+describe("a permission request for a session libi cannot look up", () => {
+  const handlerWithNoSessions = () =>
+    new SessionEventHandler(
+      { next: () => 1 },
+      vi.fn(),
+      (() => undefined) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+
+  it("answers publish_template like any tool: preparing a publish publishes nothing", async () => {
+    const r = await handlerWithNoSessions().handlePermissionRequest(req("mcp__libi__libi_publish_template", ["reject_once", "allow_once"]));
+    expect(r).toEqual({ outcome: { outcome: "selected", optionId: "opt-1-allow_once" } });
+  });
+
+  it("still picks the first allow option for an ordinary tool", async () => {
+    const r = await handlerWithNoSessions().handlePermissionRequest(req("mcp__libi__libi_apply_template", ["reject_once", "allow_once"]));
+    expect(r).toEqual({ outcome: { outcome: "selected", optionId: "opt-1-allow_once" } });
   });
 });

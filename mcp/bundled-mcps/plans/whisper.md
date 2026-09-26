@@ -13,6 +13,10 @@ Before any download step, tell the user (paraphrase, don't paste verbatim):
 > downloads to your machine:
 > - **Python library**: `faster-whisper` 1.1.x from **PyPI**,
 >   installed via the bundled `uv` (Apache-2.0).
+> - **Python itself**: libi's own CPython 3.12 from **GitHub**
+>   (`astral-sh/python-build-standalone`, via the bundled `uv`) — ~25 MB
+>   download, ~70 MB into `~/.libi/uv/python/`. Once per machine, shared
+>   with libi's other on-device features; skipped if already there.
 > - **Model weights**: Systran's `faster-whisper-small` from
 >   **HuggingFace** (`Systran/faster-whisper-small`, ~480 MB into
 >   `~/.libi/models/whisper/`). Other sizes are tiny/base

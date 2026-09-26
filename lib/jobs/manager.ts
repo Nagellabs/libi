@@ -36,6 +36,7 @@ import {
   updateProgress,
 } from "@/lib/jobs/repo";
 import { notify } from "@/mcp/notify";
+import { redactLiveSecrets } from "@/lib/security/secret-scrub";
 
 function partialPathFor(jobId: string): string {
   return path.join(getLibiHome(), "jobs", jobId, "state.json");
@@ -362,6 +363,13 @@ export class JobManager extends EventEmitter {
     return () => this.off("progress", handler);
   }
 
+  /** How many jobs of `kind` hold a slot or wait for one in this process. A
+   *  background example render reads it for `export`, so it does not start
+   *  between two queued user exports only to yield at once (lib/export/export-lane.ts). */
+  activeOrWaiting(kind: string): number {
+    return (this.activeByKind.get(kind) ?? 0) + (this.waiters.get(kind)?.length ?? 0);
+  }
+
   async getStatus(jobId: string): Promise<JobStatusSnapshot> {
     const row = await getJobById(jobId);
     if (!row) throw new JobNotFoundError(jobId);
@@ -606,7 +614,11 @@ export class JobManager extends EventEmitter {
         this.emitTerminal("cancelled", jobId);
         throw err instanceof CancelledError ? err : new CancelledError(jobId);
       }
-      const message = err instanceof Error ? err.message : String(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      // A backstop: the job row, the SSE event and the error the MCP child
+      // hands the agent must never carry a live secret (a failed query's
+      // message quotes its parameters). Runners are expected not to throw one.
+      const message = redactLiveSecrets(raw);
       try {
         await markFailed(jobId, message);
       } catch (e) {
@@ -614,7 +626,7 @@ export class JobManager extends EventEmitter {
       }
       logger.error({ jobId, kind: row.kind, err: message }, "jobs.run.failed");
       this.emitTerminal("failed", jobId, { error: message });
-      throw err;
+      throw message === raw ? err : new Error(message);
     } finally {
       if (watchdog) clearInterval(watchdog);
       clearInterval(heartbeat);

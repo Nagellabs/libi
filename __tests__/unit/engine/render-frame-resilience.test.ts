@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from "vitest";
 import { renderFrame } from "@/lib/engine/renderer";
-import type { Composition, DrawContext } from "@/lib/engine/types";
+import type { Composition } from "@/lib/engine/types";
+import { fakeBitmap, fakeLayers } from "@/__tests__/helpers/fake-layers";
 
 /**
  * Regression: a single throwing overlay draw must NOT abort the whole frame.
  * Before this guard, `renderFrame` unwound on the first throw (after clearRect)
  * and the preview loop's silent catch left the ENTIRE canvas blank — one broken
  * code or 3D-text overlay blanked everything, invisibly. renderFrame now
- * isolates each overlay draw.
+ * isolates each overlay draw. Bodies render in the sandbox now (spec §4.4),
+ * so the host-side thrower is the LayerSource an overlay reads through.
  */
 function mockCanvas() {
   const canvas = document.createElement("canvas");
@@ -41,14 +43,13 @@ describe("renderFrame draw isolation", () => {
       overlays: [codeOverlay("o1", 0)],
     };
     const { canvas, mockCtx } = mockCanvas();
-    const compiled = { o1: () => { throw new ReferenceError("ctx is not defined"); } };
-    expect(() => renderFrame(canvas, comp, 0, {}, undefined, undefined, compiled)).not.toThrow();
+    const layers = fakeLayers({}, { throwOnGet: ["o1"] });
+    expect(() => renderFrame(canvas, comp, 0, {}, undefined, undefined, layers)).not.toThrow();
     // Frame still progressed past the cleared canvas.
     expect(mockCtx.clearRect).toHaveBeenCalled();
   });
 
   it("a throwing overlay does not prevent its siblings from drawing", () => {
-    const good = vi.fn((_ctx: DrawContext) => {});
     const comp: Composition = {
       id: "c", name: "c", width: 100, height: 100, fps: 30,
       // The thrower sits UNDERNEATH, so a frame that unwound on it would never
@@ -56,12 +57,9 @@ describe("renderFrame draw isolation", () => {
       overlays: [codeOverlay("bad", 0), codeOverlay("good", 1)],
     };
     const { canvas } = mockCanvas();
-    const compiled = {
-      bad: () => { throw new Error("bad code overlay"); },
-      good,
-    };
-    expect(() => renderFrame(canvas, comp, 0, {}, undefined, undefined, compiled)).not.toThrow();
-    expect(good).toHaveBeenCalledTimes(1);
+    const layers = fakeLayers({ good: fakeBitmap() }, { throwOnGet: ["bad"] });
+    expect(() => renderFrame(canvas, comp, 0, {}, undefined, undefined, layers)).not.toThrow();
+    expect(layers.requests.filter((r) => r.overlayId === "good")).toHaveLength(1);
   });
 
   // QA 2026-09-18 B1: the throw was only visible as an info-level console
@@ -74,18 +72,17 @@ describe("renderFrame draw isolation", () => {
       overlays: [codeOverlay("o1", 0)],
     };
     const { canvas } = mockCanvas();
-    const compiled = { o1: () => { throw new ReferenceError("ctx is not defined"); } };
+    const layers = fakeLayers({}, { throwOnGet: ["o1"] });
     const onOverlayDropped = vi.fn();
     renderFrame(
-      canvas, comp, 0, {}, undefined, undefined, compiled,
-      undefined, undefined, undefined, undefined,
+      canvas, comp, 0, {}, undefined, undefined, layers,
+      undefined, undefined, undefined,
       onOverlayDropped,
     );
-    expect(onOverlayDropped).toHaveBeenCalledWith("o1", "ctx is not defined");
+    expect(onOverlayDropped).toHaveBeenCalledWith("o1", "layer o1 failed");
   });
 
   it("does not call onOverlayDropped when no overlay throws", () => {
-    const good = vi.fn((_ctx: DrawContext) => {});
     const comp: Composition = {
       id: "c", name: "c", width: 100, height: 100, fps: 30,
       overlays: [codeOverlay("good", 0)],
@@ -93,8 +90,8 @@ describe("renderFrame draw isolation", () => {
     const { canvas } = mockCanvas();
     const onOverlayDropped = vi.fn();
     renderFrame(
-      canvas, comp, 0, {}, undefined, undefined, { good },
-      undefined, undefined, undefined, undefined,
+      canvas, comp, 0, {}, undefined, undefined, fakeLayers({ good: fakeBitmap() }),
+      undefined, undefined, undefined,
       onOverlayDropped,
     );
     expect(onOverlayDropped).not.toHaveBeenCalled();

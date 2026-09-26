@@ -10,6 +10,10 @@
  * Override with NEXT_PUBLIC_LIBI_SITE_URL when running against a staging site.
  */
 
+/** The production origin — the default, and what "talking to production" means
+ *  wherever the app must tell production from staging (lib/templates/cloud). */
+export const PRODUCTION_SITE_URL = "https://libi.nagellabs.com";
+
 export const SITE_URL = (
-  process.env.NEXT_PUBLIC_LIBI_SITE_URL ?? "https://libi.nagellabs.com"
+  process.env.NEXT_PUBLIC_LIBI_SITE_URL ?? PRODUCTION_SITE_URL
 ).replace(/\/+$/, "");

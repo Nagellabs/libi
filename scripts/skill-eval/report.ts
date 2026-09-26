@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { RunResult, TraceCall } from "./types";
+import { describeTurn } from "./assertions";
 
 export interface ReportPayload {
   result: RunResult;
@@ -48,9 +49,25 @@ export function formatStdoutSummary(result: RunResult): string {
     );
   }
   if (result.errorMessage) lines.push(`  error: ${result.errorMessage}`);
+  if (result.durationSec !== undefined) {
+    const cost = result.cost ? ` · ${result.cost.amount.toFixed(4)} ${result.cost.currency}` : " · cost not reported";
+    lines.push(`  took ${result.durationSec}s${cost}`);
+  }
   for (const a of result.assertions) {
     const mark = a.pass ? "✓" : "✗";
-    const sel = a.matcher.endpoint_id ?? a.matcher.tool ?? a.matcher.where ?? "(any)";
+    const needle = a.matcher.transcript_contains;
+    const narrowed = [describeTurn(a.matcher.turn), a.matcher.scope === "agent_text" ? "agent text" : ""].filter(Boolean).join(", ");
+    const sel =
+      a.matcher.endpoint_id ??
+      a.matcher.tool ??
+      a.matcher.where ??
+      (needle !== undefined
+        ? `${JSON.stringify(needle)}${narrowed ? ` (${narrowed})` : ""}`
+        : a.matcher.transcript_matches !== undefined
+          ? `/${a.matcher.transcript_matches}/${narrowed ? ` (${narrowed})` : ""}`
+          : a.matcher.ordered
+            ? `ordered: ${a.matcher.ordered.before.map((b) => JSON.stringify(b.transcript_contains)).join(" + ")} before ${JSON.stringify(a.matcher.ordered.then.transcript_contains)}`
+            : "(any)");
     const rule = a.matcher.expect ?? a.matcher.count ?? "?";
     lines.push(`  ${mark} ${sel} [${rule}] matched=${a.matchedCount}${a.reason ? ` — ${a.reason}` : ""}`);
   }

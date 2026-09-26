@@ -103,11 +103,26 @@ jobs:
       # it the way the product does — `<LIBI_HOME>/bin` first, then PATH — and
       # the isolated LIBI_HOME links in the Category-A binaries when the
       # machine has them (__tests__/helpers/provisioned-bin.ts). This runner
-      # has no provisioned home, so everything falls through to the apt build
+      # has no provisioned home, so everything falls through to the build
       # installed here. It must carry `drawtext` (libfreetype) or the caption
       # burn-in and text-overlay tests skip.
-      - name: Install ffmpeg (not in the runner image; real-ffmpeg tests must run here, not skip)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      #
+      # And it must be the ffmpeg libi installs, not Ubuntu's: libi puts
+      # BtbN's linux64-gpl build in `~/.libi/bin` (mcp/registry/bundled.ts),
+      # 9.x like the macOS one. The audio-timing tests pin what ffmpeg 9 does
+      # with encoder delay, Matroska CodecDelay and late-starting streams, and
+      # apt's 6.x answers differently (0.379 s for a 0.4 s lead) — 17 of them
+      # failed on the 0.1.16 candidate for exactly that. Pinned to the n9.0
+      # release line, not master, so a new ffmpeg can't turn CI red overnight.
+      - name: Install ffmpeg 9.0 (the build libi installs on Linux; real-ffmpeg tests must run here, not skip)
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 -o /tmp/ffmpeg.tar.xz \
+            https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+          mkdir -p /tmp/ffmpeg && tar -xJf /tmp/ffmpeg.tar.xz -C /tmp/ffmpeg --strip-components=1
+          sudo install -m 0755 /tmp/ffmpeg/bin/ffmpeg /tmp/ffmpeg/bin/ffprobe /usr/local/bin/
+          ffmpeg -version | head -1
+          ffmpeg -hide_banner -filters | grep -q drawtext
 
       # Fixture-dependent suites (tracking footage, MediaPipe models, Playwright
       # browsers) skip loudly when their inputs are absent — see

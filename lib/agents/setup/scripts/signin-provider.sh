@@ -7,7 +7,7 @@
 #
 #   sh signin-provider.sh <provider> <agent> <cli> <entry>
 #
-#   provider  higgsfield
+#   provider  higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config
@@ -30,6 +30,8 @@ entry=$4
 # an account.
 case $provider in
   higgsfield) name='Higgsfield' ;;
+  zernio) name='Zernio' ;;
+  elevenlabs) name='ElevenLabs' ;;
   *) echo "signin-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in
@@ -47,4 +49,18 @@ fi
 
 # The agent's own sign-in. The script exits with its exit code.
 echo "Opening your browser to sign in with your $name account. This waits here until you finish."
+if [ "$agent" != claude ]; then
+  "$cli" mcp login -- "$entry"
+  exit
+fi
+# For Claude Code, the two [libi sign-in ...] lines tell libi when the sign-in
+# starts and when it has ended, however it ended (Ctrl-C included): libi must
+# not ask Claude Code about the entry in between, or Claude Code may skip it
+# for 15 minutes.
+printf '[libi sign-in start: %s]\n' "$entry"
+trap 'printf "\n[libi sign-in end: %s]\n" "$entry"; exit 130' HUP INT TERM
 "$cli" mcp login -- "$entry"
+status=$?
+trap - HUP INT TERM
+printf '[libi sign-in end: %s]\n' "$entry"
+exit "$status"

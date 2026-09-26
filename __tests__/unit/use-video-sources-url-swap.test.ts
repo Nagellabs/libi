@@ -31,6 +31,7 @@ vi.mock("@/lib/engine/media-bunny-frame-source", () => ({
     constructor(
       public readonly url: string,
       public readonly maxDecodeHeight: number,
+      public readonly opts?: { fallbackUrl?: string },
     ) {}
     setTelemetryLabel() {}
     onFrame() {
@@ -127,6 +128,26 @@ describe("useVideoSources URL swap", () => {
       rerender({ c: comp });
     });
     expect(result.current.sources["scene-1"]).toBe(before);
+  });
+
+  // T3 (2026-09-25): a proxy that can't be played falls back to the original
+  // once, so the source has to be told what the original is.
+  it("hands a proxy-backed source the original as its fallback", () => {
+    const { result } = renderHook(
+      ({ comp }) => useVideoSources(comp, false, 1, fs),
+      { initialProps: { comp: mkComp("/api/files/by-id/f1/proxy") } },
+    );
+    const src = result.current.sources["scene-1"] as unknown as { opts?: { fallbackUrl?: string } };
+    expect(src.opts?.fallbackUrl).toBe("/api/files/by-id/f1/content");
+  });
+
+  it("gives a source already on the original no fallback", () => {
+    const { result } = renderHook(
+      ({ comp }) => useVideoSources(comp, false, 1, fs),
+      { initialProps: { comp: mkComp("/api/files/by-id/f1/content") } },
+    );
+    const src = result.current.sources["scene-1"] as unknown as { opts?: { fallbackUrl?: string } };
+    expect(src.opts?.fallbackUrl).toBeUndefined();
   });
 
   // NOTE: first-frame-decode → snapshot-bump (initial paint / paused scrub) is

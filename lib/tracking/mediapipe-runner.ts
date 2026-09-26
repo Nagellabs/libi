@@ -388,7 +388,7 @@ async function runTracker(
 
   page.on("console", (msg) =>
     logger.info(
-      { jobId: job.jobId, level: msg.type(), text: msg.text() },
+      { jobId: job.jobId, consoleLevel: msg.type(), text: msg.text() },
       "tracking.console",
     ),
   );

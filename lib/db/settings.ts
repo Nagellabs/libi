@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "./client";
 import { settings } from "./schema";
 import { DEFAULT_ASPECT_RATIO_ID, ratioById } from "@/lib/composition/aspect-ratio";
@@ -9,6 +9,7 @@ import {
   markMilestone,
 } from "@/lib/analytics/settings-logic";
 import { crashReportChoiceAllowsReporting } from "@/lib/sentry/enabled";
+import { isSocialProviderId, type SocialProviderId, type InstagramPostType } from "@/lib/social/catalog";
 
 export type { AnalyticsSettings };
 
@@ -324,6 +325,49 @@ export function setPieceDefaults(s: PieceDefaultsSetting): void {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy canvas-scene notice (once per piece; see hooks/editor/use-legacy-scenes-notice.ts)
+// ---------------------------------------------------------------------------
+
+function readLegacyScenesNoticed(): string[] {
+  const [row] = getDb()
+    .select({ legacyScenesNoticed: settings.legacyScenesNoticed })
+    .from(settings)
+    .where(eq(settings.id, 1))
+    .limit(1)
+    .all();
+  const raw = row?.legacyScenesNoticed;
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeLegacyScenesNoticed(ids: string[]): void {
+  const set = { legacyScenesNoticed: JSON.stringify(ids), updatedAt: new Date() };
+  getDb().insert(settings).values({ id: 1, ...set }).onConflictDoUpdate({ target: settings.id, set }).run();
+}
+
+/** Has the user already been told this piece's legacy canvas scenes were not loaded? */
+export function isLegacyScenesNoticed(pieceId: string): boolean {
+  return readLegacyScenesNoticed().includes(pieceId);
+}
+
+/** Record that the user has been told. Idempotent. */
+export function markLegacyScenesNoticed(pieceId: string): void {
+  const ids = readLegacyScenesNoticed();
+  if (!ids.includes(pieceId)) writeLegacyScenesNoticed([...ids, pieceId]);
+}
+
+/** Drop a deleted piece's id (lib/pieces/delete-piece.ts). No-op when absent. */
+export function forgetLegacyScenesNoticed(pieceId: string): void {
+  const ids = readLegacyScenesNoticed();
+  if (ids.includes(pieceId)) writeLegacyScenesNoticed(ids.filter((id) => id !== pieceId));
+}
+
+// ---------------------------------------------------------------------------
 // Bundled-skill digest cache (per-app-version, see mcp/skills/digest.ts)
 // ---------------------------------------------------------------------------
 
@@ -473,4 +517,469 @@ export function setCrashReportSettings(next: CrashReportSettings): CrashReportSe
  *  can't drift from the one the Sentry hooks actually gate on. */
 export function crashReportsAllowed(s: CrashReportSettings): boolean {
   return crashReportChoiceAllowsReporting(s.choice);
+}
+
+// ---------------------------------------------------------------------------
+// Social settings (chosen provider + defaults). Never a token.
+// ---------------------------------------------------------------------------
+
+export type SocialSettings = {
+  providerId: SocialProviderId | null;
+  /** IANA zone; null = the OS zone (`Intl.DateTimeFormat().resolvedOptions().timeZone`). */
+  timezone: string | null;
+  defaults: { instagramType: InstagramPostType; aiLabel: boolean };
+  pollSeconds: 30;
+};
+
+const SOCIAL_FALLBACK: SocialSettings = {
+  providerId: null,
+  timezone: null,
+  defaults: { instagramType: "reel", aiLabel: true },
+  pollSeconds: 30,
+};
+
+/** Read the social settings. Falls back to no provider / OS timezone / reel
+ *  + AI-label-on defaults if the row is missing, the column is empty, the
+ *  JSON is malformed, or the stored provider id is not in the catalog. */
+export function getSocialSettings(): SocialSettings {
+  const db = getDb();
+  const [row] = db.select({ social: settings.social }).from(settings).where(eq(settings.id, 1)).limit(1).all();
+  if (!row?.social) return { ...SOCIAL_FALLBACK, defaults: { ...SOCIAL_FALLBACK.defaults } };
+  try {
+    const p = JSON.parse(row.social) as Partial<SocialSettings> | null;
+    if (!p || typeof p !== "object") return { ...SOCIAL_FALLBACK, defaults: { ...SOCIAL_FALLBACK.defaults } };
+    const d = (p.defaults ?? {}) as Partial<SocialSettings["defaults"]>;
+    return {
+      providerId: isSocialProviderId(p.providerId) ? p.providerId : null,
+      timezone: typeof p.timezone === "string" && p.timezone ? p.timezone : null,
+      defaults: {
+        instagramType: d.instagramType === "feed" || d.instagramType === "story" ? d.instagramType : "reel",
+        aiLabel: d.aiLabel !== false,
+      },
+      pollSeconds: 30,
+    };
+  } catch {
+    return { ...SOCIAL_FALLBACK, defaults: { ...SOCIAL_FALLBACK.defaults } };
+  }
+}
+
+/** Persist the social settings as JSON in the settings table. */
+export function setSocialSettings(s: SocialSettings): void {
+  const db = getDb();
+  const set = { social: JSON.stringify(s), updatedAt: new Date() };
+  db.insert(settings).values({ id: 1, ...set }).onConflictDoUpdate({ target: settings.id, set }).run();
+}
+
+// ---------------------------------------------------------------------------
+// Templates creator identity (the public catalog's creator key)
+//
+// The key is a bearer secret: whoever holds it can edit this install's
+// published templates. It is never logged, never sent to analytics, and never
+// part of getSettings() / GET /api/settings — only POST
+// /api/templates/cloud/key/reveal (Settings → General's explicit Reveal or
+// Copy; a POST, so the proxy's origin and DNS-rebinding gate covers it)
+// returns it.
+// ---------------------------------------------------------------------------
+
+import { generateDefaultNickname } from "@/lib/templates/cloud/default-nickname";
+import { CREATOR_KEY_PATTERN, authorIdFromKey, generateCreatorKey } from "@/lib/templates/cloud/identity";
+import { serverLogger as logger } from "@/lib/logger";
+import { registerLiveSecret } from "@/lib/security/secret-scrub";
+import { isTestMode } from "@/lib/test-mode";
+
+/**
+ * The stored creator identity moved under the caller: another key was
+ * imported, or another writer saved first. Nothing was written; the caller
+ * re-reads before deciding anything. Routes answer it with 409.
+ */
+export class TemplatesAuthorChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TemplatesAuthorChangedError";
+  }
+}
+
+/**
+ * A write of the creator identity failed in the database (busy past the wait,
+ * disk full, read-only, ...). Thrown IN PLACE OF the driver's error, never
+ * wrapping it: drizzle's `DrizzleQueryError` message is "Failed query: ...
+ * params: ..." and every one of these statements binds the key, so the
+ * original would carry it into the job row, the logs, the agent's tool result
+ * and Sentry. Only the SQLite code (a fixed `SQLITE_*` word) is kept, and
+ * there is deliberately no `cause`.
+ */
+export class TemplatesAuthorWriteError extends Error {
+  readonly sqliteCode: string | null;
+  constructor(sqliteCode: string | null) {
+    super(`could not save the creator identity${sqliteCode ? ` (${sqliteCode})` : ""}`);
+    this.name = "TemplatesAuthorWriteError";
+    this.sqliteCode = sqliteCode;
+  }
+}
+
+const SQLITE_CODE = /^SQLITE_[A-Z_]{1,40}$/;
+
+function sqliteCodeOf(err: unknown): string | null {
+  const e = err as { code?: unknown; cause?: { code?: unknown } } | null;
+  const code = e?.cause?.code ?? e?.code;
+  return typeof code === "string" && SQLITE_CODE.test(code) ? code : null;
+}
+
+/** Run one statement that binds the key; any failure but a compare-and-set loss leaves as a `TemplatesAuthorWriteError`. */
+function keyBoundWrite<T>(write: () => T): T {
+  try {
+    return write();
+  } catch (err) {
+    if (err instanceof TemplatesAuthorChangedError) throw err;
+    throw new TemplatesAuthorWriteError(sqliteCodeOf(err));
+  }
+}
+
+/**
+ * The settings row the identity lives in. Test mode (`LIBI_TEST_MODE`) shares
+ * LIBI_HOME with the user's real studio, but talks to the fixture catalog —
+ * so its identity, and the fixture nickname a test run sets, live in a row of
+ * their own. Test mode never reads or writes the production identity, and a
+ * normal boot never sees what a test run left. Nothing else reads row 2: every
+ * other setting is read and written at `id = 1`.
+ */
+const PRODUCTION_AUTHOR_ROW = 1;
+const TEST_MODE_AUTHOR_ROW = 2;
+
+function authorRow(): number {
+  return isTestMode() ? TEST_MODE_AUTHOR_ROW : PRODUCTION_AUTHOR_ROW;
+}
+
+export interface TemplatesAuthorSetting {
+  /** 43 chars base64url. Anyone holding it can edit this install's published templates. */
+  key: string;
+  /** Always derived from `key` on read — a stored value is never trusted. */
+  authorId: string;
+  nickname: string | null;
+  createdAt: number;
+}
+
+function parseTemplatesAuthor(raw: string | null): TemplatesAuthorSetting | null {
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as Partial<TemplatesAuthorSetting> | null;
+    if (!p || typeof p !== "object") return null;
+    if (typeof p.key !== "string" || !CREATOR_KEY_PATTERN.test(p.key)) return null;
+    // Whatever this process now holds, the logger and Sentry mask.
+    registerLiveSecret(p.key);
+    return {
+      key: p.key,
+      authorId: authorIdFromKey(p.key),
+      nickname: typeof p.nickname === "string" && p.nickname ? p.nickname : null,
+      createdAt: typeof p.createdAt === "number" ? p.createdAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function readTemplatesAuthorRaw(row: number = authorRow()): string | null {
+  const db = getDb();
+  const [found] = db
+    .select({ templatesAuthor: settings.templatesAuthor })
+    .from(settings)
+    .where(eq(settings.id, row))
+    .limit(1)
+    .all();
+  return found?.templatesAuthor ?? null;
+}
+
+/** The stored identity, or null when there is none yet (or the stored value is unusable). */
+export function getTemplatesAuthor(): TemplatesAuthorSetting | null {
+  return parseTemplatesAuthor(readTemplatesAuthorRaw());
+}
+
+/**
+ * Write `next` only while the stored value is still exactly `expectedRaw` — one
+ * statement, so no other writer (another request in this process across an
+ * await, the MCP child, a second libi on the same LIBI_HOME) can land between
+ * the check and the write. Returns whether it wrote.
+ */
+function compareAndSetTemplatesAuthor(expectedRaw: string | null, next: TemplatesAuthorSetting, row: number = authorRow()): boolean {
+  registerLiveSecret(next.key);
+  const set = { templatesAuthor: JSON.stringify(next), updatedAt: new Date() };
+  const res = keyBoundWrite(() =>
+    getDb()
+      .insert(settings)
+      .values({ id: row, ...set })
+      .onConflictDoUpdate({ target: settings.id, set, setWhere: sql`${settings.templatesAuthor} IS ${expectedRaw}` })
+      .run(),
+  );
+  return res.changes > 0;
+}
+
+function writeTemplatesAuthor(next: TemplatesAuthorSetting, row: number = authorRow()): void {
+  registerLiveSecret(next.key);
+  const set = { templatesAuthor: JSON.stringify(next), updatedAt: new Date() };
+  keyBoundWrite(() => getDb().insert(settings).values({ id: row, ...set }).onConflictDoUpdate({ target: settings.id, set }).run());
+}
+
+/**
+ * Persist the identity. Refuses (throws) to replace a DIFFERENT stored key
+ * unless `replaceKey` is set — only the import path does that. Anything that
+ * read the identity, awaited, and wants to save it back must not resurrect a
+ * key imported meanwhile; to change the nickname use setTemplatesAuthorNickname.
+ */
+export function setTemplatesAuthor(next: TemplatesAuthorSetting, opts: { replaceKey?: boolean } = {}): void {
+  if (!CREATOR_KEY_PATTERN.test(next.key)) throw new Error("not a creator key");
+  const value: TemplatesAuthorSetting = { ...next, authorId: authorIdFromKey(next.key) };
+  // The import path: the user asked for this key, whatever is stored now.
+  if (opts.replaceKey) return writeTemplatesAuthor(value);
+  const raw = readTemplatesAuthorRaw();
+  const cur = parseTemplatesAuthor(raw);
+  if (cur && cur.key !== next.key) {
+    throw new TemplatesAuthorChangedError("refusing to overwrite a different creator key");
+  }
+  if (!compareAndSetTemplatesAuthor(raw, value)) {
+    throw new TemplatesAuthorChangedError("the creator identity changed while it was being saved");
+  }
+}
+
+/**
+ * One field of the stored identity, NULL when the stored value is not JSON.
+ * CASE, not AND: json_extract throws on malformed JSON and AND is not
+ * guaranteed to short-circuit.
+ */
+function authorField(path: string) {
+  const col = settings.templatesAuthor;
+  return sql`CASE WHEN json_valid(${col}) THEN json_extract(${col}, ${path}) END`;
+}
+
+/**
+ * Set the nickname, but only while the stored key is still `expectedKey` — a
+ * single compare-and-set statement, so a key imported while the caller awaited
+ * the site is never overwritten. Returns false (and writes nothing) when the key
+ * has changed or there is no identity. On false the nickname belonged to an
+ * identity that is gone: re-read before deciding anything, never blindly retry.
+ *
+ * `expectedNickname` (null included) also holds the write to the nickname the
+ * caller read: a cache write-back of the site's value (`/mine`, key import)
+ * passes it, so a nickname the user set while the site was answering is never
+ * overwritten by the older one the site sent. False then means either changed.
+ */
+export function setTemplatesAuthorNickname(expectedKey: string, nickname: string | null, opts: { expectedNickname?: string | null } = {}): boolean {
+  if (!CREATOR_KEY_PATTERN.test(expectedKey)) return false;
+  registerLiveSecret(expectedKey);
+  const col = settings.templatesAuthor;
+  const res = keyBoundWrite(() =>
+    getDb()
+      .update(settings)
+      .set({ templatesAuthor: sql`json_set(${col}, '$.nickname', ${nickname})`, updatedAt: new Date() })
+      .where(
+        and(
+          eq(settings.id, authorRow()),
+          sql`${authorField("$.key")} = ${expectedKey}`,
+          // IS, not =: a stored null must match an expected null.
+          opts.expectedNickname === undefined ? undefined : sql`${authorField("$.nickname")} IS ${opts.expectedNickname}`,
+        ),
+      )
+      .run(),
+  );
+  return res.changes > 0;
+}
+
+/**
+ * Give `cur` a default nickname (lib/templates/cloud/default-nickname.ts) when
+ * it has none — an identity made before defaults existed, or one whose
+ * nickname was cleared. One compare-and-set statement: written only while the
+ * stored key is still `cur.key` AND its nickname still empty, so a nickname
+ * the user (or the site's write-back) set meanwhile is never overwritten, and a
+ * key imported meanwhile never receives it. On a lost race the stored identity
+ * is answered as it now stands. Throws `TemplatesAuthorWriteError` only.
+ */
+function backfillTemplatesAuthorNickname(cur: TemplatesAuthorSetting): TemplatesAuthorSetting {
+  if (cur.nickname) return cur;
+  registerLiveSecret(cur.key);
+  const nickname = generateDefaultNickname();
+  const col = settings.templatesAuthor;
+  const res = keyBoundWrite(() =>
+    getDb()
+      .update(settings)
+      .set({ templatesAuthor: sql`json_set(${col}, '$.nickname', ${nickname})`, updatedAt: new Date() })
+      .where(
+        and(
+          eq(settings.id, authorRow()),
+          sql`${authorField("$.key")} = ${cur.key}`,
+          // Missing, null, "" and a non-string all read as "no nickname" (parseTemplatesAuthor).
+          // CASE, not AND: json_type throws on malformed JSON (see authorField).
+          sql`CASE WHEN json_valid(${col}) THEN (json_type(${col}, '$.nickname') IS NOT 'text' OR json_extract(${col}, '$.nickname') = '') ELSE 0 END`,
+        ),
+      )
+      .run(),
+  );
+  if (res.changes > 0) {
+    logger.info({ tag: "templates", op: "author_nickname_defaulted" }, "gave the creator identity a default nickname");
+    return { ...cur, nickname };
+  }
+  return getTemplatesAuthor() ?? cur;
+}
+
+/**
+ * The identity for display and publishing: as `getTemplatesAuthor`, but an
+ * identity with no nickname is given its default first (the lazy backfill).
+ * Never creates the identity. A backfill the database refuses is logged and
+ * the identity answered without one — a read must not fail on a cache write.
+ */
+export function getTemplatesAuthorForDisplay(): TemplatesAuthorSetting | null {
+  const cur = getTemplatesAuthor();
+  if (!cur || cur.nickname) return cur;
+  try {
+    return backfillTemplatesAuthorNickname(cur);
+  } catch (err) {
+    if (!(err instanceof TemplatesAuthorWriteError)) throw err;
+    logger.warn({ tag: "templates", op: "author_nickname_default_failed", sqliteCode: err.sqliteCode }, "could not save a default nickname");
+    return cur;
+  }
+}
+
+/**
+ * Created on the first VIEW of the nickname or the key (the author and key
+ * GET routes — the Templates page and the Settings card), else on the first
+ * publish request, publish or nickname edit; stable for the life of the
+ * install until the user imports another key (an unused one is replaced
+ * without asking: lib/templates/cloud/key-usage.ts). A new
+ * identity carries a default nickname from the start; an existing one without
+ * a nickname is given one here (`backfillTemplatesAuthorNickname`).
+ */
+export function getOrCreateTemplatesAuthor(): TemplatesAuthorSetting {
+  const raw = readTemplatesAuthorRaw();
+  const cur = parseTemplatesAuthor(raw);
+  if (cur) return backfillTemplatesAuthorNickname(cur);
+  if (raw !== null) {
+    // Never the value itself: it may hold the user's only copy of their key.
+    logger.warn({ tag: "templates", op: "author_unparseable" }, "stored creator identity is unusable; minting a new one");
+  }
+  const key = generateCreatorKey();
+  const next: TemplatesAuthorSetting = { key, authorId: authorIdFromKey(key), nickname: generateDefaultNickname(), createdAt: Date.now() };
+  // Guarded on the value just read: if another writer minted first, theirs wins.
+  if (compareAndSetTemplatesAuthor(raw, next)) return next;
+  const winner = getTemplatesAuthor();
+  if (!winner) throw new TemplatesAuthorChangedError("the creator identity changed while it was being created");
+  return backfillTemplatesAuthorNickname(winner);
+}
+
+/**
+ * Both stored identities — the production one and test mode's — read raw for
+ * a DB reset to carry across (app/api/db/resolve). Raw on purpose: a reset in
+ * test mode must not lose the production key, and an unparseable value may
+ * still be the user's only copy of it. Each read is separate, so one broken
+ * row does not cost the other.
+ */
+export interface CarriedTemplatesAuthors {
+  production: string | null;
+  testMode: string | null;
+}
+
+export function readTemplatesAuthorsForReset(): CarriedTemplatesAuthors {
+  const read = (row: number) => {
+    try {
+      return readTemplatesAuthorRaw(row);
+    } catch {
+      return null;
+    }
+  };
+  const carried = { production: read(PRODUCTION_AUTHOR_ROW), testMode: read(TEST_MODE_AUTHOR_ROW) };
+  // Held in memory until the restore: the logger and Sentry mask both keys meanwhile.
+  parseTemplatesAuthor(carried.production);
+  parseTemplatesAuthor(carried.testMode);
+  return carried;
+}
+
+/** Put back what `readTemplatesAuthorsForReset` carried, into the fresh DB. Throws `TemplatesAuthorWriteError` only. */
+export function restoreTemplatesAuthorsAfterReset(carried: CarriedTemplatesAuthors): void {
+  for (const [row, raw] of [[PRODUCTION_AUTHOR_ROW, carried.production], [TEST_MODE_AUTHOR_ROW, carried.testMode]] as const) {
+    if (raw === null) continue;
+    const set = { templatesAuthor: raw, updatedAt: new Date() };
+    keyBoundWrite(() => getDb().insert(settings).values({ id: row, ...set }).onConflictDoUpdate({ target: settings.id, set }).run());
+  }
+}
+
+/**
+ * Paste a key from another machine: same author from now on. It is stored with
+ * a fresh default nickname, which the caller replaces with the one the site
+ * already shows for this key (compare-and-set against the default, so a
+ * nickname the user types meanwhile wins); offline, the default stands until
+ * `/mine` learns the site's.
+ */
+export function importTemplatesAuthorKey(raw: string): TemplatesAuthorSetting {
+  const key = raw.trim();
+  if (!CREATOR_KEY_PATTERN.test(key)) throw new Error("not a creator key");
+  const next: TemplatesAuthorSetting = { key, authorId: authorIdFromKey(key), nickname: generateDefaultNickname(), createdAt: Date.now() };
+  setTemplatesAuthor(next, { replaceKey: true });
+  return next;
+}
+
+// ---------------------------------------------------------------------------
+// Templates catalog (dev builds only) — lib/templates/cloud/catalog-setting.ts
+//
+// Which public templates catalog a DEV build reads, and the development
+// site's Vercel protection-bypass token. The token is a secret: registered
+// with the live-secret mask whenever it is read or written, never part of
+// getSettings() / GET /api/settings, and never answered by any route (the
+// catalog-setting route says only whether one is set).
+// ---------------------------------------------------------------------------
+
+import { BYPASS_TOKEN_PATTERN, parseDevOrigin } from "@/lib/templates/cloud/catalog-origin";
+
+export type TemplatesCatalogChoice = "production" | "development";
+
+export interface TemplatesCatalogSetting {
+  choice: TemplatesCatalogChoice;
+  /** The development site's origin (validated by parseDevOrigin), or null for "not set". */
+  devOrigin: string | null;
+  /** The Vercel bypass secret for `devOrigin` — bound to it: a new origin clears it. */
+  bypassToken: string | null;
+}
+
+/**
+ * A write of the catalog setting failed in the database. Thrown IN PLACE OF
+ * the driver's error, never wrapping it: drizzle's message carries the bound
+ * params, and the token is one of them.
+ */
+export class TemplatesCatalogWriteError extends Error {
+  readonly sqliteCode: string | null;
+  constructor(sqliteCode: string | null) {
+    super(`could not save the templates catalog setting${sqliteCode ? ` (${sqliteCode})` : ""}`);
+    this.name = "TemplatesCatalogWriteError";
+    this.sqliteCode = sqliteCode;
+  }
+}
+
+/** The stored value, or null when there is none or it is unusable. Anything invalid inside it reads as unset. */
+export function parseTemplatesCatalogSetting(raw: string | null): TemplatesCatalogSetting | null {
+  if (!raw) return null;
+  let p: Partial<Record<keyof TemplatesCatalogSetting, unknown>> | null;
+  try {
+    p = JSON.parse(raw) as typeof p;
+  } catch {
+    return null;
+  }
+  if (!p || typeof p !== "object") return null;
+  const choice: TemplatesCatalogChoice = p.choice === "development" ? "development" : "production";
+  const origin = typeof p.devOrigin === "string" ? parseDevOrigin(p.devOrigin) : null;
+  const devOrigin = origin?.ok ? origin.origin : null;
+  const bypassToken = devOrigin && typeof p.bypassToken === "string" && BYPASS_TOKEN_PATTERN.test(p.bypassToken) ? p.bypassToken : null;
+  // Whatever this process now holds, the logger and Sentry mask.
+  registerLiveSecret(bypassToken);
+  return { choice, devOrigin, bypassToken };
+}
+
+export function getTemplatesCatalogSetting(): TemplatesCatalogSetting | null {
+  const [found] = getDb().select({ v: settings.templatesCatalog }).from(settings).where(eq(settings.id, 1)).limit(1).all();
+  return parseTemplatesCatalogSetting(found?.v ?? null);
+}
+
+export function setTemplatesCatalogSetting(next: TemplatesCatalogSetting): void {
+  registerLiveSecret(next.bypassToken);
+  const set = { templatesCatalog: JSON.stringify(next), updatedAt: new Date() };
+  try {
+    getDb().insert(settings).values({ id: 1, ...set }).onConflictDoUpdate({ target: settings.id, set }).run();
+  } catch (err) {
+    throw new TemplatesCatalogWriteError(sqliteCodeOf(err));
+  }
 }

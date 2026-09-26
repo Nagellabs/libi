@@ -1,4 +1,4 @@
-import type { DrawContext, Overlay, OverlayRect, TextOverlay, ThreeOverlay, TrackedOverlay, Transform3D } from "./types";
+import type { DrawContext, Overlay, OverlayRect, TextOverlay, TrackedOverlay, Transform3D } from "./types";
 import type { VideoFrameSource } from "./video-frame-source";
 import type { ThreeOverlayInstance } from "./three-overlay";
 import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
@@ -8,6 +8,7 @@ import { fitRect, coverRect } from "./letterbox";
 import { drawWithBalancedState } from "./canvas-state";
 import { sampleTrackedOverlay } from "@/lib/engine/tracked-space";
 import type { Track, TrackFit } from "@/lib/tracking/types";
+import { MAX_LAYER_SIDE, clampRenderGeometry } from "@/lib/sandbox/protocol";
 import { elementTiming } from "./overlay-timing";
 import { valueAt } from "@/lib/engine/animatable";
 import { resolveOverlayTransform, resolveFlip, planarCanvas2DOps, classifyTransform, splitScreenRoll } from "@/lib/engine/overlay-transform";
@@ -33,7 +34,8 @@ import {
 import { currentWord, typewriterRevealedText } from "./text-anim/caption-logic";
 import { captionPlateRect, layoutTextOverlay } from "@/lib/captions/layout";
 import { anchorPointOf } from "@/lib/captions/anchor";
-import { contentFitOps, type ContentBox } from "@/lib/overlays/code-content-fit";
+import type { LayerRequest, LayerSource } from "./layer-source";
+import type { LayerPad } from "@/lib/sandbox/protocol";
 
 // `expansionSig` is the pure signature over a 3D transform + rect (rounded to
 // avoid float churn). It outlived the content-bounds expansion cache it once
@@ -95,20 +97,205 @@ export function applyOverlayTransform(
   }
 }
 
+export interface LayerPlan {
+  request: LayerRequest;
+  /** three only: in-plane screen roll the host applies about the rect's center. */
+  rollRad: number;
+}
+
+export interface LayerPlanContext {
+  time: number;
+  fps: number;
+  width: number;
+  height: number;
+  renderScale: number;
+  tracks?: Record<string, Track>;
+  overlays?: readonly Overlay[];
+  /** A tracked overlay's already-resolved bbox (the tracked case computes it
+   *  first); when absent it is sampled here from `tracks`/`overlays`. */
+  trackedBbox?: { x: number; y: number; w: number; h: number };
+}
+
+/** Layers are whole composition pixels: a fractional size (every tracked bbox,
+ *  any keyframed rect mid-tween) would otherwise re-allocate the layer and
+ *  re-probe its fit on every frame. The position stays sub-pixel. */
+/**
+ * The two ends of the rect keyframe segment `progress` falls in, as layer
+ * sizes — only when that segment changes the size. Mirrors `valueAt`'s own
+ * segment choice (sorted by `t`, half-open `[t_i, t_i+1)`); outside the track,
+ * on a shared-`t` step, or on a position-only segment the size is constant
+ * and the fit is measured at it exactly.
+ */
+function rectSizeSegment(
+  overlay: Overlay,
+  progress: number,
+): { from: { width: number; height: number }; to: { width: number; height: number } } | undefined {
+  const kfs = overlay.keyframes?.rect?.keyframes;
+  if (!kfs || kfs.length < 2) return undefined;
+  const sorted = [...kfs].sort((x, y) => x.t - y.t);
+  if (progress <= sorted[0]!.t || progress >= sorted[sorted.length - 1]!.t) return undefined;
+  for (let j = 0; j < sorted.length - 1; j++) {
+    const left = sorted[j]!;
+    const right = sorted[j + 1]!;
+    if (left.t <= progress && progress < right.t) {
+      if (right.t - left.t <= 0) return undefined;
+      const cap = (v: number) => Math.min(v, MAX_LAYER_SIDE);
+      const from = layerSize(cap(left.value.width), cap(left.value.height));
+      const to = layerSize(cap(right.value.width), cap(right.value.height));
+      if (from.width === to.width && from.height === to.height) return undefined;
+      return { from, to };
+    }
+  }
+  return undefined;
+}
+
+function layerSize(width: number, height: number): { width: number; height: number } {
+  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+}
+
+/**
+ * The room a tracked `code` layer gets around its box: one box size on every
+ * side, cut back to the output canvas. The old in-process path drew tracked
+ * bodies on the main canvas with no clip, so a name tag above a face, a glow
+ * or a label beside a product landed; a layer the size of the box alone would
+ * cut all of that off. Whole pixels, floored, so the layer never reaches past
+ * the canvas.
+ */
+function trackedPad(
+  box: { x: number; y: number },
+  size: { width: number; height: number },
+  canvas: { width: number; height: number },
+): LayerPad {
+  const clamp = (v: number, max: number) => Math.floor(Math.min(max, Math.max(0, v)));
+  return {
+    left: clamp(box.x, size.width),
+    top: clamp(box.y, size.height),
+    right: clamp(canvas.width - (box.x + size.width), size.width),
+    bottom: clamp(canvas.height - (box.y + size.height), size.height),
+  };
+}
+
+/**
+ * Everything the runtime needs to draw one body layer for this frame — the
+ * same timing, rect and transform maths the host used to apply around the body
+ * call (spec §4.4). Pure; shared by `drawOverlay` (preview, per case) and
+ * `collectLayerRequests` (export, before the frame), so the two can't drift.
+ */
+export function planLayer(overlay: Overlay, c: LayerPlanContext): LayerPlan | null {
+  const plan = planLayerUncapped(overlay, c);
+  // Within the wire's caps (protocol.ts): the bitmap is placed by the
+  // geometry of the request it answers, so it must be the one it was rendered at.
+  return plan && { ...plan, request: { ...plan.request, ...clampRenderGeometry(plan.request) } };
+}
+
+function planLayerUncapped(overlay: Overlay, c: LayerPlanContext): LayerPlan | null {
+  const timing = elementTiming(c.time, c.fps, overlay.startTime, overlay.duration);
+  const words = overlay.caption?.words;
+  const common = { overlayId: overlay.id, frame: timing.frame, pixelRatio: c.renderScale, fps: c.fps, time: timing, ...(words ? { words } : {}) };
+  if (overlay.kind === "code") {
+    const rect = valueAt(overlay.keyframes?.rect ?? overlay.rect, timing);
+    const size = layerSize(rect.width, rect.height);
+    // Inside a keyframe segment that changes the SIZE, the fit is measured at
+    // the segment's two ends and interpolated (lib/overlays/code-content-fit.ts
+    // #interpolateContentBox), so a tween does not re-run the content-fit probe
+    // on every frame; anywhere else it is measured at the exact size.
+    const fitSegment = rectSizeSegment(overlay, timing.progress);
+    return { request: { ...common, kind: "code", size, ...(fitSegment ? { fitSegment } : {}) }, rollRad: 0 };
+  }
+  if (overlay.kind === "three") {
+    const rect = valueAt(overlay.keyframes?.rect ?? overlay.rect, timing);
+    const resolved3d = valueAt(overlay.keyframes?.transform3d ?? resolveOverlayTransform(overlay), timing);
+    const { spatial, rollRad } = splitScreenRoll(resolved3d);
+    return { request: { ...common, kind: "three", size: layerSize(rect.width, rect.height), transform3d: spatial }, rollRad };
+  }
+  if (overlay.kind === "tracked" && overlay.content.kind === "code") {
+    let bbox = c.trackedBbox;
+    if (!bbox) {
+      const track = c.tracks?.[overlay.trackId];
+      if (!track) return null;
+      const sample = sampleTrackedOverlay(overlay, track, c.overlays, c.time);
+      if (!sample || !sample.visible) return null;
+      bbox = resolveTrackedRect(sample, overlay, { width: c.width, height: c.height });
+    }
+    const size = layerSize(bbox.w, bbox.h);
+    const pad = trackedPad(bbox, size, { width: c.width, height: c.height });
+    return { request: { ...common, kind: "tracked", size, pad }, rollRad: 0 };
+  }
+  return null;
+}
+
+function planContextOf(drawCtx: DrawOverlayContext, trackedBbox?: LayerPlanContext["trackedBbox"]): LayerPlanContext {
+  return {
+    time: drawCtx.time,
+    fps: drawCtx.fps,
+    width: drawCtx.width,
+    height: drawCtx.height,
+    renderScale: drawCtx.renderScale ?? 1,
+    tracks: drawCtx.tracks,
+    overlays: drawCtx.overlays,
+    ...(trackedBbox ? { trackedBbox } : {}),
+  };
+}
+
+/** Ask for the layer and draw whatever the source has (preview: the newest
+ *  bitmap, possibly a frame old; export: exactly this frame). `at` is where
+ *  the caller placed the body's box — the rect, the tracked bbox, or the
+ *  spatial scratch's origin — with the current request's `size`.
+ *
+ *  The bitmap is placed by the geometry it was RENDERED for (review N1): its
+ *  own box is scaled onto the current box on each axis and its pad scales with
+ *  it, so a held bitmap from before a resize or a tracked box change lands on
+ *  the current box rather than being zoomed, cropped or shifted. When that
+ *  geometry is the current one the scale is exactly 1 and the draw is 1:1. */
+function drawBodyLayer(
+  ctx: CanvasRenderingContext2D,
+  drawCtx: DrawOverlayContext,
+  overlay: Overlay,
+  at: OverlayRect,
+  trackedBbox?: LayerPlanContext["trackedBbox"],
+): void {
+  const layers = drawCtx.layers;
+  if (!layers) return;
+  const plan = planLayer(overlay, planContextOf(drawCtx, trackedBbox));
+  if (!plan) return;
+  layers.request(plan.request);
+  const layer = layers.get(overlay.id, plan.request.frame);
+  if (!layer) return;
+  const { size, pad, pixelRatio } = layer;
+  const current = plan.request.size;
+  const sx = current.width / size.width;
+  const sy = current.height / size.height;
+  // The layer in the logical px it was rendered at: its box plus its pad.
+  const w = size.width + (pad ? pad.left + pad.right : 0);
+  const h = size.height + (pad ? pad.top + pad.bottom : 0);
+  const x = at.x - (pad?.left ?? 0) * sx;
+  const y = at.y - (pad?.top ?? 0) * sy;
+  // The runtime's canvas is ceil(w × pixelRatio) device px; naming the source
+  // rect keeps the draw 1:1 instead of squeezing that rounding into w × h.
+  const draw = () => ctx.drawImage(layer.bitmap, 0, 0, w * pixelRatio, h * pixelRatio, x, y, w * sx, h * sy);
+  if (plan.rollRad) {
+    const cx = at.x + at.width / 2;
+    const cy = at.y + at.height / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(plan.rollRad);
+    ctx.translate(-cx, -cy);
+    draw();
+    ctx.restore();
+  } else {
+    draw();
+  }
+}
+
 export interface DrawOverlayContext extends DrawContext {
   /** For video overlays. Keyed by overlay.id. */
   videoFrameSources?: Record<string, VideoFrameSource>;
   /** For image overlays. Keyed by overlay.id. */
   imageElements?: Record<string, HTMLImageElement>;
-  /** For code overlays — compiled draw function (see createDrawFunction). */
-  compiledDrawFns?: Record<string, (ctx: DrawContext) => void>;
-  /** For code overlays — the probed union ink-bbox of each fn's drawing at its
-   *  rect size (see `measureCodeContentBox`), keyed by overlay.id. Drives the
-   *  contain-fit that scales+centers the drawn content into the overlay rect.
-   *  Absent / null entry ⇒ identity (no scale), the pre-fit behavior. Probed
-   *  once off the hot path (preview hook + export), NOT per frame. */
-  codeContentBoxes?: Record<string, ContentBox | null>;
-  /** For three overlays — prebuilt instance keyed by overlay.id. */
+  /** For code / three / tracked-code overlays — the sandboxed body layers
+   *  (spec §4.4). Absent ⇒ those overlays draw nothing (transient loading). */
+  layers?: LayerSource;
+  /** For 3D-TEXT overlays only (host-built, not a body) — prebuilt instance keyed by overlay.id. */
   threeScenes?: Record<string, ThreeOverlayInstance>;
   /** For spatial (out-of-plane) 2D overlays — prebuilt textured-quad instance keyed by overlay.id. */
   spatialQuads?: Record<string, OverlayQuadInstance>;
@@ -142,10 +329,11 @@ function getScratchCanvas(w: number, h: number): { canvas: HTMLCanvasElement | O
 
 /**
  * Renders a single overlay onto the canvas. Overlays are drawn AFTER the
- * base scene. The four kinds are text, image, video, code — the last three
- * need asset maps (images/videoFrameSources/compiledDrawFns) that are
- * populated by the editor's hooks. If a required asset is missing, the
- * overlay silently no-ops so a transient loading state never throws.
+ * base scene. Image, video and tracked overlays need asset maps
+ * (imageElements/videoFrameSources/tracks) populated by the editor's hooks;
+ * code, three and tracked-code bodies come as bitmaps from `layers`. If a
+ * required asset or layer is missing, the overlay silently no-ops so a
+ * transient loading state never throws.
  */
 export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void {
   const { ctx } = drawCtx;
@@ -358,45 +546,10 @@ export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void
       break;
     }
     case "three": {
-      const inst = drawCtx.threeScenes?.[overlay.id];
-      if (inst) {
-        const t = elementTiming(drawCtx.time, drawCtx.fps, overlay.startTime, overlay.duration);
-        const resolved3d = valueAt(overlay.keyframes?.transform3d ?? resolveOverlayTransform(overlay), timing);
-        // In-plane Spin (rotation.z) is a 2D screen-roll, NOT a 3D scene-root roll
-        // (which doesn't even render on a Scene root). Feed the scene the
-        // out-of-plane part only; roll the composite about the rect center after.
-        const { spatial: transform3d, rollRad } = splitScreenRoll(resolved3d);
-        inst.update?.({
-          frame: t.frame,
-          time: t.time,
-          totalFrames: t.totalFrames,
-          duration: t.duration,
-          progress: t.progress,
-          transform3d,
-          words: overlay.caption?.words,
-        });
-        // Window model: apply the 3D transform, then render the scene INTO the rect
-        // window and composite at the rect. Content outside the rect-sized viewport
-        // is clipped by the GL render — predictable, never hidden. No content-bounds
-        // expansion (that was the source of the first-paint-misframe + drag-lag bugs).
-        inst.applyTransform(transform3d);
-        // Render the GL buffer at the BACKING resolution (rect × renderScale) so
-        // the three scene is crisp on a 4K export / HiDPI preview; drawImage dest
-        // stays in composition coords (base ctx scale places it) → 1:1 map.
-        const glCanvas = inst.render(rect.width * renderScale, rect.height * renderScale);
-        if (rollRad) {
-          const cx = rect.x + rect.width / 2;
-          const cy = rect.y + rect.height / 2;
-          ctx.save();
-          ctx.translate(cx, cy);
-          ctx.rotate(rollRad);
-          ctx.translate(-cx, -cy);
-          ctx.drawImage(glCanvas as CanvasImageSource, rect.x, rect.y, rect.width, rect.height);
-          ctx.restore();
-        } else {
-          ctx.drawImage(glCanvas as CanvasImageSource, rect.x, rect.y, rect.width, rect.height);
-        }
-      }
+      // Bodies render in the sandbox (spec §4.4); the host composites the
+      // bitmap inside exactly the ctx state above and rolls it about the rect
+      // center (in-plane Spin stays a 2D screen roll — see splitScreenRoll).
+      drawBodyLayer(ctx, drawCtx, overlay, rect);
       break;
     }
     case "tracked": {
@@ -446,7 +599,9 @@ export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void
         }
         case "video": {
           const src = drawCtx.videoFrameSources?.[overlay.id];
-          if (src) {
+          // A failed source has nothing to paint (the owning video overlay
+          // shows the placeholder).
+          if (src && !src.failure?.()) {
             src.seek(drawCtx.time);
             // Hold-last-frame parity (see drawOverlayContent2D / renderer.ts).
             const liveReady = src.isReadyAt ? src.isReadyAt(drawCtx.time) : true;
@@ -458,27 +613,7 @@ export function drawOverlay(overlay: Overlay, drawCtx: DrawOverlayContext): void
           break;
         }
         case "code": {
-          const fn = drawCtx.compiledDrawFns?.[overlay.id];
-          if (fn) {
-            ctx.save();
-            ctx.translate(bbox.x, bbox.y);
-            // Positional sampling above stays at absolute clip time (unchanged);
-            // the INNER content clock is element-local, same contract as a plain
-            // code overlay so the same template body works either way.
-            const t = elementTiming(drawCtx.time, drawCtx.fps, overlay.startTime, overlay.duration);
-            fn({
-              ...drawCtx,
-              width: bbox.w,
-              height: bbox.h,
-              frame: t.frame,
-              time: t.time,
-              totalFrames: t.totalFrames,
-              duration: t.duration,
-              progress: t.progress,
-              words: overlay.caption?.words,
-            });
-            ctx.restore();
-          }
+          drawBodyLayer(ctx, drawCtx, overlay, { x: bbox.x, y: bbox.y, width: bbox.w, height: bbox.h }, bbox);
           break;
         }
         case "effect": {
@@ -516,6 +651,10 @@ export function drawOverlayContent2D(
       drawTextOverlay(ctx, { ...overlay, rect: localRect }, drawCtx);
       break;
     case "image": {
+      if (overlay.unfilledSlot !== undefined) {
+        drawUnfilledSlotPlaceholder(ctx, localRect, overlay.unfilledSlot);
+        break;
+      }
       if (overlay.missing) {
         drawMissingOverlayPlaceholder(ctx, localRect, overlay.displayName);
         break;
@@ -539,11 +678,21 @@ export function drawOverlayContent2D(
       break;
     }
     case "video": {
+      if (overlay.unfilledSlot !== undefined) {
+        drawUnfilledSlotPlaceholder(ctx, localRect, overlay.unfilledSlot);
+        break;
+      }
       if (overlay.missing) {
         drawMissingOverlayPlaceholder(ctx, localRect, overlay.displayName);
         break;
       }
       const src = drawCtx.videoFrameSources?.[overlay.id];
+      // A source that gave up (lib/engine/media-load-failure.ts) says so on the
+      // overlay's own rect instead of holding a frozen/black frame.
+      if (src?.failure?.()) {
+        drawUnplayableVideoPlaceholder(ctx, localRect, overlay.displayName ?? overlay.sourceName);
+        break;
+      }
       if (src) {
         const localT =
           drawCtx.time - overlay.startTime + (overlay.trim?.start ?? 0);
@@ -600,49 +749,12 @@ export function drawOverlayContent2D(
       break;
     }
     case "code": {
-      const fn = drawCtx.compiledDrawFns?.[overlay.id];
-      if (fn) {
-        ctx.beginPath();
-        ctx.rect(localRect.x, localRect.y, localRect.width, localRect.height);
-        ctx.clip();
-        ctx.translate(localRect.x, localRect.y);
-        // Content contain-fit: scale + center the fn's drawn ink into the rect
-        // so a fixed-size graphic (e.g. a 100px circle) fills a resized box and
-        // Spin pivots about the content's visual center. The box is probed once
-        // off the hot path; here it's two ctx ops (no allocation, no per-frame
-        // compositing). Absent / degenerate box ⇒ identity (pre-fit behavior),
-        // and a non-op identity is skipped so a width/height-filling fn renders
-        // byte-identically to before. The fn STILL receives rect-space
-        // width/height (unchanged) — the fit is purely a canvas transform.
-        const contentBox = drawCtx.codeContentBoxes?.[overlay.id];
-        if (contentBox && contentBox.width > 0 && contentBox.height > 0) {
-          const fit = contentFitOps(contentBox, localRect.width, localRect.height);
-          if (fit.scale !== 1 || fit.dx !== 0 || fit.dy !== 0) {
-            ctx.translate(fit.dx, fit.dy);
-            ctx.scale(fit.scale, fit.scale);
-          }
-        }
-        // Element-local timing: drawCtx.time is composition-global here (the
-        // renderer's overlay pass sets it). Remap to THIS overlay's window so a
-        // draw fn animates relative to itself — identical to how a scene's
-        // draw fn sees scene-local time. This is what fixes the "reveal paced
-        // over the whole comp" bug.
-        const t = elementTiming(drawCtx.time, drawCtx.fps, overlay.startTime, overlay.duration);
-        fn({
-          ...drawCtx,
-          width: localRect.width,
-          height: localRect.height,
-          frame: t.frame,
-          time: t.time,
-          totalFrames: t.totalFrames,
-          duration: t.duration,
-          progress: t.progress,
-          // Voice-synced caption words (element-local) when this code overlay
-          // carries a transcript — the body pairs them with the injected
-          // activeWordIndex/typewriterRevealedText helpers.
-          words: overlay.caption?.words,
-        });
-      }
+      // The contain-fit that used to be applied here moved into the runtime,
+      // where the body draws — so the bitmap already IS the fitted content.
+      ctx.beginPath();
+      ctx.rect(localRect.x, localRect.y, localRect.width, localRect.height);
+      ctx.clip();
+      drawBodyLayer(ctx, drawCtx, overlay, localRect);
       break;
     }
     default:
@@ -684,6 +796,90 @@ function drawMissingOverlayPlaceholder(
     ctx.font = `${Math.max(8, Math.round(h * 0.09))}px sans-serif`;
     ctx.fillText(label, x + w / 2, y + h / 2 + h * 0.08);
   }
+  ctx.restore();
+}
+
+/**
+ * A video overlay whose preview source gave up — the file answered 4xx, its
+ * codec can't be decoded here, it won't demux, or the server stayed down past
+ * the bounded retries (`VideoFrameSource.failure`). Before this the clip held a
+ * black/frozen frame while the player showed "Buffering…" every few seconds,
+ * forever (docs-local/qa/2026-09-25-video-download-and-playback-plan.md T3).
+ *
+ * Deliberately QUIET, unlike the red "file missing" treatment: the file is
+ * there, only the preview can't show it (export reads it from disk). It paints
+ * its own dark plate so it reads the same in the light and dark app themes, and
+ * names the clip so the user knows which one.
+ */
+function drawUnplayableVideoPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  rect: { x: number; y: number; width: number; height: number },
+  label?: string,
+): void {
+  const { x, y, width: w, height: h } = rect;
+  const unit = Math.min(w, h);
+  ctx.save();
+  ctx.fillStyle = "rgba(24, 24, 27, 0.92)"; // zinc-900
+  ctx.fillRect(x, y, w, h);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const maxTextW = Math.max(0, w * 0.9);
+  ctx.fillStyle = "#e4e4e7"; // zinc-200
+  ctx.font = `600 ${Math.max(10, Math.round(unit * 0.06))}px sans-serif`;
+  ctx.fillText("This video can't be played", x + w / 2, y + h / 2 - (label ? unit * 0.045 : 0));
+  if (label) {
+    ctx.fillStyle = "#a1a1aa"; // zinc-400
+    ctx.font = `${Math.max(8, Math.round(unit * 0.042))}px sans-serif`;
+    ctx.fillText(fitLabel(ctx, label, maxTextW), x + w / 2, y + h / 2 + unit * 0.045);
+  }
+  ctx.restore();
+}
+
+/** `label`, cut with an ellipsis until it measures within `maxW`. */
+function fitLabel(ctx: CanvasRenderingContext2D, label: string, maxW: number): string {
+  if (ctx.measureText(label).width <= maxW) return label;
+  let lo = 0;
+  let hi = label.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (ctx.measureText(label.slice(0, mid) + "…").width <= maxW) lo = mid;
+    else hi = mid - 1;
+  }
+  return label.slice(0, lo).trimEnd() + "…";
+}
+
+/**
+ * An applied template's media slot that has not been filled yet (see
+ * lib/templates/unfilled-slot.ts). Deliberately NOT the red "file missing"
+ * treatment: nothing is broken, the layer is waiting for the media the user
+ * was told to add. A neutral dashed box inside the overlay's rect, naming the
+ * slot and what it needs.
+ */
+function drawUnfilledSlotPlaceholder(
+  ctx: CanvasRenderingContext2D,
+  rect: { x: number; y: number; width: number; height: number },
+  label: string,
+): void {
+  const { x, y, width: w, height: h } = rect;
+  const unit = Math.min(w, h);
+  ctx.save();
+  ctx.fillStyle = "rgba(39, 39, 42, 0.85)"; // zinc-800
+  ctx.fillRect(x, y, w, h);
+  const inset = Math.max(2, Math.round(unit * 0.02));
+  ctx.strokeStyle = "#a1a1aa"; // zinc-400
+  ctx.lineWidth = Math.max(2, Math.round(unit * 0.008));
+  const dash = Math.max(6, Math.round(unit * 0.03));
+  ctx.setLineDash([dash, dash * 0.75]);
+  ctx.strokeRect(x + inset, y + inset, w - inset * 2, h - inset * 2);
+  ctx.setLineDash([]);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#e4e4e7"; // zinc-200
+  ctx.font = `600 ${Math.max(10, Math.round(unit * 0.08))}px sans-serif`;
+  ctx.fillText(label, x + w / 2, y + h / 2 - unit * 0.05);
+  ctx.fillStyle = "#a1a1aa"; // zinc-400
+  ctx.font = `${Math.max(8, Math.round(unit * 0.055))}px sans-serif`;
+  ctx.fillText("add media", x + w / 2, y + h / 2 + unit * 0.06);
   ctx.restore();
 }
 

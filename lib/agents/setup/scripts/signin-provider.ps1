@@ -11,7 +11,7 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider  higgsfield
+#   provider  higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config
@@ -31,6 +31,8 @@ param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry)
 # an account.
 switch -CaseSensitive ($Provider) {
   'higgsfield' { $name = 'Higgsfield' }
+  'zernio'     { $name = 'Zernio' }
+  'elevenlabs' { $name = 'ElevenLabs' }
   default      { [Console]::Error.WriteLine("signin-provider.ps1: unknown provider '$Provider'"); exit 2 }
 }
 if ($Agent -cne 'claude' -and $Agent -cne 'codex') {
@@ -42,10 +44,24 @@ if (-not $Cli -or -not $Entry) {
   exit 2
 }
 
-# The agent's own sign-in. The script exits with its exit code.
+# The agent's own sign-in. The script exits with its exit code. For Claude
+# Code, the two [libi sign-in ...] lines tell libi when the sign-in starts and
+# when it has ended, however it ended (Ctrl+C included): libi must not ask
+# Claude Code about the entry in between, or Claude Code may skip it for 15
+# minutes.
 Write-Host "Opening your browser to sign in with your $name account. This waits here until you finish."
-$loginArgs = @('mcp', 'login', '--', $Entry)
-& $Cli @loginArgs
-if ($?) { exit 0 }
-if ($LASTEXITCODE) { exit $LASTEXITCODE }
-exit 1
+$marked = $Agent -ceq 'claude'
+if ($marked) { Write-Host "[libi sign-in start: $Entry]" }
+$code = 0
+try {
+  $loginArgs = @('mcp', 'login', '--', $Entry)
+  & $Cli @loginArgs
+  if (-not $?) {
+    $code = 1
+    if ($LASTEXITCODE) { $code = $LASTEXITCODE }
+  }
+} finally {
+  # [Console], not Write-Host: after Ctrl+C the pipeline is stopping, and Write-Host can throw and print nothing.
+  if ($marked) { [Console]::WriteLine("[libi sign-in end: $Entry]") }
+}
+exit $code

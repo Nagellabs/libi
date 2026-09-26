@@ -33,7 +33,7 @@ const BUNDLED_NAME_BY_ID = new Map<string, string>(
  *    "libi:libi.compute_object_track"          → "Libi Compute object track"
  *    "libi-tracking:libi.compute_object_track" → "Libi Compute object track"
  *    "youtube-downloader:ytdlp_search_videos"  → "YouTube Downloader Ytdlp search videos"
- *    "elevenlabs:text_to_speech"               → "ElevenLabs Text to speech"
+ *    "elevenlabs:creative_generate_speech"     → "ElevenLabs Generate speech"
  *    "fal-ai:generate_image"                   → "fal-ai Generate image"
  *    "My_Custom_MCP:do_thing"                  → "My Custom MCP Do thing"
  */
@@ -44,10 +44,20 @@ export function formatToolId(id: McpToolId): string {
   if (serverId === "libi" || serverId === "libi-tracking") {
     return formatLibiName(toolName);
   }
-  const serverLabel = formatServerLabel(serverId);
-  const toolLabel = formatActionPart(toolName);
+  const known = KNOWN_PROVIDER_LABELS.get(serverId.toLowerCase());
+  const serverLabel = known?.label ?? formatServerLabel(serverId);
+  const toolLabel = formatActionPart(known?.toolPrefix && toolName.startsWith(known.toolPrefix) ? toolName.slice(known.toolPrefix.length) : toolName);
   return toolLabel ? `${serverLabel} ${toolLabel}` : serverLabel;
 }
+
+/**
+ * Catalog providers whose server name or tool names read badly when prettified generically, keyed by the
+ * lowercased server name. ElevenLabs' hosted server (`elevenlabs`, the name test mode's fake shares) prefixes
+ * every creative tool with `creative_`, which says nothing in a chat label.
+ */
+const KNOWN_PROVIDER_LABELS = new Map<string, { label: string; toolPrefix?: string }>([
+  ["elevenlabs", { label: "ElevenLabs", toolPrefix: "creative_" }],
+]);
 
 /** Server segment → display label. Bundled ids use the def's display name;
  *  anything else (user-installed MCPs) swaps underscores for spaces and,

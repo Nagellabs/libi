@@ -45,8 +45,12 @@ describe("consolidated overlay tools", () => {
     expect(res.success).toBe(true);
     const overlayId = overlayIdOf(res);
     const codeFilePath = (res.data as { codeFilePath: string }).codeFilePath;
-    expect(codeFilePath).toBe(`overlays/${overlayId}/scene.jsx`);
-    expect(await new LocalFileStorage(tempDir).exists(pieceId, codeFilePath)).toBe(true);
+    // Absolute — the agent opens this directly with its own file tools, which
+    // have no notion of "relative to the piece's storage dir".
+    expect(codeFilePath).toBe(
+      new LocalFileStorage(tempDir).localPath(pieceId, `overlays/${overlayId}/scene.jsx`),
+    );
+    expect(await new LocalFileStorage(tempDir).exists(pieceId, `overlays/${overlayId}/scene.jsx`)).toBe(true);
   });
 
   it("scaffolds a starter body when none is given", async () => {
@@ -69,7 +73,9 @@ describe("consolidated overlay tools", () => {
     const add = await addOverlay({ pieceId, kind: "three", displayName: "Test", startTime: 0, duration: 2, rect: baseRect, z: 0, opacity: 1, body: "scene.add(x)" });
     const overlayId = overlayIdOf(add);
     const rec = findOverlay(await getOverlays({ pieceId }), overlayId);
-    expect(rec.codeFilePath).toBe(`overlays/${overlayId}/scene.jsx`);
+    expect(rec.codeFilePath).toBe(
+      new LocalFileStorage(tempDir).localPath(pieceId, `overlays/${overlayId}/scene.jsx`),
+    );
   });
 
   it("remove deletes the overlay dir", async () => {

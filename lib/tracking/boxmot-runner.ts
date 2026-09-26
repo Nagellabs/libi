@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { uvPath, sidecarProjectDir, trackingModelsDir } from "@/lib/tracking/engine-deps";
 import { buildUvEnv, trackingVenvDir } from "@/lib/uv-env/spawn-env";
 import { serverLogger as logger } from "@/lib/logger";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import type { TrackSample } from "@/lib/tracking/types";
 
 export interface EngineSegmentOpts {
@@ -186,7 +187,8 @@ export async function runEngineSegment(
         );
         return reject(
           new Error(
-            `tracking sidecar exited ${code}: ${stderr.slice(-500)}`,
+            uvNetworkFailureMessage("object tracking", stderr) ??
+              `tracking sidecar exited ${code}: ${stderr.slice(-500)}`,
           ),
         );
       }

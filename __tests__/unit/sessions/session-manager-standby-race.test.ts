@@ -175,7 +175,7 @@ describe("standby vs setup terminals, with the real freshness check", () => {
 
 describe("getSessionManager", () => {
   it("wires the settle: once the last setup terminal closes, the app's session manager refreshes its standby", async () => {
-    const key = "__sessionManager_v3";
+    const key = "__sessionManager_v5";
     const g = globalThis as Record<string, unknown>;
     const previous = g[key];
     delete g[key];

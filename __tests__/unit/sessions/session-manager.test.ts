@@ -63,8 +63,8 @@ vi.mock("@/lib/agents/session-event-handler", () => ({
 // Import after mocks
 // ---------------------------------------------------------------------------
 
-import { refreshStandbyWhenSetupSettles, SessionManager } from "@/lib/sessions/session-manager";
-import { MAX_ACTIVE_SESSIONS } from "@/lib/sessions/types";
+import { CANCEL_SETTLE_TIMEOUT_MS, refreshStandbyWhenSetupSettles, SessionManager } from "@/lib/sessions/session-manager";
+import { isSessionMidTurn, MAX_ACTIVE_SESSIONS } from "@/lib/sessions/types";
 import { __resetSetupActivity, noteSetupTerminalClosed, noteSetupTerminalOpened } from "@/lib/terminal/setup-activity";
 
 // ---------------------------------------------------------------------------
@@ -405,6 +405,43 @@ describe("SessionManager", () => {
       expect(pm.registerSessionId).toHaveBeenCalledWith("claude-code", "old-1");
       expect(messages).toEqual([]); // Fresh cache after replay
     });
+
+    it("an agent with no transcript for the chat: typed error, no raw text on the status, asked once", async () => {
+      const { RequestError } = await import("@agentclientprotocol/sdk");
+      const { AgentHistoryMissingError } = await import("@/lib/sessions/history-missing");
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: "gone-1", title: "Gone", updatedAt: null }],
+        nextCursor: null,
+      });
+      await sm.loadInitialSessions("claude-code");
+      const events: AgentEvent[] = [];
+      sm.onGlobalEvent((sid, e) => {
+        if (sid === "gone-1") events.push(e);
+      });
+      mockConnection.loadSession.mockRejectedValueOnce(RequestError.resourceNotFound("gone-1"));
+
+      await expect(sm.activateSession("gone-1")).rejects.toBeInstanceOf(AgentHistoryMissingError);
+      expect(sm.hasActiveSession("gone-1")).toBe(false);
+      const statuses = events.filter((e) => e.type === "agent-status");
+      expect(statuses.at(-1)).toEqual({ type: "agent-status", status: "disconnected" });
+      expect(statuses.some((e) => "error" in e && e.error)).toBe(false);
+
+      // Remembered: the next open answers without another resume.
+      await expect(sm.activateSession("gone-1")).rejects.toBeInstanceOf(AgentHistoryMissingError);
+      expect(mockConnection.loadSession).toHaveBeenCalledTimes(1);
+    });
+
+    it("any other load failure still surfaces as itself and is retried on the next open", async () => {
+      mockConnection.listSessions.mockResolvedValueOnce({
+        sessions: [{ sessionId: "flaky-1", title: "Flaky", updatedAt: null }],
+        nextCursor: null,
+      });
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.loadSession.mockRejectedValueOnce(new Error("adapter crashed"));
+      await expect(sm.activateSession("flaky-1")).rejects.toThrow("adapter crashed");
+      await sm.activateSession("flaky-1");
+      expect(sm.hasActiveSession("flaky-1")).toBe(true);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -610,6 +647,215 @@ describe("SessionManager", () => {
         events.find((e) => e.type === "agent-status" && e.status === "error"),
       ).toBeDefined();
       expect(events.find((e) => e.type === "chat-note")).toBeUndefined();
+    });
+
+    // The SSE route asks this on every (re)connect to tell the client whether
+    // a session is mid-turn — the old route announced every session idle,
+    // dropping the Stop button of a chat that was still working.
+    it("is mid-turn from send until the turn ends", async () => {
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "busy-1" });
+      const sessionId = await sm.createSession();
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(false);
+
+      let finish!: (v: { stopReason: string }) => void;
+      mockConnection.prompt.mockReturnValueOnce(
+        new Promise((resolve) => { finish = resolve; }),
+      );
+      const sending = sm.sendMessage(sessionId, "hello");
+      await Promise.resolve();
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(true);
+
+      finish({ stopReason: "end_turn" });
+      await sending;
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(false);
+    });
+
+    it("is not mid-turn once the prompt fails", async () => {
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "busy-2" });
+      const sessionId = await sm.createSession();
+      mockConnection.prompt.mockRejectedValueOnce(new Error("boom"));
+      await sm.sendMessage(sessionId, "hello");
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(false);
+    });
+
+    it("an unknown session is never mid-turn", () => {
+      expect(isSessionMidTurn(sm.getSession("nope"))).toBe(false);
+    });
+
+    // The steer path: the client cancels turn 1 and sends turn 2 at once, so
+    // turn 1's `cancelled` often resolves AFTER turn 2 went out. Turn 1's
+    // teardown nulls the assembly cursor (`currentAgentMessage`), which the
+    // old signal read as idle while turn 2 was still running.
+    it("stays mid-turn when a steered second prompt outlives the cancelled first", async () => {
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "steer-1" });
+      const sessionId = await sm.createSession();
+
+      let finishFirst!: (v: { stopReason: string }) => void;
+      let finishSecond!: (v: { stopReason: string }) => void;
+      mockConnection.prompt
+        .mockReturnValueOnce(new Promise((r) => { finishFirst = r; }))
+        .mockReturnValueOnce(new Promise((r) => { finishSecond = r; }));
+
+      const first = sm.sendMessage(sessionId, "first");
+      await Promise.resolve();
+      const second = sm.sendMessage(sessionId, "second");
+      await Promise.resolve();
+
+      finishFirst({ stopReason: "cancelled" });
+      await first;
+      expect(sm.getSession(sessionId)!.currentAgentMessage).toBeNull(); // the old signal: idle
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(true);
+
+      finishSecond({ stopReason: "end_turn" });
+      await second;
+      expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(false);
+    });
+
+    // The event handler re-creates the assembly cursor for ANY agent content,
+    // including a late chunk or a background subagent's output after the
+    // prompt resolved. That must not read as a turn in flight.
+    it("a late agent chunk after the turn ended does not make the session mid-turn", async () => {
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "late-1" });
+      const sessionId = await sm.createSession();
+      await sm.sendMessage(sessionId, "hello");
+
+      const entry = sm.getSession(sessionId)!;
+      // What `ensureAgentMessage` does for a stray `agent_message_chunk`.
+      entry.currentAgentMessage = { id: "agent_late", role: "agent", parts: [], timestamp: Date.now() };
+      expect(isSessionMidTurn(entry)).toBe(false);
+    });
+
+    it("deactivation and an agent crash both clear an in-flight prompt, and its late settle does not go negative", async () => {
+      await sm.loadInitialSessions("claude-code");
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "reset-1" });
+      const sessionId = await sm.createSession();
+      let finish!: (v: { stopReason: string }) => void;
+      mockConnection.prompt.mockReturnValueOnce(new Promise((r) => { finish = r; }));
+      const sending = sm.sendMessage(sessionId, "hello");
+      await Promise.resolve();
+      expect(sm.getSession(sessionId)!.promptsInFlight).toBe(1);
+
+      sm.handleProcessCrash("claude-code", "gone");
+      expect(sm.getSession(sessionId)!.promptsInFlight).toBe(0);
+
+      finish({ stopReason: "cancelled" });
+      await sending;
+      expect(sm.getSession(sessionId)!.promptsInFlight).toBe(0);
+
+      mockConnection.newSession.mockResolvedValueOnce({ sessionId: "reset-2" });
+      const other = await sm.createSession();
+      mockConnection.prompt.mockReturnValueOnce(new Promise(() => {}));
+      void sm.sendMessage(other, "hang");
+      await Promise.resolve();
+      expect(sm.getSession(other)!.promptsInFlight).toBe(1);
+      await sm.deactivateSession(other);
+      expect(sm.getSession(other)!.promptsInFlight).toBe(0);
+    });
+
+    // A cancelled prompt the adapter never settles (hung, but its process
+    // alive) would otherwise pin the session busy until it is torn down: a
+    // Stop button on every reconnect that cannot end the turn, and eviction
+    // skipping it. After CANCEL_SETTLE_TIMEOUT_MS it stops counting.
+    describe("a cancel the adapter never settles", () => {
+      afterEach(() => { vi.useRealTimers(); });
+
+      async function hungSession(id: string) {
+        await sm.loadInitialSessions("claude-code");
+        mockConnection.newSession.mockResolvedValueOnce({ sessionId: id });
+        const sessionId = await sm.createSession();
+        (mockConnection as unknown as { cancel: ReturnType<typeof vi.fn> }).cancel = vi.fn(async () => {});
+        let settle!: (v: { stopReason: string }) => void;
+        mockConnection.prompt.mockReturnValueOnce(new Promise((r) => { settle = r; }));
+        const sending = sm.sendMessage(sessionId, "long job");
+        await Promise.resolve();
+        return { sessionId, sending, settle: (v: { stopReason: string }) => settle(v) };
+      }
+
+      it("stops counting it as in flight after the bound, and its late settle changes nothing", async () => {
+        const { sessionId, sending, settle } = await hungSession("hung-1");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        await sm.cancelTurn(sessionId);
+
+        vi.advanceTimersByTime(CANCEL_SETTLE_TIMEOUT_MS - 1000);
+        expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(true);
+        vi.advanceTimersByTime(2000);
+        expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(false);
+
+        settle({ stopReason: "cancelled" });
+        await sending;
+        expect(sm.getSession(sessionId)!.promptsInFlight).toBe(0);
+      });
+
+      // A cancel that never reached the agent leaves its prompt running
+      // normally — releasing it would read a working chat as idle.
+      it("a FAILED cancel never starts the bound", async () => {
+        const { sessionId } = await hungSession("hung-fail");
+        (mockConnection as unknown as { cancel: ReturnType<typeof vi.fn> }).cancel = vi.fn(async () => {
+          throw new Error("pipe closed");
+        });
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        await sm.cancelTurn(sessionId);
+        vi.advanceTimersByTime(CANCEL_SETTLE_TIMEOUT_MS * 3);
+        expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(true);
+      });
+
+      // Accepted the cancel but still finishing (an MCP tool it can't
+      // interrupt): as long as the agent keeps talking, it is working.
+      it("a slow-but-working adapter stays busy while it keeps emitting; released only after 30 s of silence", async () => {
+        const { sessionId } = await hungSession("hung-slow");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        await sm.cancelTurn(sessionId);
+        const entry = sm.getSession(sessionId)!;
+
+        vi.advanceTimersByTime(20_000);
+        entry.lastAgentActivityAt = Date.now(); // what the event handler stamps on any update
+        vi.advanceTimersByTime(CANCEL_SETTLE_TIMEOUT_MS - 1000); // 30 s since the cancel, 29 s of silence
+        expect(isSessionMidTurn(entry)).toBe(true);
+
+        vi.advanceTimersByTime(2000); // 31 s of silence
+        expect(isSessionMidTurn(entry)).toBe(false);
+      });
+
+      it("never releases a prompt sent AFTER the cancel (the steer)", async () => {
+        const { sessionId } = await hungSession("hung-2");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        await sm.cancelTurn(sessionId);
+
+        mockConnection.prompt.mockReturnValueOnce(new Promise(() => {}));
+        void sm.sendMessage(sessionId, "steer");
+        await Promise.resolve();
+        expect(sm.getSession(sessionId)!.promptsInFlight).toBe(2);
+
+        vi.advanceTimersByTime(CANCEL_SETTLE_TIMEOUT_MS + 1000);
+        expect(sm.getSession(sessionId)!.promptsInFlight).toBe(1);
+        expect(isSessionMidTurn(sm.getSession(sessionId))).toBe(true);
+      });
+
+      it("a cancel that settles in time leaves nothing for the bound to do", async () => {
+        const { sessionId, sending, settle } = await hungSession("hung-3");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+        await sm.cancelTurn(sessionId);
+        settle({ stopReason: "cancelled" });
+        await sending;
+
+        mockConnection.prompt.mockReturnValueOnce(new Promise(() => {}));
+        void sm.sendMessage(sessionId, "next");
+        await Promise.resolve();
+        vi.advanceTimersByTime(CANCEL_SETTLE_TIMEOUT_MS + 1000);
+        expect(sm.getSession(sessionId)!.promptsInFlight).toBe(1);
+      });
+    });
+
+    it("an entry from an older class (no counter) falls back to the cursor", () => {
+      const legacy = {
+        active: true,
+        currentAgentMessage: { id: "a", role: "agent", parts: [], timestamp: 1 },
+      } as unknown as Parameters<typeof isSessionMidTurn>[0];
+      expect(isSessionMidTurn(legacy)).toBe(true);
     });
 
     it("emits error for non-existent session", async () => {
@@ -818,8 +1064,10 @@ describe("SessionManager", () => {
       return sessionIds;
     }
 
-    /** Mark a session as mid-turn the way `sendMessage` does. */
+    /** Mark a session as mid-turn the way `sendMessage` does: a prompt in
+     *  flight, plus the placeholder agent message it opens. */
     function markGenerating(sessionId: string) {
+      sm.getSession(sessionId)!.promptsInFlight = 1;
       sm.getSession(sessionId)!.currentAgentMessage = {
         id: `agent_${sessionId}`,
         role: "agent",
@@ -843,6 +1091,19 @@ describe("SessionManager", () => {
       expect(sm.hasActiveSession(sessionIds[1])).toBe(false);
       expect(sm.hasActiveSession("incoming")).toBe(true);
       expect(sm.getActiveSessions()).toHaveLength(MAX_ACTIVE_SESSIONS);
+    });
+
+    it("evicts a session whose only 'activity' is a late chunk after its turn ended", async () => {
+      const sessionIds = await fillToCapacity();
+      // The assembly cursor alone — no prompt in flight — is idle.
+      sm.getSession(sessionIds[0])!.currentAgentMessage = {
+        id: "agent_late", role: "agent", parts: [], timestamp: Date.now(),
+      };
+
+      await sm.activateSession("incoming");
+
+      expect(sm.hasActiveSession(sessionIds[0])).toBe(false);
+      expect(sm.hasActiveSession(sessionIds[1])).toBe(true);
     });
 
     it("evicts nobody when every candidate is generating", async () => {

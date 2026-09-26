@@ -28,8 +28,10 @@ import { runJobViaServer } from "@/mcp/jobs-client";
 import {
   downloadVideo,
   canonicalizeVideoUrl,
+  needsInstallMessage,
   YT_DLP_INSTALL_MB,
 } from "@/mcp/tools/video-download-tools";
+import { YT_DLP_UNAVAILABLE } from "@/lib/video-download/launcher";
 
 const savedHome = process.env.LIBI_HOME;
 let home: string;
@@ -163,14 +165,96 @@ describe("libi.download_video", () => {
     );
   });
 
-  it("returns needs_install when the yt-dlp wrapper is absent", async () => {
-    vi.mocked(runJobViaServer).mockRejectedValue(new Error("spawn ENOENT"));
+  it("returns needs_install ONLY for the runner's marked could-not-install/repair failure, naming Agents → Libi MCP → Video download", async () => {
+    vi.mocked(runJobViaServer).mockRejectedValue(
+      new Error(
+        `${YT_DLP_UNAVAILABLE} yt-dlp could not be started (exit 127) and reinstalling it failed: Failed to fetch https://pypi.org/simple/yt-dlp/`,
+      ),
+    );
     const res = await downloadVideo({ url: "https://youtu.be/abc", pieceId: null, audioOnly: false });
-    expect(res).toEqual({
+    expect(res).toMatchObject({
       success: false,
       error: "needs_install",
-      data: { extensionId: "youtube-download", message: expect.stringContaining("yt-dlp") },
+      data: { extensionId: "youtube-download" },
     });
+    const message = (res as unknown as { data: { message: string } }).data.message;
+    // Says what failed, in the job's own words, marker stripped.
+    expect(message).toContain("reinstalling it failed: Failed to fetch https://pypi.org/simple/yt-dlp/");
+    expect(message).not.toContain(YT_DLP_UNAVAILABLE);
+    // The right place — never Settings, which is where the old text sent users.
+    expect(message).toContain("Agents → Libi MCP → Video download");
+    expect(message).not.toMatch(/Settings/);
+    // A retry once the user is online — and never a hand repair.
+    expect(message).toMatch(/online/);
+    expect(message).toMatch(/retry this tool ONCE/);
+    expect(message).toMatch(/Do NOT edit, create or delete anything under ~\/\.libi\/bin/);
+  });
+
+  it("only suggests being offline when the cause reads as the network; anything else is relayed plainly", async () => {
+    const plain = needsInstallMessage(
+      "installing yt-dlp (needed to download videos) failed: OSError: [Errno 28] No space left on device",
+    );
+    expect(plain).toContain("No space left on device");
+    expect(plain).not.toMatch(/online|network problem/i);
+    expect(plain).toContain("Agents → Libi MCP → Video download");
+    expect(plain).toMatch(/Do NOT edit, create or delete anything under ~\/\.libi\/bin/);
+    expect(plain).not.toMatch(/Settings/);
+
+    for (const cause of [
+      "getaddrinfo ENOTFOUND github.com",
+      "error sending request for url (https://pypi.org/simple/yt-dlp/): tcp connect error: Connection refused (os error 61)",
+      "Failed to fetch: https://pypi.org/simple/certifi/",
+    ]) {
+      const net = needsInstallMessage(cause);
+      expect(net, cause).toMatch(/network problem/);
+      expect(net, cause).toMatch(/check they are online/);
+      expect(net, cause).toContain(cause);
+    }
+  });
+
+  it("does NOT call yt-dlp's own 'not found' / a bare ENOENT an install problem (the old regex did)", async () => {
+    writeWrapper();
+    for (const text of [
+      "yt-dlp failed (exit 1): ERROR: [generic] Video not found",
+      "spawn ENOENT",
+    ]) {
+      vi.mocked(runJobViaServer).mockRejectedValueOnce(new Error(text));
+      const res = await downloadVideo({ url: "https://youtu.be/abc", pieceId: null, audioOnly: false });
+      expect(res, text).toEqual({ success: false, error: "download_failed", data: { message: text } });
+    }
+  });
+
+  it("a launcher whose target is gone is a silent repair, not a first-use install disclosure", async () => {
+    const bin = path.join(home, "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(
+      path.join(bin, "yt-dlp"),
+      `#!/bin/bash\nexec "${path.join(home, "worktrees", "gone", "yt-dlp")}" --no-playlist "$@"\n`,
+      { mode: 0o755 },
+    );
+    vi.mocked(runJobViaServer).mockResolvedValue(
+      completed({ fileId: "f1", filename: "clip.mp4", title: "clip", bytes: 42 }),
+    );
+    const sendNotification = vi.fn(async () => {});
+    const res = await downloadVideo(
+      { url: "https://youtu.be/abc", pieceId: null, audioOnly: false },
+      { _meta: { progressToken: "tok" }, sendNotification } as never,
+    );
+    expect(sendNotification).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      success: true,
+      data: { fileId: "f1", filename: "clip.mp4", title: "clip", bytes: 42 },
+    });
+  });
+
+  it("the tool description and the needs_install text never send the user to Settings", () => {
+    expect(needsInstallMessage("x")).not.toMatch(/Settings/);
+    const server = fs.readFileSync(path.join(process.cwd(), "mcp", "server.ts"), "utf-8");
+    const start = server.indexOf('"libi.download_video"');
+    const desc = server.slice(start, server.indexOf("inputSchema", start));
+    expect(desc).not.toMatch(/Settings/);
+    expect(desc).toContain("Agents → Libi MCP → Video download");
+    expect(desc).toMatch(/never edit files under ~\/\.libi\/bin/);
   });
 
   it("returns download_failed with the job's message for any other failure", async () => {

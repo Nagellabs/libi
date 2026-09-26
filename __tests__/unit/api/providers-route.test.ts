@@ -17,6 +17,8 @@ const { detect, detected, clearLegacy } = vi.hoisted(() => {
 });
 vi.mock("@/lib/providers/legacy", () => ({ clearLegacyKeysForConnected: clearLegacy }));
 vi.mock("@/lib/providers/detect", () => ({ detectProviders: detect }));
+let fakesOn = true;
+vi.mock("@/lib/mcp-config", () => ({ TEST_MODE_STDIO_FAKE_NAMES: ["fal-ai", "elevenlabs"], testModeFakesEnabled: () => fakesOn }));
 
 import { GET } from "@/app/api/providers/route";
 
@@ -38,9 +40,37 @@ describe("GET /api/providers", () => {
 
   it("a plain read asks detection with nothing injected; Retry's ?refresh=1 asks it to read codex again", async () => {
     await listProvidersRoute();
-    expect(detect).toHaveBeenLastCalledWith();
+    expect(detect).toHaveBeenLastCalledWith({});
     await listProvidersRoute("?refresh=1");
-    expect(detect).toHaveBeenLastCalledWith({ refresh: true });
+    expect(detect).toHaveBeenLastCalledWith({ refresh: true, revalidateClaude: true });
+  });
+
+  it("in test mode with the fakes on only, names the entries libi's stdio fakes are attached to Codex under", async () => {
+    vi.stubEnv("LIBI_TEST_MODE", "1");
+    try {
+      expect(await (await listProvidersRoute()).json()).toEqual({ connected: detected, testModeCodexFakes: ["fal-ai", "elevenlabs"] });
+      // A skill-eval scenario that turned the fakes off: nothing is attached, so nothing collides.
+      fakesOn = false;
+      expect(await (await listProvidersRoute()).json()).toEqual({ connected: detected });
+    } finally {
+      fakesOn = true;
+      vi.unstubAllEnvs();
+    }
+    vi.stubEnv("LIBI_TEST_MODE", "0");
+    try {
+      expect(await (await listProvidersRoute()).json()).toEqual({ connected: detected });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("?revalidate=1 (the user looked) and Retry both ask detection to re-check Claude Code's sign-ins", async () => {
+    await listProvidersRoute("?revalidate=1");
+    expect(detect).toHaveBeenLastCalledWith({ revalidateClaude: true });
+    await listProvidersRoute("?refresh=1");
+    expect(detect).toHaveBeenLastCalledWith({ refresh: true, revalidateClaude: true });
+    await listProvidersRoute("?revalidate=0");
+    expect(detect).toHaveBeenLastCalledWith({});
   });
 
   it("says when Codex's rows are its last good listing, and hands only rows read just now to the legacy-key cleanup", async () => {

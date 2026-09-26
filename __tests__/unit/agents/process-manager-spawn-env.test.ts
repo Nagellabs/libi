@@ -32,6 +32,13 @@ vi.mock("@/lib/agents/cli/resolve", () => ({
   isUsableCli: (r: { meetsMinimum?: boolean } | null) => !!r && "meetsMinimum" in r && r.meetsMinimum === true,
 }));
 
+// The login-shell PATH the resolver's probe last delivered (lib/agents/agent-path.ts): none unless a case sets one.
+let loginDirs: string[] | null = null;
+vi.mock("@/lib/agents/cli/login-shell-path", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/agents/cli/login-shell-path")>()),
+  lastLoginShellPathDirs: () => loginDirs,
+}));
+
 /** Spawn an agent and return the options object the child was actually given. */
 async function spawnOpts(agentId = "claude-code"): Promise<Record<string, unknown>> {
   const { AgentProcessManager } = await import("@/lib/agents/process-manager");
@@ -60,10 +67,28 @@ describe("AgentProcessManager spawn env", () => {
     resolved = USABLE;
     adapter = ADAPTER;
     resolveCalls.length = 0;
+    loginDirs = null;
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  // A launcher installed after libi booted (uv, so `uvx`) is on the login shell's PATH, which the Providers tab reads
+  // it from, but not on libi's own: the agent's MCP servers must be able to run it.
+  it("a new agent process gets libi's PATH followed by the login shell's folders it lacks, ", async () => {
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    loginDirs = ["/Users/me/.local/bin", "/usr/bin"];
+    const env = await spawnEnv();
+    expect(env.PATH).toBe(["/usr/bin", "/bin", "/Users/me/.local/bin"].join(path.delimiter));
+  });
+
+  it("sets no PATH of its own when the login shell adds nothing, so the inherited key stays the only one", async () => {
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    loginDirs = ["/usr/bin"];
+    const env = await spawnEnv();
+    expect(env.PATH).toBe("/usr/bin:/bin");
+    expect(Object.keys(env).filter((k) => k.toUpperCase() === "PATH")).toHaveLength(1);
   });
 
   it("sets MCP_TIMEOUT=60000 on the spawned agent process", async () => {

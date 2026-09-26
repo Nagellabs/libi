@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Composition,
-  DrawContext,
   OverlayRect,
   TextOverlay,
   TrackedOverlay,
@@ -23,7 +22,8 @@ import {
 } from "@/lib/preview/supersample-controller";
 import type { ThreeOverlayInstance } from "@/lib/engine/three-overlay";
 import type { OverlayQuadInstance } from "@/lib/engine/overlay-quad";
-import type { ContentBox } from "@/lib/overlays/code-content-fit";
+import { subscribeOncePerFrame, type PreviewLayerSource } from "@/lib/sandbox/preview-layers";
+import { subscribeCustomEffectCurves } from "@/lib/effects/custom-curves";
 import { Layers, EyeOff } from "lucide-react";
 import type {
   VideoFrameSource,
@@ -64,7 +64,7 @@ import {
 import type { ManualAnchor, Track, TrackFit, TrackSmoothing } from "@/lib/tracking/types";
 import { ExportDialog } from "@/components/export/export-dialog";
 import { hasGraphicsOverlays } from "@/lib/export/quality";
-import { ExportSuccessToast } from "@/components/export/export-success-toast";
+import { ExportSuccessToast, exportToastFor } from "@/components/export/export-success-toast";
 import { revealFile } from "@/lib/shell/client";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
 import { recordPreviewEvent, useReactRenderTelemetry } from "@/lib/preview/telemetry";
@@ -91,6 +91,8 @@ import { isOverlayIn3dMode } from "@/lib/overlays/three-d-mode";
 import { overlayAtPlayhead } from "@/lib/overlays/display-overlay";
 import { ThreeGizmoControls } from "@/components/preview/three-gizmo-controls";
 import type { OverlayTransformPatch } from "@/hooks/editor/use-overlay-transform-commit";
+import { openPostingTab, useExportDialogRequest } from "@/hooks/social/use-posting-intent";
+import { useSocialStatus } from "@/lib/queries/social";
 
 /** Seconds the user can keep fine-tuning a drag before the re-anchor is
  *  actually committed (POST + seeded re-track). Each new drag resets it. */
@@ -150,12 +152,10 @@ interface PreviewPlayerProps {
   videoErrors?: Record<string, VideoFrameSourceError>;
   /** Image elements for image overlays, keyed by overlay.id */
   images?: Record<string, HTMLImageElement>;
-  /** Compiled draw functions for code overlays, keyed by overlay.id */
-  compiledDrawFns?: Record<string, (ctx: DrawContext) => void>;
-  /** Probed content ink-bboxes for code overlays, keyed by overlay.id — drives
-   *  the renderer's contain-fit of drawn content into the overlay rect. */
-  codeContentBoxes?: Record<string, ContentBox | null>;
-  /** Three.js overlay instances, keyed by overlay.id */
+  /** Sandboxed body layers for code / three / tracked-code overlays (spec §4.4).
+   *  A layer arriving repaints the current frame imperatively (spec §4.5). */
+  layers?: PreviewLayerSource;
+  /** 3D-text instances (host-built), keyed by overlay.id */
   threeScenes?: Record<string, ThreeOverlayInstance>;
   /** Spatial (out-of-plane) 2D overlay quad instances, keyed by overlay.id */
   spatialQuads?: Record<string, OverlayQuadInstance>;
@@ -246,8 +246,7 @@ export default function PreviewPlayer({
   videoSources,
   videoErrors,
   images,
-  compiledDrawFns,
-  codeContentBoxes,
+  layers,
   threeScenes,
   spatialQuads,
   overlayErrors,
@@ -442,7 +441,12 @@ export default function PreviewPlayer({
   // success toast. If the export finishes while the dialog is CLOSED, we
   // surface a dismissible "Exported …" pill next to the Export button.
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportToast, setExportToast] = useState<{ filePath: string; filename: string } | null>(null);
+  const [exportToast, setExportToast] = useState<{ filePath: string; filename: string; note: string | null } | null>(null);
+  const socialStatus = useSocialStatus();
+  // "Export & post" (Posting tab, no export yet) asks for the REAL export
+  // dialog rather than a duplicate form — opening it this way just flips the
+  // same `exportOpen` state a manual click would.
+  useExportDialogRequest(pieceId, () => setExportOpen(true));
   const prevExportStatusRef = useRef(exportFlow.status);
   const exportOpenRef = useRef(exportOpen);
   exportOpenRef.current = exportOpen;
@@ -459,8 +463,7 @@ export default function PreviewPlayer({
     // an open dialog already shows its own success card.
     const becameSuccess = prev !== "success" && exportFlow.status === "success";
     if (becameSuccess && !exportOpenRef.current && exportFlow.result) {
-      const fp = exportFlow.result.filePath;
-      setExportToast({ filePath: fp, filename: fp.split(/[\\/]/).pop() ?? fp });
+      setExportToast(exportToastFor(exportFlow.result));
     }
   }, [exportFlow.status, exportFlow.result]);
 
@@ -1062,7 +1065,7 @@ export default function PreviewPlayer({
           }
         : composition;
     try {
-      renderFrame(canvas, comp, frame, {}, videoSources, images, compiledDrawFns, tracks, threeScenes, spatialQuads, codeContentBoxes);
+      renderFrame(canvas, comp, frame, {}, videoSources, images, layers, tracks, threeScenes, spatialQuads);
     } catch (e) {
       // renderFrame isolates per-scene/per-overlay draw errors internally, so a
       // throw here is a whole-frame failure (e.g. a bad composition shape). Log
@@ -1084,7 +1087,7 @@ export default function PreviewPlayer({
     if (composition.fps > 0 && renderMs > 1000 / composition.fps) stats.slow += 1;
     // fontsVersion: bumps when a custom font finishes loading so a paused
     // preview repaints text with the now-available family.
-  }, [composition, frame, videoSources, images, compiledDrawFns, codeContentBoxes, tracks, threeScenes, spatialQuads, fontsVersion]);
+  }, [composition, frame, videoSources, images, layers, tracks, threeScenes, spatialQuads, fontsVersion]);
 
   useEffect(() => {
     drawCurrentFrame();
@@ -1149,6 +1152,20 @@ export default function PreviewPlayer({
     if (!editStore) return;
     return editStore.subscribeImperative(() => drawCurrentFrameRef.current());
   }, [editStore]);
+
+  // A body layer arriving from the sandbox repaints the CURRENT frame through
+  // the same imperative path a drag uses — no React re-render per layer (spec §4.5).
+  // Arrivals are coalesced to one repaint per animation frame: each body overlay
+  // answers separately, and N arrivals must not composite the frame N times.
+  useEffect(() => {
+    if (!layers) return;
+    return subscribeOncePerFrame(layers, () => drawCurrentFrameRef.current());
+  }, [layers]);
+
+  // A custom effect's sampled curve arriving from the effect sandbox
+  // (lib/effects/custom-curves.ts): until it did, that slot drew identity, so
+  // the frame on screen repaints — once per animation frame, like layers.
+  useEffect(() => subscribeOncePerFrame({ subscribe: subscribeCustomEffectCurves }, () => drawCurrentFrameRef.current()), []);
 
   const handleCanvasPointerDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
@@ -1521,17 +1538,34 @@ export default function PreviewPlayer({
             flow={exportFlow}
             hasSnapshot={hasSnapshot}
             hasDraft={hasDraft}
+            // Uncontrolled (undefined) for a normal click — the DialogTrigger
+            // button renders and owns its own open state. Controlled+open
+            // only while `exportOpen` is true, which a manual click ALSO
+            // sets (via onOpenChange below): the trigger simply doesn't
+            // render while open, which is fine — the modal overlay covers it
+            // either way. This is what lets `requestExportDialog` (the
+            // Posting tab's "Export & post") open the real dialog.
+            openOverride={exportOpen ? true : undefined}
             onOpenChange={setExportOpen}
           />
           {exportToast && (
             <div className="absolute top-full right-0 z-20 mt-2">
               <ExportSuccessToast
                 filename={exportToast.filename}
+                note={exportToast.note}
                 onOpenFolder={() => {
                   void revealFile(exportToast.filePath);
                   setExportToast(null);
                 }}
                 onDismiss={() => setExportToast(null)}
+                onPost={
+                  socialStatus.data?.providerId
+                    ? () => {
+                        openPostingTab({ pieceId, exportPath: exportToast.filePath });
+                        setExportToast(null);
+                      }
+                    : undefined
+                }
               />
             </div>
           )}

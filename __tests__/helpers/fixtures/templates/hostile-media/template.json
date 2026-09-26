@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "name": "Hostile media",
+  "description": "An SVG with a script and an HTML file posing as a PNG",
+  "tags": ["test-fixture"],
+  "canvas": { "width": 1080, "height": 1920, "fps": 30 },
+  "duration": 4,
+  "slots": [],
+  "overlays": [
+    { "key": "clip", "kind": "video", "startTime": 0, "duration": 4, "rect": { "x": 0, "y": 0, "width": 1080, "height": 1920 }, "z": 0, "opacity": 1, "displayName": "Clip", "source": { "assetRef": "clip" } },
+    { "key": "real", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 0, "y": 0, "width": 64, "height": 64 }, "z": 1, "opacity": 1, "displayName": "Real", "source": { "assetRef": "real" } },
+    { "key": "logo", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 100, "y": 0, "width": 64, "height": 64 }, "z": 2, "opacity": 1, "displayName": "Logo", "source": { "assetRef": "logo" } },
+    { "key": "page", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 200, "y": 0, "width": 64, "height": 64 }, "z": 3, "opacity": 1, "displayName": "Page", "source": { "assetRef": "page" } }
+  ],
+  "audioClips": [],
+  "assets": [
+    { "ref": "clip", "kind": "video", "file": "assets/clip.mp4" },
+    { "ref": "real", "kind": "image", "file": "assets/real.png" },
+    { "ref": "logo", "kind": "image", "file": "assets/logo.svg" },
+    { "ref": "page", "kind": "image", "file": "assets/page.png", "contentType": "text/html" }
+  ],
+  "fonts": [],
+  "captionStyles": []
+}

@@ -246,26 +246,65 @@ describe("hashPort", () => {
 });
 
 describe("pickPort", () => {
-  it("returns the hashed port when it is free", async () => {
-    const p = await pickPort("/test/path/picker-free");
+  /** Bind an OS-assigned (ephemeral) port. These tests must not bind anything
+   *  in the real dev range: a running worktree dev server owns ports there,
+   *  and a fixed port made this suite fail whenever one was up. */
+  const close = (s: net.Server) => new Promise<void>((res) => s.close(() => res()));
+  async function listenEphemeral(): Promise<{ server: net.Server; port: number }> {
+    for (;;) {
+      const server = net.createServer();
+      await new Promise<void>((resolve, reject) =>
+        server.once("error", reject).listen(0, "127.0.0.1", resolve),
+      );
+      const port = (server.address() as net.AddressInfo).port;
+      // Leave headroom for the small ranges below to stay under 65536.
+      if (port <= 65000) return { server, port };
+      await close(server);
+    }
+  }
+
+  it("hashes into the default dev range", () => {
+    const p = hashPort("/test/path/picker-free");
     expect(p).toBeGreaterThanOrEqual(PORT_RANGE_START);
     expect(p).toBeLessThan(PORT_RANGE_START + PORT_RANGE_SIZE);
   });
 
+  it("returns the hashed port when it is free", async () => {
+    const { server, port } = await listenEphemeral();
+    await close(server);
+    const got = await pickPort("/test/path/picker-free", { start: port, size: 1 });
+    expect(got).toBe(port);
+  });
+
   it("scans forward past an in-use port", async () => {
-    const wt = "/test/path/picker-busy";
-    const desired = hashPort(wt);
-    const blocker = net.createServer();
-    await new Promise<void>((resolve, reject) =>
-      blocker.once("error", reject).listen(desired, "127.0.0.1", resolve),
-    );
+    const { server: blocker, port } = await listenEphemeral();
     try {
-      const got = await pickPort(wt);
-      expect(got).not.toBe(desired);
-      expect(got).toBeGreaterThanOrEqual(PORT_RANGE_START);
-      expect(got).toBeLessThan(PORT_RANGE_START + PORT_RANGE_SIZE);
+      const range = { start: port, size: 3 };
+      // A path whose hash lands exactly on the blocked port, so the scan
+      // has to move past it.
+      let wt = "";
+      for (let i = 0; i < 1000 && !wt; i++) {
+        const cand = `/test/path/picker-busy-${i}`;
+        if (hashPort(cand, range) === port) wt = cand;
+      }
+      expect(wt).not.toBe("");
+      const got = await pickPort(wt, range);
+      expect(got).not.toBe(port);
+      expect(got).toBeGreaterThan(port);
+      expect(got).toBeLessThan(port + range.size);
     } finally {
-      await new Promise<void>((res) => blocker.close(() => res()));
+      await close(blocker);
+    }
+  });
+
+  it("throws when every port in the range is taken", async () => {
+    const { server, port } = await listenEphemeral();
+    try {
+      await expect(pickPort("/test/path/picker-full", { start: port, size: 1 })).rejects.toThrow(
+        /are in use/,
+      );
+    } finally {
+      await close(server);
     }
   });
 });

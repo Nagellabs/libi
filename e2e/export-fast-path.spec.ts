@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { seedPieceWithVideo } from "./helpers/app";
 import fs from "fs";
 import path from "path";
 import { execFileSync } from "child_process";
@@ -7,58 +8,18 @@ test.describe("Export fast path", () => {
   let pieceId = "";
 
   test.beforeAll(async ({ request }) => {
-    // Create a piece + upload tiny.mp4 + create a video scene.
-    const pRes = await request.post("/api/pieces");
-    pieceId = (await pRes.json()).id as string;
-
-    const fixturePath = path.resolve(
-      __dirname,
-      "..",
-      "__tests__",
-      "helpers",
-      "fixtures",
-      "tiny.mp4",
-    );
-    const fixtureBuf = fs.readFileSync(fixturePath);
-
-    // Probe duration server-side via ffprobe so add_overlay has
-    // the metadata it requires (no browser in this spec to probe client-side).
-    const probeOut = execFileSync(
-      "ffprobe",
-      [
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        fixturePath,
-      ],
-      { encoding: "utf8" },
-    ).trim();
-    const mediaDuration = Number(probeOut);
-
-    await request.post(`/api/pieces/${pieceId}/upload`, {
-      multipart: {
-        file: { name: "tiny.mp4", mimeType: "video/mp4", buffer: fixtureBuf },
-        mediaDuration: String(mediaDuration),
-      },
-    });
-
-    const filesRes = await request.get(`/api/pieces/${pieceId}/files`);
-    const filesBody = await filesRes.json();
-    const arr = Array.isArray(filesBody) ? filesBody : filesBody.files ?? [];
-    const fileId = arr.find((f: { filename: string }) => f.filename === "tiny.mp4")?.id;
-    if (!fileId) throw new Error("tiny.mp4 not present on seeded piece");
-
-    // Create a plain video scene (no trim, no overlay) — this is the
-    // shape that classifies as stream-copy-trim.
-    await request.post("/api/e2e/run-tool", {
-      data: {
-        tool: "libi.add_overlay",
-        args: { pieceId, kind: "video", fileId, displayName: "fast-path" },
-      },
-    });
+    // A piece whose only layer is tiny.mp4 as a plain full-frame video
+    // overlay (no trim, nothing else) — the shape that classifies as
+    // stream-copy-trim. Two things make it that shape, both checked by the
+    // server's classifier (lib/export/classifier.ts), which refuses a client
+    // shape it disagrees with (409):
+    //   - the overlay starts at 0 with a duration — `startTime`/`duration` are
+    //     required by add_overlay's schema, and a base video must start at 0;
+    //   - the frame is tiny.mp4's own 320x240: `-c copy` cannot scale, so a
+    //     source that doesn't match the composition goes to ffmpeg-overlay
+    //     (lib/export/export-base.ts#streamCopyPreservesFraming), and a new
+    //     piece takes the user's default aspect ratio.
+    ({ pieceId } = await seedPieceWithVideo(request, { fixture: "tiny.mp4", width: 320, height: 240, displayName: "fast-path" }));
   });
 
   test("trim-only export uses stream-copy-trim backend and returns an MP4", async ({ request }) => {
@@ -79,7 +40,7 @@ test.describe("Export fast path", () => {
     });
     const elapsed = Date.now() - t0;
 
-    expect(resp.ok()).toBe(true);
+    expect(resp.ok(), `HTTP ${resp.status()} ${resp.ok() ? "" : await resp.text()}`).toBe(true);
     expect(resp.headers()["x-export-backend"]).toBe("stream-copy-trim");
 
     const body = await resp.body();

@@ -6,6 +6,12 @@ const clearRegistrationMock = vi.fn();
 vi.mock("@/lib/agents/libi-registration", () => ({ __clearLibiRegistrationMemo: (...a: unknown[]) => clearRegistrationMock(...a) }));
 const clearProviderMock = vi.fn();
 vi.mock("@/lib/providers/detect", () => ({ __clearProviderMemo: (...a: unknown[]) => clearProviderMock(...a) }));
+const probe = vi.hoisted(() => ({ started: vi.fn(), ended: vi.fn(), endAll: vi.fn() }));
+vi.mock("@/lib/providers/claude-signin-probe", () => ({
+  noteClaudeLoginStarted: (...a: unknown[]) => probe.started(...a),
+  noteClaudeLoginEnded: (...a: unknown[]) => probe.ended(...a),
+  endClaudeLoginsOf: (...a: unknown[]) => probe.endAll(...a),
+}));
 const warnMock = vi.fn();
 vi.mock("@/lib/logger", () => ({ serverLogger: { warn: (...a: unknown[]) => warnMock(...a), info: vi.fn(), debug: vi.fn() } }));
 vi.mock("@/lib/libi-home", () => ({ getLibiAgentDir: () => "/tmp/agent" }));
@@ -33,6 +39,42 @@ beforeEach(() => {
   warnMock.mockReset();
   openedMock.mockReset();
   closedMock.mockReset();
+  probe.started.mockReset();
+  probe.ended.mockReset();
+  probe.endAll.mockReset();
+});
+
+// Claude Code must not be asked about an entry while its `mcp login` runs (lib/providers/claude-signin-probe.ts);
+// the setup scripts announce its start and end in the terminal's output.
+describe("setup terminal output hook", () => {
+  it("the manager is built with it, and it hands each sign-in's start and end to the probe, per terminal", async () => {
+    const { getTerminalManager, handleSetupTerminalOutput } = await import("@/lib/terminal/instance");
+    getTerminalManager();
+    expect((ctorOpts.at(-1) as { onSetupTerminalOutput?: unknown }).onSetupTerminalOutput).toBe(handleSetupTerminalOutput);
+    handleSetupTerminalOutput("t-1", "Claude Code adds ElevenLabs...\r\n[libi sign-in st");
+    handleSetupTerminalOutput("t-2", "art: other]\r\n");
+    expect(probe.started).not.toHaveBeenCalled();
+    handleSetupTerminalOutput("t-1", "art: elevenlabs]\r\n");
+    expect(probe.started).toHaveBeenCalledWith("elevenlabs", "t-1");
+    handleSetupTerminalOutput("t-1", "[libi sign-in end: elevenlabs]\r\n");
+    expect(probe.ended).toHaveBeenCalledWith("elevenlabs");
+  });
+
+  it("a terminal that goes away ends the sign-ins it was running", async () => {
+    const { handleSetupTerminalExit } = await import("@/lib/terminal/instance");
+    handleSetupTerminalExit("providers", "t-9");
+    expect(probe.endAll).toHaveBeenCalledWith("t-9");
+    expect(clearProviderMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("never throws", async () => {
+    probe.started.mockImplementation(() => {
+      throw new Error("boom");
+    });
+    const { handleSetupTerminalOutput } = await import("@/lib/terminal/instance");
+    expect(() => handleSetupTerminalOutput("t-3", "[libi sign-in start: x]")).not.toThrow();
+    expect(warnMock).toHaveBeenCalledWith({ tag: "terminal", op: "setup_output_hook_failed" }, expect.any(String));
+  });
 });
 
 describe("setup terminal exit hook", () => {

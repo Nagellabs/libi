@@ -94,5 +94,6 @@ for every extend take on route D — `costEstimate:` from `get_pricing`, `provid
 ## Music
 
 `local-music` (free, ACE-Step, on-device) is the default. A paid alternative is a `music`
-provider's own tool — ElevenLabs `compose_music`, or a fal audio model. Add the result via
+provider's own tool — ElevenLabs music (`creative_generate_in_flow` with `node_type: "music"`,
+`generations_count: 1`), or a fal audio model. Add the result via
 `libi.audio_add_clip` with `kind: "standalone"`.

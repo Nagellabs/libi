@@ -163,3 +163,26 @@ describe("TerminalView clipboard shortcuts", () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 });
+
+// The setup terminal's Enter guard (components/terminal/setup-terminal.tsx) reaches xterm through `keyFilter`.
+describe("TerminalView keyFilter", () => {
+  function enter(type: "keydown" | "keypress" = "keydown") {
+    return { type, key: "Enter", code: "Enter", keyCode: 13, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, repeat: false, preventDefault: vi.fn() } as unknown as KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> };
+  }
+
+  it("a key the filter refuses is dropped before xterm or the browser acts on it; one it takes goes on as before", async () => {
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+    const { default: TerminalView } = await import("@/components/terminal/terminal-view");
+    let accept = false;
+    render(<TerminalView terminalId="t1" keyFilter={() => accept} />);
+    for (const type of ["keydown", "keypress"] as const) {
+      const ev = enter(type);
+      expect(term!.keyHandler!(ev)).toBe(false);
+      expect(ev.preventDefault).toHaveBeenCalled();
+    }
+    accept = true;
+    const ev = enter();
+    expect(term!.keyHandler!(ev)).toBe(true);
+    expect(ev.preventDefault).not.toHaveBeenCalled();
+  });
+});

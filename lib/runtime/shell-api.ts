@@ -71,6 +71,20 @@ export { bindNotifier } from "@/mcp/notify";
 export { reportNativeCrash } from "@/lib/sentry/native-crash";
 /** Boots the production Next server in-process and returns its bound port. */
 export { startNextServer } from "@/lib/server/next-server";
+/**
+ * Lets the desktop shell hand the runtime a keychain-backed cipher
+ * (Electron `safeStorage`) for libi's own social-provider grant.
+ *
+ * The shell MUST call this BEFORE `startNextServer` (above). With no cipher
+ * registered the token store writes a plaintext `enc: "none"` file, so a
+ * grant obtained in the gap between the server binding and this call is
+ * persisted in the clear on a machine that has a keychain — and an existing
+ * encrypted grant reads as "not connected" for the same window.
+ *
+ * ADDITIVE (no version bump): an older shell never calls it and the runtime
+ * falls back to a private 0600 file — see lib/social/token-store.ts.
+ */
+export { registerSecretCipher } from "@/lib/social/secret-cipher";
 
 export type { LifecycleAdapter, LifecycleEvent } from "@/lib/server/lifecycle";
 export type { ShellUpdater, ShellUpdateStatus } from "@/lib/runtime/shell-update";
@@ -79,3 +93,4 @@ export type {
   StartNextServerOptions,
   StartedNextServer,
 } from "@/lib/server/next-server";
+export type { SecretCipher } from "@/lib/social/secret-cipher";

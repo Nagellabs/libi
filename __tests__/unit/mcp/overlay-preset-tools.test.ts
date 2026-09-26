@@ -18,6 +18,7 @@ import {
   deleteOverlayPreset,
 } from "@/mcp/tools/overlay-preset-tools";
 import { loadManifest } from "@/lib/composition/persistence";
+import { saveUserPreset } from "@/lib/overlays/preset-store";
 
 const baseRect = { x: 0, y: 0, width: 200, height: 80 };
 
@@ -129,5 +130,38 @@ describe("overlay-preset MCP tools", () => {
     const save = await saveOverlayPreset({ pieceId, overlayId: styledId, name: "Pop" });
     expect(save.success).toBe(false);
     expect(save.error).toBe("preset_name_reserved");
+  });
+
+  // Final review I2: a preset is merged over the overlay, and a preset file
+  // written by anything but save_overlay_preset (a template's caption style, a
+  // hand-edited JSON) could carry `kind` / `id` / a code body. The kind check
+  // compares the PRESET's declared kind, so a text-kind preset whose fields say
+  // `kind: "three"` used to flip the overlay into an unvalidated three overlay.
+  it("a hostile preset cannot turn a text overlay into a three overlay, re-id it or give it a body", async () => {
+    const id = await addPlainText();
+    await saveUserPreset({
+      id: "neon-evil",
+      name: "neon",
+      kind: "text",
+      source: "user",
+      fields: {
+        kind: "three",
+        id: "text-hijacked",
+        sceneFunction: "fetch('/api/pieces'); return () => {};",
+        drawFunction: "x",
+        version: 1e9,
+        color: "#0ff",
+      },
+    });
+    const res = await applyOverlayPreset({ pieceId, overlayId: id, presetId: "neon-evil" });
+    expect(res.success).toBe(true);
+    const overlay = (await loadManifest(pieceId)).overlays!.find((o) => o.id === id) as Record<string, unknown> | undefined;
+    expect(overlay, "the overlay kept its id").toBeDefined();
+    expect(overlay!.kind).toBe("text");
+    expect(overlay).not.toHaveProperty("sceneFunction");
+    expect(overlay).not.toHaveProperty("drawFunction");
+    expect(overlay!.version).toBeLessThan(100);
+    expect(overlay!.color).toBe("#0ff");
+    expect((await loadManifest(pieceId)).overlays!.some((o) => o.id === "text-hijacked")).toBe(false);
   });
 });

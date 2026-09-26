@@ -2,7 +2,9 @@ import matter from "gray-matter";
 import yaml from "js-yaml";
 import { basename, isAbsolute, normalize, sep } from "node:path";
 import type { Matcher, ParsedScenario } from "./types";
+import { compileTranscriptPattern } from "./assertions";
 import { SHAREABLE, isShareable, type Shareable } from "./shared-deps";
+import { expandAuthorTerms } from "./author-terms";
 
 /** Extract the body of a "## <heading>" section up to the next "## " or EOF. */
 function sectionBody(markdown: string, heading: string): string | null {
@@ -45,6 +47,18 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
   const timeoutSec =
     Number.isInteger(data.timeoutSec) && data.timeoutSec > 0 ? data.timeoutSec : 300;
   const falStrict = data.falStrict === true;
+  // libi's OWN social connection for this run (see ParsedScenario.social).
+  // Validated here for the same reason `share` is: a typo'd value should fail
+  // before anything is spawned, not silently run the wrong state — a social
+  // scenario that boots "connected" when it meant "disconnected" asserts the
+  // opposite branch of the skill and can still pass.
+  const socialRaw: unknown = data.social ?? "none";
+  if (socialRaw !== "none" && socialRaw !== "connected" && socialRaw !== "disconnected") {
+    throw new Error(
+      `Scenario ${sourcePath}: "social" must be none / connected / disconnected; got "${String(socialRaw)}"`,
+    );
+  }
+  const social: ParsedScenario["social"] = socialRaw;
   // Validated HERE rather than at boot: a typo'd `share:` should fail the run
   // before anything is spawned, and the allowlist is what keeps this from
   // becoming "point the harness at any directory".
@@ -79,6 +93,48 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
     }
   }
 
+  // Template FOLDERS, validated exactly like `fixtures` — same repo-relative rule, and
+  // for the same reason: a list that can name any directory on the machine is a very
+  // different feature from a fixture list. The entry names a DIRECTORY, so the last check
+  // is only that it has a basename at all (a trailing separator would stage into
+  // `<home>/fixtures/templates/` itself and clobber the whole folder).
+  const templates = asStringArray(data.templates ?? [], "templates", sourcePath);
+  for (const rel of templates) {
+    if (isAbsolute(rel)) {
+      throw new Error(
+        `Scenario ${sourcePath}: "templates" entries must be repo-relative; got absolute "${rel}"`,
+      );
+    }
+    const resolved = normalize(rel);
+    if (resolved.startsWith("..") || resolved.split(sep).includes("..")) {
+      throw new Error(
+        `Scenario ${sourcePath}: "templates" may not escape the repo with ".."; got "${rel}"`,
+      );
+    }
+    if (basename(resolved).length === 0) {
+      throw new Error(`Scenario ${sourcePath}: "templates" entry "${rel}" names no folder`);
+    }
+  }
+
+  // Canvas size seeded onto the piece before the prompt is sent (see
+  // ParsedScenario.pieceDimensions). Validated here for the same reason `social` is: a
+  // scenario that meant a 9:16 piece and got a typo'd number should fail before anything
+  // is spawned, not silently seed the default 1920×1080 and fail for an unrelated reason.
+  let pieceDimensions: ParsedScenario["pieceDimensions"];
+  if (data.pieceDimensions !== undefined) {
+    const dims = data.pieceDimensions;
+    if (
+      !Array.isArray(dims) ||
+      dims.length !== 2 ||
+      !dims.every((n) => Number.isInteger(n) && n > 0)
+    ) {
+      throw new Error(
+        `Scenario ${sourcePath}: "pieceDimensions" must be a [width, height] pair of positive integers`,
+      );
+    }
+    pieceDimensions = [dims[0], dims[1]];
+  }
+
   // Default TRUE: without the pre-authorization preamble an unattended run stops at
   // the first "OK to generate?" and produces an empty trace. Setting it false is what lets
   // a scenario assert a paid call is ABSENT — see harness.ts#preambleFor.
@@ -87,9 +143,47 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
   }
   const preauthorize = data.preauthorize !== false;
 
+  // The test-mode catalog's creator status (see ParsedScenario.catalogCreator). A typo
+  // fails here, before a paid run boots the catalog approved and asserts the wrong branch.
+  const CATALOG_CREATORS = ["none", "pending", "approved", "rejected"] as const;
+  const catalogCreatorRaw: unknown = data.catalogCreator;
+  if (catalogCreatorRaw !== undefined && !(CATALOG_CREATORS as readonly unknown[]).includes(catalogCreatorRaw)) {
+    throw new Error(`Scenario ${sourcePath}: frontmatter "catalogCreator" must be one of none, pending, approved, rejected`);
+  }
+  const catalogCreator = catalogCreatorRaw as ParsedScenario["catalogCreator"];
+
   const prompt = sectionBody(content, "Prompt");
   if (!prompt) {
     throw new Error(`Scenario ${sourcePath}: a "## Prompt" section is required`);
+  }
+
+  // Scripted follow-ups (see ParsedScenario.replies): a numbered list, one item per turn.
+  // An item may wrap over several lines; a continuation line is indented or unnumbered.
+  const replies: string[] = [];
+  const repliesSection = sectionBody(content, "Replies");
+  if (repliesSection !== null) {
+    for (const line of repliesSection.split("\n")) {
+      const item = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+      if (item) replies.push(item[1].trim());
+      else if (line.trim() && replies.length > 0) replies[replies.length - 1] += ` ${line.trim()}`;
+      else if (line.trim()) {
+        throw new Error(`Scenario ${sourcePath}: "## Replies" must be a numbered list; got "${line.trim()}"`);
+      }
+    }
+    if (replies.length === 0) {
+      throw new Error(`Scenario ${sourcePath}: "## Replies" is present but lists no reply`);
+    }
+  }
+
+  // Tools whose approval card the harness answers yes (see ParsedScenario.approve). libi
+  // tools only, named without the `libi.` prefix; validated here so a typo fails before
+  // boot rather than silently rejecting the card the scenario meant to approve.
+  const approve = asStringArray(data.approve ?? [], "approve", sourcePath).map((t) => t.replace(/^libi\./, ""));
+  for (const t of approve) {
+    // No `__`: a Claude MCP name (`mcp__libi__libi_publish_template`) is the classic slip.
+    if (!/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(t)) {
+      throw new Error(`Scenario ${sourcePath}: "approve" names libi tools like publish_template; got "${t}"`);
+    }
   }
 
   let assertions: Matcher[] = [];
@@ -111,6 +205,44 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
           throw new Error(`Scenario ${sourcePath}: "assertions" must be a list`);
         }
         assertions = list as Matcher[];
+        for (const m of assertions) {
+          if (m.ordered !== undefined) validateOrdered(m, sourcePath);
+          // A bad regex would otherwise throw only in evaluate(), after the paid run.
+          if (typeof m?.transcript_matches === "string") {
+            try {
+              compileTranscriptPattern(m.transcript_matches);
+            } catch (err) {
+              throw new Error(`Scenario ${sourcePath}: ${(err as Error).message}`);
+            }
+          }
+          // `{{author-terms:<source>}}` → the needles derived from that fixture's author values.
+          if (m.transcript_contains !== undefined) {
+            try {
+              m.transcript_contains = expandAuthorTerms(m.transcript_contains);
+            } catch (err) {
+              throw new Error(`Scenario ${sourcePath}: ${(err as Error).message}`);
+            }
+          }
+          if ((m.turn !== undefined || m.scope !== undefined) && m.transcript_contains === undefined && m.transcript_matches === undefined) {
+            throw new Error(`Scenario ${sourcePath}: "turn" and "scope" narrow a transcript_contains or transcript_matches: ${JSON.stringify(m)}`);
+          }
+          if (m.turn !== undefined) {
+            const last = replies.length + 1;
+            const ok = (n: unknown) => Number.isInteger(n) && (n as number) >= 1 && (n as number) <= last;
+            const valid = Array.isArray(m.turn)
+              ? m.turn.length === 2 && ok(m.turn[0]) && ok(m.turn[1]) && m.turn[0] <= m.turn[1]
+              : ok(m.turn);
+            if (!valid) {
+              throw new Error(
+                `Scenario ${sourcePath}: "turn" must be 1..${last} or a range [from, to] within it (the prompt plus ` +
+                  `${replies.length} scripted repl${replies.length === 1 ? "y" : "ies"}); got ${JSON.stringify(m.turn)}`,
+              );
+            }
+          }
+          if (m.scope !== undefined && m.scope !== "all" && m.scope !== "agent_text") {
+            throw new Error(`Scenario ${sourcePath}: "scope" must be all or agent_text; got ${JSON.stringify(m.scope)}`);
+          }
+        }
       }
     }
   }
@@ -133,13 +265,40 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
     runs,
     timeoutSec,
     falStrict,
+    social,
     share: share as Shareable[],
     fixtures,
+    templates,
+    pieceDimensions,
     preauthorize,
+    ...(catalogCreator !== undefined ? { catalogCreator } : {}),
+    replies,
+    approve,
     covers,
     prompt,
     assertions,
     behavior,
     sourcePath,
   };
+}
+
+/** Shape-check an `ordered` matcher at parse time, so a typo fails before a paid run. */
+function validateOrdered(m: Matcher, sourcePath: string): void {
+  const bad = (why: string) => new Error(`Scenario ${sourcePath}: "ordered" ${why}: ${JSON.stringify(m)}`);
+  const o = m.ordered as unknown as { before?: unknown; then?: unknown };
+  const others = Object.keys(m).filter((k) => k !== "ordered" && k !== "expect");
+  if (others.length) throw bad(`cannot be combined with ${others.join(", ")}`);
+  if (m.expect !== "present") throw bad("takes expect: present only");
+  if (!o || typeof o !== "object" || !Array.isArray(o.before) || o.before.length === 0) throw bad("needs a non-empty before list");
+  const needles = [...(o.before as unknown[]), o.then];
+  for (const n of needles) {
+    const x = n as { transcript_contains?: unknown; scope?: unknown } | null;
+    if (!x || typeof x !== "object") throw bad("needs before and then needles");
+    const tc = x.transcript_contains;
+    const ok = typeof tc === "string" ? tc !== "" : Array.isArray(tc) && tc.length > 0 && tc.every((t) => typeof t === "string" && t !== "");
+    if (!ok) throw bad("needles need a non-empty transcript_contains");
+    if (x.scope !== undefined && x.scope !== "all" && x.scope !== "agent_text") throw bad(`scope must be all or agent_text`);
+    const extra = Object.keys(x).filter((k) => k !== "transcript_contains" && k !== "scope");
+    if (extra.length) throw bad(`needles take only transcript_contains and scope, not ${extra.join(", ")}`);
+  }
 }

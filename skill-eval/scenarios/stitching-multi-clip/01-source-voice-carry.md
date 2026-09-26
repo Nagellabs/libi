@@ -2,7 +2,7 @@
 id: stitch-source-voice-carry
 title: Stitch (preserve-creator branch) carries the source creator's voice into faceless AI inserts via @Audio1 (no ElevenLabs)
 skills: [stitching-multi-clip, ugc-product-video, voiceover-production, ai-asset-generation, ai-video-models, realistic-image-generation]
-mcps: [fal-ai, ElevenLabs]
+mcps: [fal-ai, elevenlabs]
 agent: claude-code
 runs: 1
 # Raised from 600 after the 2026-09-10 QA timeout. 715 KB of transcript and a healthy trace
@@ -65,7 +65,7 @@ assertions: []
   `PUT`/`curl` bytes to fal storage — provider credentials stayed inside the server/MCP boundary.
 - Reused the SAME `@Audio1` sample on every insert so one voice runs through the piece; the AI
   inserts are voiced in the creator's own voice with no silent holes.
-- Did **NOT** call ElevenLabs `voice_clone` / `text_to_speech` — cloning is the explicit opt-in
+- Did **NOT** call ElevenLabs' `creative_generate_speech` or its voice changer — a new voice is the explicit opt-in
   fallback, and the user did not ask for it. Did NOT mute the inserts and ship silent gaps. Did
   NOT use Kokoro for the UGC voice.
 - Kept the stitch as separate per-beat scenes (no pre-concatenation); no doubled audio on the

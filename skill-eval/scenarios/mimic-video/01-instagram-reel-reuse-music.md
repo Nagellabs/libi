@@ -2,7 +2,7 @@
 id: mimic-video-instagram-reel-reuse-music
 title: Mimic an Instagram reel — download, analyze, plan, storyboard, reuse original music, generate
 skills: [mimic-video, video-planning, video-analysis, audio-analysis, using-storyboard, generic-video, ugc-product-video, music-video-creation, music-creation, ugc-craft, ai-asset-generation, ai-video-models, realistic-image-generation, physical-action-video, voiceover-production, stitching-multi-clip, speech-captions, animated-text-overlays, using-asset-folders, using-snapshot-draft, using-character-library]
-mcps: [youtube-download, whisper, fal-ai, ElevenLabs, local-tts, local-music]
+mcps: [youtube-download, whisper, fal-ai, elevenlabs, local-tts, local-music]
 agent: claude-code
 runs: 1
 # HEAVY FULL-BUILD over a LIVE network source. The agent must: download a real Instagram

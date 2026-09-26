@@ -24,6 +24,7 @@ const getActiveSessionIds = vi.hoisted(() => vi.fn(() => [] as string[]));
 vi.mock("@/lib/sessions/session-manager", () => ({
   getSessionManager: () => ({
     getActiveSessionIds,
+    getSession: () => undefined,
     onGlobalEvent: vi.fn(),
     offGlobalEvent: vi.fn(),
     onSystemEvent: vi.fn(),

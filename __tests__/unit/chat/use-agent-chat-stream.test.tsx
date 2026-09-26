@@ -649,3 +649,167 @@ describe("useAgentChat — shellEnvLoaded", () => {
     expect(result.current.shellEnvLoaded).toBe(true);
   });
 });
+
+describe("useAgentChat — SSE (re)connect during a running turn", () => {
+  // The route announces each active session's REAL state on every new SSE
+  // connection: `streaming` when a prompt is in flight, `connected` when idle
+  // (app/api/agent/events/route.ts). It used to say `connected` for every
+  // session, so a reload or EventSource reconnect mid-turn dropped the Stop
+  // button while the agent kept working (QA 2026-09-25, bug 3).
+  function emitFor(sessionId: string, event: Record<string, unknown>) {
+    lastES().onmessage?.({ data: JSON.stringify({ sessionId, ...event }) });
+  }
+  const inFlightHistory = [
+    { id: "user_1", role: "user", parts: [{ type: "text", text: "make it" }], timestamp: 1 },
+    { id: "agent_1", role: "agent", parts: [{ type: "text", text: "Working on it." }], timestamp: 2 },
+  ];
+
+  it("a reload mid-turn keeps the chat busy when the reconnect frame arrives after history", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ messages: inFlightHistory }) })));
+    const { result } = renderHook(() => useAgentChat("reload-busy-a"));
+    await act(async () => {}); // history lands first
+
+    act(() => emitFor("reload-busy-a", { type: "agent-status", status: "streaming" }));
+    expect(result.current.isLoading).toBe(true);
+
+    // The turn keeps streaming into the SAME message (adopted from history).
+    act(() => emitFor("reload-busy-a", { type: "agent-text", text: " Still going." }));
+    const agents = result.current.messages.filter((m) => m.role === "agent");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].id).toBe("agent_1");
+    expect(result.current.isLoading).toBe(true);
+
+    act(() => emitFor("reload-busy-a", { type: "agent-complete", stopReason: "end_turn" }));
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it("a reload mid-turn keeps the chat busy when the reconnect frame beats the history fetch", async () => {
+    let answer!: () => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve({ ok: true, json: async () => ({ messages: inFlightHistory }) });
+          }),
+      ),
+    );
+    const { result } = renderHook(() => useAgentChat("reload-busy-b"));
+    await act(async () => {});
+    act(() => emitFor("reload-busy-b", { type: "agent-status", status: "streaming" }));
+    await act(async () => { answer(); });
+    await act(async () => {});
+    expect(result.current.isLoading).toBe(true);
+    expect(result.current.messages.filter((m) => m.role === "agent")).toHaveLength(1);
+  });
+
+  it("an EventSource reconnect mid-turn neither idles the chat nor splits the reply", async () => {
+    const { result } = renderHook(() => useAgentChat("reconnect-busy"));
+    await act(async () => {});
+    act(() => emitFor("reconnect-busy", { type: "agent-status", status: "thinking" }));
+    act(() => emitFor("reconnect-busy", { type: "agent-text", text: "part one" }));
+
+    // The reconnect frame for a session whose prompt is still running.
+    act(() => emitFor("reconnect-busy", { type: "agent-status", status: "streaming" }));
+    act(() => emitFor("reconnect-busy", { type: "agent-text", text: " part two" }));
+
+    expect(result.current.isLoading).toBe(true);
+    const agents = result.current.messages.filter((m) => m.role === "agent");
+    expect(agents).toHaveLength(1);
+    expect(agents[0].parts).toEqual([{ type: "text", text: "part one part two" }]);
+  });
+
+  it("an idle session's reconnect frame leaves it idle", async () => {
+    const { result } = renderHook(() => useAgentChat("reconnect-idle"));
+    await act(async () => {});
+    act(() => emitFor("reconnect-idle", { type: "agent-status", status: "connected" }));
+    expect(result.current.status).toBe("connected");
+    expect(result.current.isLoading).toBe(false);
+  });
+
+  it("the sidebar's working dot agrees with the composer after the reconnect frame", async () => {
+    const { result } = renderHook(() => useSessionGenerating("reconnect-dot"));
+    await act(async () => {});
+    act(() => emitFor("reconnect-dot", { type: "agent-status", status: "streaming" }));
+    expect(result.current).toBe(true);
+  });
+});
+
+describe("useAgentChat — a pending approval across a reload", () => {
+  // The server caches the approval card in the session's history (pending
+  // until answered) AND re-sends it on every SSE (re)connect. Whichever
+  // arrives first, the chat must end with exactly one answerable card — the
+  // re-sent copy used to be dropped when the history load replaced the live
+  // message holding it (review of bug 3, 2026-09-25).
+  function emitFor(sessionId: string, event: Record<string, unknown>) {
+    lastES().onmessage?.({ data: JSON.stringify({ sessionId, ...event }) });
+  }
+  const toolCall = { toolCallId: "tc-1", title: "`rm -rf build`" };
+  const options = [
+    { optionId: "allow", name: "Allow", kind: "allow_once" },
+    { optionId: "deny", name: "Deny", kind: "reject_once" },
+  ];
+  const card = (status: "pending" | "resolved", outcome?: unknown) => ({
+    type: "permission-request", pendingId: "p-1", toolCall, options, reason: "acp", status,
+    ...(outcome ? { outcome } : {}),
+  });
+  const history = (status: "pending" | "resolved", outcome?: unknown) => [
+    { id: "user_1", role: "user", parts: [{ type: "text", text: "clean up" }], timestamp: 1 },
+    { id: "agent_1", role: "agent", parts: [{ type: "text", text: "Deleting build/." }, card(status, outcome)], timestamp: 2 },
+  ];
+  const request = { type: "agent-permission-request", pendingId: "p-1", toolCall, options, reason: "acp" };
+  const cards = (messages: { parts: { type: string }[] }[]) =>
+    messages.flatMap((m) => m.parts).filter((p) => p.type === "permission-request") as unknown as Array<{ status: string }>;
+
+  it("frames before history: one answerable card", async () => {
+    let answer!: () => void;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise((resolve) => {
+            answer = () => resolve({ ok: true, json: async () => ({ messages: history("pending") }) });
+          }),
+      ),
+    );
+    const { result } = renderHook(() => useAgentChat("perm-frames-first"));
+    await act(async () => {});
+    act(() => emitFor("perm-frames-first", { type: "agent-status", status: "streaming" }));
+    act(() => emitFor("perm-frames-first", request));
+    expect(cards(result.current.messages)).toHaveLength(1);
+
+    await act(async () => { answer(); });
+    await act(async () => {});
+    const after = cards(result.current.messages);
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe("pending");
+    expect(result.current.isLoading).toBe(true);
+  });
+
+  it("history before frames: one answerable card", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => ({ messages: history("pending") }) })));
+    const { result } = renderHook(() => useAgentChat("perm-history-first"));
+    await act(async () => {});
+    act(() => emitFor("perm-history-first", { type: "agent-status", status: "streaming" }));
+    act(() => emitFor("perm-history-first", request));
+    const after = cards(result.current.messages);
+    expect(after).toHaveLength(1);
+    expect(after[0].status).toBe("pending");
+  });
+
+  it("an answered card shows resolved after a reload", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ messages: history("resolved", { kind: "selected", optionId: "allow" }) }),
+      })),
+    );
+    const { result } = renderHook(() => useAgentChat("perm-answered"));
+    await act(async () => {});
+    act(() => emitFor("perm-answered", { type: "agent-status", status: "streaming" }));
+    const after = cards(result.current.messages);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ status: "resolved", outcome: { kind: "selected", optionId: "allow" } });
+  });
+});

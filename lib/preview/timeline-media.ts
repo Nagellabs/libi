@@ -29,6 +29,8 @@ export function buildMediaById(
   if (!composition) return map;
 
   for (const o of composition.overlays ?? []) {
+    // An unfilled template slot has no file to paint (or to ensure a filmstrip for).
+    if ((o.kind === "image" || o.kind === "video") && o.unfilledSlot !== undefined) continue;
     if (o.kind === "image" && o.fileId) {
       map.set(o.id, { kind: "image", fileId: o.fileId });
     } else if (o.kind === "video" && o.fileId) {

@@ -22,9 +22,18 @@ import {
   seenAnnouncements,
   analyticsQueue,
   skillInstalls,
+  socialPostLinks,
+  socialAdLinks,
+  socialPostIntents,
+  templates,
+  templateUses,
+  templatePublishRequests,
+  catalogIndex,
+  catalogIndexMeta,
 } from "@/lib/db/schema/sqlite";
+import { TEMPLATES_FTS_STATEMENTS } from "@/lib/db/templates-fts";
 
-const schema = { pieces, files, settings, mcpServers, legacyProviderKeys, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue, skillInstalls };
+const schema = { pieces, files, settings, mcpServers, legacyProviderKeys, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue, skillInstalls, socialPostLinks, socialPostIntents, socialAdLinks, templates, templateUses, templatePublishRequests, catalogIndex, catalogIndexMeta };
 
 declare global {
   var __libi_test_db: BetterSQLite3Database<typeof schema> | undefined;
@@ -125,6 +134,10 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       skill_digest_cache TEXT,
       analytics TEXT,
       crash_reports TEXT,
+      social TEXT,
+      templates_author TEXT,
+      templates_catalog TEXT,
+      legacy_scenes_noticed TEXT,
       onboarding_persona TEXT,
       persona_selected_at INTEGER,
       agent_ever_connected INTEGER NOT NULL DEFAULT 0,
@@ -334,7 +347,118 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       last_root TEXT
     );
     CREATE UNIQUE INDEX skill_installs_level_unique ON skill_installs(agent_id, scope, folder_path);
+    CREATE TABLE social_post_links (
+      provider_id TEXT NOT NULL,
+      provider_post_id TEXT NOT NULL,
+      piece_id TEXT NOT NULL REFERENCES pieces(id) ON DELETE CASCADE,
+      export_path TEXT,
+      request_id TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      last_status TEXT,
+      last_status_at INTEGER,
+      PRIMARY KEY (provider_id, provider_post_id)
+    );
+    CREATE INDEX idx_social_post_links_piece ON social_post_links(piece_id);
+    CREATE TABLE social_post_intents (
+      provider_id TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      piece_id TEXT REFERENCES pieces(id) ON DELETE CASCADE,
+      provider_post_id TEXT,
+      mode TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER,
+      PRIMARY KEY (provider_id, request_id)
+    );
+    CREATE INDEX idx_social_post_intents_piece ON social_post_intents(piece_id);
+    CREATE TABLE social_ad_links (
+      provider_id TEXT NOT NULL,
+      provider_ad_id TEXT NOT NULL,
+      platform_ad_id TEXT,
+      piece_id TEXT NOT NULL REFERENCES pieces(id) ON DELETE CASCADE,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (provider_id, provider_ad_id)
+    );
+    CREATE INDEX idx_social_ad_links_piece ON social_ad_links(piece_id);
+    CREATE TABLE templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      tags TEXT NOT NULL DEFAULT '[]',
+      origin TEXT NOT NULL DEFAULT 'local',
+      cloud_id TEXT,
+      publish_pending TEXT,
+      cloud_source TEXT,
+      version INTEGER NOT NULL DEFAULT 1,
+      created_from_piece_id TEXT REFERENCES pieces(id) ON DELETE SET NULL,
+      has_code INTEGER NOT NULL DEFAULT 0,
+      use_count INTEGER NOT NULL DEFAULT 0,
+      last_used_at INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX idx_templates_origin_updated ON templates(origin, updated_at);
+    CREATE UNIQUE INDEX templates_cloud_id_unique ON templates(cloud_id) WHERE cloud_id IS NOT NULL;
+    CREATE TABLE template_uses (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+      piece_id TEXT REFERENCES pieces(id) ON DELETE SET NULL,
+      used_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      reported INTEGER NOT NULL DEFAULT 0,
+      report_attempts INTEGER NOT NULL DEFAULT 0,
+      report_next_at INTEGER,
+      source TEXT
+    );
+    CREATE INDEX idx_template_uses_template_used ON template_uses(template_id, used_at);
+    CREATE TABLE template_publish_requests (
+      id TEXT PRIMARY KEY NOT NULL,
+      template_id TEXT NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+      source TEXT NOT NULL,
+      example_video TEXT NOT NULL,
+      nickname TEXT,
+      fingerprint TEXT NOT NULL,
+      confirm_code TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'awaiting',
+      job_id TEXT,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX template_publish_requests_template_unique ON template_publish_requests(template_id);
+    CREATE TABLE catalog_index (
+      cloud_id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      tags_json TEXT NOT NULL DEFAULT '[]',
+      nickname TEXT NOT NULL DEFAULT '',
+      author_id TEXT NOT NULL DEFAULT '',
+      version INTEGER NOT NULL DEFAULT 1,
+      has_code INTEGER NOT NULL DEFAULT 0,
+      canvas_width INTEGER NOT NULL,
+      canvas_height INTEGER NOT NULL,
+      duration REAL NOT NULL DEFAULT 0,
+      slot_count INTEGER NOT NULL DEFAULT 0,
+      poster TEXT NOT NULL,
+      video TEXT NOT NULL,
+      uses_total INTEGER NOT NULL DEFAULT 0,
+      uses_7d INTEGER NOT NULL DEFAULT 0,
+      heat REAL NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      fetched_at INTEGER NOT NULL
+    );
+    CREATE INDEX idx_catalog_index_uses7d ON catalog_index(uses_7d);
+    CREATE TABLE catalog_index_meta (
+      id INTEGER PRIMARY KEY NOT NULL DEFAULT 1,
+      etag TEXT,
+      fetched_at INTEGER,
+      source TEXT
+    );
   `);
+
+  for (const statement of TEMPLATES_FTS_STATEMENTS) sqlite.exec(statement);
 
   const db = drizzle(sqlite, { schema });
   globalThis.__libi_test_db = db;

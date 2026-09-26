@@ -2,7 +2,7 @@ import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
 import { getDb } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
-import { checkBinary, type AuxResult } from "./aux-checks";
+import { checkYtDlp, type AuxResult } from "./aux-checks";
 import { buildSpawnEnv } from "@/mcp/registry/spawn-env";
 import { resolveBundledSpawn } from "@/mcp/registry/local-bin-resolver";
 
@@ -47,7 +47,8 @@ const AUX_CHECKS: Record<
   string,
   (row: McpRow) => Promise<AuxResult[]>
 > = {
-  "youtube-download": async () => [await checkBinary("yt-dlp")],
+  // libi's own launcher, not whatever `yt-dlp` is first on PATH (see checkYtDlp).
+  "youtube-download": async () => [await checkYtDlp()],
 };
 
 export async function diagnoseMcp(

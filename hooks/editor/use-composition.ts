@@ -11,6 +11,7 @@ import {
 import { useEditorState } from "@/lib/editor-state-context";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { getCompositionFrames } from "@/lib/engine/renderer";
+import { useLegacyScenesNotice } from "@/hooks/editor/use-legacy-scenes-notice";
 
 export interface UseCompositionResult {
   /** Hydrated composition (overlay array attached), or null when empty/loading. */
@@ -75,6 +76,13 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
 
   // Unify the two branches so the rest of the hook is mode-agnostic.
   const activeQuery = isSnapshotMode ? snapshotQuery : compositionQuery;
+
+  // Canvas scenes from libi 0.1.0/0.1.1 were dropped on load: say so once.
+  useLegacyScenesNotice(
+    activePieceId,
+    compositionQuery.data?.legacyScenes,
+    compositionQuery.data?.legacyScenesNoticed,
+  );
 
   // useFiles already gates internally on `!!pieceId`, so passing `""` when
   // inactive is inert. We only include filesQuery here for the filesById

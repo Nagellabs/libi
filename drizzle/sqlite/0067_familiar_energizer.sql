@@ -1,0 +1,1 @@
+ALTER TABLE `catalog_index_meta` ADD `source` text;

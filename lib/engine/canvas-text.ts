@@ -71,8 +71,8 @@ export function makeCanvasTextClass(THREE: AnyTHREE) {
     outlineWidth = 0;
     font: string | undefined = undefined;
 
-    private _canvas: HTMLCanvasElement;
-    private _texture: import("three").CanvasTexture;
+    private _canvas: HTMLCanvasElement | OffscreenCanvas;
+    private _texture: import("three").CanvasTexture<HTMLCanvasElement | OffscreenCanvas>;
 
     /** Post-sync font metrics (see the `metrics` getter). Zero until first sync. */
     private _ascent = 0;
@@ -82,7 +82,10 @@ export function makeCanvasTextClass(THREE: AnyTHREE) {
 
     constructor() {
       const geometry = new THREE.PlaneGeometry(1, 1);
-      const canvas = document.createElement("canvas");
+      // Host: a DOM canvas, byte-identical to before. Sandbox worker (spec A1):
+      // no document — an OffscreenCanvas backs the texture instead.
+      const canvas: HTMLCanvasElement | OffscreenCanvas =
+        typeof document !== "undefined" ? document.createElement("canvas") : new OffscreenCanvas(2, 2);
       canvas.width = 2;
       canvas.height = 2;
       const texture = new THREE.CanvasTexture(canvas);
@@ -108,7 +111,7 @@ export function makeCanvasTextClass(THREE: AnyTHREE) {
       const fontSpec = `bold ${FONT_PX}px ${family}`;
 
       const canvas = this._canvas;
-      const ctx = canvas.getContext("2d");
+      const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | null;
       if (!ctx) {
         cb?.();
         return;

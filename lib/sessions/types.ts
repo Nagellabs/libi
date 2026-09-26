@@ -16,6 +16,9 @@ export interface PendingApproval {
   pendingId: string;
   toolCall: ToolCallUpdate;
   options: PermissionOption[];
+  /** Why the prompt was surfaced (UI hint copy). Kept so the SSE route can
+   *  re-announce the request on a (re)connect exactly as first sent. */
+  reason?: "acp" | "extension";
   /** Resolves the ACP requestPermission promise. Idempotent — additional
    *  calls are no-ops because the entry is removed on first resolve. */
   resolve: (response: RequestPermissionResponse) => void;
@@ -30,8 +33,26 @@ export interface SessionEntry {
   active: boolean;
   lastUsed: number;
   messageCache: AgentMessage[];
+  /** Message-ASSEMBLY cursor: the agent message incoming content appends to.
+   *  NOT an in-flight flag — the event handler re-creates it for any late
+   *  agent content, and a cancelled prompt's teardown nulls it while a steered
+   *  successor is still running. Use `isSessionMidTurn` for "is it working". */
   currentAgentMessage: AgentMessage | null;
   currentUserMessage: AgentMessage | null;
+  /** Prompts `sendMessage` has sent that have not settled yet. A count, not a
+   *  flag: on the steer path turn 2 goes out before the cancelled turn 1
+   *  resolves. Reset to 0 (and `promptEpoch` bumped) whenever the ACP session
+   *  is dropped. Optional only because an entry built by an older class (the
+   *  dev singleton across HMR) lacks it — see `isSessionMidTurn`. */
+  promptsInFlight?: number;
+  /** Bumped on every reset of `promptsInFlight`, so a prompt that settles
+   *  after its session was torn down cannot decrement a newer count. */
+  promptEpoch?: number;
+  /** Wall-clock ms of the last LIVE update the agent sent (any session
+   *  update; replay excluded). A cancelled prompt stops counting as in flight
+   *  only after the session has been silent this long past
+   *  CANCEL_SETTLE_TIMEOUT_MS, so a slow-but-working adapter stays busy. */
+  lastAgentActivityAt?: number;
   listeners: Set<(event: AgentEvent) => void>;
   /** Permission requests awaiting user decision. Keyed by pendingId. */
   pendingApprovals: Map<string, PendingApproval>;
@@ -56,12 +77,19 @@ export interface SessionEntry {
   /** True while loadSession() replays history through the event handler.
    *  Replayed tool calls get no timestamps/status — a replay-time
    *  Date.now() would be a lie (QA 2026-07-04: bogus timers after
-   *  session re-activation). */
+   *  session re-activation). It also keeps the replay's message content off
+   *  the SSE: the replay builds the cache the history fetch returns, and an
+   *  open chat shown it live adopted it as a turn nothing ends (a stale "▍",
+   *  2026-09-25). Not only a timestamp switch — don't narrow it to one. */
   isReplaying?: boolean;
   /** False when the agent process this session runs on was spawned while the desktop app had not
    *  loaded the user's shell environment — its chat shows a warning. Set when the session becomes
    *  active; unset on a history entry that has never been activated. */
   shellEnvLoaded?: boolean;
+  /** The agent answered `session/load` with "no such session": its transcript is gone. Set once;
+   *  later activations throw `AgentHistoryMissingError` without asking the agent again. In memory
+   *  only, so a transcript the user restores is picked up after libi restarts. */
+  historyMissing?: boolean;
 }
 
 /** A group of sessions under a day header for the sidebar UI */
@@ -103,3 +131,47 @@ export type SystemEvent =
 
 /** Maximum concurrent active sessions (LRU eviction beyond this) */
 export const MAX_ACTIVE_SESSIONS = 10;
+
+/**
+ * Is this session mid-turn — a prompt sent and not yet settled?
+ * Read by LRU eviction (never evict a working session) and by the SSE route on
+ * every (re)connect (announce a working session as busy, not idle —
+ * app/api/agent/events/route.ts).
+ *
+ * The signal is `promptsInFlight`, maintained by `sendMessage` around
+ * `conn.prompt`. `currentAgentMessage` is consulted ONLY for an entry that has
+ * no counter at all (built by an older class the dev server kept across HMR),
+ * and never OR-ed with it: the cursor is re-created by late content, so
+ * trusting it alongside the counter would bring back a Stop button that
+ * cancels nothing.
+ */
+export function isSessionMidTurn(entry: SessionEntry | undefined): boolean {
+  if (!entry || !entry.active) return false;
+  if (typeof entry.promptsInFlight === "number") return entry.promptsInFlight > 0;
+  return entry.currentAgentMessage != null;
+}
+
+/**
+ * Mark the cached copy of an approval card resolved. The card is part of the
+ * session's history (`SessionEventHandler.handlePermissionRequest` caches it)
+ * so a reload brings back a pending one; every path that answers or drops the
+ * request must also close the cached card, or a reload would offer an
+ * answerable card for a request that no longer exists. Tolerates an entry
+ * without a cache. No-op for an unknown `pendingId`.
+ */
+export function markPermissionResolvedInCache(
+  entry: { messageCache?: AgentMessage[] },
+  pendingId: string,
+  outcome: { kind: "selected"; optionId: string } | { kind: "cancelled" },
+): void {
+  for (const msg of entry.messageCache ?? []) {
+    const idx = msg.parts.findIndex(
+      (p) => p.type === "permission-request" && p.pendingId === pendingId,
+    );
+    if (idx === -1) continue;
+    const part = msg.parts[idx];
+    if (part.type !== "permission-request") return;
+    msg.parts[idx] = { ...part, status: "resolved", outcome };
+    return;
+  }
+}

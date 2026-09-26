@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema";
 import { getStorage } from "@/lib/storage";
+import { isUnsafeStorageName } from "@/lib/storage/safe-name";
 import { serveFileWithRange } from "@/lib/http/range";
 
 /**
@@ -24,11 +25,7 @@ export async function GET(
   // Defensive path-traversal guard — `filmstripFilename` is always
   // server-generated (`<basename>-filmstrip.jpg`), so the surface is zero,
   // but fail closed mirroring the proxy route.
-  if (
-    file.filmstripFilename.includes("..") ||
-    file.filmstripFilename.includes("/") ||
-    file.filmstripFilename.includes("\\")
-  ) {
+  if (isUnsafeStorageName(file.filmstripFilename)) {
     return new Response("Invalid path", { status: 400 });
   }
 
@@ -41,8 +38,16 @@ export async function GET(
     ? `"${file.filmstripGeneratedAt.getTime()}"`
     : `"${file.id}"`;
 
+  // Contained, or a 404 — never a thrown error carrying the resolved path (as the proxy route).
+  let filePath: string;
+  try {
+    filePath = await storage.realPathForRead(file.pieceId, file.filmstripFilename);
+  } catch {
+    return new Response("Filmstrip missing", { status: 404 });
+  }
+
   return serveFileWithRange({
-    filePath: await storage.realPathForRead(file.pieceId, file.filmstripFilename),
+    filePath,
     contentType: "image/jpeg",
     etag,
     cacheControl: "no-cache, must-revalidate",

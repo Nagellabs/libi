@@ -1,7 +1,10 @@
 import { test, expect } from "@playwright/test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { launchLibi } from "./helpers";
 import path from "node:path";
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 
 /**
  * Two-part Electron verification, driven against a SCRATCH LIBI_HOME so
@@ -9,7 +12,7 @@ import fs from "node:fs";
  *
  *  1. LIBI_HOME flows through to the renderer — pieces/files land in
  *     the scratch root, not `~/.libi/`.
- *  2. A full create-piece → write-scene → export run finishes inside
+ *  2. A full create-piece → add a drawn layer → export run finishes inside
  *     the Electron renderer + the same Next.js server it loaded from.
  *
  * Prereqs (set by the harness before invocation):
@@ -46,7 +49,7 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
     }
   });
 
-  test("piece create + canvas-scene export end-to-end through the renderer", async () => {
+  test("piece create + code-overlay export end-to-end through the renderer", async () => {
     test.setTimeout(240_000);
     const { app, main } = await launchLibi();
     try {
@@ -61,42 +64,55 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
       }, port);
       expect(piece.id).toMatch(/^[0-9a-f-]{36}$/);
 
-      // ── 2. Seed a minimal canvas composition.json under scratch storage.
-      const storageDir = path.join(LIBI_HOME, "storage", piece.id);
-      fs.mkdirSync(storageDir, { recursive: true });
-      const sceneId = `s-${Date.now()}`;
-      const manifest = {
-        sceneOrder: [sceneId],
-        width: 320,
-        height: 180,
-        fps: 30,
-        audioClips: [],
-        overlays: [],
-        scenes: [
-          {
-            id: sceneId,
-            type: "canvas",
-            name: "Test scene",
-            duration: 0.5, // 15 frames @ 30fps
-            drawFunction:
-              "const { ctx, width, height } = context; ctx.fillStyle='#0ea5e9'; ctx.fillRect(0,0,width,height); ctx.fillStyle='#fff'; ctx.font='24px sans-serif'; ctx.fillText('libi', 20, 40);",
-          },
-        ],
-      };
-      fs.writeFileSync(
-        path.join(storageDir, "composition.json"),
-        JSON.stringify(manifest, null, 2),
-      );
-
-      // Server must initialize a snapshot before export accepts it for the
-      // "draft" source. The route's loadComposition already creates one
-      // lazily, so this is just an idempotent prime.
-      await main.evaluate(async (args) => {
-        const r = await fetch(
-          `http://127.0.0.1:${args.port}/api/pieces/${args.pieceId}/composition`,
-        );
-        if (!r.ok) throw new Error("composition fetch failed: " + r.status);
+      // ── 2. A small frame, then one full-frame hand-drawn layer on it.
+      //
+      // This used to hand-write a composition.json with a canvas SCENE
+      // (`scenes` / `sceneOrder` / `drawFunction`). Canvas scenes were removed
+      // on 2026-08-21 (f0e0a410): "a full-frame hand-drawn graphic is a code
+      // overlay now", and loadManifest drops `scenes` from any manifest still
+      // carrying it (lib/composition/persistence.ts) — so that seed loaded as
+      // an EMPTY piece and the export rightly refused it, "Nothing to export".
+      // The same draw body now goes in as a code overlay, the way an agent
+      // makes one: `libi.add_overlay` over libi's MCP endpoint, whose code
+      // lands in the overlay's own file (composition.json never holds code).
+      const dims = await main.evaluate(async (args) => {
+        const r = await fetch(`http://127.0.0.1:${args.port}/api/pieces/${args.pieceId}/composition/dimensions`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ width: 320, height: 180 }),
+        });
+        return r.status;
       }, { port, pieceId: piece.id });
+      expect(dims).toBe(200);
+
+      const mcpPort = fs.readFileSync(path.join(LIBI_HOME, "mcp-port"), "utf-8").trim();
+      const client = new Client({ name: "electron-e2e", version: "0" });
+      const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${mcpPort}/mcp`));
+      try {
+        await client.connect(transport);
+        const called = await client.callTool({
+          name: "libi.add_overlay",
+          arguments: {
+            pieceId: piece.id,
+            kind: "code",
+            displayName: "Test layer",
+            body:
+              "const { ctx, width, height } = context; ctx.fillStyle='#0ea5e9'; ctx.fillRect(0,0,width,height); ctx.fillStyle='#fff'; ctx.font='24px sans-serif'; ctx.fillText('libi', 20, 40);",
+            rect: { x: 0, y: 0, width: 320, height: 180 },
+            startTime: 0,
+            duration: 0.5, // 15 frames @ 30fps
+            z: 0,
+            opacity: 1,
+          },
+        });
+        const text = (called.content as Array<{ type: string; text?: string }>)[0]?.text ?? "";
+        const result = JSON.parse(text) as { success: boolean; error?: string };
+        expect(result.success, text).toBe(true);
+      } finally {
+        // DELETE /mcp — leave no session behind on a live aggregator.
+        await transport.terminateSession().catch(() => {});
+        await transport.close().catch(() => {});
+      }
 
       // ── 3. Kick off an export, override destFolder so the artifact
       // lands inside the scratch home (easy to assert on).
@@ -160,6 +176,24 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
       // The output MUST live inside the destFolder we requested — proves
       // the export route honors per-call destFolder, not the global default.
       expect(filePath!.startsWith(EXPORT_DEST)).toBe(true);
+      // The layer is in the file: a non-empty MP4 could still be black frames.
+      // The body fills the frame with #0ea5e9, so a 2x2 patch away from the
+      // "libi" label must decode to that blue (within H.264's colour error).
+      const [w, h] = execFileSync(
+        "ffprobe",
+        ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", filePath!],
+        { encoding: "utf8" },
+      ).trim().split(",").map(Number);
+      const rgb = execFileSync("ffmpeg", [
+        "-v", "error", "-ss", "0.1", "-i", filePath!, "-frames:v", "1",
+        "-vf", `crop=2:2:${Math.round(w * 0.75)}:${Math.round(h * 0.75)},format=rgb24`,
+        "-f", "rawvideo", "-",
+      ]);
+      const [r, g, b] = [rgb[0], rgb[1], rgb[2]];
+      expect(
+        Math.abs(r - 0x0e) <= 12 && Math.abs(g - 0xa5) <= 12 && Math.abs(b - 0xe9) <= 12,
+        `pixel rgb(${r},${g},${b}) is not the drawn #0ea5e9`,
+      ).toBe(true);
       console.log(`[export] wrote ${st.size} bytes to ${filePath}`);
     } finally {
       await app.close();

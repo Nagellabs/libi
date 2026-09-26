@@ -45,6 +45,25 @@ describe("/api/jobs/[id]", () => {
     expect(res.status).toBe(404);
   });
 
+  it("GET / DELETE / status answer 'not found' for another bundle's copy of JobNotFoundError", async () => {
+    // The JobManager is a globalThis singleton built from whichever route bundle loaded it first,
+    // so the error it throws can be a different class copy than the one this route imports.
+    const foreign = () => Object.assign(new Error("Job nope not found"), { name: "JobNotFoundError", jobId: "nope" });
+    (globalThis as { __libiJobManager?: unknown }).__libiJobManager = {
+      getStatus: vi.fn(async () => { throw foreign(); }),
+      cancel: vi.fn(async () => { throw foreign(); }),
+    };
+    const ctx = { params: Promise.resolve({ id: "nope" }) };
+
+    const { GET, DELETE } = await import("@/app/api/jobs/[id]/route");
+    expect((await GET(new Request("http://x/api/jobs/nope"), ctx)).status).toBe(404);
+    expect((await DELETE(new Request("http://x/api/jobs/nope", { method: "DELETE" }), ctx)).status).toBe(404);
+
+    const { GET: STATUS } = await import("@/app/api/jobs/[id]/status/route");
+    const res = await STATUS(new Request("http://x/api/jobs/nope/status"), ctx);
+    expect(await res.json()).toEqual({ status: "unknown" });
+  });
+
   it("DELETE transitions to cancel-requested", async () => {
     registerRunner({
       kind: "k", maxConcurrent: 1, resumable: false,

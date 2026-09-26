@@ -3,7 +3,8 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { jobs } from "@/lib/db/schema/sqlite";
 import { getJobManager } from "@/lib/jobs/manager";
-import { JobNotFoundError } from "@/lib/jobs/types";
+import { isJobNotFoundError } from "@/lib/jobs/types";
+import { USER_STARTED_JOB_KINDS } from "@/lib/jobs/user-started-kinds";
 
 /** Re-enqueue a failed/cancelled job with the same params. Returns the new
  *  jobId (since enqueue with `resume: false` creates a fresh row). */
@@ -16,6 +17,14 @@ export async function POST(
   const [row] = db.select().from(jobs).where(eq(jobs.id, id)).limit(1).all();
   if (!row) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+  // A job only the user starts is never re-run from stored params: every
+  // publish is a fresh confirm on the Templates page's review panel.
+  if (USER_STARTED_JOB_KINDS.has(row.kind)) {
+    return NextResponse.json(
+      { error: `A ${row.kind} job can't be retried from here. Publish it again from the Templates page.` },
+      { status: 403 },
+    );
   }
   if (row.status !== "failed" && row.status !== "cancelled") {
     return NextResponse.json(
@@ -56,7 +65,7 @@ export async function POST(
     });
     return NextResponse.json({ jobId });
   } catch (err) {
-    if (err instanceof JobNotFoundError) {
+    if (isJobNotFoundError(err)) {
       return NextResponse.json({ error: "not found" }, { status: 404 });
     }
     return NextResponse.json(

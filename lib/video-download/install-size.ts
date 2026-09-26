@@ -15,5 +15,10 @@
 // bulk of it and its size moves with the pinned interpreter — and stated as
 // decimal MB, as everywhere else in libi.
 
-/** "~125 MB": uv + a managed Python + yt-dlp, installed once, on first use. */
-export const YT_DLP_INSTALL_MB = 125;
+/** "~170 MB": uv + a managed Python + yt-dlp, installed once, on first use.
+ *  Measured 2026-09-25 on a true new-user run (macOS arm64, PATH=/usr/bin:/bin,
+ *  uv 0.12.19, UV_PYTHON_PREFERENCE=only-managed): `bin/uv` 36 MB +
+ *  `uv/python` (CPython 3.12.14) 70 MB + `uv/tools` (yt-dlp[default] + certifi)
+ *  33 MB + the `uv/cache` it leaves 30 MB = 169 MB. It was 125 while a system
+ *  Python could stand in for the managed one. */
+export const YT_DLP_INSTALL_MB = 170;

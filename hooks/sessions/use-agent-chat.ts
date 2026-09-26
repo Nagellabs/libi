@@ -10,6 +10,7 @@ import type {
 } from "@/lib/sessions/usage";
 import type { SessionModelSnapshot } from "@/lib/sessions/model-option";
 import { toast } from "sonner";
+import { restartSignals, type RestartOutcome } from "@/hooks/sessions/restart-signals";
 import { sanitizeInspectorGroup } from "@/lib/editor-state-context";
 import {
   backupFailedSend,
@@ -539,9 +540,15 @@ export const setComplexityModeEmitter = globalForSetMode.__libiSetComplexityMode
 
 type SSESessionHandler = (event: Record<string, unknown>) => void;
 
+/** After a reconnect ended another window's restart (its `done` lost), how long a `done` for it that
+ *  was still on its way is recognised as that restart's, not a second swap. */
+export const RECONNECT_DONE_GRACE_MS = 2_000;
+
 const _sseSessionHandlers = new Map<string, Set<SSESessionHandler>>();
 const _sseBroadcastHandlers = new Set<SSESessionHandler>();
 let _globalES: EventSource | null = null;
+/** The connection errored and a reconnect is due: the next one announces itself (`sse-reconnected`). */
+let _globalESLost = false;
 let _globalESReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 function _hasAnyHandlers() {
@@ -567,6 +574,16 @@ function _ensureGlobalSSE() {
 
   const es = new EventSource("/api/agent/events");
   _globalES = es;
+  // Back after an error: tell every mounted chat, since events sent meanwhile are lost (a
+  // restart's `done` among them — see `sse-reconnected` in useAgentChat).
+  if (_globalESLost) {
+    _globalESLost = false;
+    es.onopen = () => {
+      for (const handlers of _sseSessionHandlers.values()) {
+        for (const h of handlers) h({ type: "sse-reconnected" });
+      }
+    };
+  }
 
   es.onmessage = (event: MessageEvent) => {
     let data: Record<string, unknown>;
@@ -749,6 +766,7 @@ function _ensureGlobalSSE() {
   es.onerror = () => {
     es.close();
     _globalES = null;
+    _globalESLost = true;
     _globalESReconnectTimer = setTimeout(() => {
       _globalESReconnectTimer = null;
       if (_hasAnyHandlers()) _ensureGlobalSSE();
@@ -832,6 +850,9 @@ export interface UseAgentChat {
   /** False when this session's agent process started before the desktop app loaded the user's
    *  shell environment. True until the server has answered. */
   shellEnvLoaded: boolean;
+  /** True when the agent has no transcript for this chat any more (deleted or cleaned on disk), so
+   *  it can't be continued — told by the history fetch (`historyMissing`) or a send's 409. */
+  historyMissing: boolean;
 }
 
 /** SSE event types that affect the assembled messages and therefore run
@@ -844,6 +865,7 @@ const CHAT_STREAM_EVENT_TYPES = new Set([
   "agent-tool-progress",
   "agent-tool-status",
   "agent-tool-args",
+  "agent-tool-title",
   "agent-subagent-refine",
   "agent-tool-result",
   "agent-permission-request",
@@ -878,6 +900,11 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
   const [shellEnv, setShellEnv] = useState<{ sessionId: string; loaded: boolean } | null>(null);
   const shellEnvLoaded = shellEnv !== null && shellEnv.sessionId === sessionId ? shellEnv.loaded : true;
 
+  // The session whose agent reported no history for it. Keyed like `shellEnv`, so a switch to
+  // another chat never inherits the answer.
+  const [historyMissingFor, setHistoryMissingFor] = useState<string | null>(null);
+  const historyMissing = !!sessionId && historyMissingFor === sessionId;
+
   const [status, setStatusRaw] = useState<AgentChatStatus>(
     sessionId ? (_cachedStatusMap.get(sessionId) ?? "idle") : "idle",
   );
@@ -897,9 +924,178 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
 
   const sessionReady = status === "connected" || status === "thinking" || status === "streaming";
 
+  // A "Restart session" of this chat is under way — between the server's `session-restart`
+  // started and done/failed. The restart cancels the running turn, then the load that follows
+  // REPLAYS the whole history as ordinary stream events; appended to what is on screen, that would
+  // duplicate it. So in between only the cancel's own terminals are applied, and `done` swaps in a
+  // fresh history.
+  //
+  // The wait ends on whichever reaches this window first: the SSE `done`/`failed`, this window's
+  // own restart request settling (`restartSignals`), or — for a restart another window asked for —
+  // the SSE connection coming back (`sse-reconnected`) to find the server no longer restarting it,
+  // since a `done` sent while it was down is gone for good. Each source that ends it marks itself,
+  // so another's later arrival is not a second history swap.
+  const restartingRef = useRef(false);
+  const finishedBySseRef = useRef(false);
+  const finishedLocallyRef = useRef(false);
+  const finishedByReconnectRef = useRef(false);
+  /** Bumped by every restart that starts (and by a switch of chat): a reconnect probe answered for an
+   *  older one must not end a newer one. */
+  const restartGenRef = useRef(0);
+  const shownSessionRef = useRef(sessionId);
+  useEffect(() => {
+    shownSessionRef.current = sessionId;
+    restartingRef.current = false;
+    finishedBySseRef.current = false;
+    finishedLocallyRef.current = false;
+    finishedByReconnectRef.current = false;
+    restartGenRef.current++;
+  }, [sessionId]);
+
+  const applyStreamEvent = useCallback(
+    (data: Record<string, unknown>) => {
+      const result = applyAgentEvent(stateRef.current, data as unknown as AgentEvent);
+      if (result.state !== stateRef.current) {
+        stateRef.current = result.state;
+        publish();
+      }
+      return result;
+    },
+    [publish],
+  );
+
+  const finishRestart = useCallback(
+    (outcome: RestartOutcome) => {
+      restartingRef.current = false;
+      if (outcome.ok) {
+        const forSession = sessionId;
+        // Back to ready — unless a new turn has already started meanwhile (another window's send).
+        const settle = () => {
+          if (shownSessionRef.current !== forSession || !forSession) return;
+          const cached = _cachedStatusMap.get(forSession);
+          if (cached !== "thinking" && cached !== "streaming") setStatus("connected");
+        };
+        fetch(`/api/agent/messages?sessionId=${forSession}`)
+          // A failed fetch (its body is `{ error }`, no messages) is not an empty history: what the
+          // chat shows stays, and the chat only settles.
+          .then((r) => (r.ok ? r.json() : null))
+          .then((d: { messages?: AgentMessage[]; shellEnvLoaded?: boolean; historyMissing?: boolean } | null) => {
+            if (!d) return settle();
+            if (shownSessionRef.current !== forSession) return;
+            if (forSession && d.historyMissing) {
+              setHistoryMissingFor(forSession);
+              setStatus("disconnected");
+              return;
+            }
+            if (forSession) setShellEnv({ sessionId: forSession, loaded: d.shellEnvLoaded !== false });
+            stateRef.current = applyHistory(initialChatStreamState(), d.messages ?? []);
+            publish();
+            settle();
+          })
+          .catch(settle);
+      } else {
+        const reason = outcome.error.trim();
+        applyStreamEvent({
+          type: "chat-note",
+          text: reason ? `Restart failed. ${reason}` : "Restart failed.",
+          noteId: `session-restart-failed:${Date.now()}`,
+        });
+        // What was on screen stays. A message sent now loads the chat on demand (the send route
+        // activates an inactive session), so the composer is not left waiting on nothing.
+        setStatus("connected");
+      }
+    },
+    [sessionId, setStatus, publish, applyStreamEvent],
+  );
+
+  const handleRestartEvent = useCallback(
+    (data: Record<string, unknown>) => {
+      const phase = data.phase as string;
+      if (phase === "started") {
+        restartingRef.current = true;
+        finishedBySseRef.current = false;
+        finishedLocallyRef.current = false;
+        finishedByReconnectRef.current = false;
+        restartGenRef.current++;
+        setStatus("connecting");
+        return;
+      }
+      if (phase !== "done" && phase !== "failed") return;
+      if (finishedLocallyRef.current) {
+        finishedLocallyRef.current = false;
+        return;
+      }
+      if (finishedByReconnectRef.current) {
+        finishedByReconnectRef.current = false;
+        return;
+      }
+      // Marked only for a restart THIS window asked for: that request's settle is still coming
+      // and must not swap again. For another window's restart nothing is coming, and a mark left
+      // behind would swallow this window's next outcome.
+      if (sessionId && restartSignals.isRequested(sessionId)) finishedBySseRef.current = true;
+      finishRestart(
+        phase === "done" ? { ok: true } : { ok: false, error: typeof data.error === "string" ? data.error : "" },
+      );
+    },
+    [sessionId, setStatus, finishRestart],
+  );
+
+  // This window's own restart request settled: end the wait if the SSE has not already.
+  useEffect(() => {
+    if (!sessionId) return;
+    return restartSignals.onSettled((id, outcome) => {
+      if (id !== sessionId) return;
+      if (finishedBySseRef.current) {
+        finishedBySseRef.current = false;
+        return;
+      }
+      finishedLocallyRef.current = true;
+      finishRestart(outcome);
+    });
+  }, [sessionId, finishRestart]);
+
   const sseHandler = useCallback(
     (data: Record<string, unknown>) => {
       const type = data.type as string;
+
+      if (type === "session-restart") {
+        handleRestartEvent(data);
+        return;
+      }
+      if (type === "sse-reconnected") {
+        // A restart's `done` sent while the connection was down never arrives. One this window
+        // asked for ends when its request settles. For any other the server is asked: one still
+        // running sends its `done` over the connection that is back, so it is left to that; one
+        // that is over is ended here with a fresh history (and a `done` still on its way is then
+        // not a second swap). A probe that fails ends it too — waiting on nothing is worse.
+        if (restartingRef.current && sessionId && !restartSignals.isRequested(sessionId)) {
+          const forSession = sessionId;
+          const gen = restartGenRef.current;
+          void fetch(`/api/sessions/${encodeURIComponent(forSession)}/restart`)
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d: { restarting?: unknown } | null) => d?.restarting === true)
+            .catch(() => false)
+            .then((stillRunning) => {
+              // Answered for THIS restart only: one started meanwhile (another window's, or this
+              // window's own) is not what the server was asked about.
+              if (stillRunning || !restartingRef.current || restartGenRef.current !== gen) return;
+              if (shownSessionRef.current !== forSession || restartSignals.isRequested(forSession)) return;
+              finishedByReconnectRef.current = true;
+              finishRestart({ ok: true });
+              // The mark only has to outlast a `done` already on its way; left set, it would swallow
+              // the end of a later restart whose `started` was missed too.
+              setTimeout(() => {
+                if (restartGenRef.current === gen) finishedByReconnectRef.current = false;
+              }, RECONNECT_DONE_GRACE_MS);
+            });
+        }
+        return;
+      }
+      if (restartingRef.current && CHAT_STREAM_EVENT_TYPES.has(type)) {
+        // Only the cancel's terminals: approval cards resolve, the running turn stops streaming.
+        if (type === "agent-permission-resolved" || type === "agent-complete") applyStreamEvent(data);
+        return;
+      }
 
       // ── Message assembly ─────────────────────────────────────────────
       if (CHAT_STREAM_EVENT_TYPES.has(type)) {
@@ -927,6 +1123,9 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         else if (agentStatus === "connecting") setStatus("connecting");
         else if (agentStatus === "disconnected") setStatus("disconnected");
         else if (agentStatus === "thinking") setStatus("streaming");
+        // Sent on (re)connect for a session whose prompt is still running
+        // (app/api/agent/events/route.ts) — busy, but NOT a new turn.
+        else if (agentStatus === "streaming") setStatus("streaming");
         else if (agentStatus === "error") setStatus("error");
 
         // `agent-status` has carried an optional `error` string since it was
@@ -985,7 +1184,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         optionsRef.current?.onSessionsChanged?.();
       }
     },
-    [setStatus, setStatusError, publish],
+    [sessionId, setStatus, setStatusError, publish, handleRestartEvent, finishRestart, applyStreamEvent],
   );
 
   // Cancel the current turn
@@ -1039,13 +1238,24 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
       // same failure from the user's perspective: the prompt never reached
       // the agent. Without the catch, the rejection is unhandled and status
       // stays "thinking" forever — the stuck-"generating" bug.
+      let historyGone = false;
       try {
         const res = await fetch("/api/agent/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text, sessionId, attachments: fileAttachments }),
         });
-        if (!res.ok) throw new Error(`send failed: HTTP ${res.status}`);
+        if (!res.ok) {
+          // 409 `historyMissing`: the agent has no transcript for this chat. The failed bubble and
+          // the text backup below still apply; the chat then disables its composer rather than
+          // offering a Retry that can only fail the same way.
+          const body = (await res.json().catch(() => null)) as { historyMissing?: boolean } | null;
+          if (body?.historyMissing) {
+            historyGone = true;
+            setHistoryMissingFor(sessionId);
+          }
+          throw new Error(`send failed: HTTP ${res.status}`);
+        }
         // A retry that succeeds must clear the backup its failure wrote —
         // otherwise the delivered text would resurface in the composer on
         // the next reload.
@@ -1058,9 +1268,12 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         // text so a reload restores it into the composer instead of
         // silently destroying it.
         backupFailedSend(sessionId, text);
-        toast.error("Message failed to send", {
-          description: "The libi server didn't receive it. Use the retry button on the message.",
-        });
+        // The chat itself explains a missing history; "use the retry button" would be untrue there.
+        if (!historyGone) {
+          toast.error("Message failed to send", {
+            description: "The libi server didn't receive it. Use the retry button on the message.",
+          });
+        }
       }
     },
     [sessionId, status, cancelMessage, setStatus, publish],
@@ -1151,8 +1364,16 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
     let cancelled = false;
     fetch(`/api/agent/messages?sessionId=${sessionId}`)
       .then((r) => r.json())
-      .then((data: { messages?: AgentMessage[]; shellEnvLoaded?: boolean }) => {
+      .then((data: { messages?: AgentMessage[]; shellEnvLoaded?: boolean; historyMissing?: boolean }) => {
         if (cancelled) return;
+        if (data.historyMissing) {
+          // Nothing to replay and nothing to connect to: leave "connecting" for "disconnected", so
+          // the history skeleton ends and the composer can't queue a message that would never send.
+          setHistoryMissingFor(forSession);
+          _setCachedStatus(forSession, "disconnected");
+          setStatusRaw("disconnected");
+          return;
+        }
         setShellEnv({ sessionId: forSession, loaded: data.shellEnvLoaded !== false });
         stateRef.current = applyHistory(stateRef.current, data.messages ?? []);
         publish();
@@ -1169,7 +1390,7 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
     return () => { cancelled = true; };
   }, [sessionId, publish]);
 
-  return { messages, sendMessage, retryMessage, cancelMessage, status, statusError, isLoading: status === "thinking" || status === "streaming", sessionReady, shellEnvLoaded };
+  return { messages, sendMessage, retryMessage, cancelMessage, status, statusError, isLoading: status === "thinking" || status === "streaming", sessionReady, shellEnvLoaded, historyMissing };
 }
 
 // ── Tool events helper ──────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { uvPath, sidecarProjectDir, trackingModelsDir } from "@/lib/tracking/engine-deps";
 import { buildUvEnv, trackingVenvDir } from "@/lib/uv-env/spawn-env";
 import { serverLogger as logger } from "@/lib/logger";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 
 export interface MatteSegmentOpts {
   videoPath: string;
@@ -140,7 +141,10 @@ export async function runMatteSegment(
           "matte sidecar failed",
         );
         return reject(
-          new Error(`matte sidecar exited ${code}: ${stderr.slice(-500)}`),
+          new Error(
+            uvNetworkFailureMessage("background removal", stderr) ??
+              `matte sidecar exited ${code}: ${stderr.slice(-500)}`,
+          ),
         );
       }
       resolvePromise();

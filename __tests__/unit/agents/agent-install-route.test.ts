@@ -359,4 +359,15 @@ describe("DELETE /api/agents/[agentId]/install", () => {
     expect(res.status).toBe(404);
     expect(manager.cancel).not.toHaveBeenCalled();
   });
+
+  it("returns 404 when the JobManager throws another bundle's copy of JobNotFoundError", async () => {
+    dbRows = [fakeRow({ id: "job-1", agentId: "claude-code", status: "running" })];
+    manager.cancel.mockRejectedValueOnce(Object.assign(new Error("Job job-1 not found"), { name: "JobNotFoundError", jobId: "job-1" }));
+    const { DELETE } = await import("@/app/api/agents/[agentId]/install/route");
+
+    const res = await DELETE(req("DELETE"), ctx("claude-code"));
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "not found" });
+  });
 });

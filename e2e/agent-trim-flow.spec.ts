@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { openEditor } from "./helpers/app";
+import { openEditor, showResources } from "./helpers/app";
 
 /**
  * Drives the trim tool via /api/e2e/run-tool (the test-only dispatch
@@ -24,14 +24,17 @@ test.describe("Agent — trim flow", () => {
     );
 
     // Probe duration on the server is optional; the trim tool doesn't require it.
-    await request.post(
+    const upload = await request.post(
       `/api/pieces/${piece.id}/upload`,
       { multipart: { file: { name: "tiny.mp4", mimeType: "video/mp4", buffer: fixtureBuf } } },
     );
+    expect(upload.ok(), `upload → HTTP ${upload.status()}`).toBe(true);
   });
 
   test("agent produces a trimmed file via libi.trim_video", async ({ page }) => {
-    await openEditor(page);
+    await openEditor(page, pieceId);
+    // Asset rows live in the resources panel, hidden by default.
+    await showResources(page);
 
     // Wait for the original asset row to render so we know files are loaded.
     await expect(

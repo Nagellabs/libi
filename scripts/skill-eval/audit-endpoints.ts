@@ -61,6 +61,9 @@ const NON_VENDOR_PREFIXES = new Set([
   "veo3.1",
   "o1",
   "fast",
+  // MCP method names — `tools/list` is the protocol's own call, quoted by the
+  // social-posting provider reference to explain which tools are advertised.
+  "tools",
   // not a path and not an id
   "easeIn",
 ]);

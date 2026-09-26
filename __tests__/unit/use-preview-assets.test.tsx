@@ -6,7 +6,7 @@ import { createFrameStore } from "@/lib/preview/frame-store";
 
 const fs = createFrameStore(0);
 
-// Stub the three underlying hooks so we're only testing composition logic.
+// Stub the underlying hooks so we're only testing composition logic.
 vi.mock("@/hooks/preview/use-video-sources", () => ({
   useVideoSources: (_c: unknown, _p: boolean) => ({
     sources: { sceneA: "v-source" },
@@ -16,16 +16,21 @@ vi.mock("@/hooks/preview/use-video-sources", () => ({
 vi.mock("@/hooks/preview/use-overlay-images", () => ({
   useOverlayImages: () => ({ images: { overlayA: "i-elem" } }),
 }));
-vi.mock("@/hooks/preview/use-overlay-code", () => ({
-  useOverlayCompiledFns: () => ({ compiledDrawFns: { overlayB: () => {} } }),
+vi.mock("@/hooks/preview/use-overlay-layers", () => ({
+  useOverlayLayers: () => ({ layers: { tag: "layers" }, errors: { overlayB: "boom" }, loadedBodies: new Set(["overlayB"]) }),
+}));
+vi.mock("@/hooks/preview/use-overlay-three", () => ({
+  useOverlayThreeScenes: () => ({ threeScenes: {}, errors: { overlayT: "3d text failed" } }),
 }));
 
 describe("usePreviewAssets", () => {
-  it("returns videoSources + images + compiledDrawFns bundled together", () => {
+  it("returns videoSources + images + layers bundled together", () => {
     const { result } = renderHook(() => usePreviewAssets(null, false, 1, fs));
     expect(result.current.videoSources).toEqual({ sceneA: "v-source" });
     expect(result.current.images).toEqual({ overlayA: "i-elem" });
-    expect(typeof result.current.compiledDrawFns.overlayB).toBe("function");
+    expect(result.current.layers).toEqual({ tag: "layers" });
+    expect(result.current.overlayErrors.overlayB).toBe("boom");
+    expect(result.current.overlayErrors.overlayT).toBe("3d text failed");
   });
 
   it("forwards videoErrors from useVideoSources so callers can render warnings", () => {

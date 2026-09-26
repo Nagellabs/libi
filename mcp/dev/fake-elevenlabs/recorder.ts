@@ -2,21 +2,27 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { getLibiHome } from "@/lib/libi-home";
 
+/** One line of `<LIBI_HOME>/test-mode/elevenlabs-calls.jsonl`, which the skill-eval harness reads. */
 export interface ElevenLabsCall {
   tool: string;
-  /** Raw voice_id arg (text_to_speech) or synthetic id (voice_clone). */
+  /** The arguments exactly as the agent sent them (a `where: "input.<field> …"` matcher reads these). */
+  input?: unknown;
   voice_id?: string;
-  /** Raw voice_name arg (text_to_speech). */
-  voice_name?: string;
-  /** Effective model_id (text_to_speech). */
   model_id?: string;
-  /** Input path (isolate_audio / speech_to_text). */
-  input_file_path?: string;
-  /** Absolute path written (tts / sfx / music / iso / stt-save). */
-  output_path?: string;
-  text?: string;
+  node_type?: string;
+  /** The EFFECTIVE count: what the agent passed, else the hosted default of 4. */
+  generations_count?: number;
+  estimate_only?: boolean;
+  flow_id?: string;
+  node_id?: string;
+  session_ids?: string[];
+  asset_id?: string;
+  /** The audio URLs a finished status poll handed back (its `media[].url`). */
+  output_urls?: string[];
   prompt?: string;
-  name?: string;
+  /** Set when the fake refused the call, with the message it answered. */
+  rejected?: true;
+  error?: string;
 }
 
 export function elevenlabsRecordPath(): string {

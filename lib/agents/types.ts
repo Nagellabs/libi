@@ -58,6 +58,18 @@ export type AgentEvent =
       args: unknown;
     }
   | {
+      /** A built-in tool call's real title, which — like its arguments —
+       *  arrives after the call. claude-agent-acp titles a Write "Preparing
+       *  file…" (an Edit a bare "Edit") at content_block_start, before
+       *  `file_path` has streamed, and sends "Write <path>" on the
+       *  `tool_call_update` that carries the input. The message cache adopts
+       *  the same title (`adoptToolCallTitle`); this is that patch on the
+       *  wire. Built-in calls only: an MCP row is named by its `toolId`. */
+      type: "agent-tool-title";
+      toolCallId: string;
+      rawTitle: string;
+    }
+  | {
       /** Subagent dispatch refinement. claude-agent-acp emits the initial
        *  `tool_call` for Task/Agent at content_block_start with empty
        *  `input`, then a `tool_call_update` with the full input once the
@@ -91,6 +103,16 @@ export type AgentEvent =
     }
   | { type: "agent-status"; status: string; error?: string }
   | { type: "agent-complete"; stopReason: string }
+  | {
+      /** The user restarted this chat (`SessionManager.restartSession`). `started` comes before
+       *  the running turn is cancelled and the session is closed; the history replay of the load
+       *  that follows streams through as ordinary events, which a chat that saw `started` skips
+       *  and replaces with a fresh history fetch on `done`. `failed` carries the reason in plain
+       *  words. */
+      type: "session-restart";
+      phase: "started" | "done" | "failed";
+      error?: string;
+    }
   | {
       /** A deterministic, system-authored note rendered as a finished
        *  message. Does NOT prompt the agent (no generation, no streaming

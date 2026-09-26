@@ -2,6 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
 /**
@@ -75,9 +76,11 @@ async function renderList() {
     "@/components/sessions/sidebar-session-list"
   );
   return render(
-    <SidebarProvider>
-      <List />
-    </SidebarProvider>,
+    <QueryClientProvider client={new QueryClient()}>
+      <SidebarProvider>
+        <List />
+      </SidebarProvider>
+    </QueryClientProvider>,
   );
 }
 

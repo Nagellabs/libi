@@ -18,7 +18,7 @@
  *
  * IMPORTANT: the result preserves the original schema *form* — a ZodRawShape
  * stays a raw shape, a ZodObject stays a ZodObject (with strict/passthrough/
- * catchall re-applied). It never returns a top-level `ZodEffects`, because the
+ * catchall and its errorMap re-applied). It never returns a top-level `ZodEffects`, because the
  * MCP SDK's `normalizeObjectSchema` only recognises raw shapes and ZodObjects;
  * handing it a ZodEffects would blank the tool's emitted JSON schema.
  */
@@ -112,8 +112,14 @@ export function coerceInputSchema(inputSchema: unknown): unknown {
     const def = inputSchema._def as {
       unknownKeys?: "strip" | "strict" | "passthrough";
       catchall?: z.ZodTypeAny;
+      errorMap?: z.ZodErrorMap;
     };
-    let rebuilt: z.AnyZodObject = z.object(mapShape(inputSchema.shape as RawShape));
+    // Carry the object's own errorMap across: it is what words a strict
+    // schema's unknown-field refusal (schemas.ts#refuseUnknownFields).
+    let rebuilt: z.AnyZodObject = z.object(
+      mapShape(inputSchema.shape as RawShape),
+      def.errorMap ? { errorMap: def.errorMap } : undefined,
+    );
     if (def.unknownKeys === "strict") rebuilt = rebuilt.strict();
     else if (def.unknownKeys === "passthrough") rebuilt = rebuilt.passthrough();
     if (def.catchall && baseTypeName(def.catchall) !== "ZodNever") {

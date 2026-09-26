@@ -7,18 +7,27 @@ import {
   writeFileSync,
   mkdirSync,
   copyFileSync,
+  cpSync,
   statSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { createServer } from "node:net";
-import type { ParsedScenario, TraceCall } from "./types";
+import type { ParsedScenario, TraceCall, TranscriptView } from "./types";
 import { provisionSharedDeps } from "./shared-deps";
 
 export interface HarnessResult {
   status: "completed" | "errored" | "timeout";
   trace: TraceCall[];
   transcript: string;
+  /** The same transcript whole, per turn and as agent text only — what the matchers read. */
+  view: TranscriptView;
+  /** Every approval card raised in the run, and how the harness answered it. */
+  approvals: HarnessApproval[];
+  /** Wall-clock seconds from the first prompt to the end of the last turn (or the failure). */
+  durationSec: number;
+  /** The agent's cumulative session cost, when its adapter reported one. */
+  cost: { amount: number; currency: string } | null;
   /** The in-app agent's CLI version, from the hermetic libi — see `cliVersionFromStatus`. */
   cliVersion: string;
   errorMessage?: string;
@@ -90,58 +99,304 @@ function waitForPort(home: string, timeoutMs: number): Promise<number> {
   });
 }
 
-/** Stream /api/agent/events and resolve when agent-complete for `sessionId`. */
-async function waitForAgentComplete(
-  base: string,
-  sessionId: string,
-  timeoutMs: number,
-  onConnected?: () => void,
-): Promise<void> {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  let signalledConnected = false;
-  try {
-    const res = await fetch(`${base}/api/agent/events`, { signal: ctrl.signal });
-    if (!res.body) throw new Error("no SSE body");
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) throw new Error("SSE stream closed before agent-complete");
-      // First non-done chunk ⇒ the SSE stream is live, which means the
-      // server-side subscription is definitely registered. Signal once so
-      // the caller can safely send the prompt without racing the subscribe.
-      if (!signalledConnected) {
-        signalledConnected = true;
-        onConnected?.();
-      }
-      buf += decoder.decode(value, { stream: true });
-      const frames = buf.split("\n\n");
-      buf = frames.pop() ?? "";
-      for (const frame of frames) {
-        const line = frame.split("\n").find((l) => l.startsWith("data: "));
-        if (!line) continue;
-        let evt: { type?: string; sessionId?: string };
-        try { evt = JSON.parse(line.slice(6)); } catch { continue; }
-        if (evt.type === "agent-complete" && evt.sessionId === sessionId) return;
-      }
-    }
-  } finally {
-    clearTimeout(timer);
-    ctrl.abort();
-  }
+/**
+ * The libi tool an approval card is for, from the permission request's `toolCall.title` —
+ * for a Claude MCP call that title IS the tool's `mcp__<server>__<tool>` name
+ * (lib/agents/session-event-handler.ts#extractToolMeta), and a libi tool `libi.foo` is
+ * `mcp__libi__libi_foo` (`libi-app` is the fallback entry name). Null for anything else — a
+ * built-in, a third-party MCP tool — which the harness never approves.
+ */
+export function libiToolFromTitle(title: unknown): string | null {
+  if (typeof title !== "string") return null;
+  const m = /^mcp__(?:libi|libi-app)__libi_([a-z0-9_]+)$/.exec(title);
+  return m ? m[1] : null;
 }
 
-async function post(base: string, path: string, body: unknown): Promise<Response> {
+/** One approval card the harness answered (or could not). */
+export interface HarnessApproval {
+  /** 1-based: the turn it was raised in (1 = the prompt's). */
+  turn: number;
+  /** The libi tool, or the raw title when it is not one. */
+  tool: string;
+  /** Why libi raised it: `public` | `extension` | `acp`. */
+  reason: string;
+  /** The option KINDS the card offered, sorted — `allow_always` missing is the public gate. */
+  offered: string[];
+  decision: "approved" | "rejected" | "unanswered";
+}
+
+type PermissionOptionLike = { optionId: string; kind: string };
+
+/**
+ * How the harness answers one approval card: `allow_once` for a libi tool the scenario
+ * declared in `approve:` — one yes, never `allow_always`, as a user clicking once — and, in
+ * a scenario that declared `approve:`, the card's reject option for everything else: such a
+ * scenario runs under libi's `auto` mode, where a gated tool it did not declare would
+ * otherwise stall the run on a question the scenario never meant to ask.
+ *
+ * A scenario with NO `approve:` gets no answers at all — the responder is inert. It runs
+ * under `auto-with-generations`, where the SDK's bypass means libi raises no card on a
+ * non-root host; a card that does appear (a root host, or a gate that fires even under
+ * bypass) is left `unanswered`, so the run times out VISIBLY, exactly as before the
+ * responder existed, instead of silently continuing down a "user said no" path the
+ * scenario never declared. `unanswered` also when the card offers nothing to pick.
+ * Pure: the caller posts the choice.
+ */
+export function answerApprovalCard(
+  req: { toolCall?: { title?: unknown } | null; options?: PermissionOptionLike[] | null },
+  approve: readonly string[],
+): { decision: HarnessApproval["decision"]; optionId?: string; tool: string | null; offered: string[] } {
+  const options = req.options ?? [];
+  const tool = libiToolFromTitle(req.toolCall?.title);
+  const offered = [...new Set(options.map((o) => o.kind))].sort();
+  if (approve.length === 0) return { decision: "unanswered", tool, offered };
+  if (tool !== null && approve.includes(tool)) {
+    const allow = options.find((o) => o.kind === "allow_once");
+    if (allow) return { decision: "approved", optionId: allow.optionId, tool, offered };
+  }
+  const reject = options.find((o) => o.kind === "reject_once") ?? options.find((o) => o.kind === "reject_always");
+  if (reject) return { decision: "rejected", optionId: reject.optionId, tool, offered };
+  return { decision: "unanswered", tool, offered };
+}
+
+/** How an answered card reads in the transcript — the literal a scenario's needle matches. */
+export function renderApproval(a: HarnessApproval): string {
+  return `[harness-approval ${a.decision} ${a.tool} reason=${a.reason} offered=${a.offered.join(",")}]`;
+}
+
+/** An SSE event as the harness reads it — structural, never imported from `@/lib`. */
+export interface HarnessSseEvent {
+  type?: string;
+  sessionId?: string;
+  agentId?: string;
+  status?: string;
+  error?: string;
+  readiness?: { state?: string; agentId?: string; message?: string };
+  pendingId?: string;
+  toolCall?: { title?: unknown } | null;
+  options?: PermissionOptionLike[];
+  reason?: string;
+  usage?: { cost?: { amount: number; currency: string } | null };
+}
+
+/**
+ * The events that mean the run's turn will never complete, so the harness ends the
+ * run at once instead of waiting out `timeoutSec` (an expired sign-in used to cost a
+ * 20-minute TIMEOUT). Returns the reason, or null.
+ *
+ * - `agent-readiness` → `needs-auth` for the scenario's agent. A SYSTEM event: it
+ *   carries no sessionId, so it is checked before the session filter. libi sets
+ *   `needs-auth` only from an OBSERVED auth rejection (lib/agents/agent-readiness.ts),
+ *   never by probing, so it cannot fire on a turn that would still complete.
+ * - `agent-status` → `error` for this session: emitted in place of `agent-complete`
+ *   when the prompt throws, and for a dead session (no connection, a crashed process,
+ *   a failed load) — each the end of the turn.
+ *
+ * Neither changes a verdict: the run ends `errored` instead of `timeout`, and neither
+ * status is evaluated.
+ */
+export function turnEndingFailure(evt: HarnessSseEvent, sessionId: string, agent: string): string | null {
+  if (evt.type === "agent-readiness" && evt.readiness?.state === "needs-auth" && (evt.agentId ?? evt.readiness.agentId) === agent) {
+    const how = agent === "claude-code" ? "run `claude` then /login" : `sign ${agent} in`;
+    return `agent not signed in — ${how}${evt.readiness.message ? ` (libi: ${evt.readiness.message})` : ""}`;
+  }
+  if (evt.type === "agent-status" && evt.status === "error" && evt.sessionId === sessionId) {
+    return `agent error: ${evt.error ?? "the session reported an error with no message"}`;
+  }
+  return null;
+}
+
+/**
+ * One SSE subscription to /api/agent/events for the whole run, across every turn.
+ *
+ * It resolves turn completions (`agent-complete` for `sessionId`), answers approval cards
+ * (`agent-permission-request`) through the product's own
+ * `POST /api/sessions/:id/permission` — the route the chat card's click posts to — and keeps
+ * the latest reported session cost. One stream rather than one per turn so a card raised
+ * between turns, or a completion that lands before the next wait is registered, is never
+ * missed: `waitForCompletions(n)` resolves once `n` completions have been SEEN.
+ */
+export function watchSession(
+  base: string,
+  sessionId: string,
+  opts: { timeoutMs: number; approve: readonly string[]; currentTurn: () => number; agent: string },
+) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs);
+  const approvals: HarnessApproval[] = [];
+  let cost: { amount: number; currency: string } | null = null;
+  let completions = 0;
+  let failure: Error | null = null;
+  const waiters: Array<{ n: number; resolve: () => void; reject: (e: Error) => void }> = [];
+  let markConnected: () => void = () => {};
+  const connected = new Promise<void>((r) => { markConnected = r; });
+
+  const settle = () => {
+    for (let i = waiters.length - 1; i >= 0; i--) {
+      const w = waiters[i];
+      if (failure) w.reject(failure);
+      else if (completions >= w.n) w.resolve();
+      else continue;
+      waiters.splice(i, 1);
+    }
+  };
+
+  const answer = async (evt: { pendingId?: string; toolCall?: { title?: unknown } | null; options?: PermissionOptionLike[]; reason?: string }) => {
+    const choice = answerApprovalCard(evt, opts.approve);
+    const title = typeof evt.toolCall?.title === "string" ? evt.toolCall.title : "?";
+    const record: HarnessApproval = {
+      turn: opts.currentTurn(),
+      tool: choice.tool ?? title,
+      reason: evt.reason ?? "?",
+      offered: choice.offered,
+      decision: choice.decision,
+    };
+    approvals.push(record);
+    console.log(`[skill-eval] approval card: ${renderApproval(record)}`);
+    if (!choice.optionId || !evt.pendingId) return;
+    try {
+      // The harness stands in for the user's CLICK on the chat card, so it sends the
+      // page's own headers: the permission route takes the browser-only checks
+      // (`browserOnlyRefusal`) and refuses a header-less loopback caller. This is the one
+      // deliberate impersonation of the page in the harness — the same forged-browser-
+      // request class the LIMITATIONS in lib/approval/extensions.ts accept as limit 1 —
+      // and it is only ever pointed at the hermetic studio this run booted.
+      const res = await post(
+        base,
+        `/api/sessions/${sessionId}/permission`,
+        { pendingId: evt.pendingId, optionId: choice.optionId },
+        pageHeaders(base),
+      );
+      if (!res.ok) {
+        record.decision = "unanswered";
+        console.log(`[skill-eval] answering the approval card failed: ${res.status}`);
+      }
+    } catch (err) {
+      record.decision = "unanswered";
+      console.log(`[skill-eval] answering the approval card failed: ${(err as Error).message}`);
+    }
+  };
+
+  const pump = (async () => {
+    try {
+      const res = await fetch(`${base}/api/agent/events`, { signal: ctrl.signal });
+      if (!res.body) throw new Error("no SSE body");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("SSE stream closed before agent-complete");
+        // First non-done chunk ⇒ the SSE stream is live, which means the
+        // server-side subscription is definitely registered. The caller waits
+        // on this before sending the prompt so it cannot race the subscribe.
+        markConnected();
+        buf += decoder.decode(value, { stream: true });
+        const frames = buf.split("\n\n");
+        buf = frames.pop() ?? "";
+        for (const frame of frames) {
+          const line = frame.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          let evt: HarnessSseEvent;
+          try { evt = JSON.parse(line.slice(6)); } catch { continue; }
+          // Before the session filter: `agent-readiness` is a system event with no sessionId.
+          const ended = turnEndingFailure(evt, sessionId, opts.agent);
+          if (ended) throw new Error(ended);
+          if (evt.sessionId !== sessionId) continue;
+          if (evt.type === "agent-complete") {
+            completions++;
+            settle();
+          } else if (evt.type === "agent-permission-request") {
+            void answer(evt);
+          } else if (evt.type === "agent-usage" && evt.usage?.cost) {
+            cost = evt.usage.cost;
+          }
+        }
+      }
+    } catch (err) {
+      // A genuine timeout surfaces as AbortError (the AbortController fired);
+      // Node's fetch rejects the in-flight read with name === "AbortError".
+      failure = err as Error;
+      settle();
+    }
+  })();
+
+  return {
+    /** Resolves once the stream is live, or after 5 s, whichever is first. */
+    ready: () => Promise.race([connected, new Promise<void>((r) => setTimeout(r, 5000))]),
+    waitForCompletions: (n: number) =>
+      new Promise<void>((resolve, reject) => {
+        waiters.push({ n, resolve, reject });
+        settle();
+      }),
+    approvals,
+    cost: () => cost,
+    close: async () => {
+      clearTimeout(timer);
+      ctrl.abort();
+      await pump.catch(() => {});
+    },
+  };
+}
+
+/**
+ * The headers libi's own page sends on a same-origin fetch — what the
+ * browser-only checks (`browserOnlyRefusal`) look for. The harness sends them
+ * ONLY where it stands in for the user (answering a card, choosing the social
+ * provider); that deliberate impersonation is limit 1 in the LIMITATIONS of
+ * lib/approval/extensions.ts, pointed only at the hermetic studio this run
+ * booted. `base` is `http://127.0.0.1:<port>`, so Origin equals the Host.
+ */
+export function pageHeaders(base: string): Record<string, string> {
+  return { "Sec-Fetch-Site": "same-origin", Origin: base };
+}
+
+async function post(base: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return fetch(`${base}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
 
-function readJsonlTagged(path: string, provider: "fal" | "elevenlabs"): TraceCall[] {
+/**
+ * The social settings a `social: connected | disconnected` scenario boots with.
+ *
+ * A hermetic home has NO provider chosen, and `/api/social/status` short-circuits
+ * on that — so without this write the social skill's gate routes to
+ * `suggest_provider` no matter what else is wired, which is the `social: none`
+ * state every other scenario wants and exactly the wrong one for a posting flow.
+ */
+export const SKILL_EVAL_SOCIAL_SETTINGS = {
+  providerId: "zernio",
+  timezone: "UTC",
+  defaults: { instagramType: "reel", aiLabel: true },
+  pollSeconds: 30,
+} as const;
+
+/**
+ * Extra spawn env for this scenario's social state.
+ *
+ * `disconnected` is NOT expressible by leaving `LIBI_SOCIAL_MCP_URL` unset:
+ * unset is precisely what makes the studio start its own fake AND write the
+ * test-mode grant (`lib/social/test-fake.ts`). The flag suppresses the grant
+ * only — the fake still runs, so the AGENT keeps its zernio tools while libi's
+ * own connection reads as not connected.
+ */
+export function socialEnvFor(scenario: Pick<ParsedScenario, "social">): Record<string, string> {
+  return scenario.social === "disconnected" ? { LIBI_SOCIAL_TEST_NO_GRANT: "1" } : {};
+}
+
+/**
+ * Extra spawn env for the test-mode catalog: every author's creator status
+ * (`catalogCreator:` frontmatter, default `approved` so publish scenarios reach
+ * the catalog). Publishing is invite-only — lib/templates/cloud/test-fixture.ts.
+ */
+export function catalogEnvFor(scenario: Pick<ParsedScenario, "catalogCreator">): Record<string, string> {
+  return { LIBI_TEST_CATALOG_CREATOR: scenario.catalogCreator ?? "approved" };
+}
+
+function readJsonlTagged(path: string, provider: TraceCall["provider"]): TraceCall[] {
   if (!existsSync(path)) return [];
   return readFileSync(path, "utf8")
     .split("\n")
@@ -149,18 +404,77 @@ function readJsonlTagged(path: string, provider: "fal" | "elevenlabs"): TraceCal
     .map((l) => ({ ...(JSON.parse(l) as TraceCall), provider }));
 }
 
-function readTrace(home: string): TraceCall[] {
+/**
+ * Every recorder under `<LIBI_HOME>/test-mode/`, by the provider its lines are
+ * tagged with. `templates-catalog` is the studio's own fixture of libi-site's
+ * catalog API (lib/templates/cloud/test-fixture.ts#FIXTURE_TRACE_FILE), not an
+ * MCP fake: its lines are `{ ts, tool, input, status, code? }`, `tool` one of
+ * index | get | prepare | commit | use | report | mine | authors_me | creators_me | visibility.
+ */
+const TRACE_FILES: ReadonlyArray<readonly [file: string, provider: NonNullable<TraceCall["provider"]>]> = [
+  ["fal-calls.jsonl", "fal"],
+  ["elevenlabs-calls.jsonl", "elevenlabs"],
+  ["zernio-calls.jsonl", "zernio"],
+  ["templates-catalog-calls.jsonl", "templates-catalog"],
+];
+
+export function readTrace(home: string): TraceCall[] {
   const dir = join(home, "test-mode");
-  const fal = readJsonlTagged(join(dir, "fal-calls.jsonl"), "fal");
-  const eleven = readJsonlTagged(join(dir, "elevenlabs-calls.jsonl"), "elevenlabs");
-  return [...fal, ...eleven].sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""));
+  return TRACE_FILES.flatMap(([file, provider]) => readJsonlTagged(join(dir, file), provider)).sort((a, b) => (a.ts ?? "").localeCompare(b.ts ?? ""));
 }
 
-function truncateTrace(home: string): void {
+/**
+ * The catalog canary: a positive control for every `provider: templates-catalog`
+ * assertion. Those are mostly `count: "==0"` (nothing reached the catalog), which a
+ * recorder that stopped recording — or a studio that stopped reaching the fixture —
+ * would pass just as well. So after the last turn the harness makes ONE catalog read
+ * through the studio, and the scenario asserts `{ tool: index, count: ">=1" }`: a
+ * catalog index read was recorded — at least the harness's own (an agent-triggered
+ * read counts too, and proves the same recorder).
+ *
+ * `path` is the route the Templates page's Public tab uses. POST is its Refresh: a
+ * FORCED fetch of the index, past the 10-minute freshness. A GET inside that window
+ * answers from the cache and reaches no fixture — the canary would then fail on a live
+ * recorder whenever anything read the catalog during the run. The studio fetches the
+ * index from its own fixture (`lib/templates/cloud/client.ts#fetchIndex`), which traces
+ * it as `tool` (`lib/templates/cloud/test-fixture.ts`, route `index`; a 304 is traced
+ * too). Sent with NO page headers: a header-less loopback client is an internal client
+ * to the proxy's guard, and the harness is not standing in for the user here.
+ */
+export const CATALOG_CANARY = { path: "/api/templates/cloud/catalog", tool: "index" } as const;
+
+export function needsCatalogCanary(scenario: Pick<ParsedScenario, "assertions">): boolean {
+  return scenario.assertions.some((m) => m.provider === "templates-catalog");
+}
+
+export type CatalogCanaryResult =
+  | { ran: false }
+  | { ran: true; ok: boolean; status: number }
+  | { ran: true; ok: false; error: string };
+
+/**
+ * Make the canary read, once, when the scenario asserts on the catalog fixture. Never
+ * throws: a refused or failed read leaves nothing in the trace, and the scenario's
+ * `>=1` canary assertion is what fails the run — the verdict belongs to the assertions.
+ */
+export async function readCatalogCanary(base: string, scenario: Pick<ParsedScenario, "assertions">): Promise<CatalogCanaryResult> {
+  if (!needsCatalogCanary(scenario)) return { ran: false };
+  try {
+    const res = await fetch(`${base}${CATALOG_CANARY.path}`, { method: "POST", signal: AbortSignal.timeout(30_000) });
+    await res.body?.cancel().catch(() => {});
+    if (!res.ok) console.warn(`[skill-eval] catalog canary: ${CATALOG_CANARY.path} answered ${res.status}`);
+    return { ran: true, ok: res.ok, status: res.status };
+  } catch (e) {
+    const error = (e as Error).message;
+    console.warn(`[skill-eval] catalog canary: ${CATALOG_CANARY.path} failed: ${error}`);
+    return { ran: true, ok: false, error };
+  }
+}
+
+export function truncateTrace(home: string): void {
   const dir = join(home, "test-mode");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "fal-calls.jsonl"), "");
-  writeFileSync(join(dir, "elevenlabs-calls.jsonl"), "");
+  for (const [file] of TRACE_FILES) writeFileSync(join(dir, file), "");
 }
 
 /**
@@ -203,14 +517,45 @@ function renderPart(part: AgentMessagePartLike): string {
   }
 }
 
-function renderTranscript(messages: AgentMessageLike[]): string {
-  return messages
-    .map((m, i) => {
-      const role = m.role ?? "?";
-      const body = (m.parts ?? []).map(renderPart).filter(Boolean).join("\n\n");
-      return `### [${i}] ${role}\n\n${body}`;
-    })
-    .join("\n\n");
+function renderMessage(m: AgentMessageLike, i: number): string {
+  const role = m.role ?? "?";
+  const body = (m.parts ?? []).map(renderPart).filter(Boolean).join("\n\n");
+  return `### [${i}] ${role}\n\n${body}`;
+}
+
+/** The agent's own words in a message: its text parts only. */
+function agentTextOf(m: AgentMessageLike): string {
+  return (m.parts ?? []).filter((p) => p.type === "text").map((p) => p.text ?? "").join("\n\n");
+}
+
+/**
+ * The transcript whole, per turn, and as the agent's own text (see `TranscriptView`).
+ *
+ * A turn opens at each USER message — the prompt, then each scripted reply — and holds every
+ * non-user message after it. The approval cards the harness answered are not chat messages
+ * (the card is client-side stream state, lib/chat/stream-state.ts), so they are rendered
+ * here: into the turn they were raised in, and after the messages in the whole transcript.
+ */
+export function buildTranscriptView(messages: AgentMessageLike[], approvals: readonly HarnessApproval[] = []): TranscriptView {
+  const turns: Array<{ parts: string[]; agentText: string[] }> = [];
+  messages.forEach((m, i) => {
+    if (m.role === "user") {
+      turns.push({ parts: [], agentText: [] });
+      return;
+    }
+    const turn = turns[turns.length - 1];
+    if (!turn) return; // nothing before the prompt belongs to a turn
+    turn.parts.push(renderMessage(m, i));
+    const text = agentTextOf(m);
+    if (text) turn.agentText.push(text);
+  });
+  for (const a of approvals) turns[a.turn - 1]?.parts.push(renderApproval(a));
+  const approvalBlock = approvals.length ? `\n\n### harness approvals\n\n${approvals.map(renderApproval).join("\n")}` : "";
+  return {
+    full: messages.map(renderMessage).join("\n\n") + approvalBlock,
+    agentText: messages.filter((m) => m.role !== "user").map(agentTextOf).filter(Boolean).join("\n\n"),
+    turns: turns.map((t) => ({ all: t.parts.join("\n\n"), agentText: t.agentText.join("\n\n") })),
+  };
 }
 
 async function fetchMessages(base: string, sessionId: string): Promise<AgentMessageLike[]> {
@@ -310,9 +655,53 @@ const EVAL_PREAMBLE_NO_SPEND =
   "is the failure. Do not pause on anything that costs nothing and has no gate: pick " +
   "sensible defaults and get as far as the free path takes you.]";
 
+/**
+ * The preamble for a scenario with scripted `replies`.
+ *
+ * Both preambles above open with "no human is available to answer questions", which is
+ * false here and is exactly the sentence that made templates-01's agent skip the
+ * private-or-public question ("nobody could answer"). A scripted conversation is only a test
+ * of "ask, wait, then act" if the agent believes its question will be answered — and does
+ * not pre-empt the answer. Money follows `preauthorize` as it does for one-turn runs.
+ *
+ * It must not tell the agent WHEN to ask. An earlier draft said "when a skill, a tool
+ * description or libi's instructions tell you to ask … ask", which sent a no-skill agent
+ * (templates/05) looking for ask-instructions a real user's session never points it at —
+ * a nudge toward the very behaviour 05 measures. It only says questions get answered.
+ */
+const EVAL_PREAMBLE_SCRIPTED_HEAD =
+  "\n\n[AUTOMATED EVAL — the user in this conversation is SCRIPTED: their replies are already " +
+  "written and each arrives as your next user message. Treat it exactly as a conversation with " +
+  "a real user. Your questions will be answered: when you ask the user something, END YOUR " +
+  "TURN there — the answer will come. Never answer for the user and never act on a yes they " +
+  "have not given yet. On anything nobody needs to " +
+  "decide, pick a sensible default rather than asking. ";
+const EVAL_PREAMBLE_SCRIPTED_SPEND =
+  "You are pre-authorized to spend on paid generations (zero-cost placeholders in this " +
+  "test-mode run); that covers money only, never a step a skill or a tool puts in front of an action.]";
+const EVAL_PREAMBLE_SCRIPTED_NO_SPEND =
+  "You are NOT authorized to spend the user's money: before anything that bills their paid " +
+  "provider, say what it costs and ask.]";
+
 /** Which preamble this scenario runs with. Exported for the unit guard. */
-export function preambleFor(scenario: Pick<ParsedScenario, "preauthorize">): string {
+export function preambleFor(scenario: Pick<ParsedScenario, "preauthorize"> & Partial<Pick<ParsedScenario, "replies">>): string {
+  if (scenario.replies && scenario.replies.length > 0) {
+    return EVAL_PREAMBLE_SCRIPTED_HEAD + (scenario.preauthorize ? EVAL_PREAMBLE_SCRIPTED_SPEND : EVAL_PREAMBLE_SCRIPTED_NO_SPEND);
+  }
   return scenario.preauthorize ? EVAL_PREAMBLE : EVAL_PREAMBLE_NO_SPEND;
+}
+
+/**
+ * The approval mode the harness configures. `auto-with-generations` pushes the SDK's
+ * `bypassPermissions`, under which libi's permission handler is never asked — except on a
+ * host where bypass is not advertised (a root process), where it silently degrades to
+ * `default` and a public action's card DOES appear. A scenario that declares `approve:` is
+ * about such a card, so it runs under `auto` (the SDK's `default`, every tool routed through
+ * libi, which auto-allows all but the gated ones): the card is raised on every host, and the
+ * responder answers it. Exported for the unit guard.
+ */
+export function approvalModeFor(scenario: Pick<ParsedScenario, "approve">): "auto" | "auto-with-generations" {
+  return scenario.approve.length > 0 ? "auto" : "auto-with-generations";
 }
 
 /**
@@ -389,6 +778,77 @@ export function stageFixtures(opts: {
   return staged;
 }
 
+/**
+ * Stage a scenario's template FOLDERS into `<home>/fixtures/templates/<basename>`.
+ *
+ * Same shape and the same reasoning as `stageFixtures`: a copy, never a link, so the run
+ * cannot write back into the repo, and the seed route only ever reads from under the
+ * hermetic home (or the committed fixture root). The staged path is what the harness then
+ * POSTs to `/api/e2e/seed-template`; the basename is the handle a prompt uses through
+ * `{{template:<basename>}}`.
+ */
+export function stageTemplates(opts: {
+  home: string;
+  templates: readonly string[];
+  repoRoot?: string;
+}): string[] {
+  if (opts.templates.length === 0) return [];
+  const root = opts.repoRoot ?? REPO_ROOT;
+  const dir = join(opts.home, "fixtures", "templates");
+  mkdirSync(dir, { recursive: true });
+  const staged: string[] = [];
+  const used = new Set<string>();
+  for (const rel of opts.templates) {
+    const src = resolve(root, rel);
+    // Belt and braces over the parser's check: a template must be a real directory inside the repo.
+    if (!src.startsWith(root + sep)) {
+      throw new Error(`skill-eval: template "${rel}" resolves outside the repo (${src}).`);
+    }
+    if (!existsSync(src) || !statSync(src).isDirectory()) {
+      throw new Error(
+        `skill-eval: this scenario declares the template "${rel}", but ${src} is not a directory. ` +
+          "Template paths are relative to the repo root.",
+      );
+    }
+    const name = basename(src);
+    if (used.has(name)) {
+      throw new Error(
+        `skill-eval: two templates share the basename "${name}"; they would collide in <home>/fixtures/templates.`,
+      );
+    }
+    used.add(name);
+    const dest = join(dir, name);
+    cpSync(src, dest, { recursive: true });
+    staged.push(dest);
+  }
+  return staged;
+}
+
+/**
+ * Resolve `{{template:<basename>}}` in a prompt to the id the seed route returned.
+ *
+ * A seeded template's id is a fresh uuid the scenario author cannot know, so a prompt that
+ * must name one exactly (rather than searching for it) needs the placeholder. Fails LOUDLY
+ * on an unseeded name, for the same reason `resolveFixturePlaceholders` does: a literal
+ * `{{template:ghost}}` reaching the agent is a confusing run, not a clean failure.
+ */
+export function resolveTemplatePlaceholders(
+  prompt: string,
+  ids: ReadonlyMap<string, string>,
+): string {
+  return prompt.replace(/\{\{template:([^}]+)\}\}/g, (_m, name: string) => {
+    const id = ids.get(name.trim());
+    if (!id) {
+      throw new Error(
+        `skill-eval: the prompt references {{template:${name.trim()}}}, but this scenario seeded ` +
+          `${ids.size ? [...ids.keys()].join(", ") : "no templates"}. Add it to the ` +
+          "scenario's `templates:` frontmatter.",
+      );
+    }
+    return id;
+  });
+}
+
 export interface RunOnceOpts {
   scenario: ParsedScenario;
   agent: string;
@@ -435,12 +895,23 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
         // /api/skill-eval/configure below, so it must opt the spawned libi in.
         LIBI_ENABLE_TEST_ROUTES: "1",
         LIBI_FAKE_FAL_CONFIG: fakeFalCfgPath,
+        // Keep the HOST user's Claude config out of the inner agent: without this
+        // their ~/.claude/CLAUDE.md, settings (hooks, plugins) and ~/.claude/skills
+        // load into every eval session (lib/sessions/session-meta.ts). Only the
+        // "user" setting source is dropped — auth is not a setting source, so
+        // credentials are neither read nor moved.
+        LIBI_AGENT_SKIP_USER_SETTINGS: "1",
         // Setting LIBI_HOME also suppresses the dev worktree-bootstrap's
         // home/port override (it only fires when LIBI_HOME is unset — see
         // `useHome`/`usePort` in lib/dev/worktree-bootstrap.ts), so the
         // hermetic temp home is honored.
         LIBI_HOME: home,
         LIBI_PORT: String(wantPort),
+        // Social state for this scenario (`social:` frontmatter) — see
+        // socialEnvFor. Empty for every scenario that does not ask.
+        ...socialEnvFor(opts.scenario),
+        // The test-mode catalog's creator status (`catalogCreator:` frontmatter) — see catalogEnvFor.
+        ...catalogEnvFor(opts.scenario),
         // NB: there is NO PREFERRED_AGENT env — libi warms the agent from the
         // settings DB (`preferredAgent`). The configure route below calls
         // switchAgent(opts.agent), which fully re-warms + wires the requested
@@ -469,60 +940,138 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
         .catch(() => null),
     );
 
+    // Pick libi's social provider when the scenario asked for one. Must precede
+    // the session: `libi.social_status` and `libi.post_piece` read this on every
+    // call, and a scenario that meant "connected" would otherwise run the
+    // no-provider branch and still report a result.
+    if (opts.scenario.social !== "none") {
+      // The user's own settings (browser-only checks): the harness stands in for
+      // the user choosing a provider, so it sends the page's headers.
+      const res = await fetch(`${base}/api/social/settings`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", ...pageHeaders(base) },
+        body: JSON.stringify(SKILL_EVAL_SOCIAL_SETTINGS),
+      });
+      if (!res.ok) throw new Error(`social settings failed: ${res.status}`);
+      const st = (await (await fetch(`${base}/api/social/status`)).json()) as { connected?: boolean };
+      const want = opts.scenario.social === "connected";
+      if (st.connected !== want) {
+        throw new Error(
+          `social: ${opts.scenario.social} asked for connected=${want}, but libi reports ${String(st.connected)}`,
+        );
+      }
+      console.log(`[skill-eval] libi's own social connection: ${opts.scenario.social}`);
+    }
+
     // Configure wiring for this scenario. `mcps` is validated server-side:
-    // fal-ai / ElevenLabs name the test-mode fakes (ACP-injected, attached as
+    // fal-ai / elevenlabs name the test-mode fakes (ACP-injected, attached as
     // a pair when the list is non-empty), anything else must be a libi
     // extension; an empty list detaches the fakes.
     const cfg = await post(base, "/api/skill-eval/configure", {
       skills: opts.scenario.skills,
       mcps: opts.scenario.mcps,
       agent: opts.agent,
+      approvalMode: approvalModeFor(opts.scenario),
     });
     if (!cfg.ok) throw new Error(`configure failed: ${(await cfg.json()).error ?? cfg.status}`);
 
     // Fresh piece + clean trace.
     const pieceRes = await post(base, "/api/pieces", {});
     if (!pieceRes.ok) throw new Error(`create piece failed: ${pieceRes.status}`);
+    // Canvas size for this scenario (`pieceDimensions` frontmatter) — see
+    // ParsedScenario.pieceDimensions. Must precede the prompt: a scenario that needs a
+    // non-default aspect (a 9:16 export gate, say) seeds it here rather than asking the
+    // agent to resize the canvas itself, which is a different skill's behaviour and would
+    // make a failure here look like this scenario's own bug.
+    if (opts.scenario.pieceDimensions) {
+      const { id: pieceId } = (await pieceRes.json()) as { id?: string };
+      if (!pieceId) throw new Error("create piece succeeded but returned no id, needed for pieceDimensions");
+      const [width, height] = opts.scenario.pieceDimensions;
+      const dimRes = await fetch(`${base}/api/pieces/${pieceId}/composition/dimensions`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ width, height }),
+      });
+      if (!dimRes.ok) throw new Error(`seed piece dimensions failed: ${dimRes.status}`);
+      console.log(`[skill-eval] seeded piece dimensions: ${width}x${height}`);
+    }
+
+    // Templates this scenario declared (`templates:` frontmatter), staged into the
+    // hermetic home and imported through the test-only seed route. Must precede the
+    // prompt: an apply scenario whose template is missing would send the agent hunting
+    // for one and fail for a reason that is not the skill's behaviour.
+    const seededTemplates = new Map<string, string>();
+    for (const dir of stageTemplates({ home, templates: opts.scenario.templates })) {
+      const res = await post(base, "/api/e2e/seed-template", { dir });
+      const payload = (await res.json()) as { templateId?: string; error?: string };
+      if (!res.ok || !payload.templateId) {
+        throw new Error(`seed template ${basename(dir)} failed: ${payload.error ?? res.status}`);
+      }
+      seededTemplates.set(basename(dir), payload.templateId);
+      console.log(`[skill-eval] seeded template: ${basename(dir)} → ${payload.templateId}`);
+    }
     truncateTrace(home);
 
-    // Create session, subscribe, send prompt, await completion.
+    // Create session, subscribe, send the prompt and each scripted reply, await each turn.
     const sessRes = await post(base, "/api/sessions", {});
     if (!sessRes.ok) throw new Error(`create session failed: ${(await sessRes.json()).error ?? sessRes.status}`);
     const { sessionId } = (await sessRes.json()) as { sessionId: string };
 
-    let markConnected: () => void = () => {};
-    const connected = new Promise<void>((r) => { markConnected = r; });
-    const completion = waitForAgentComplete(
-      base, sessionId, opts.scenario.timeoutSec * 1000, markConnected,
-    );
-    // Ensure the SSE subscription is live before sending, so a fast
-    // completion can't be missed. Race against a short fallback so a
-    // missing initial frame never blocks the send indefinitely.
-    await Promise.race([connected, new Promise<void>((r) => setTimeout(r, 5000))]);
-    const sendRes = await post(base, "/api/agent/send", {
-      sessionId,
-      text: resolveFixturePlaceholders(opts.scenario.prompt, staged) + preambleFor(opts.scenario),
+    let turn = 0;
+    const watcher = watchSession(base, sessionId, {
+      timeoutMs: opts.scenario.timeoutSec * 1000,
+      approve: opts.scenario.approve,
+      currentTurn: () => turn,
+      agent: opts.agent,
     });
-    if (!sendRes.ok) throw new Error(`send failed: ${sendRes.status}`);
-
-    try {
-      await completion;
-    } catch (e) {
+    // Ensure the SSE subscription is live before sending, so a fast
+    // completion can't be missed. Bounded so a missing initial frame never
+    // blocks the send indefinitely.
+    await watcher.ready();
+    const messagesToSend = [
+      resolveTemplatePlaceholders(resolveFixturePlaceholders(opts.scenario.prompt, staged), seededTemplates) +
+        preambleFor(opts.scenario),
+      ...opts.scenario.replies,
+    ];
+    const startedAt = Date.now();
+    const finish = async (status: HarnessResult["status"], errorMessage?: string): Promise<HarnessResult> => {
+      const durationSec = Math.round((Date.now() - startedAt) / 100) / 10;
+      await watcher.close();
       const messages = await fetchMessages(base, sessionId);
-      const name = (e as Error).name;
+      const view = buildTranscriptView(messages, watcher.approvals);
       return {
-        // A genuine timeout surfaces as AbortError (the AbortController fired);
-        // Node's fetch rejects the in-flight read with name === "AbortError".
-        status: name === "AbortError" ? "timeout" : "errored",
+        status,
         trace: readTrace(home),
-        transcript: renderTranscript(messages),
+        transcript: view.full,
+        view,
+        approvals: watcher.approvals,
+        durationSec,
+        cost: watcher.cost(),
         cliVersion,
-        errorMessage: (e as Error).message,
+        ...(errorMessage ? { errorMessage } : {}),
       };
+    };
+    try {
+      for (const text of messagesToSend) {
+        turn++;
+        if (turn > 1) console.log(`[skill-eval] scripted reply ${turn - 1}: ${text}`);
+        const sendRes = await post(base, "/api/agent/send", { sessionId, text });
+        if (!sendRes.ok) throw new Error(`send failed (turn ${turn}): ${sendRes.status}`);
+        await watcher.waitForCompletions(turn);
+      }
+      // After the last turn, before the trace is read: the positive control for the
+      // catalog assertions (see CATALOG_CANARY). Only on a completed run — an errored
+      // or timed-out one is never evaluated.
+      const canary = await readCatalogCanary(base, opts.scenario);
+      if (canary.ran) console.log(`[skill-eval] catalog canary read: ${"status" in canary ? canary.status : canary.error}`);
+    } catch (e) {
+      const name = (e as Error).name;
+      // `return await`, never a bare `return finish(…)`: inside this try/finally a bare
+      // return runs the finally — which kills the server — before finish has read the
+      // transcript, and the read dies with ECONNRESET (the first A15 runs).
+      return await finish(name === "AbortError" ? "timeout" : "errored", (e as Error).message);
     }
-
-    const messages = await fetchMessages(base, sessionId);
-    return { status: "completed", trace: readTrace(home), transcript: renderTranscript(messages), cliVersion };
+    return await finish("completed");
   } finally {
     if (child?.pid) {
       // Kill the whole process GROUP (negative pid), not just bin/libi.js —

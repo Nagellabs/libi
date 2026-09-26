@@ -9,6 +9,8 @@ vi.mock("@/mcp/tools", () => ({
   updatePieceName: vi.fn().mockResolvedValue({ success: true, data: {} }),
   updatePieceDescription: vi.fn().mockResolvedValue({ success: true, data: {} }),
   saveAsset: vi.fn().mockResolvedValue({ success: true, data: {} }),
+  // createLibiMcpServer builds its per-session apply_template replay memory at construction.
+  newApplyReplayMemory: vi.fn(() => new Map()),
 }));
 
 // Mock the version constant

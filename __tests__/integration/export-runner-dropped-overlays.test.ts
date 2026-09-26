@@ -21,6 +21,7 @@ import type { Composition } from "@/lib/engine/types";
 import type { RenderPayload } from "@/lib/export/render-jobs";
 import type { JobContext } from "@/lib/jobs/types";
 import { exportLogger } from "@/lib/logger";
+import { files as filesTable } from "@/lib/db/schema/sqlite";
 
 const captured = vi.hoisted(() => ({
   droppedOverlays: undefined as Array<{ id: string; message: string }> | undefined,
@@ -79,7 +80,7 @@ function params(destFolder: string): ExportParams {
 /** A code overlay with a broken body forces the chromium-render branch (the
  *  ffmpeg graph cannot run one) — exactly the QA repro shape. The backend is
  *  stubbed, so the body itself is never actually executed here. */
-async function seedManifest(): Promise<void> {
+async function seedManifest(extra: unknown[] = []): Promise<void> {
   const m = await loadManifest(PIECE_ID);
   m.width = 320;
   m.height = 240;
@@ -90,6 +91,7 @@ async function seedManifest(): Promise<void> {
       startTime: 0, duration: 2, z: 0, opacity: 1,
       rect: { x: 0, y: 0, width: 320, height: 240 }, drawFunction: "// draw",
     },
+    ...extra,
   ] as typeof m.overlays;
   await saveManifest(PIECE_ID, m);
 }
@@ -122,6 +124,66 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     expect(result.droppedOverlays).toEqual([{ id: "code-bg", message: "ctx is not defined" }]);
     // The export still succeeded — a dropped overlay is informational, not fatal.
     expect(fs.existsSync(result.filePath)).toBe(true);
+  });
+
+  // F13 UI / N3: a clip the render page could not load comes back as `{ id, message }` like any
+  // drop. The runner — not the page — says which of them were videos, from the manifest, and
+  // names the clip from its file row, for the export screen.
+  it("tags a dropped video with kind, fileId and the file's name, and leaves a body drop as it was", async () => {
+    getDb().insert(filesTable).values({
+      id: "file-beach", pieceId: PIECE_ID, filename: "beach.mp4", name: "Beach take", description: "",
+      type: "video", storagePath: `${PIECE_ID}/beach.mp4`, contentType: "video/mp4", size: 1,
+    }).run();
+    await seedManifest([
+      {
+        id: "vid-1", kind: "video", fileId: "file-beach",
+        startTime: 0, duration: 2, z: 1, opacity: 1, rect: { x: 0, y: 0, width: 320, height: 240 },
+      },
+    ]);
+    const message = "its video could not be loaded for export (neither the original file nor its proxy): HTTP 404";
+    captured.droppedOverlays = [
+      { id: "code-bg", message: "ctx is not defined" },
+      { id: "vid-1", message },
+    ];
+    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    expect(result.droppedOverlays).toEqual([
+      { id: "code-bg", message: "ctx is not defined" },
+      { id: "vid-1", message, kind: "video", cause: "load", fileId: "file-beach", name: "Beach take" },
+    ]);
+  });
+
+  // Review m8: naming the clip is only a label. A DB error there must not fail an export that has
+  // already rendered — the clip goes unnamed and the error is logged.
+  it("keeps the export when the file-name lookup throws, leaving the clip unnamed", async () => {
+    await seedManifest([
+      {
+        id: "vid-1", kind: "video", fileId: "file-beach",
+        startTime: 0, duration: 2, z: 1, opacity: 1, rect: { x: 0, y: 0, width: 320, height: 240 },
+      },
+    ]);
+    const warnSpy = vi.spyOn(exportLogger, "warn").mockImplementation(() => exportLogger);
+    const db = getDb() as unknown as { select: (...args: unknown[]) => unknown };
+    const realSelect = db.select.bind(db);
+    // Only the name lookup selects exactly { id, name, filename }; everything else goes through.
+    const selectSpy = vi.spyOn(db, "select").mockImplementation((...args: unknown[]) => {
+      const fields = args[0] as Record<string, unknown> | undefined;
+      if (fields && Object.keys(fields).sort().join(",") === "filename,id,name") throw new Error("database is locked");
+      return realSelect(...args);
+    });
+    const message = "its video could not be loaded for export (neither the original file nor its proxy): HTTP 404";
+    captured.droppedOverlays = [{ id: "vid-1", message }];
+    try {
+      const result = await exportRunner.run(fakeCtx(params(outDir)));
+      expect(fs.existsSync(result.filePath)).toBe(true);
+      expect(result.droppedOverlays).toEqual([{ id: "vid-1", message, kind: "video", cause: "load", fileId: "file-beach" }]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ op: "dropped_clip_names_failed", jobId: "job-test", error: "database is locked" }),
+        expect.any(String),
+      );
+    } finally {
+      selectSpy.mockRestore();
+      warnSpy.mockRestore();
+    }
   });
 
   // QA 2026-09-18 O1: the warn line carried the inner export_render job's id,

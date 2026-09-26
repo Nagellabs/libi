@@ -89,3 +89,42 @@ describe("useAgentChat — agent-status error text", () => {
     expect(result.current.statusError).toBeNull();
   });
 });
+
+describe("useAgentChat — a chat whose history is gone", () => {
+  it("reads `historyMissing` from the history fetch and settles on disconnected (not ready to send)", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ messages: [], historyMissing: true, shellEnvLoaded: true }), { status: 200 }),
+    );
+    const { result } = renderHook(() => useAgentChat("session-gone-1"));
+    await waitFor(() => expect(result.current.historyMissing).toBe(true));
+    expect(result.current.status).toBe("disconnected");
+    expect(result.current.sessionReady).toBe(false);
+    expect(result.current.messages).toEqual([]);
+  });
+
+  it("a send refused with 409 historyMissing flags the chat instead of inviting a retry", async () => {
+    const fetchMock = vi.spyOn(global, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/agent/send")) {
+        return new Response(JSON.stringify({ error: "gone", historyMissing: true }), { status: 409 });
+      }
+      return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+    });
+    const { result } = renderHook(() => useAgentChat("session-gone-2"));
+    await waitFor(() => expect(result.current.status).toBe("connected"));
+    await act(async () => {
+      result.current.sendMessage("hello");
+    });
+    await waitFor(() => expect(result.current.historyMissing).toBe(true));
+    expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith("/api/agent/send"))).toBe(true);
+  });
+
+  it("an ordinary history leaves it false", async () => {
+    vi.spyOn(global, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ messages: [] }), { status: 200 }),
+    );
+    const { result } = renderHook(() => useAgentChat("session-ok-1"));
+    await waitFor(() => expect(result.current.status).toBe("connected"));
+    expect(result.current.historyMissing).toBe(false);
+  });
+});

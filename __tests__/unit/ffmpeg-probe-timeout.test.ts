@@ -39,7 +39,7 @@ vi.mock("child_process", () => ({
   },
 }));
 
-import { probeMedia } from "@/lib/ffmpeg/probe";
+import { probeMedia, probeMediaResult } from "@/lib/ffmpeg/probe";
 
 describe("probeMedia timeout", () => {
   it("passes a bounded timeout + SIGKILL to execFile (boot-sweep hang guard)", async () => {
@@ -55,5 +55,14 @@ describe("probeMedia timeout", () => {
   it("surfaces a timeout as an ordinary probe failure ({} — skip, never delete)", async () => {
     behavior = "timeout";
     await expect(probeMedia("/mnt/stalled/clip.mp4")).resolves.toEqual({});
+  });
+
+  // A caller that must tell "could not read" from "has no video" (the template
+  // publish path) asks for the outcome; a timeout is named as one.
+  it("probeMediaResult names a timeout, and a success carries the media", async () => {
+    behavior = "timeout";
+    await expect(probeMediaResult("/mnt/stalled/clip.mp4")).resolves.toEqual({ ok: false, failure: "timeout" });
+    behavior = "ok";
+    await expect(probeMediaResult("/tmp/whatever.mp4")).resolves.toMatchObject({ ok: true, media: { duration: 1, hasAudio: false } });
   });
 });

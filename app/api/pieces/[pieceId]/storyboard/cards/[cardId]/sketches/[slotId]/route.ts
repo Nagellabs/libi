@@ -1,12 +1,16 @@
+import { readFile } from "fs/promises";
 import { NextResponse } from "next/server";
 import { getStorage } from "@/lib/storage";
+import { isSafePieceId, isSafeStoryboardId } from "@/lib/security/pieceId";
 import { slotSketchPath } from "@/lib/storyboard/paths";
 import { loadCard, editSketch } from "@/lib/storyboard/repo";
 import { renderCardSketch } from "@/lib/storyboard/render-card";
 import { withStoryboardBusy } from "@/lib/storyboard/busy-response";
 
-function bad(seg: string): boolean {
-  return seg.includes("/") || seg.includes("..") || seg.includes("\\");
+/** The ids are generated (a piece's UUID, `card_<n>` or an agent's card id, `sk_<n>`), so only
+ *  that alphabet is taken — not any one path segment. */
+function badIds(pieceId: string, cardId: string, slotId: string): boolean {
+  return !isSafePieceId(pieceId) || !isSafeStoryboardId(cardId) || !isSafeStoryboardId(slotId);
 }
 
 /** Set (or clear, with imageFileId:null) the imported image used AS this slot's
@@ -16,7 +20,7 @@ export const PATCH = withStoryboardBusy(async function PATCH(
   ctx: { params: Promise<{ pieceId: string; cardId: string; slotId: string }> },
 ) {
   const { pieceId, cardId, slotId } = await ctx.params;
-  if (bad(pieceId) || bad(cardId) || bad(slotId)) {
+  if (badIds(pieceId, cardId, slotId)) {
     return NextResponse.json({ error: "Invalid id" }, { status: 400 });
   }
   const body = (await req.json().catch(() => ({}))) as { imageFileId?: string | null };
@@ -33,7 +37,7 @@ export async function GET(
   ctx: { params: Promise<{ pieceId: string; cardId: string; slotId: string }> },
 ) {
   const { pieceId, cardId, slotId } = await ctx.params;
-  if (bad(pieceId) || bad(cardId) || bad(slotId)) return new Response("Invalid id", { status: 400 });
+  if (badIds(pieceId, cardId, slotId)) return new Response("Invalid id", { status: 400 });
 
   const storage = await getStorage();
   const rel = slotSketchPath(cardId, slotId);
@@ -52,7 +56,15 @@ export async function GET(
     }
   }
 
-  const bytes = await storage.read(pieceId, rel);
+  // Resolve through realPathForRead like the file-serving routes: storage.read
+  // checks containment LEXICALLY only, so a symlink planted inside the piece
+  // dir (an agent has write access there) would be followed out of it.
+  let bytes: Buffer;
+  try {
+    bytes = await readFile(await storage.realPathForRead(pieceId, rel));
+  } catch {
+    return new Response("Not found", { status: 404 });
+  }
   return new Response(new Uint8Array(bytes), {
     status: 200,
     headers: { "content-type": "image/png", "cache-control": "no-store" },

@@ -80,6 +80,9 @@ export function evictProxiesIfOverBudget(opts: EvictOptions = {}): void {
   const entries: ProxyEntry[] = [];
   for (const row of readyRows) {
     if (!row.proxyFilename) continue;
+    // An audio file's proxy is the only audio the preview can play for it
+    // (audio-preview.ts), is small, and nothing would make it again: kept.
+    if (row.type === "audio") continue;
     const proxyPath = path.join(
       storageBaseDir,
       row.pieceId ?? "_global",

@@ -17,9 +17,31 @@
 
 import { SITE_URL } from "@/lib/site-url";
 
-export const LEGAL_LINKS = {
-  privacy: `${SITE_URL}/privacy`,
-  terms: `${SITE_URL}/terms`,
-  accessibility: `${SITE_URL}/accessibility`,
-  license: "https://github.com/Nagellabs/libi/blob/main/LICENSE",
-} as const;
+/**
+ * The links of the site at `origin`. A dev build switched to a development
+ * templates catalog links that site's own Terms and Privacy (the text under
+ * test); otherwise production's — see `useLegalLinks`
+ * (lib/queries/templates-catalog.ts), which components use.
+ */
+export function legalLinksFor(origin: string) {
+  return {
+    privacy: `${origin}/privacy`,
+    terms: `${origin}/terms`,
+    /** The Terms' section on publishing to the public templates catalog (§4A). */
+    templatesCatalogTerms: `${origin}/terms#templates-catalog`,
+    /**
+     * The site's no-account report form (libi-site app/templates/report), with
+     * the template prefilled: where a formal copyright notice goes, since the
+     * in-app report carries no contact details or claimant statement.
+     */
+    templateReportForm: (cloudId: string) => `${origin}/templates/report?template=${encodeURIComponent(cloudId)}`,
+    /** How an author disputes a takedown (Terms §11). */
+    templatesDispute: `${origin}/terms#copyright`,
+    accessibility: `${origin}/accessibility`,
+    license: "https://github.com/Nagellabs/libi/blob/main/LICENSE",
+  } as const;
+}
+export type LegalLinks = ReturnType<typeof legalLinksFor>;
+
+/** The build's own site's links: what a packaged build shows, and the fallback before the catalog view has loaded. */
+export const LEGAL_LINKS: LegalLinks = legalLinksFor(SITE_URL);

@@ -139,14 +139,14 @@ describe("shadow", () => {
     expect(graph).toContain("drawbox=c=#000000:t=fill:replace=1");
     expect(graph).toContain("alphamerge,lut=a=val*0.549");
     // blur + composite only while the caption is on screen
-    expect(graph).toContain("gblur=sigma=4:steps=3:enable='between(t,1,3)'");
+    expect(graph).toContain("gblur=sigma=4:steps=3:enable='gte(t,1)*lt(t,3)'");
     // The layer is only the rows the shadow can reach — line top 1570 + dy 2,
     // less a font size (50) and 3σ (12) → 1510 — so the silhouette is drawn
     // relative to that band and the band is put back at its row.
     expect(graph).toContain("crop=iw:");
     expect(graph).toContain(":0:1510,format=gray");
     expect(graph).toContain("y=62+50*font_a/(font_a+abs(font_d))");
-    expect(graph).toContain("overlay=0:1510:enable='between(t,1,3)'[");
+    expect(graph).toContain("overlay=0:1510:enable='gte(t,1)*lt(t,3)'[");
     const gblurAt = graph.indexOf("gblur");
     const fillAt = graph.indexOf("fontcolor=#ffffff");
     expect(gblurAt).toBeGreaterThan(-1);
@@ -163,7 +163,7 @@ describe("shadow", () => {
     expect(graph.match(/gblur=/g)).toHaveLength(1);
     expect(graph.match(/split/g)).toHaveLength(1);
     // back-to-back cues merge into ONE enable window
-    expect(graph).toContain("gblur=sigma=4:steps=3:enable='between(t,0,60)'");
+    expect(graph).toContain("gblur=sigma=4:steps=3:enable='gte(t,0)*lt(t,60)'");
   });
 
   it("a NAMED shadow colour fills the layer as that colour (was black)", () => {
@@ -202,7 +202,7 @@ describe("background plate", () => {
     // widest 40 → plate w 64, x = 40 + 500 − 32 = 508; y 1543, h 85 + 24 = 109
     expect(layout.plate).toMatchObject({ x: 508, y: 1543, width: 64, height: 109 });
     const spec = plateSpecFor(o, layout, 0, 1)!;
-    expect(spec).toBe("drawbox=x=508:y=1543:w=64:h=109:color=#00000099:t=fill:enable='between(t,1,3)'");
+    expect(spec).toBe("drawbox=x=508:y=1543:w=64:h=109:color=#00000099:t=fill:enable='gte(t,1)*lt(t,3)'");
   });
 
   it("scales with the export and folds the overlay's opacity into the plate colour", () => {
@@ -334,13 +334,13 @@ describe("classifier — what drawtext can't draw routes to the chromium rendere
 describe("unionEnableExpr", () => {
   it("merges touching and overlapping windows", () => {
     expect(unionEnableExpr([{ startTime: 2, duration: 1 }, { startTime: 0, duration: 2 }, { startTime: 5, duration: 1 }], 0))
-      .toBe("between(t,0,3)+between(t,5,6)");
+      .toBe("gte(t,0)*lt(t,3)+gte(t,5)*lt(t,6)");
   });
 
   // ffmpeg failed to parse a sum of 120 `between`s (a sparse caption track).
   it("many disjoint windows collapse to one covering window", () => {
     const w = Array.from({ length: 120 }, (_, i) => ({ startTime: i, duration: 0.5 }));
-    expect(unionEnableExpr(w, 0)).toBe("between(t,0,119.5)");
+    expect(unionEnableExpr(w, 0)).toBe("gte(t,0)*lt(t,119.5)");
   });
 });
 

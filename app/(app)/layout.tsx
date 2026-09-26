@@ -2,6 +2,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { EditorStateProvider } from "@/lib/editor-state-context";
 import { AppShell } from "@/components/layout/app-shell";
 import { GlobalRefreshMount } from "./global-refresh-mount";
+import { AgentHandoffMount } from "./agent-handoff-mount";
 import { AnalyticsProvider } from "@/components/analytics/analytics-provider";
 import { FirstRunNotice } from "@/components/analytics/first-run-notice";
 
@@ -29,6 +30,7 @@ export default function AppLayout({
             }
           >
             <GlobalRefreshMount />
+            <AgentHandoffMount />
             <FirstRunNotice />
             <AnalyticsProvider>{children}</AnalyticsProvider>
           </SidebarProvider>

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { DatabaseIcon, FolderIcon, SlidersHorizontalIcon, Crown, ActivityIcon, BellIcon, DownloadIcon, ShieldIcon } from "lucide-react";
+import { DatabaseIcon, FolderIcon, SlidersHorizontalIcon, Crown, ActivityIcon, BellIcon, DownloadIcon, ShieldIcon, LayoutTemplateIcon } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarInset } from "@/components/ui/sidebar";
@@ -16,6 +16,8 @@ import { JobsTab } from "@/components/settings/jobs-tab";
 import { NotificationsTab } from "@/components/settings/notifications-tab";
 import { ExportTab } from "@/components/settings/export-tab";
 import { PrivacyTab } from "@/components/settings/privacy-tab";
+import { TemplatesCatalogCard } from "@/components/settings/templates-catalog-card";
+import { useTemplatesCatalog } from "@/lib/queries/templates-catalog";
 
 const SETTINGS_TABS = [
   "general",
@@ -24,6 +26,7 @@ const SETTINGS_TABS = [
   "notifications",
   "analytics",
   "export",
+  "templates",
   "database",
   "storage",
 ] as const;
@@ -39,6 +42,13 @@ export default function SettingsPage() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const urlTab = searchParams.get("tab");
+  // Settings → Templates exists only in a dev build (its one card is the catalog switch).
+  const catalog = useTemplatesCatalog();
+  const devBuild = catalog.data?.devBuild === true;
+  // Known NOT to be a dev build (the view says so, or can't be read): no Templates
+  // panel at all — a `?tab=templates` link opens General instead. Until the view
+  // loads, the panel's own skeleton stands in.
+  const noTemplatesTab = !devBuild && (catalog.data !== undefined || catalog.isError);
   const [tab, setTab] = useState<SettingsTab>(
     isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB,
   );
@@ -76,7 +86,7 @@ export default function SettingsPage() {
           </p>
         </div>
         <Tabs
-          value={tab}
+          value={tab === "templates" && noTemplatesTab ? DEFAULT_TAB : tab}
           onValueChange={handleTabChange}
           orientation="vertical"
           className="flex flex-row gap-6"
@@ -132,6 +142,16 @@ export default function SettingsPage() {
               <DownloadIcon className="size-4" />
               Export
             </TabsTrigger>
+            {devBuild && (
+              <TabsTrigger
+                value="templates"
+                data-testid="settings-tab-templates"
+                className="w-full cursor-pointer justify-start gap-2 rounded-md px-3 py-2 text-sm data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-accent-foreground"
+              >
+                <LayoutTemplateIcon className="size-4" />
+                Templates
+              </TabsTrigger>
+            )}
             <TabsTrigger
               value="database"
               className="w-full cursor-pointer justify-start gap-2 rounded-md px-3 py-2 text-sm data-active:bg-sidebar-accent data-active:font-medium data-active:text-sidebar-accent-foreground"
@@ -201,6 +221,18 @@ export default function SettingsPage() {
               </div>
               <ExportTab />
             </TabsContent>
+
+            {!noTemplatesTab && (
+              <TabsContent value="templates" className="space-y-4">
+                <div>
+                  <h2 className="text-lg font-semibold">Templates</h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Where this development build&rsquo;s templates come from and go to.
+                  </p>
+                </div>
+                <TemplatesCatalogCard />
+              </TabsContent>
+            )}
 
             <TabsContent value="database" className="space-y-4">
               <div>

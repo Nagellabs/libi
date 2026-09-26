@@ -2,7 +2,7 @@
 
 import { DocsLink } from "@/components/agents-page/providers-tab/pieces";
 import { SetupTerminal } from "@/components/terminal/setup-terminal";
-import type { ProviderDef, ProviderKind } from "@/lib/providers/catalog";
+import { billsGenerationCredits, type ProviderDef, type ProviderKind } from "@/lib/providers/catalog";
 import { cn } from "@/lib/utils";
 import { AgentChip, type AgentChipProps } from "./agent-chip";
 
@@ -21,6 +21,7 @@ const KIND_LABEL: Record<ProviderKind, string> = {
   voice: "Voice",
   sfx: "Sound effects",
   transcription: "Transcription",
+  social: "Social posting",
 };
 
 /**
@@ -60,10 +61,13 @@ export function ProviderRow({
       </div>
 
       {/* Credits: https://higgsfield.ai/mcp — each generation costs credits by model and resolution, from the
-          user's existing Higgsfield plan credits, through any connected agent. */}
+          user's existing Higgsfield plan credits, through any connected agent. A posting-only provider (e.g.
+          Zernio) signs in the same way but generates no media and has no credits — billsGenerationCredits
+          gates that half of the sentence. */}
       {def.auth === "oauth" ? (
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          No key: you sign in with your {def.name} account in your browser, and generations use your {def.name} credits.
+          No key: you sign in with your {def.name} account in your browser
+          {billsGenerationCredits(def) ? <>, and generations use your {def.name} credits.</> : "."}
         </p>
       ) : null}
 

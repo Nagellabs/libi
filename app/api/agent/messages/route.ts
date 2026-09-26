@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getSessionManager } from "@/lib/sessions/session-manager";
+import { isAgentHistoryMissing } from "@/lib/sessions/history-missing";
 
 /**
  * GET /api/agent/messages?sessionId=…
@@ -12,6 +13,10 @@ import { getSessionManager } from "@/lib/sessions/session-manager";
  *
  * `shellEnvLoaded` is false when the session's agent process was spawned before
  * the desktop app loaded the user's shell environment; the chat warns about it.
+ *
+ * `historyMissing: true` (200, no messages) is the agent saying it has no transcript for this
+ * chat any more — the chat explains that and offers a new one. Not an error: nothing retrying can
+ * change it, and its raw text ("Resource not found: <id>") must never reach the user.
  */
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -34,6 +39,10 @@ export async function GET(request: Request) {
     // runs on (and so whether that process had the shell environment) only then.
     return NextResponse.json({ messages, shellEnvLoaded: entry.shellEnvLoaded !== false });
   } catch (err) {
+    if (isAgentHistoryMissing(err)) {
+      // Logged once by the session manager, where it was recognised.
+      return NextResponse.json({ messages: [], historyMissing: true, shellEnvLoaded: true });
+    }
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message, messages: [], shellEnvLoaded: true }, { status: 500 });
   }

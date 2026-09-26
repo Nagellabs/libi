@@ -67,7 +67,7 @@ async function main(): Promise<void> {
       const harness = await runScenarioOnce({ scenario, agent, keep });
       const assertions =
         harness.status === "completed"
-          ? evaluate(harness.trace, scenario.assertions, harness.transcript)
+          ? evaluate(harness.trace, scenario.assertions, harness.view)
           : [];
       const hardPass = harness.status === "completed" && assertions.every((a) => a.pass);
       // A scenario with no `## Hard invariants` needles can only ever produce
@@ -77,6 +77,7 @@ async function main(): Promise<void> {
       const result: RunResult = {
         scenarioId: scenario.id, agent, status: harness.status,
         assertions, hardPass, vacuous, cliVersion: harness.cliVersion, reportDir,
+        durationSec: harness.durationSec, cost: harness.cost,
         errorMessage: harness.errorMessage,
       };
       writeRunReport(reportDir, { result, trace: harness.trace, transcript: harness.transcript });
@@ -87,7 +88,7 @@ async function main(): Promise<void> {
 
   // Print a machine-readable summary block for the orchestrating coding agent.
   console.log("\n[skill-eval] JSON_SUMMARY " + JSON.stringify(results.map((r) => ({
-    scenarioId: r.scenarioId, agent: r.agent, status: r.status, hardPass: r.hardPass, vacuous: r.vacuous, cliVersion: r.cliVersion, reportDir: r.reportDir,
+    scenarioId: r.scenarioId, agent: r.agent, status: r.status, hardPass: r.hardPass, vacuous: r.vacuous, cliVersion: r.cliVersion, durationSec: r.durationSec, cost: r.cost, reportDir: r.reportDir,
   }))));
 
   const ok = results.every((r) => r.status === "completed" && r.hardPass);

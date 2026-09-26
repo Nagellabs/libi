@@ -192,6 +192,21 @@ export class JobNotFoundError extends Error {
   }
 }
 
+/*
+ * Name-based guards for the two errors above. Not `instanceof`: the JobManager (and the runner
+ * registry it fills) is a process-wide singleton on globalThis, built from whichever route bundle
+ * first called `getJobManager`, and each Next route bundle has its own copy of this module — so
+ * a route's class need not be the one the manager or its runner threw with.
+ */
+
+export function isCancelledError(err: unknown): err is CancelledError {
+  return err instanceof Error && err.name === "CancelledError";
+}
+
+export function isJobNotFoundError(err: unknown): err is JobNotFoundError {
+  return err instanceof Error && err.name === "JobNotFoundError";
+}
+
 /** Result of `enqueue`. Discriminated union with four shapes:
  *  - `new`: no match found; a fresh row was inserted.
  *  - `attached_running`: an in-flight (queued/running/cancel-requested) job

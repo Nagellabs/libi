@@ -4,10 +4,11 @@ import {
   findProvider,
   providersForKind,
   commandNeedsKey,
+  billsGenerationCredits,
 } from "@/lib/providers/catalog";
 
 describe("PROVIDER_CATALOG", () => {
-  it("holds the six entries the design names", () => {
+  it("holds the seven entries the design names", () => {
     expect(PROVIDER_CATALOG.map((p) => p.id).sort()).toEqual([
       "ace-step",
       "elevenlabs",
@@ -15,6 +16,7 @@ describe("PROVIDER_CATALOG", () => {
       "higgsfield",
       "kokoro",
       "whisper",
+      "zernio",
     ]);
   });
 
@@ -36,16 +38,32 @@ describe("PROVIDER_CATALOG", () => {
     expect(fal.kinds).toEqual(["image", "video"]);
   });
 
-  it("gives ElevenLabs the stdio uvx commands", () => {
+  // The owner's ElevenLabs add ran `uvx elevenlabs-mcp` on a Mac without uv, and the chat had no ElevenLabs tools
+  // (2026-09-25). The hosted server needs nothing installed and no key: the user signs in with their account.
+  it("gives ElevenLabs its hosted MCP server at api.us: OAuth, the exact add and sign-in commands, no key, no uv", () => {
     const el = findProvider("elevenlabs");
-    expect(el.commands!.claude).toBe(
-      'claude mcp add --scope user elevenlabs -e "ELEVENLABS_API_KEY=<your key>" -- uvx elevenlabs-mcp',
-    );
-    expect(el.commands!.codex).toBe(
-      'codex mcp add elevenlabs --env "ELEVENLABS_API_KEY=<your key>" -- uvx elevenlabs-mcp',
-    );
-    expect(el.transport).toBe("stdio");
+    expect(el.kind).toBe("remote-mcp");
+    expect(el.transport).toBe("http");
+    expect(el.auth).toBe("oauth");
+    expect(el.commands).toEqual({
+      claude: "claude mcp add --transport http --scope user elevenlabs https://api.us.elevenlabs.io/v1/mcp",
+      codex: "codex mcp add elevenlabs --url https://api.us.elevenlabs.io/v1/mcp",
+    });
+    expect(el.signInCommands).toEqual({ claude: "claude mcp login elevenlabs", codex: "codex mcp login elevenlabs" });
+    expect(el.addSignsIn).toEqual(["codex", "claude"]);
+    expect(el.keyName).toBeUndefined();
+    expect(el.codexKeyEnv).toBeUndefined();
+    for (const cmd of Object.values(el.commands!)) {
+      expect(commandNeedsKey(cmd)).toBe(false);
+      expect(cmd).not.toMatch(/\buvx?\b/);
+      // api.elevenlabs.io advertises api.us as its protected resource, which Claude Code refuses as a mismatch.
+      expect(cmd).not.toContain("https://api.elevenlabs.io");
+    }
+    expect(el.codexNote).toBe("Add opens your browser to sign in with your ElevenLabs account, and waits until you finish.");
+    expect(el.match).toEqual({ names: ["elevenlabs", "eleven-labs", "eleven_labs"], urls: ["elevenlabs.io"] });
+    // Voice, music and sound effects only: its image/video generation is not what libi recommends it for.
     expect([...el.kinds].sort()).toEqual(["music", "sfx", "voice"]);
+    expect(billsGenerationCredits(el)).toBe(true);
   });
 
   it("gives Higgsfield its hosted MCP server: OAuth, the exact add and sign-in commands, and no key anywhere", () => {
@@ -105,6 +123,7 @@ describe("PROVIDER_CATALOG", () => {
     expect(providersForKind("music").map((p) => p.id)).toEqual(["elevenlabs", "ace-step"]);
     expect(providersForKind("video").map((p) => p.id)).toEqual(["fal", "higgsfield"]);
     expect(providersForKind("transcription").map((p) => p.id)).toEqual(["whisper"]);
+    expect(providersForKind("social").map((p) => p.id)).toEqual(["zernio"]);
   });
 
   it("findProvider throws on an unknown id", () => {

@@ -6,6 +6,9 @@ import { files, analysisSteps, analysisKeyframes, analysisAudioChunks } from "@/
 import { serverLogger as logger } from "@/lib/logger";
 import { getStorage } from "@/lib/storage";
 import { runFfmpeg } from "@/lib/ffmpeg/exec";
+import { probeMedia } from "@/lib/ffmpeg/probe";
+import { onFileTimeline } from "@/lib/export/export-base";
+import { TRANSCRIPT_AUDIO_TIMELINE } from "@/lib/analysis/retime-audio-lead";
 import { ensureAnalysisDirs, getAudioPath, getFramesDir, getAnalysisDir } from "./storage";
 import { videoSummarySchema } from "./schemas";
 import type { VideoSummary, TranscriptWord } from "./schemas";
@@ -226,11 +229,20 @@ export async function saveTranscript(params: {
   content: string;
   metadata?: string | Record<string, unknown> | null;
 }): Promise<AnalysisStep> {
-  const metadataStr = typeof params.metadata === "string"
+  let metadataStr = typeof params.metadata === "string"
     ? params.metadata
     : params.metadata != null
       ? JSON.stringify(params.metadata)
       : null;
+  // Saved now, so on the file's timeline (see aggregateTranscript).
+  if (metadataStr) {
+    try {
+      const m = JSON.parse(metadataStr) as unknown;
+      if (m && typeof m === "object" && !Array.isArray(m)) metadataStr = JSON.stringify({ ...m, audioTimeline: TRANSCRIPT_AUDIO_TIMELINE });
+    } catch {
+      // not JSON: kept as given
+    }
+  }
   return upsertStep({
     fileId: params.fileId,
     kind: "transcript",
@@ -513,6 +525,10 @@ export async function aggregateTranscript(
   // wrong provenance to correct.
   const metadata = {
     schema_version: "transcript_v1",
+    // Times on the file's timeline (extractAudio pads an audio lead); the
+    // one-time re-timing of older transcripts skips a stamped one
+    // (retime-audio-lead.ts).
+    audioTimeline: TRANSCRIPT_AUDIO_TIMELINE,
     provider: opts?.provider ?? "external",
     model: opts?.model ?? undefined,
     language,
@@ -575,8 +591,14 @@ export async function extractAudio(params: {
   const audioPath = getAudioPath(file.pieceId, params.fileId);
   const sr = params.sampleRate ?? 16000;
 
+  // On the file's timeline, as the preview and the export place it: an audio
+  // track that starts after its file keeps its lead as silence, so transcript
+  // and chunk times are source times (onFileTimeline). A file ffmpeg reads off
+  // its timeline gets its probe's fix (ProbedMedia.audioRead).
+  const read = (await probeMedia(inputPath)).audioRead;
   await runFfmpeg(
-    ["-y", "-i", inputPath, "-vn", "-ac", "1", "-ar", String(sr), "-f", "wav", audioPath],
+    ["-y", ...(read?.inputArgs ?? []), "-i", inputPath, "-vn", "-af", onFileTimeline(read?.ptsShift),
+      "-ac", "1", "-ar", String(sr), "-f", "wav", audioPath],
     { op: "analysis_extract_audio", context: { fileId: params.fileId, pieceId: file.pieceId } },
   );
   return { audioPath };

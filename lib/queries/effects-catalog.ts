@@ -3,10 +3,11 @@
 import { useQuery } from "@tanstack/react-query";
 import type { CustomEffectManifest } from "@/lib/effects/package-types";
 
-/** One custom effect as shipped by `GET /api/effects` — validated manifest + animate source. */
+/** One custom effect as shipped by `GET /api/effects` — validated manifest, animate source and its sha256. */
 export interface CustomEffectEntry {
   meta: CustomEffectManifest;
   source: string;
+  sourceHash: string;
 }
 
 export interface CustomEffectsPayload {
@@ -19,7 +20,8 @@ export const effectsCatalogKeys = {
 
 /**
  * Fetch the custom effect packages (manifest + animate source) from the server.
- * The client compiles + registers these via `compileCustomEffect` — see
+ * The page registers curve-backed defs from these — it never compiles or runs
+ * the source, which only the effect sandbox samples — see
  * `useRegisterCustomEffects`. 5-minute staleTime: custom packages change rarely.
  */
 export function useCustomEffects() {

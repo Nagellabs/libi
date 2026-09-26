@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getTerminalManager } from "@/lib/terminal/instance";
-import { TerminalCapacityError } from "@/lib/terminal/manager";
+import { isTerminalCapacityError } from "@/lib/terminal/manager";
 import { DEFAULT_TERMINAL_CLI_ID } from "@/lib/terminal/presets";
 import { isSetupSurface, type SetupSurface, type TerminalPurpose } from "@/lib/terminal/types";
 import { trackServerEvent } from "@/lib/analytics/server";
@@ -74,7 +74,7 @@ export async function POST(request: Request) {
     }
     return NextResponse.json(meta, { status: 201 });
   } catch (err) {
-    if (err instanceof TerminalCapacityError) {
+    if (isTerminalCapacityError(err)) {
       return NextResponse.json({ error: err.message }, { status: 409 });
     }
     const message = err instanceof Error ? err.message : String(err);

@@ -1,28 +1,23 @@
 import { mkdirSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
-import { getLibiHome } from "@/lib/libi-home";
+import { elevenlabsTestOutDir } from "@/lib/providers/elevenlabs-test-media";
+import { studioBaseUrl } from "@/mcp/notify";
 
-/**
- * Resolve where a placeholder file is written. Faithful to elevenlabs-mcp's
- * make_output_path EXCEPT the default: instead of ~/Desktop we write to a temp
- * dir under the libi home so test runs never pollute the user's Desktop.
- */
-export function resolveOutputDir(outputDirectory?: string | null): string {
-  const dir = outputDirectory && isAbsolute(outputDirectory)
-    ? outputDirectory
-    : join(getLibiHome(), "test-mode", "elevenlabs-out");
+/** Where placeholders are written: `<LIBI_HOME>/test-mode/elevenlabs-out`, created on demand. */
+export function resolveOutputDir(): string {
+  const dir = elevenlabsTestOutDir();
   mkdirSync(dir, { recursive: true });
   return dir;
 }
 
-function stamp(): string {
-  const d = new Date();
-  const p = (n: number, w = 2) => String(n).padStart(w, "0");
-  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+/**
+ * The URL a placeholder is served at: the studio's test-mode route
+ * (app/api/test-mode/elevenlabs), standing in for ElevenLabs' short-lived output URL.
+ */
+export function outputUrl(fileName: string): string {
+  return `${studioBaseUrl() ?? "http://127.0.0.1:3456"}/api/test-mode/elevenlabs/out/${fileName}`;
 }
 
-/** Faithful to elevenlabs-mcp make_output_file: `{tool}_{text[:5]}_{ts}.{ext}`. */
-export function makeOutputFileName(tool: string, text: string, ext: string): string {
-  const id = text.slice(0, 5).replace(/ /g, "_");
-  return `${tool}_${id}_${stamp()}.${ext}`;
+/** The presigned PUT URL for an upload the fake started. */
+export function uploadUrl(assetId: string): string {
+  return `${studioBaseUrl() ?? "http://127.0.0.1:3456"}/api/test-mode/elevenlabs/upload/${assetId}`;
 }

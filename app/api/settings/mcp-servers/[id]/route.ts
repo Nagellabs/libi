@@ -4,12 +4,26 @@ import { mcpServers } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
 import { invalidateMcpConfig } from "@/lib/mcp-config";
 import { redactServerRow } from "@/lib/security/redact-mcp-server";
+import { serverLogger as logger } from "@/lib/logger";
+import { browserOnlyRefusal } from "@/lib/security/request-guard";
 
 interface RouteParams {
   params: Promise<{ id: string }>;
 }
 
+/**
+ * The extension card's "Require approval" switch (`useUpdateMcpServer`, its one
+ * caller). Takes the browser-only checks (`browserOnlyRefusal`): the flag
+ * decides whether an extension's tools raise a card, so an agent's shell must
+ * not be able to switch it off with a header-less curl. The agent's own tool,
+ * `libi.update_mcp_server`, may only turn it ON (mcp/tools/mcp-server-tools.ts).
+ */
 export async function PATCH(request: Request, { params }: RouteParams) {
+  const refused = browserOnlyRefusal(request);
+  if (refused) {
+    logger.warn({ tag: "mcp-config", op: "mcp_server_update_refused", reason: refused }, "extension setting change refused: not from libi's own page");
+    return NextResponse.json({ error: "Extension settings are changed only on libi's Agents page.", code: "browser_only" }, { status: 403 });
+  }
   const { id } = await params;
   const body = await request.json();
 

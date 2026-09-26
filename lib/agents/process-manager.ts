@@ -16,6 +16,7 @@ import { isShellEnvLoaded } from "@/lib/runtime/shell-env-state";
 import type { AgentUnavailableReason } from "@/lib/agents/types";
 import { ensureCodexHome } from "@/lib/codex-config/canonical";
 import { stripHostSessionEnv } from "@/lib/agents/child-env";
+import { agentChildPath, forgetAgentSpawnPath, recordAgentSpawnPath } from "@/lib/agents/agent-path";
 import { CODEX_ACP_DISABLE_MCP_FILTER_ENV } from "@/lib/mcp/agent-surface";
 import { LIBI_SERVER_PORT_ENV } from "@/lib/libi-home";
 import {
@@ -106,9 +107,11 @@ export class AgentProcessManager {
     return this.shellEnvAtSpawn.get(agentId) ?? isShellEnvLoaded();
   }
 
-  /** Kill `agentId`'s process (if any) and spawn a fresh one. Used only to hand an IDLE agent the
-   *  shell environment that arrived after it started — never while a chat runs on it. A second
-   *  call while one is in progress shares it. */
+  /** Kill `agentId`'s process (if any) and spawn a fresh one. Two callers, both never while a chat
+   *  is working on it: handing an IDLE agent the shell environment that arrived after it started,
+   *  and a chat's Restart session replacing a process that answered neither the close nor the load
+   *  within its bound (`SessionManager.replaceUnresponsiveProcess`, which refuses while another chat
+   *  on it is working or being opened). A second call while one is in progress shares it. */
   restartProcess(agentId: string): Promise<void> {
     const inflight = this.restarts.get(agentId);
     if (inflight) return inflight;
@@ -227,6 +230,7 @@ export class AgentProcessManager {
     if (this.processes.get(managed.agentId) !== managed) return;
     this.processes.delete(managed.agentId);
     this.shellEnvAtSpawn.delete(managed.agentId);
+    forgetAgentSpawnPath(managed.agentId);
   }
 
   private ensureProcess(agentId: string): Promise<ManagedProcess> {
@@ -336,8 +340,15 @@ export class AgentProcessManager {
     // ACP `mcpServers`, never through an inherited port, and what its shell
     // starts is the user's, as in the terminal (`lib/terminal/manager.ts`): a
     // stdio libi MCP pointed at another home has to find that home's server.
+    //
+    // PATH: this process's, then every login-shell folder it lacks (`lib/agents/agent-path.ts`), so a launcher
+    // the user installed after libi booted (`uvx`, `npx`), which the Providers tab reads as found, is on the
+    // PATH of the MCP servers this agent starts.
+    // Set only when it adds a folder: on Windows (none there) the inherited `Path` stays the one key.
+    const childPath = agentChildPath();
     const agentEnv: NodeJS.ProcessEnv = stripHostSessionEnv({
       ...process.env,
+      ...(childPath !== undefined && childPath !== process.env.PATH ? { PATH: childPath } : {}),
       ...cliEnv,
       MCP_TIMEOUT: "60000",
       CODEX_HOME: ensureCodexHome(),
@@ -433,6 +444,8 @@ export class AgentProcessManager {
     );
     this.processes.set(agentId, managed);
     this.shellEnvAtSpawn.set(agentId, shellEnvLoaded);
+    // `childPath`, not `agentEnv.PATH`: on Windows the inherited key is `Path`, which `process.env` reads either way.
+    recordAgentSpawnPath(agentId, childPath);
     if (this.exiting) this.retiring.add(managed);
     return managed;
   }
@@ -480,6 +493,7 @@ export class AgentProcessManager {
     if (this.processes.get(managed.agentId) !== managed) return;
     this.processes.delete(managed.agentId);
     this.shellEnvAtSpawn.delete(managed.agentId);
+    forgetAgentSpawnPath(managed.agentId);
   }
 }
 
@@ -490,7 +504,7 @@ export class AgentProcessManager {
 // so the wiring between PM and SM stays consistent after a class-shape change.
 // ---------------------------------------------------------------------------
 
-const PM_GLOBAL_KEY = "__agentProcessManager_v2";
+const PM_GLOBAL_KEY = "__agentProcessManager_v4";
 
 const globalForPM = globalThis as unknown as {
   [PM_GLOBAL_KEY]?: AgentProcessManager;

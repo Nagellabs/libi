@@ -10,7 +10,7 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider  fal, higgsfield or elevenlabs
+#   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config
@@ -18,13 +18,16 @@
 #             (user, local or project)
 #
 # What it does:
-#   1. Higgsfield, which you sign in to with your account: runs the agent's own
-#      `mcp logout`, which clears the sign-in the agent stored for the entry.
+#   1. Higgsfield, Zernio and ElevenLabs, which you sign in to with your
+#      account: runs the agent's own `mcp logout`, which clears the sign-in the
+#      agent stored for the entry.
 #      It runs before the remove because both agents look that sign-in up
 #      through the entry: once the entry is gone they answer "No MCP server
 #      named ..." and clear nothing. With no sign-in stored it changes
 #      nothing, and a sign-out that fails never stops step 2. If step 2 then
 #      fails, the entry stays, signed out, and Sign in signs it in again.
+#      libi passes -NoSignOut for an older local ElevenLabs entry
+#      (`uvx elevenlabs-mcp`, with a key): it has no sign-in to clear.
 #   2. Runs the agent's own `mcp remove`, which deletes the entry, and any key
 #      saved in it, from the agent's config.
 #   3. Codex with fal.ai only, and only when step 2 worked: clears FAL_KEY from
@@ -33,7 +36,7 @@
 # The entry's name goes after `--`, so a name that starts with `-` is never
 # read as an option.
 
-param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope)
+param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)
 
 # Provider details. A libi test keeps this table the same as libi's provider
 # catalog (lib/providers/catalog.ts).
@@ -41,7 +44,8 @@ param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$
 switch -CaseSensitive ($Provider) {
   'fal'        { $name = 'fal.ai'; $auth = 'key'; $codexKeyEnv = 'FAL_KEY' }
   'higgsfield' { $name = 'Higgsfield'; $auth = 'oauth'; $codexKeyEnv = '' }
-  'elevenlabs' { $name = 'ElevenLabs'; $auth = 'key'; $codexKeyEnv = '' }
+  'zernio'     { $name = 'Zernio'; $auth = 'oauth'; $codexKeyEnv = '' }
+  'elevenlabs' { $name = 'ElevenLabs'; $auth = 'oauth'; $codexKeyEnv = '' }
   default      { [Console]::Error.WriteLine("remove-provider.ps1: unknown provider '$Provider'"); exit 2 }
 }
 switch -CaseSensitive ($Agent) {
@@ -50,7 +54,7 @@ switch -CaseSensitive ($Agent) {
   default  { [Console]::Error.WriteLine("remove-provider.ps1: unknown agent '$Agent'"); exit 2 }
 }
 if (-not $Cli -or -not $Entry -or ($Agent -ceq 'claude' -and -not $Scope)) {
-  [Console]::Error.WriteLine('usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>]')
+  [Console]::Error.WriteLine('usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut]')
   exit 2
 }
 if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {
@@ -61,7 +65,7 @@ if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {
 # 1. A provider you sign in to with your account: sign out first, while the
 #    agent can still find the sign-in through the entry. Nothing stored is not
 #    a failure, and a sign-out that fails still goes on to the remove.
-if ($auth -ceq 'oauth') {
+if ($auth -ceq 'oauth' -and -not $NoSignOut) {
   Write-Host "Signing out of $name first, so the sign-in isn't left stored."
   $logoutArgs = @('mcp', 'logout', '--', $Entry)
   & $Cli @logoutArgs

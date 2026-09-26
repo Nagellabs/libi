@@ -273,6 +273,16 @@ export function getLibiSkillsDir(): string {
   return path.join(getLibiHome(), "skills");
 }
 
+/**
+ * Holds libi's OWN OAuth grants for social providers
+ * (`lib/social/token-store.ts`) — the only provider credentials libi ever
+ * writes. Owner-only (0700), and every `<id>.tokens.json` in it 0600; see
+ * `ensureLibiDirs`.
+ */
+export function getLibiSocialDir(): string {
+  return path.join(getLibiHome(), "social");
+}
+
 /** The user's cross-session memories file, injected into agent instructions. */
 export function getLibiMemoriesPath(): string {
   return path.join(getLibiHome(), "memories.md");
@@ -351,7 +361,7 @@ export function getBundledSkillsDir(): string {
  * files down is a hardening nicety, not a correctness requirement. On failure
  * we log-and-continue so startup is never gated on it.
  */
-function chmodBestEffort(target: string, mode: number, op: string): void {
+export function chmodBestEffort(target: string, mode: number, op: string): void {
   try {
     fs.chmodSync(target, mode);
   } catch (err) {
@@ -378,6 +388,23 @@ export function ensureLibiDirs(): void {
 
   for (const sub of ["storage", "agent", "bin", "models", "logs", "skills"]) {
     fs.mkdirSync(path.join(home, sub), { recursive: true });
+  }
+
+  // libi's own social-provider grants. Created owner-only, and re-tightened
+  // every boot: `mkdirSync({ mode: 0o700 })` does NOTHING to a directory that
+  // already exists — an install that created it at 0755 (or under a loose
+  // umask) would keep it. The grant files inside are locked below.
+  const socialDir = getLibiSocialDir();
+  fs.mkdirSync(socialDir, { recursive: true, mode: 0o700 });
+  chmodBestEffort(socialDir, 0o700, "chmod_social_dir");
+  try {
+    for (const entry of fs.readdirSync(socialDir)) {
+      if (entry.endsWith(".tokens.json")) {
+        chmodBestEffort(path.join(socialDir, entry), 0o600, "chmod_social_grant");
+      }
+    }
+  } catch {
+    // Unreadable directory — the token store chmods its own file on write.
   }
 
   // Lock any secret-bearing files that already exist. The SQLite DB holds MCP

@@ -104,12 +104,18 @@ describe("libi-export chromium dep — one install path", () => {
   let tmp: string;
   let cache: string;
   let prevBrowsersPath: string | undefined;
+  let prevHome: string | undefined;
   let revision: string;
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), "libi-chromium-dep-"));
     cache = path.join(tmp, "ms-playwright");
     fs.mkdirSync(cache, { recursive: true });
+    // Its own LIBI_HOME: the install lock (`bin/playwright-chromium.install-lock`)
+    // must not be shared with other test files running in parallel.
+    prevHome = process.env.LIBI_HOME;
+    process.env.LIBI_HOME = path.join(tmp, "home");
+    fs.mkdirSync(path.join(tmp, "home", "bin"), { recursive: true });
     prevBrowsersPath = process.env.PLAYWRIGHT_BROWSERS_PATH;
     process.env.PLAYWRIGHT_BROWSERS_PATH = cache;
     pw.executablePath = path.join(cache, "chromium-x", "chrome");
@@ -132,6 +138,8 @@ describe("libi-export chromium dep — one install path", () => {
   afterEach(() => {
     if (prevBrowsersPath === undefined) delete process.env.PLAYWRIGHT_BROWSERS_PATH;
     else process.env.PLAYWRIGHT_BROWSERS_PATH = prevBrowsersPath;
+    if (prevHome === undefined) delete process.env.LIBI_HOME;
+    else process.env.LIBI_HOME = prevHome;
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 

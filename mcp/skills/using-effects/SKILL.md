@@ -116,8 +116,12 @@ TransformDelta`:
 - You may use ONLY the injected pure-math helpers — `interpolate`, `spring`, `clamp`,
   `lerp`, and the easing functions. There is NO `ctx`/canvas, and `require`, `import`,
   `fetch`, `process`, DOM, and any other IO are **forbidden** — a body that references
-  one is rejected at validation time (the same sandbox as code overlays). Keep it pure
-  math returning a delta.
+  one is rejected at validation time. The body only ever runs inside libi's sandboxed
+  effect worker (an opaque-origin frame with no network), never in the studio: libi
+  samples it at 1025 evenly spaced `progress` values per param set and the preview and
+  the export interpolate those numbers. So keep it pure math returning a delta — the
+  same `progress` and `params` must give the same result, and state kept between calls
+  is not seen. A sharp step reads as a step (it is blurred over ~1/1000 of the window).
 
 Example body (a gentle slow drift up + fade):
 

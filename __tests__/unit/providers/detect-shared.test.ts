@@ -29,6 +29,12 @@ vi.mock("@/lib/agents/cli/resolve", async (importOriginal) => ({
     meetsMinimum: true,
   }),
 }));
+// The launcher lookup reads the host's PATH (and a login-shell PATH the resolver may have probed): pinned to
+// "unknown" so no row here flips on the machine running the suite. The lookup itself is launcher.test.ts's.
+vi.mock("@/lib/providers/launcher", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/providers/launcher")>()),
+  launcherLookupForPass: () => () => "unknown" as const,
+}));
 vi.mock("@/lib/libi-home", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/libi-home")>()),
   getLibiAgentDir: () => path.join(h.home, "agent"),
@@ -39,6 +45,15 @@ vi.mock("@/lib/libi-home", async (importOriginal) => ({
 vi.mock("@/lib/sessions/session-manager", () => ({ getSessionManager: () => ({ getReadiness: () => ({ state: "unknown" }) }) }));
 vi.mock("@/lib/agents/acp/agent-registry", () => ({ getAgentConfig: () => undefined, refreshAgentCache: () => undefined }));
 vi.mock("@/lib/agents/sign-in-confirmation", () => ({ getSignInConfirmedAt: () => null }));
+
+// Claude Code's own sign-in answers (lib/providers/claude-signin-probe.ts) are the probe module's tests; here only
+// whether detection asks it to forget the answers of entries no longer in the config.
+const probe = vi.hoisted(() => ({ retain: vi.fn() }));
+vi.mock("@/lib/providers/claude-signin-probe", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/providers/claude-signin-probe")>()),
+  lookupClaudeSignIn: () => "unknown" as const,
+  retainClaudeSignIn: (...a: unknown[]) => probe.retain(...a),
+}));
 
 import { CODEX_MCP_LIST_TIMEOUT_MS, CODEX_MCP_LIST_WAIT_MS } from "@/lib/agents/codex-mcp-listing";
 import { __clearLibiRegistrationMemo, detectLibiRegistration, readLibiCodexEntryShape } from "@/lib/agents/libi-registration";
@@ -344,5 +359,20 @@ describe("the session-start check of libi's own codex entry reads the same listi
     vi.setSystemTime(new Date("2026-09-12T10:01:30Z"));
     expect(await readLibiCodexEntryShape()).toBe("unknown");
     expect(h.list).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("forgetting Claude sign-in answers", () => {
+  it("only after ~/.claude.json was read: a read caught mid-write lists nothing, and must not drop every answer", async () => {
+    h.list.mockResolvedValue([]);
+    const file = path.join(h.home, ".claude.json");
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: { elevenlabs: { type: "http", url: "https://api.us.elevenlabs.io/v1/mcp" } } }));
+    await detectProviders({ refresh: true });
+    expect(probe.retain).toHaveBeenCalledWith([{ name: "elevenlabs", url: "https://api.us.elevenlabs.io/v1/mcp" }]);
+    probe.retain.mockClear();
+    fs.writeFileSync(file, '{"mcpServers": {"eleven');
+    __clearProviderMemo();
+    await detectProviders({ refresh: true });
+    expect(probe.retain).not.toHaveBeenCalled();
   });
 });

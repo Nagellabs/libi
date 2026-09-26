@@ -95,6 +95,16 @@ export interface VideoFrameSource {
    * export) are treated as "don't pace" by the caller.
    */
   getMediaTime?(): number;
+  /**
+   * Non-null once the source has given up: the clip can't be played (a
+   * permanent failure — HTTP 4xx, codec, demux — after the one proxy→original
+   * fallback, or a transient one whose bounded retries ran out). The renderer
+   * then draws the "can't be played" placeholder on the overlay's rect instead
+   * of asking for frames, and the readiness gate leaves the source out so the
+   * rest of the piece plays. Optional — sources that can't fail this way
+   * (export, canvas) omit it.
+   */
+  failure?(): VideoFrameSourceFailure | null;
   /** Clean up resources */
   dispose(): void;
 }
@@ -117,5 +127,12 @@ export function readyAhead(
 /** `code` mirrors `MediaError.code` (4 = MEDIA_ERR_SRC_NOT_SUPPORTED, the codec case). */
 export interface VideoFrameSourceError {
   code: number;
+  message: string;
+}
+
+/** Why a preview source gave up — see `VideoFrameSource.failure` and
+ *  lib/engine/media-load-failure.ts. */
+export interface VideoFrameSourceFailure {
+  kind: "permanent" | "transient";
   message: string;
 }

@@ -1,4 +1,4 @@
-import { KEY_PLACEHOLDER, type ProviderDef } from "@/lib/providers/catalog";
+import { billsGenerationCredits, KEY_PLACEHOLDER, type ProviderDef } from "@/lib/providers/catalog";
 import type { installCommand, LibiScope, SetupAgentId } from "./commands";
 
 type ShellFlavor = Parameters<typeof installCommand>[1];
@@ -16,8 +16,24 @@ export type SetupCommandContext =
   | { action: "connect-libi"; agentId: SetupAgentId; endpointUrl: string }
   | { action: "disconnect-libi"; agentId: SetupAgentId; scope: LibiScope }
   | { action: "reconnect-libi"; agentId: SetupAgentId; endpointUrl: string; scope: LibiScope }
-  | { action: "provider-add" | "provider-replace"; agentId: SetupAgentId; provider: ProviderDef; flavor: ShellFlavor }
-  | { action: "provider-remove"; agentId: SetupAgentId; provider: ProviderDef; flavor: ShellFlavor; scope?: string }
+  | { action: "provider-add"; agentId: SetupAgentId; provider: ProviderDef; flavor: ShellFlavor }
+  | {
+      action: "provider-replace";
+      agentId: SetupAgentId;
+      provider: ProviderDef;
+      flavor: ShellFlavor;
+      /** The entry can't start because libi can't find this launcher (bare name, e.g. `uvx`) on this computer: the replace is its fix. */
+      missingCommand?: string;
+    }
+  | {
+      action: "provider-remove";
+      agentId: SetupAgentId;
+      provider: ProviderDef;
+      flavor: ShellFlavor;
+      scope?: string;
+      /** The detected entry's transport: a LOCAL entry of a provider you sign in to has a key, not a sign-in. */
+      transport?: "http" | "stdio";
+    }
   | { action: "provider-sign-in"; agentId: SetupAgentId; provider: ProviderDef };
 
 const NAME: Record<SetupAgentId, string> = { "claude-code": "Claude Code", codex: "Codex" };
@@ -62,29 +78,31 @@ function pasteKeyHint(flavor: ShellFlavor): string {
 function providerAdd(agentId: SetupAgentId, provider: ProviderDef, flavor: ShellFlavor): string {
   const name = NAME[agentId];
   const raw = agentId === "codex" ? provider.commands?.codex : provider.commands?.claude;
-  const uv = raw && /\buvx\b/.test(raw) ? " It runs through uv, which needs to be installed." : "";
   let text: string;
   if (provider.auth === "oauth") {
-    // Credits: https://higgsfield.ai/mcp (the one account-signed provider today) says each generation costs
-    // credits by model and resolution, and that the user's existing Higgsfield plan credits work through any
-    // connected agent.
-    const noKey = ` There is no key, and generations use your ${provider.name} credits.`;
-    text =
-      agentId === "codex"
-        ? `Adds the ${provider.name} MCP server to ${settingsFor(agentId)}, then opens your browser to sign in with your ${provider.name} account; the command waits until you finish.${noKey}`
-        : `Adds the ${provider.name} MCP server to ${settingsFor(agentId)}. Then sign in with your ${provider.name} account in your browser: use Sign in here, or run /mcp in Claude Code.${noKey}`;
+    // Credits: https://higgsfield.ai/mcp (a generation provider) says each generation costs credits by model
+    // and resolution, and that the user's existing Higgsfield plan credits work through any connected agent.
+    // ElevenLabs' hosted server says so in its own tool descriptions (see its catalog entry).
+    // A posting-only provider (e.g. Zernio) signs in the same way but generates no media and has no credits —
+    // billsGenerationCredits gates that half of the sentence.
+    const noKey = billsGenerationCredits(provider)
+      ? ` There is no key, and generations use your ${provider.name} credits.`
+      : " There is no key.";
+    // Both agents sign in within the add: Codex's own `mcp add` does, and libi's add script runs Claude Code's
+    // `mcp login` right after an add that worked (`addSignsIn` in the catalog).
+    text = `Adds the ${provider.name} MCP server to ${settingsFor(agentId)}, then opens your browser to sign in with your ${provider.name} account; the command waits until you finish. ${name} keeps the sign-in, and libi never sees it.${noKey}`;
   } else if (agentId === "codex" && provider.codexKeyEnv) {
     const where = isPowerShellFlavor(flavor) ? "your Windows user environment" : "your shell profile";
     text =
       `Asks for your ${provider.name} key without showing it and saves it as ${provider.codexKeyEnv} in ${where}, ` +
       `then adds the ${provider.name} MCP server to ${settingsFor(agentId)}, which reads the key from ${provider.codexKeyEnv}. ` +
-      `Restart libi and Codex afterwards so they pick up the key.${pasteKeyHint(flavor)}${uv}`;
+      `Restart libi and Codex afterwards so they pick up the key.${pasteKeyHint(flavor)}`;
   } else if (raw?.includes(KEY_PLACEHOLDER)) {
     text =
       `Asks for your ${provider.name} key without showing it, then adds the ${provider.name} MCP server with that key to ` +
-      `${settingsFor(agentId)}, so ${name} can use ${provider.name} in libi and everywhere else.${pasteKeyHint(flavor)}${uv}`;
+      `${settingsFor(agentId)}, so ${name} can use ${provider.name} in libi and everywhere else.${pasteKeyHint(flavor)}`;
   } else {
-    text = `Adds the ${provider.name} MCP server to ${settingsFor(agentId)}, so ${name} can use ${provider.name} in libi and everywhere else.${uv}`;
+    text = `Adds the ${provider.name} MCP server to ${settingsFor(agentId)}, so ${name} can use ${provider.name} in libi and everywhere else.`;
   }
   return text + constrainedLanguageModeNote(flavor);
 }
@@ -118,16 +136,22 @@ export function explainSetupCommand(ctx: SetupCommandContext): string {
     case "provider-add":
       return providerAdd(ctx.agentId, ctx.provider, ctx.flavor);
     case "provider-replace":
+      if (ctx.missingCommand) {
+        return `Your ${ctx.provider.name} entry in ${name} can't start because libi can't find ${ctx.missingCommand} on this computer. This removes that entry, then ${lowerFirst(providerAdd(ctx.agentId, ctx.provider, ctx.flavor))}`;
+      }
       return `Replaces your current ${ctx.provider.name} entry in ${name}: it removes that entry first, then ${lowerFirst(providerAdd(ctx.agentId, ctx.provider, ctx.flavor))}`;
-    case "provider-sign-in":
-      // Credits: https://higgsfield.ai/mcp, as in providerAdd above.
+    case "provider-sign-in": {
+      // Credits: https://higgsfield.ai/mcp, as in providerAdd above. A posting-only provider (e.g. Zernio) gets
+      // no credits sentence — billsGenerationCredits gates it.
+      const credits = billsGenerationCredits(ctx.provider) ? ` Generations use your ${ctx.provider.name} credits.` : "";
       return (
         `Runs ${name}'s own MCP sign-in for ${ctx.provider.name}: your browser opens to sign in with your ${ctx.provider.name} account, ` +
-        `and the command waits until you finish. ${name} keeps the sign-in, and libi never sees it. Generations use your ${ctx.provider.name} credits.`
+        `and the command waits until you finish. ${name} keeps the sign-in, and libi never sees it.${credits}`
       );
+    }
     case "provider-remove": {
       let removeText: string;
-      if (ctx.provider.auth === "oauth") {
+      if (ctx.provider.auth === "oauth" && ctx.transport !== "stdio") {
         // remove-provider signs out BEFORE the remove: both agents look the stored sign-in up through the entry,
         // and once the entry is gone their `mcp logout` answers "No MCP server named …" and clears nothing.
         removeText =

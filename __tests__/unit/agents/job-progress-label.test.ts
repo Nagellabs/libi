@@ -36,4 +36,12 @@ describe("formatJobProgressText", () => {
       formatJobProgressText({ jobId: "j", kind: "tracking", done: 1, total: 2, unit: "frames", etaMs: null, message: "   " }),
     ).toBe("tracking 1/2 frames (50%)");
   });
+
+  // Final review F7: an export waiting its turn in the export lane says so, not "0/1 (0%)".
+  it("an export waiting behind another export says so", () => {
+    expect(formatJobProgressText({ jobId: "j", kind: "export", done: 0, total: 1, unit: "waiting", etaMs: null })).toBe("Waiting for another export to finish");
+    expect(formatJobProgressText({ jobId: "j", kind: "export", done: 0, total: 1, unit: "waiting", etaMs: null, progressLabel: "4K" })).toBe(
+      "4K — Waiting for another export to finish",
+    );
+  });
 });
