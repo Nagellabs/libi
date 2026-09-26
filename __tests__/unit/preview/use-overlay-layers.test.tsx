@@ -674,15 +674,21 @@ describe("useOverlayLayers", () => {
 
   it("a render timeout says 'timed out after 2 s', frees every other render, and blames no rejected load (minor 7)", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const tick = async () => {
+    // Ten turns at least; up to 500 while `until` is false. A load waits on
+    // an async sha256, which a loaded CI runner can take more than ten turns
+    // to finish (both release-npm gate runs for 0.1.16 saw a load missing).
+    const tick = async (until?: () => boolean) => {
       await act(async () => {
-        for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
+        for (let i = 0; i < 500; i++) {
+          if (i >= 10 && (!until || until())) break;
+          await new Promise((r) => setImmediate(r));
+        }
       });
     };
     const onDiagnostic = vi.fn();
     const { result, rerender, unmount } = mount(comp([code("o1", "1;"), code("o2", "2;")]), { onDiagnostic });
     await ready();
-    await tick();
+    await tick(() => transports.length > 0 && loadsOf(transports[0]).length >= 2);
     const t = transports[0];
     expect(loadsOf(t)).toHaveLength(2);
     await act(async () => {
@@ -706,7 +712,7 @@ describe("useOverlayLayers", () => {
     t.deliver({ t: "started", nonce: t.nonce, id: "o1", req: wedged.req });
     // A third body arrives; its load queues behind the two renders and stays pending.
     rerender({ c: comp([code("o1", "1;"), code("o2", "2;"), code("o3", "3;")]), opts: { onDiagnostic } });
-    await tick();
+    await tick(() => loadsOf(t).length >= 3);
     expect(loadsOf(t)).toHaveLength(3);
     await act(async () => {
       vi.advanceTimersByTime(RENDER_TIMEOUT_MS);
