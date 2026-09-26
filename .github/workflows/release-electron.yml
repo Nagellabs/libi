@@ -183,6 +183,11 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 90
     environment: release
+    # macos-15 runners have 7 GB, and Node sizes its default heap from that:
+    # 0.1.16's `next build` worker died "JavaScript heap out of memory" here
+    # while the same build passed on the 16 GB ubuntu and windows runners.
+    env:
+      NODE_OPTIONS: --max-old-space-size=5120
     steps:
       - uses: actions/checkout@v4
         with:
