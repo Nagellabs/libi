@@ -147,8 +147,15 @@ const STAMP_NAME = ".libi-runtime.json";
  *           the node-pty prebuild the sweep KEEPS there is win32-x64 (29.7 MB)
  *           rather than darwin-arm64 (0.1 MB)              ← must PASS
  *
- * 800 clears the Windows projection by ~50 MB and still fires the moment the
- * prune stops removing anything. Every target builds on its own host
+ * 800 cleared the Windows projection by ~50 MB. Measured on the Windows
+ * release runner since: 793 MB on 0.1.16 and 813 MB on 0.1.17 (2026-10-02),
+ * with the prune log IDENTICAL entry for entry (~135 MB freed both times) —
+ * the growth is libi's own package (115 → 133 MB unpacked: the exports,
+ * social-music and posting routes' server chunks), not a prune gone short.
+ * Unpruned, 0.1.17 would be ~948 MB. 860 clears the measured 813 by ~47 MB
+ * and still fires the moment the prune stops removing anything. When this
+ * fires again, diff the prune log line against the last green build first.
+ * Every target builds on its own host
  * (scripts/release-electron.js: electron-builder cross-compiles poorly and we
  * do not try), so those are the two numbers that ship.
  *
@@ -156,7 +163,7 @@ const STAMP_NAME = ".libi-runtime.json";
  * which names every package removed on every build: a list that has quietly
  * gone short is visible there long before it is visible here.
  */
-const BUNDLE_CEILING_MB = 800;
+const BUNDLE_CEILING_MB = 860;
 const PKG_NAME = "@nagellabs/libi";
 
 // ---------------------------------------------------------------------------

@@ -49,10 +49,12 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
     const audioOnly = file.type === "audio";
     if (file.type !== "video" && !audioOnly) throw new Error(`file is not a video or audio: ${file.id}`);
 
-    const sourceDir = file.pieceId
-      ? path.join(getLibiStorageDir(), file.pieceId)
-      : path.join(getLibiStorageDir(), "_global");
-    const sourcePath = path.join(sourceDir, file.filename);
+    // Where the source is read from. Mutable: a file moved before ffmpeg opened
+    // it (an agent's download assigned to a piece a moment after it landed)
+    // is re-read once from where it is now (see the encode retry below).
+    let source = { pieceId: file.pieceId, filename: file.filename };
+    let sourceDir = path.join(getLibiStorageDir(), file.pieceId ?? "_global");
+    let sourcePath = path.join(sourceDir, file.filename);
 
     // Chokepoint guard for EVERY enqueue path (storeFile, rename route,
     // regenerate_proxy tool, legacy regen sweep): the H.264 yuv420p proxy has
@@ -94,8 +96,8 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       .where(eq(files.id, file.id))
       .run();
 
-    const proxyName = proxyNameFor(file.filename, audioOnly ? "m4a" : "mp4");
-    const proxyPath = path.join(sourceDir, proxyName);
+    let proxyName = proxyNameFor(file.filename, audioOnly ? "m4a" : "mp4");
+    let proxyPath = path.join(sourceDir, proxyName);
 
     try {
       // ffmpeg has no per-frame progress hook here, so we emit pseudo-progress
@@ -132,7 +134,7 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
         }
       }, 1000);
 
-      try {
+      const encode = async () => {
         // Map the streams the preview decodes (Review M6). A failed probe
         // leaves both unknown and the args fall back to the first streams.
         const sourceProbe = await probeMedia(sourcePath);
@@ -142,10 +144,34 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
             : buildProxyArgs(sourcePath, proxyPath, { fps: 30, ...proxyStreamsFor(sourceProbe) }),
           {
             op: "proxy_gen",
-            context: { fileId: file.id, pieceId: file.pieceId },
+            context: { fileId: file.id, pieceId: source.pieceId },
             signal: ac.signal,
           },
         );
+      };
+      try {
+        try {
+          await encode();
+        } catch (err) {
+          // Moved before ffmpeg opened it: the bytes are elsewhere now, so this
+          // is not a bad source. Encode once more from where the row says the
+          // file is; anything else (or a second failure) fails the job.
+          const [moved] = db.select().from(files).where(eq(files.id, file.id)).limit(1).all();
+          if (ctx.shouldCancel() || !moved || (moved.pieceId === source.pieceId && moved.filename === source.filename)) throw err;
+          const movedDir = path.join(getLibiStorageDir(), moved.pieceId ?? "_global");
+          if (!fs.existsSync(path.join(movedDir, moved.filename))) throw err;
+          fs.rmSync(proxyPath, { force: true });
+          proxyLogger.info(
+            { tag: "proxy", op: "proxy_source_moved_retry", fileId: file.id, fromPieceId: source.pieceId, toPieceId: moved.pieceId },
+            "proxy.source_moved_retry",
+          );
+          source = { pieceId: moved.pieceId, filename: moved.filename };
+          sourceDir = movedDir;
+          sourcePath = path.join(movedDir, moved.filename);
+          proxyName = proxyNameFor(moved.filename, audioOnly ? "m4a" : "mp4");
+          proxyPath = path.join(movedDir, proxyName);
+          await encode();
+        }
       } finally {
         clearInterval(watcher);
       }
@@ -196,13 +222,13 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
         throw new Error(`file deleted while its proxy was made: ${file.id}`);
       }
       let finalName = proxyName;
-      if (now.pieceId !== file.pieceId || now.filename !== file.filename) {
+      if (now.pieceId !== source.pieceId || now.filename !== source.filename) {
         finalName = proxyNameFor(now.filename, audioOnly ? "m4a" : "mp4");
         const finalDir = path.join(getLibiStorageDir(), now.pieceId ?? "_global");
         fs.mkdirSync(finalDir, { recursive: true });
         fs.renameSync(proxyPath, path.join(finalDir, finalName));
         proxyLogger.info(
-          { tag: "proxy", op: "proxy_followed_moved_file", fileId: file.id, fromPieceId: file.pieceId, toPieceId: now.pieceId },
+          { tag: "proxy", op: "proxy_followed_moved_file", fileId: file.id, fromPieceId: source.pieceId, toPieceId: now.pieceId },
           "proxy.followed_moved_file",
         );
       }

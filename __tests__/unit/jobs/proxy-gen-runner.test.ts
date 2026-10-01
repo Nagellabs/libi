@@ -125,6 +125,70 @@ describe("proxyGenRunner", () => {
     expect(fs.existsSync(path.join(globalDir, "clip-proxy.mp4"))).toBe(false);
   });
 
+  // 0.1.17 npm verification F2: uploaded to the library and assigned ~100 ms
+  // later, ffmpeg failed to open the moved original and the proxy stayed
+  // `failed` for good.
+  it("a file moved before ffmpeg opened it is encoded once more from where it is now", async () => {
+    seedPiece(db, { id: "dest", name: "dest" });
+    const globalDir = path.join(tmp, "storage", "_global");
+    const destDir = path.join(tmp, "storage", "dest");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(path.join(globalDir, "long.mp4"), Buffer.alloc(1024));
+    db.insert(files)
+      .values({
+        id: "early", pieceId: null, filename: "long.mp4", name: "long", description: "",
+        type: "video", storagePath: "_global/long.mp4", contentType: "video/mp4", size: 1024,
+      })
+      .run();
+
+    const inputs: string[] = [];
+    vi.mocked(runFfmpeg).mockImplementation(async (args) => {
+      const a = args as string[];
+      const input = a[a.indexOf("-i") + 1];
+      inputs.push(input);
+      if (inputs.length === 1) {
+        // assign_file lands first: the bytes leave _global before ffmpeg opens them.
+        fs.mkdirSync(destDir, { recursive: true });
+        fs.renameSync(path.join(globalDir, "long.mp4"), path.join(destDir, "long.mp4"));
+        db.update(files).set({ pieceId: "dest" }).where(eq(files.id, "early")).run();
+        throw new Error(`Error opening input file ${input}`);
+      }
+      fs.writeFileSync(a[a.length - 1], Buffer.alloc(200));
+      return { stdout: "", stderr: "" };
+    });
+
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("proxy_gen", { fileId: "early" }));
+    const result = await mgr.runToCompletion<{ proxyFilename: string }>(jobId);
+
+    expect(inputs).toEqual([path.join(globalDir, "long.mp4"), path.join(destDir, "long.mp4")]);
+    expect(result.proxyFilename).toBe("long-proxy.mp4");
+    const row = db.select().from(files).where(eq(files.id, "early")).all()[0];
+    expect(row.proxyStatus).toBe("ready");
+    expect(fs.existsSync(path.join(destDir, "long-proxy.mp4"))).toBe(true);
+    expect(fs.existsSync(path.join(globalDir, "long-proxy.mp4"))).toBe(false);
+  });
+
+  it("an ffmpeg failure on a file that did NOT move is not retried", async () => {
+    const globalDir = path.join(tmp, "storage", "_global");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(path.join(globalDir, "bad.mp4"), Buffer.alloc(1024));
+    db.insert(files)
+      .values({
+        id: "bad", pieceId: null, filename: "bad.mp4", name: "bad", description: "",
+        type: "video", storagePath: "_global/bad.mp4", contentType: "video/mp4", size: 1024,
+      })
+      .run();
+    vi.mocked(runFfmpeg).mockReset();
+    vi.mocked(runFfmpeg).mockRejectedValue(new Error("Invalid data found when processing input"));
+
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("proxy_gen", { fileId: "bad" }));
+    await expect(mgr.runToCompletion(jobId)).rejects.toThrow(/Invalid data/);
+    expect(vi.mocked(runFfmpeg)).toHaveBeenCalledTimes(1);
+    expect(db.select().from(files).where(eq(files.id, "bad")).all()[0].proxyStatus).toBe("failed");
+  });
+
   it("missing source file throws", async () => {
     seedPiece(db, { id: "p", name: "p" });
     db.insert(files)

@@ -565,7 +565,9 @@ export function Composer({ intent, latestExport, exports, awaitedExport, onAwait
    * The targets as they go on the WIRE. TikTok's two consent fields are the
    * checkboxes, read here — never the constant `true` the option defaults used
    * to carry, which made both consents unbypassable-looking and bypassable in
-   * fact (uncheck them after Review, and a `true` still went out).
+   * fact (uncheck them after Review, and a `true` still went out). Everything
+   * else on the target's options (its `music` above all) goes out unchanged:
+   * 0.1.17 rebuilt them without it, so a TikTok "draft" plan posted publicly.
    */
   const wireTargets = useMemo(
     (): CreatePostInput["targets"] =>
@@ -576,7 +578,7 @@ export function Composer({ intent, latestExport, exports, awaitedExport, onAwait
           platform: t.platform,
           accountId: t.accountId,
           options: {
-            platform: "tiktok",
+            ...t.options,
             tiktok: { ...t.options.tiktok, contentPreviewConfirmed: c.preview, expressConsentGiven: c.express },
           },
         };

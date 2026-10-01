@@ -434,5 +434,24 @@ test.describe("Social posting (fake Zernio)", () => {
     await expect(tiktokCard.getByTestId("track-picker-selected")).toContainText("Espresso", { timeout: 15_000 });
     await expect(tiktokCard.getByTestId("track-picker-note")).toContainText("top 100 trending tracks");
     await expect(tab.getByTestId(/^music-card-/).filter({ hasText: "Instagram" })).toContainText("Facebook Login");
+
+    // What the Music step decided for TikTok is what goes on the wire
+    // (0.1.17 verification F1: the TikTok options were rebuilt without it).
+    await tab.getByTestId("composer-next").click(); // music -> caption
+    await expect(tab.getByTestId("caption-step")).toBeVisible();
+    await tab.getByTestId("caption-input").fill("Espresso on the desk");
+    await tab.getByTestId("composer-next").click(); // caption -> when
+    await expect(tab.getByTestId("when-draft")).toBeChecked();
+    await tab.getByTestId("composer-next").click(); // when -> review
+    const created = page.waitForRequest(
+      (r) => new URL(r.url()).pathname === "/api/social/posts" && r.method() === "POST",
+    );
+    await tab.getByTestId("composer-submit").click();
+    const sent = (await created).postDataJSON() as {
+      targets: Array<{ options: { platform: string; music?: { mode: string; track?: { title?: string } } } }>;
+    };
+    const tiktokMusic = sent.targets.find((t) => t.options.platform === "tiktok")?.options.music;
+    expect(tiktokMusic?.mode).toBe("attach");
+    expect(tiktokMusic?.track?.title).toContain("Espresso");
   });
 });

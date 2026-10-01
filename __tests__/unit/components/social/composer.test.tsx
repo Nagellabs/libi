@@ -1184,6 +1184,23 @@ describe("Composer — TikTok's consents are the checkboxes, not a constant", ()
     const tt = body.targets.find((t) => t.options.platform === "tiktok");
     expect(tt?.options.tiktok).toMatchObject({ contentPreviewConfirmed: true, expressConsentGiven: true });
   });
+
+  // 0.1.17 npm verification F1: rebuilding the TikTok options for the consents
+  // dropped `options.music`, so a TikTok "draft" (Creator Inbox) plan went out
+  // as a plain PUBLIC post with no music decision at all.
+  it("the TikTok target keeps the music its Music step decided, on validate and on send", async () => {
+    renderComposer();
+    await advanceToReviewIn("draft");
+    await waitFor(() => expect(screen.getByTestId("composer-submit")).toBeEnabled());
+    const validated = lastBodyFor("/api/social/validate") as { targets: Array<{ options: { platform: string; music?: unknown } }> };
+    expect(validated.targets.find((t) => t.options.platform === "tiktok")?.options.music).toEqual({ mode: "strip" });
+
+    fireEvent.click(screen.getByTestId("composer-submit"));
+    await waitFor(() => expect(createMutate).toHaveBeenCalled());
+    const body = createMutate.mock.calls[0][0] as { targets: Array<{ options: { platform: string; music?: unknown } }> };
+    expect(body.targets.find((t) => t.options.platform === "tiktok")?.options.music).toEqual({ mode: "strip" });
+    expect(body.targets.find((t) => t.options.platform === "instagram")?.options.music).toEqual({ mode: "strip" });
+  });
 });
 
 describe("Composer — what does and does not count as 'libi could not confirm'", () => {
