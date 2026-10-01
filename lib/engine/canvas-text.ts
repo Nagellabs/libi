@@ -111,7 +111,17 @@ export function makeCanvasTextClass(THREE: AnyTHREE) {
       const fontSpec = `bold ${FONT_PX}px ${family}`;
 
       const canvas = this._canvas;
-      const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | null;
+      // CPU-backed, deliberately. A GPU-backed 2D canvas does not rasterize these large glyphs repeatably:
+      // the same label, hashed right after fillText in the export's sandbox worker, gave three different
+      // bitmaps in eight runs (identical metrics every time), and the difference survived into the
+      // exported frame. `willReadFrequently` asks for a software canvas, which gave one bitmap in twelve
+      // runs out of twelve. The cost is one CPU raster and one CPU upload per sync(), and the engine syncs
+      // only at build (three-overlay.ts, text-3d/faux.ts). A body that re-syncs a label every frame pays
+      // that per frame, a texture of up to a few MB at FONT_PX. Two paths draw through here: a three body's
+      // `Text`, and the faux fallback of host-built 3D text; extruded 3D text never does. The first
+      // getContext call fixes a canvas's backing for good, which is why it's asked for here.
+      // Proof: __tests__/unit/engine/three-text-latch.test.ts and the label in the overlay-sandbox golden.
+      const ctx = canvas.getContext("2d", { willReadFrequently: true }) as CanvasRenderingContext2D | null;
       if (!ctx) {
         cb?.();
         return;

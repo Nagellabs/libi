@@ -4,6 +4,8 @@ import { useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { refreshQueryEmitter } from "@/hooks/sessions/use-agent-chat";
 import { pieceKeys } from "@/lib/queries/pieces";
+import { pieceAudioKeys } from "@/lib/queries/audio-rights";
+import { socialMusicKeys } from "@/lib/queries/social-music";
 
 export interface CompositionRefreshEvent {
   queryKey: string;
@@ -48,6 +50,10 @@ export function useCompositionRefreshSubscription(
       queryClient.invalidateQueries({
         queryKey: ["composition-snapshot", event.pieceId],
       });
+      // A song added, removed, hidden or retimed changes what the export
+      // dialog asks and what each platform's music plan says.
+      queryClient.invalidateQueries({ queryKey: pieceAudioKeys.forPiece(event.pieceId) });
+      queryClient.invalidateQueries({ queryKey: socialMusicKeys.planForPiece(event.pieceId) });
 
       onComposition?.(event as CompositionRefreshEvent & { pieceId: string });
     });

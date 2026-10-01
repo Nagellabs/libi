@@ -26,6 +26,11 @@ vi.mock("@/lib/templates/cloud/creator", async (importOriginal) => ({
 // The export renderer (what the `export` job runs) — a piece's example is rendered inside the prepare job, never as an export job.
 const renderExport = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/jobs/runners/export", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/jobs/runners/export")>()), renderExport }));
+// The store, passed through; a test may fail one scaffold read.
+vi.mock("@/lib/templates/store", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/templates/store")>();
+  return { ...real, readScaffold: vi.fn(real.readScaffold) };
+});
 vi.mock("@/lib/composition/persistence", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/composition/persistence")>();
   return { ...real, loadComposition: vi.fn(async () => ({ manifest: { width: 1080, height: 1920, fps: 30, overlays: [], audioClips: [] } })) };
@@ -34,7 +39,8 @@ vi.mock("@/lib/composition/persistence", async (importOriginal) => {
 import { getDb } from "@/lib/db/client";
 import { jobs, templatePublishRequests, templates as templatesTable } from "@/lib/db/schema/sqlite";
 import { getOrCreateTemplatesAuthor, getTemplatesAuthor, setTemplatesAuthorNickname } from "@/lib/db/settings";
-import { createTemplate, templateDir } from "@/lib/templates/store";
+import { createTemplate, readScaffold, templateDir } from "@/lib/templates/store";
+import { mcpLogger } from "@/lib/logger";
 import { trackMcpEvent } from "@/mcp/analytics";
 import { runJobViaServer } from "@/mcp/jobs-client";
 import { exampleBytesFor, posterBytesFor, prepareCalls } from "@/__tests__/helpers/publish-prepare";
@@ -99,6 +105,31 @@ describe("publishTemplateSchema", () => {
 });
 
 describe("publishTemplate — prepares, never publishes", () => {
+  it("names the songs the template does not carry, for the agent to tell the user", async () => {
+    const id = await makeTemplate({
+      audioClips: [{ key: "song", kind: "standalone", startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true, source: { musicRef: "espresso" } }],
+      musicLinks: [{ ref: "espresso", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" }],
+    } as never);
+    const r = await publishTemplate({ templateId: id, exampleVideo: { path: src } });
+    expect(r.success).toBe(true);
+    expect(r.data).toMatchObject({ musicNotIncluded: ["Espresso — Sabrina Carpenter"], musicNote: expect.stringMatching(/not included: tell the user/) });
+  });
+
+  it("a scaffold that can't be read back after the prepare: logged, and the publish still answers (no music note)", async () => {
+    const warn = vi.spyOn(mcpLogger, "warn");
+    const realRun = vi.mocked(runJobViaServer).getMockImplementation()!;
+    vi.mocked(runJobViaServer).mockImplementationOnce(async (...args: Parameters<typeof runJobViaServer>) => {
+      const out = await realRun(...args);
+      // Only the tool's own read AFTER the prepare fails.
+      vi.mocked(readScaffold).mockRejectedValueOnce(new Error("EIO: disk gone"));
+      return out;
+    });
+    const r = await publishTemplate({ templateId, exampleVideo: { path: src } });
+    expect(r.success).toBe(true);
+    expect(r.data).not.toHaveProperty("musicNotIncluded");
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ tag: "templates", op: "music_links_read_failed", templateId, error: "EIO: disk gone" }), expect.any(String));
+  });
+
   it("makes the request's own example and poster, records one request awaiting the user, and starts no publish", async () => {
     const r = await publishTemplate({ templateId, exampleVideo: { path: src } });
     expect(r).toEqual({
@@ -123,9 +154,9 @@ describe("publishTemplate — prepares, never publishes", () => {
     expect(rows[0].fingerprint).toMatch(/^[0-9a-f]{64}$/);
     // The confirm code is the review panel's alone: never in what the tool returns.
     expect(JSON.stringify(r)).not.toContain(rows[0].confirmCode);
-    // The only job is the prepare, keyed by the template, the source and the nickname alone.
+    // The only job is the prepare, keyed by the template, the example source, the nickname and the catalog it was asked on (review M2) alone.
     expect(vi.mocked(runJobViaServer).mock.calls.map((c) => [c[0], c[1], (c[2] as { forceNew?: boolean }).forceNew])).toEqual([
-      ["template_publish_prepare", { templateId, exampleVideo: { path: src } }, true],
+      ["template_publish_prepare", { templateId, exampleVideo: { path: src }, source: "https://libi.nagellabs.com" }, true],
     ]);
     // The example and poster, made now, in the request's own folder; the preparation folder is gone.
     expect(fs.readFileSync(path.join(publishRequestDir(id), "example.mp4"))).toEqual(exampleBytesFor(Buffer.from("x")));
@@ -212,9 +243,9 @@ describe("publishTemplate — prepares, never publishes", () => {
 
   it("exports a piece NOW, with the export renderer and no export job, and the request holds that export", async () => {
     const pieceId = seedPiece(getDb() as never);
-    renderExport.mockImplementation(async (c: { params: { destFolder: string; pieceId: string } }) => {
-      fs.mkdirSync(c.params.destFolder, { recursive: true });
-      const out = path.join(c.params.destFolder, "template-example.mp4");
+    renderExport.mockImplementation(async (c: { params: { pieceId: string } }, target: { dir: string }) => {
+      fs.mkdirSync(target.dir, { recursive: true });
+      const out = path.join(target.dir, "template-example.mp4");
       fs.writeFileSync(out, "rendered piece");
       return { filePath: out };
     });

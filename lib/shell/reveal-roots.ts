@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getLibiHome } from "@/lib/libi-home";
-import { resolveExportFolder } from "@/lib/db/settings";
 // isWindows(), never `process.platform === "win32"` — Turbopack constant-folds
 // that comparison against the BUILD machine and deletes the dead branch, so a
 // mac-built server would carry the case-sensitive path forever. See
@@ -17,20 +16,14 @@ import { isWindows } from "@/lib/platform";
  * body, not a security boundary the product relies on.
  *
  * The set is "roots libi legitimately writes to". `$HOME` and the OS temp dir
- * alone were too narrow: both `LIBI_HOME` and the export output folder are
- * user-configurable and routinely point somewhere else (an external volume,
- * a second drive). A path outside the list is silently skipped, so getting
+ * alone were too narrow: `LIBI_HOME` is user-configurable and routinely points
+ * somewhere else (an external volume, a second drive). Exports live in
+ * LIBI_HOME's storage, so it covers them. A path outside the list is silently skipped, so getting
  * this wrong shows up as a Reveal button that does nothing at all — which is
  * exactly what happened to Reveal-after-export and to the asset Location row.
  */
 export function revealRoots(): string[] {
   const roots = [os.homedir(), os.tmpdir(), getLibiHome()];
-  try {
-    roots.push(resolveExportFolder());
-  } catch {
-    // The export folder lives in the DB; a failed read must not take the
-    // whole allowlist down with it. The other roots still apply.
-  }
   return normalizeRoots(roots).map(realpathOrSelf);
 }
 
@@ -42,8 +35,8 @@ export function revealRoots(): string[] {
  * `os.tmpdir()` is itself a symlink — `/var/folders/…` realpaths to
  * `/private/var/folders/…` — so resolving the requested path while leaving the
  * roots lexical would reject every legitimate reveal under the temp dir. The
- * fallback matters too: an export folder the user has configured but never
- * exported to does not exist on disk yet, and must still count as a root.
+ * fallback matters too: a root that does not exist on disk yet (a LIBI_HOME
+ * not yet created) must still count as a root.
  */
 export function realpathOrSelf(p: string): string {
   try {

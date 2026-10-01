@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { windowWordsToElementLocal } from "@/lib/captions/window";
+import { windowWordsToElementLocal, wordsSaidByText } from "@/lib/captions/window";
 
 describe("windowWordsToElementLocal — attach a transcript to a custom overlay window", () => {
   const words = [
@@ -29,5 +29,47 @@ describe("windowWordsToElementLocal — attach a transcript to a custom overlay 
 
   it("returns empty when nothing overlaps (caller surfaces no_transcript_in_window)", () => {
     expect(windowWordsToElementLocal(words, 10, 2)).toEqual([]);
+  });
+});
+
+describe("windowWordsToElementLocal { byStart } — a TEXT cue owns a word by its start, half-open", () => {
+  const contiguous = [
+    { text: "And", start: 2.3, end: 2.5, type: "word" },
+    { text: "so", start: 2.5, end: 2.7, type: "word" },
+    { text: "my", start: 2.7, end: 2.9, type: "word" },
+  ];
+
+  it("a window ending on the next word's start does not take it; one starting there does", () => {
+    expect(windowWordsToElementLocal(contiguous, 2.3, 0.4, { byStart: true }).map((w) => w.text)).toEqual(["And", "so"]);
+    expect(windowWordsToElementLocal(contiguous, 2.7, 0.2, { byStart: true }).map((w) => w.text)).toEqual(["my"]);
+  });
+
+  it("without byStart the inclusive overlap (code/three captions) is unchanged", () => {
+    expect(windowWordsToElementLocal(contiguous, 2.7, 0.2).map((w) => w.text)).toEqual(["so", "my"]);
+  });
+
+  it("a boundary a float hair off the word's start still counts", () => {
+    expect(windowWordsToElementLocal(contiguous, 0.7 + 2 + 1e-9, 0.2, { byStart: true }).map((w) => w.text)).toEqual(["my"]);
+  });
+});
+
+describe("wordsSaidByText — keep the words a cue's text says", () => {
+  const w = (text: string, start: number) => ({ text, start, end: start + 0.2 });
+
+  it("drops a lead-in / held-over neighbour by best match", () => {
+    const heard = [w("so", 0), w("my", 0.2), w("fellow", 0.4), w("Americans,", 0.6)];
+    expect(wordsSaidByText(heard, "My fellow Americans").map((x) => x.text)).toEqual(["my", "fellow", "Americans,"]);
+    expect(wordsSaidByText(heard, "so my").map((x) => x.text)).toEqual(["so", "my"]);
+  });
+
+  it("ignores standalone punctuation / emoji tokens when counting", () => {
+    const heard = [w("ask", 0), w("not", 0.2), w("what", 0.4)];
+    expect(wordsSaidByText(heard, "— ask not").map((x) => x.text)).toEqual(["ask", "not"]);
+  });
+
+  it("returns the words unchanged when the text has as many or more words", () => {
+    const heard = [w("ask", 0), w("not", 0.2)];
+    expect(wordsSaidByText(heard, "ask not what")).toBe(heard);
+    expect(wordsSaidByText(heard, "")).toBe(heard);
   });
 });

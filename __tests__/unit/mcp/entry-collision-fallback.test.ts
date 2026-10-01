@@ -23,6 +23,7 @@ import {
   isLibiMcpEntryConfigError,
   LIBI_MCP_ENTRY_NAME,
   LIBI_MCP_FALLBACK_ENTRY_NAME,
+  mcpEntryConfigErrorName,
 } from "@/lib/mcp/agent-surface";
 import { fromAnyToolName } from "@/lib/agents/mcp-tool-id";
 
@@ -145,5 +146,24 @@ describe("the fallback entry list", () => {
         `mcp__${LIBI_MCP_FALLBACK_ENTRY_NAME.replace(/-/g, "_")}__libi_list_pieces`,
       ),
     ).toBe("libi:libi.list_pieces");
+  });
+});
+
+// Test mode's fakes (PRV-3): which entry a codex config rejection names.
+describe("mcpEntryConfigErrorName", () => {
+  const rejection = (frame: string) => ({ code: -32603, message: "Internal error", data: `failed to load configuration: url is not supported for stdio\nin \`${frame}\`` });
+  const names = ["fal-ai", "elevenlabs"];
+
+  it("names the entry whose table codex refused, bare or quoted", () => {
+    expect(mcpEntryConfigErrorName(rejection("mcp_servers.fal-ai"), names)).toBe("fal-ai");
+    expect(mcpEntryConfigErrorName(rejection('mcp_servers."elevenlabs"'), names)).toBe("elevenlabs");
+  });
+
+  it("is null for another entry, a longer name, a parse error with no frame, or no config failure at all", () => {
+    expect(mcpEntryConfigErrorName(rejection("mcp_servers.libi"), names)).toBeNull();
+    expect(mcpEntryConfigErrorName(rejection("mcp_servers.fal-ai-2"), names)).toBeNull();
+    expect(mcpEntryConfigErrorName({ data: "failed to load configuration: /h/config.toml:1:1: url is not supported for stdio" }, names)).toBeNull();
+    expect(mcpEntryConfigErrorName({ data: "in `mcp_servers.fal-ai`" }, names)).toBeNull();
+    expect(mcpEntryConfigErrorName(null, names)).toBeNull();
   });
 });

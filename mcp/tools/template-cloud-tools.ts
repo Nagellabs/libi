@@ -29,8 +29,13 @@
  */
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
 import type { ServerNotification, ServerRequest } from "@modelcontextprotocol/sdk/types";
+import { activeCatalogSource } from "@/lib/templates/cloud/catalog-setting";
+import { withCatalogSource } from "@/lib/templates/cloud/catalog-source";
 import { checkCreatorApproved } from "@/lib/templates/cloud/creator";
 import { AWAITING_MESSAGE, checkPublishRequestable } from "@/lib/templates/cloud/publish-requests";
+import { musicNotIncluded } from "@/lib/templates/music-links";
+import { readScaffold } from "@/lib/templates/store";
+import { mcpLogger as logger } from "@/lib/logger";
 import { trackMcpEvent } from "@/mcp/analytics";
 import { LibiServerUnavailableError, runJobViaServer } from "@/mcp/jobs-client";
 import type { PublishTemplateParams } from "@/mcp/tools/schemas";
@@ -71,8 +76,10 @@ export async function publishTemplate(
   params: PublishTemplateParams,
   extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
 ): Promise<PublishTemplateOutcome> {
+  // The catalog this call asks on: the gate, and the job — which prepares for it even if the user switches before it starts.
+  const source = activeCatalogSource({ fresh: true });
   // Invite-only: an unapproved creator hears so before anything is checked or made.
-  const gate = await checkCreatorApproved();
+  const gate = await withCatalogSource(source, () => checkCreatorApproved());
   if (!gate.ok) return { success: false, data: { error: gate.error, ...(gate.status !== "unknown" ? { code: CREATOR_NOT_APPROVED_CODE } : {}) } };
   const input = { templateId: params.templateId, exampleVideo: params.exampleVideo, ...(params.nickname !== undefined ? { nickname: params.nickname.trim() } : {}) };
   const checked = await checkPublishRequestable(input);
@@ -80,7 +87,7 @@ export async function publishTemplate(
   let result: PrepareJobResult | undefined;
   try {
     // forceNew: every call prepares afresh from the source as it is NOW — never an earlier run's cached request.
-    const r = await runJobViaServer<PrepareJobResult>("template_publish_prepare", input, {
+    const r = await runJobViaServer<PrepareJobResult>("template_publish_prepare", { ...input, source }, {
       extra,
       forceNew: true,
       signal: extra?.signal,
@@ -102,6 +109,17 @@ export async function publishTemplate(
   if (!result?.requestId) return { success: false, data: { error: "The publish couldn't be prepared." } };
   trackMcpEvent("template_publish_requested");
   const nickname = result.nickname ?? null;
+  // The songs the template names but does not carry (social-music spec §7):
+  // the agent tells the user before they publish.
+  const read = await readScaffold(result.templateId).catch((err: unknown) => {
+    // The request is recorded either way; only the music note is lost.
+    logger.warn(
+      { tag: "templates", op: "music_links_read_failed", templateId: result.templateId, error: err instanceof Error ? err.message : String(err) },
+      "could not read the template back for its music links",
+    );
+    return null;
+  });
+  const notIncluded = read?.ok ? musicNotIncluded(read.scaffold) : [];
   return {
     success: true,
     data: {
@@ -112,6 +130,12 @@ export async function publishTemplate(
       nickname,
       message: AWAITING_MESSAGE,
       ...(nickname ? { nicknameNote: nicknameNote(nickname) } : {}),
+      ...(notIncluded.length
+        ? {
+            musicNotIncluded: notIncluded,
+            musicNote: "These songs are named by the template but not included: tell the user; whoever applies it is asked before the song is downloaded.",
+          }
+        : {}),
     },
   };
 }

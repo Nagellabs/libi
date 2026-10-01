@@ -17,9 +17,11 @@
 //     advertised. The advertised set comes from the `availableModes` param
 //     (fresh newSession/standby response) or, when that is undefined, from
 //     the set CACHED on the SessionEntry at newSession/standby time.
-//   - NEVER pushes blind: when neither the param nor the cache advertises the
-//     mapped id (or the agent is unmapped), the push is SKIPPED with a
-//     `approval.mode.unsupported_by_agent` warn — no `setSessionMode` call.
+//   - NEVER pushes an unverified id to codex: when neither the param, the
+//     entry's cache nor the agent's last advertised set is known, the push is
+//     SKIPPED. Claude's ids are stable, so for Claude the mapped id is pushed
+//     anyway (full-verification F5 — see approval-mode-on-resume.test.ts for
+//     the resume path, the error line and the chat note).
 //   - Catches and logs `setSessionMode` rejections (never propagates).
 //   - `applyApprovalModeToActiveSessions(agentId)` only pushes for active
 //     sessions belonging to that agent, reading each entry's cached modes.
@@ -126,6 +128,7 @@ function callPush(
     sessionId,
     agentId,
     availableModes,
+    "change",
   );
 }
 
@@ -249,22 +252,33 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
     });
   });
 
-  it("skips (does NOT push blind) when neither the param nor the cache advertises modes", async () => {
+  it("codex: skips (does NOT push blind) when neither the param nor the cache advertises modes", async () => {
     vi.mocked(getApprovalMode).mockReturnValue("auto");
 
     // No session entry exists → no cached modes; param is undefined.
-    await callPush(sm, "unknown-session", "claude-code", undefined);
+    await callPush(sm, "unknown-session", "codex", undefined);
 
     expect(setSessionMode).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
-        agentId: "claude-code",
+        agentId: "codex",
         mode: "auto",
         tag: "session-manager",
         op: "approval_mode_unsupported_by_agent",
       }),
       "approval.mode.unsupported_by_agent",
     );
+  });
+
+  it("claude-code: pushes its stable mapped id when no advertised set is known", async () => {
+    vi.mocked(getApprovalMode).mockReturnValue("ask");
+
+    await callPush(sm, "unknown-session", "claude-code", undefined);
+
+    expect(setSessionMode).toHaveBeenCalledWith({
+      sessionId: "unknown-session",
+      modeId: "default",
+    });
   });
 
   it("catches setSessionMode rejections (does not propagate)", async () => {
@@ -275,7 +289,7 @@ describe("SessionManager — approval mode → ACP setSessionMode push", () => {
     // Must not throw.
     await expect(
       callPush(sm, "s1", "claude-code", CLAUDE_MODES),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render as tlRender, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render as tlRender, renderHook, screen, waitFor, fireEvent, act } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { SocialPost } from "@/lib/social/types";
 import type { PiecePost } from "@/lib/queries/social";
@@ -24,21 +24,42 @@ vi.mock("@/components/social/post-detail-sheet", () => ({
     postId ? <div data-testid="detail-sheet">{postId}</div> : null,
 }));
 
-let lastComposerProps: { intent: { pieceId: string; pieceName: string; exportPath: string | null; draftPostId: string | null } } | null = null;
+type ComposerStubProps = {
+  intent: { pieceId: string; pieceName: string; exportPath: string | null; draftPostId: string | null };
+  exports?: Array<{ filePath: string; exportId?: string; name?: string; aspect?: string }>;
+  awaitedExport?: { id: string; status: string } | null;
+  onExportRequested: () => void;
+  onAwaitedHandled?: () => void;
+  onDone: (postId: string | null) => void;
+};
+let lastComposerProps: ComposerStubProps | null = null;
 vi.mock("@/components/social/composer/composer", () => ({
-  Composer: (props: { intent: { pieceId: string; pieceName: string; exportPath: string | null; draftPostId: string | null } }) => {
+  Composer: (props: ComposerStubProps) => {
     lastComposerProps = props;
     return (
       <div data-testid="composer-stub">
         exportPath:{props.intent.exportPath ?? "none"} draftPostId:{props.intent.draftPostId ?? "none"}
+        <span data-testid="stub-exports">{(props.exports ?? []).map((e) => e.name).join(",")}</span>
+        <span data-testid="stub-awaited">{props.awaitedExport ? `${props.awaitedExport.id}:${props.awaitedExport.status}` : "none"}</span>
+        <button data-testid="stub-export-requested" onClick={props.onExportRequested} />
+        <button data-testid="stub-awaited-handled" onClick={props.onAwaitedHandled} />
       </div>
     );
   },
 }));
 
 import { PostingTab } from "@/components/editor/posting-tab";
+import type { ExportRecordView } from "@/lib/exports/types";
 import { trackEvent } from "@/lib/analytics/client";
-import { consumePostingIntent, openPostingTab } from "@/hooks/social/use-posting-intent";
+import {
+  consumePostingIntent,
+  openPostingTab,
+  subscribeExportDialogRequest,
+  takeExportDialogDraftPostId,
+  takeExportDialogPurpose,
+  takeExportDialogReturnToPost,
+  usePostingIntent,
+} from "@/hooks/social/use-posting-intent";
 
 function post(overrides: Partial<SocialPost> = {}): PiecePost {
   const base: SocialPost = {
@@ -87,9 +108,12 @@ const CONNECTED_STATUS = {
 
 describe("PostingTab", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
+  /** The piece's copyrighted songs, as `GET /api/pieces/:id/audio-rights` answers. */
+  let pieceCopyrighted: Array<{ fileId: string; name: string; clipSeconds: number }> = [];
 
   beforeEach(() => {
     lastComposerProps = null;
+    pieceCopyrighted = [];
     fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.startsWith("/api/social/status")) return jsonResponse(CONNECTED_STATUS);
@@ -108,6 +132,8 @@ describe("PostingTab", () => {
           ],
         });
       }
+      if (url.startsWith("/api/pieces/p1/audio-rights")) return jsonResponse({ copyrighted: pieceCopyrighted, ownMusic: [] });
+      if (url.startsWith("/api/pieces/p1/exports")) return jsonResponse({ exports: [] });
       if (url.startsWith("/api/pieces/p1")) return jsonResponse({ id: "p1", name: "My Piece" });
       if (url.startsWith("/api/jobs")) return jsonResponse({ jobs: [] });
       return jsonResponse({}, { status: 404 });
@@ -138,6 +164,8 @@ describe("PostingTab", () => {
       if (url.startsWith("/api/social/status")) {
         return jsonResponse({ ...CONNECTED_STATUS, connected: false, needsReconnect: false });
       }
+      if (url.startsWith("/api/pieces/p1/audio-rights")) return jsonResponse({ copyrighted: [], ownMusic: [] });
+      if (url.startsWith("/api/pieces/p1/exports")) return jsonResponse({ exports: [] });
       if (url.startsWith("/api/pieces/p1")) return jsonResponse({ id: "p1", name: "My Piece" });
       return jsonResponse({}, { status: 404 });
     });
@@ -200,13 +228,6 @@ describe("PostingTab", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("openPostingTab({ pieceId, exportPath }) pre-selects that export in the composer", async () => {
-    renderTab();
-    await waitFor(() => expect(screen.getByTestId("composer-stub")).toBeInTheDocument());
-    openPostingTab({ pieceId: "p1", exportPath: "/e.mp4" });
-    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBe("/e.mp4"));
-  });
-
   it("openPostingTab({ pieceId, providerPostId }) mounts the composer in edit mode for that draft", async () => {
     renderTab();
     await waitFor(() => expect(screen.getByTestId("composer-stub")).toBeInTheDocument());
@@ -264,6 +285,19 @@ describe("PostingTab", () => {
     expect(screen.getAllByTestId("post-nav-item")[1]).toHaveAttribute("data-active", "true");
   });
 
+  it("a post the composer just sent is scrolled into view — where its TikTok draft says how to finish", async () => {
+    const scrolled: Element[] = [];
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this);
+    };
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(2));
+    fireEvent.click(screen.getByTestId("posting-view-new"));
+    await waitFor(() => expect(lastComposerProps).not.toBeNull());
+    act(() => lastComposerProps!.onDone("post_2"));
+    await waitFor(() => expect(scrolled.map((e) => e.getAttribute("data-post-id"))).toEqual(["post_2"]));
+  });
+
   it("a draft's Edit button opens the composer on that draft", async () => {
     renderTab();
     await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(2));
@@ -288,5 +322,265 @@ describe("PostingTab", () => {
     // …and a draft with no ads and no analytics grows no empty divider.
     const draft = screen.getAllByTestId("post-row").find((el) => el.getAttribute("data-post-id") === "post_1");
     expect(draft!.querySelector('[data-testid="post-row-detail"]')).toBeNull();
+  });
+  it("a published post's music line and its finish link live inside its card; a draft still grows no divider", async () => {
+    pieceCopyrighted = [{ fileId: "f1", name: "espresso.mp3", clipSeconds: 12 }];
+    const posts = [
+      post({ id: "post_1", status: "draft" }),
+      post({
+        id: "post_2",
+        status: "published",
+        targets: [{ platform: "tiktok", accountId: "acct-tt", status: "published" }],
+        libi: { pieceId: "p1", targetOptions: [{ platform: "tiktok", tiktok: {} as never, music: { mode: "draft" } }] },
+      }),
+    ];
+    const base = fetchMock.getMockImplementation() as (input: RequestInfo | URL) => Promise<Response>;
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("/api/social/pieces/p1/posts")) return jsonResponse({ posts });
+      return base(input);
+    });
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(2));
+    const published = screen.getAllByTestId("post-row").find((el) => el.getAttribute("data-post-id") === "post_2")!;
+    await waitFor(() => expect(published.querySelector('[data-testid="post-music-tiktok-acct-tt"]')).not.toBeNull());
+    expect(published.querySelector('[data-testid="post-music-tiktok-acct-tt"]')).toHaveTextContent("Draft to finish in the app");
+    expect(published.querySelector('[data-testid="finish-link-tiktok-inbox"]')).toHaveAttribute("href", "https://www.tiktok.com/");
+    const draft = screen.getAllByTestId("post-row").find((el) => el.getAttribute("data-post-id") === "post_1")!;
+    expect(draft.querySelector('[data-testid="post-row-detail"]')).toBeNull();
+  });
+});
+
+
+// ── The exports rework: what the composer is handed, and the round trip ─────────
+
+const exportRecord = (id: string, over: Partial<ExportRecordView> = {}): ExportRecordView =>
+  ({
+    id: `exp_${id}`, pieceId: "p1", pieceName: "My Piece", jobId: null, name: id, fileName: `${id}.mp4`, path: `/s/p1/exports/${id}.mp4`,
+    status: "done", missing: false, error: null, queuedAt: 1, startedAt: 1, completedAt: 100, sizeBytes: 1000, durationSec: 10,
+    width: 1080, height: 1920, aspect: "9:16", container: "mp4", codec: "avc", fps: 30, quality: "source", graphicsQuality: null,
+    purpose: "social", carriesCopyrighted: false, excludedFileIds: [], backend: null, droppedOverlays: null, source: "user",
+    progress: null, waiting: null, ...over,
+  }) as ExportRecordView;
+
+describe("PostingTab — exports and the round trip from the composer", () => {
+  let records: ExportRecordView[];
+  let postsList: PiecePost[] = [];
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    postsList = [];
+    records = [exportRecord("old", { completedAt: 100 }), exportRecord("new", { completedAt: 300 }), exportRecord("busy", { status: "running", completedAt: null, path: null })];
+    fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.startsWith("/api/social/status")) return jsonResponse(CONNECTED_STATUS);
+      if (url.startsWith("/api/social/pieces/p1/posts")) return jsonResponse({ posts: postsList });
+      if (url.startsWith("/api/pieces/p1/audio-rights")) return jsonResponse({ copyrighted: [], ownMusic: [] });
+      if (url.startsWith("/api/pieces/p1/exports")) return jsonResponse({ exports: records });
+      if (url.startsWith("/api/pieces/p1")) return jsonResponse({ id: "p1", name: "My Piece" });
+      return jsonResponse({}, { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+    consumePostingIntent();
+    takeExportDialogPurpose();
+    takeExportDialogReturnToPost();
+    takeExportDialogDraftPostId();
+  });
+
+  function renderTab() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return tlRender(
+      <QueryClientProvider client={qc}>
+        <PostingTab pieceId="p1" />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("hands the composer every finished export (not the running one), newest first", async () => {
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-exports")).toHaveTextContent("new,old"));
+    expect(screen.getByTestId("stub-exports")).not.toHaveTextContent("busy");
+  });
+
+  it("'Post…' on an export starts the composer on exactly that file", async () => {
+    openPostingTab({ pieceId: "p1", exportPath: "/s/p1/exports/old.mp4" });
+    renderTab();
+    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBe("/s/p1/exports/old.mp4"));
+  });
+
+  it("with no export asked for, the composer is not pinned to one", async () => {
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-exports")).toHaveTextContent("new,old"));
+    expect(lastComposerProps?.intent.exportPath).toBeNull();
+  });
+
+  it("the composer's Export for social asks for the dialog AND to come back to the post", async () => {
+    const seen: string[] = [];
+    const off = subscribeExportDialogRequest((id) => seen.push(id));
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("composer-stub")).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId("stub-export-requested"));
+    off();
+    expect(seen).toEqual(["p1"]);
+    expect(takeExportDialogPurpose()).toBe("social");
+    expect(takeExportDialogReturnToPost()).toBe(true);
+  });
+
+  it("an export started from the composer is handed over by its record while it renders, and as it finishes", async () => {
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy" });
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:running"));
+    // The record finishes (the exports query is invalidated by the one SSE).
+    records = records.map((r) => (r.id === "exp_busy" ? exportRecord("busy", { completedAt: 500 }) : r));
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 2100));
+    });
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:done"));
+    expect(screen.getByTestId("stub-exports")).toHaveTextContent("busy");
+  }, 10_000);
+
+  it("once the awaited export has settled the hand-off is spent: a remount does not announce it again", async () => {
+    records = [exportRecord("busy", { completedAt: 500 })];
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy" });
+    const first = renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:done"));
+    first.unmount();
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-exports")).toHaveTextContent("busy"));
+    expect(screen.getByTestId("stub-awaited")).toHaveTextContent("none");
+  });
+
+  it("a failed awaited export is handed over as failed", async () => {
+    records = [exportRecord("busy", { status: "failed", error: "boom", completedAt: null, path: null })];
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy" });
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:failed"));
+  });
+});
+
+describe("PostingTab — hand-offs are spent once the composer has them", () => {
+  let records: ExportRecordView[];
+  beforeEach(() => {
+    records = [exportRecord("old", { completedAt: 100 }), exportRecord("busy", { completedAt: 500 })];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.startsWith("/api/social/status")) return jsonResponse(CONNECTED_STATUS);
+        if (url.startsWith("/api/social/pieces/p1/posts")) return jsonResponse({ posts: [post({ id: "post_1", status: "published" })] });
+        if (url.startsWith("/api/pieces/p1/audio-rights")) return jsonResponse({ copyrighted: [], ownMusic: [] });
+        if (url.startsWith("/api/pieces/p1/exports")) return jsonResponse({ exports: records });
+        if (url.startsWith("/api/pieces/p1")) return jsonResponse({ id: "p1", name: "My Piece" });
+        return jsonResponse({}, { status: 404 });
+      }),
+    );
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    consumePostingIntent();
+    takeExportDialogPurpose();
+    takeExportDialogReturnToPost();
+    takeExportDialogDraftPostId();
+  });
+  function renderTab() {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+    return tlRender(
+      <QueryClientProvider client={qc}>
+        <PostingTab pieceId="p1" />
+      </QueryClientProvider>,
+    );
+  }
+
+  it("once the composer has taken the awaited export, the next composer in this visit is not handed it again", async () => {
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy" });
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:done"));
+    fireEvent.click(screen.getByTestId("stub-awaited-handled")); // the composer adopted it
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("none"));
+    // Back to the list and a fresh post: no second adoption, no repeated notice.
+    fireEvent.click(await screen.findByTestId("posting-back-to-posts"));
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("posting-view-new"));
+    await waitFor(() => expect(screen.getByTestId("composer-stub")).toBeInTheDocument());
+    expect(screen.getByTestId("stub-awaited")).toHaveTextContent("none");
+  });
+
+  it("a Post… export starts the composer it opened, and no composer after it", async () => {
+    openPostingTab({ pieceId: "p1", exportPath: "/s/p1/exports/old.mp4" });
+    renderTab();
+    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBe("/s/p1/exports/old.mp4"));
+    fireEvent.click(await screen.findByTestId("posting-back-to-posts"));
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("posting-view-new"));
+    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBeNull());
+  });
+
+  it("a draft hand-off is spent: after the user leaves and returns, the composer does not reopen that draft", async () => {
+    // The agent (or Social's Edit draft) opens draft post_1…
+    openPostingTab({ pieceId: "p1", providerPostId: "post_1" });
+    const first = renderTab();
+    await waitFor(() => expect(lastComposerProps?.intent.draftPostId).toBe("post_1"));
+    first.unmount();
+    // …it is published or deleted elsewhere, and the user comes back: a plain, new composer.
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(1));
+    expect(screen.queryByTestId("composer-stub")).toBeNull();
+    fireEvent.click(screen.getByTestId("posting-view-new"));
+    await waitFor(() => expect(lastComposerProps?.intent.draftPostId).toBeNull());
+  });
+
+  it("a Post… export is spent the same way once the tab has been left", async () => {
+    openPostingTab({ pieceId: "p1", exportPath: "/s/p1/exports/old.mp4" });
+    const first = renderTab();
+    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBe("/s/p1/exports/old.mp4"));
+    first.unmount();
+    renderTab();
+    await waitFor(() => expect(screen.getAllByTestId("post-row")).toHaveLength(1));
+    fireEvent.click(screen.getByTestId("posting-view-new"));
+    await waitFor(() => expect(lastComposerProps?.intent.exportPath).toBeNull());
+  });
+
+  it("a hand-off whose export was deleted meanwhile is spent, and the composer is the normal one", async () => {
+    records = [exportRecord("old", { completedAt: 100 })]; // exp_gone is not in the list
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_gone" });
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-exports")).toHaveTextContent("old"));
+    expect(screen.getByTestId("stub-awaited")).toHaveTextContent("none");
+    // Consumed: nothing is left in the store to hand to the next mount.
+    await waitFor(() => expect(renderHook(() => usePostingIntent("p1")).result.current).toBeNull());
+  });
+
+  it("an export still rendering stays handed to the tab across a remount, and to a new post started meanwhile", async () => {
+    records = [exportRecord("old", { completedAt: 100 }), exportRecord("busy", { status: "running", completedAt: null, path: null })];
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy" });
+    const first = renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:running"));
+    // + New post while it renders does not lose the in-flight panel.
+    fireEvent.click(await screen.findByTestId("posting-back-to-posts"));
+    fireEvent.click(await screen.findByTestId("posting-view-new"));
+    await waitFor(() => expect(screen.getByTestId("composer-stub")).toBeInTheDocument());
+    expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:running");
+    first.unmount();
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:running"));
+  });
+
+  it("the way back from the export dialog reopens the draft that was being edited", async () => {
+    // Out: the composer editing a draft asks for the dialog…
+    openPostingTab({ pieceId: "p1", providerPostId: "post_1" });
+    const first = renderTab();
+    await waitFor(() => expect(lastComposerProps?.intent.draftPostId).toBe("post_1"));
+    fireEvent.click(screen.getByTestId("stub-export-requested"));
+    expect(takeExportDialogDraftPostId()).toBe("post_1");
+    first.unmount();
+    // …and back: the dialog's Start returns with the same draft id, on a tab that has just mounted.
+    openPostingTab({ pieceId: "p1", awaitExportId: "exp_busy", providerPostId: "post_1" });
+    renderTab();
+    await waitFor(() => expect(screen.getByTestId("composer-stub")).toHaveTextContent("draftPostId:post_1"));
+    expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy");
   });
 });

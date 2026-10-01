@@ -65,6 +65,8 @@ export function TemplatesCatalogCard() {
   const parsed = originText.trim() ? parseDevOrigin(originText) : null;
   const originDirty = draftOrigin !== null && parsed?.ok === true && parsed.origin !== view.development.origin;
   const vercel = isVercelPreviewOrigin(parsed?.ok ? parsed.origin : view.development.origin);
+  // One creator key serves both catalogs (review M11): a development site that is not this machine receives it.
+  const keyLeavesMachine = parsed?.ok === true && !["localhost", "127.0.0.1"].includes(new URL(parsed.origin).hostname);
   const tokenValid = BYPASS_TOKEN_PATTERN.test(token.trim());
   const pending = save.isPending ? save.variables : null;
 
@@ -155,6 +157,11 @@ export function TemplatesCatalogCard() {
               : ""}
           https:// any site, or http://localhost / 127.0.0.1 for a site on this machine.
         </p>
+        {keyLeavesMachine && (
+          <p data-testid="templates-catalog-key-note" className="text-xs text-muted-foreground">
+            Your creator key is sent to this site.
+          </p>
+        )}
         {parsed && !parsed.ok && (
           <p data-testid="templates-catalog-origin-problem" className="text-xs text-destructive">
             {parsed.error}

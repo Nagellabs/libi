@@ -81,6 +81,11 @@ if (process.env.SENTRY_AUTH_TOKEN) {
 }
 
 const env = { ...process.env, NEXT_PUBLIC_LIBI_SENTRY: "1" };
+// The release build writes `.next`, and everything after it (the externals
+// manifest, the runtime bundle, the tarball) reads `.next`. LIBI_NEXT_DIST_DIR
+// moves Next's dir for the e2e dev servers only (next.config.ts); inherited
+// from a shell that ran e2e, it would build the release somewhere nothing reads.
+delete env.LIBI_NEXT_DIST_DIR;
 
 // Mirror the hard kill-switch under a NEXT_PUBLIC_ name so it is baked into the
 // CLIENT bundle too. Only NEXT_PUBLIC_*-prefixed vars are exposed to client

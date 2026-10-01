@@ -42,7 +42,8 @@ export interface AgentChipProps {
   signInHint?: string;
   /**
    * `connected` only: its launcher was installed after this agent's process in libi started, which can't run it
-   * (detection's `launcherAfterStart`). The chip says to restart libi instead of Connected.
+   * (detection's `launcherAfterStart`). The chip says to restart libi instead of Connected. Only while a chat is using
+   * that process: an idle one is restarted by `GET /api/providers`, which then drops the flag.
    */
   launcherAfterStart?: boolean;
   /** Test mode only: why this agent's add is not offered, or why its entry has to go. Shown in every layout. */

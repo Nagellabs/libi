@@ -1,6 +1,7 @@
 import { CATALOG_BUCKET_BASES } from "@/lib/templates/cloud/constants";
 import { SENTRY_DSN, SENTRY_ENABLED } from "@/lib/sentry/config";
 import { socialMediaOrigins } from "@/lib/social/catalog";
+import { isTestMode } from "@/lib/test-mode";
 import { OVERLAY_RUNTIME_BUNDLE_PATH, OVERLAY_RUNTIME_PATH } from "@/lib/sandbox/paths";
 
 // Single source of truth for libi's Content-Security-Policy (RC-C part 2 / RC-G).
@@ -190,6 +191,59 @@ const SOCIAL_MEDIA_SRC = socialMediaOrigins().join(" ");
 // in the dev bucket, already listed. Don't add `*.vercel.app` to any directive.
 const CATALOG_MEDIA_SRC = Object.values(CATALOG_BUCKET_BASES).join(" ");
 
+// FIFTH DELIBERATE TRADE-OFF, TEST MODE ONLY: the fake Zernio's own origin is
+// allowlisted in `img-src`/`media-src`, exactly like a real provider's above,
+// so a test-mode post's placeholder thumbnail/video actually renders instead
+// of failing the same silent-black-player way the third trade-off fixed for
+// production (full-verification F9). It is computed at CALL time, never
+// folded into the static `CSP_DIRECTIVES` below: the fake listens on an
+// OS-assigned loopback port chosen when test mode starts it
+// (`mcp/dev/fake-zernio/http.ts`), which is after this module is first
+// imported, so a value baked in at import time would always be empty.
+//
+// Reads `LIBI_SOCIAL_MCP_URL` directly, NEVER by importing `lib/social/test-fake`
+// (I3, 2026-10-02 review). `csp.ts` is loaded by `proxy.ts` on EVERY request of
+// EVERY build, and `test-fake.ts` statically imports `fs`, the pino logger,
+// `lib/libi-home` and `SocialTokenStore` — and dynamically pulls in the fake HTTP
+// server's own module graph — purely to hand one env var back out. None of that
+// belongs in the per-request security chokepoint's own import graph: a failure to
+// resolve or evaluate any module in that chain would take down every page and API
+// response, in every build, for a test-mode-only convenience. A leaf env read has
+// nothing to fail to import. `LIBI_SOCIAL_MCP_URL` is also exactly what
+// `test-fake.ts` itself ultimately reads (`fakeZernioUrl()`'s own fallback) once
+// the module-instance-local `started` cache it prefers is empty — which it always
+// is from the PROXY's separate module instance anyway, so reading the env var
+// directly is not a behavior change, only a dependency-free one.
+//
+// Loopback-only (M4): this env var is inherited PROCESS env, and a packaged app's
+// env is whatever launched it. Restricting the host to 127.0.0.1/localhost/[::1]
+// means even a `LIBI_TEST_MODE=1` launch with a tampered URL can never widen the
+// CSP to name a non-local origin — the widening stays exactly what it claims to
+// be, a loopback test fixture, never a vector for naming an arbitrary host.
+//
+// Outside test mode `isTestMode()` is false and this returns `""`, so
+// production's `img-src`/`media-src` are byte-identical to before — this
+// trade-off does not exist for a real install. The fake's `/mcp` endpoint and its
+// `/media/<key>` uploads share one origin (`FakeZernioHttp.baseUrl` — same
+// listener, see http.ts), so deriving one from the other never drifts.
+// `connect-src` is untouched, same as the real-provider trade-off: a
+// compromised renderer still cannot `fetch()` the fake, only display a
+// resource from it.
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+function testModeSocialMediaOrigin(): string {
+  if (!isTestMode()) return "";
+  const raw = process.env.LIBI_SOCIAL_MCP_URL;
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    if (!LOOPBACK_HOSTNAMES.has(url.hostname)) return "";
+    return url.origin;
+  } catch {
+    return "";
+  }
+}
+
 const CSP_DIRECTIVES: readonly string[] = [
   "default-src 'self'",
   `connect-src ${CONNECT_SRC}`,
@@ -224,7 +278,13 @@ const CSP_DIRECTIVES: readonly string[] = [
  * truth — do not inline the directive string anywhere else.
  */
 export function buildCsp(): string {
-  return CSP_DIRECTIVES.join("; ");
+  const testOrigin = testModeSocialMediaOrigin();
+  if (!testOrigin) return CSP_DIRECTIVES.join("; ");
+  // Additive only, and only these two display-sink directives — see the
+  // fifth trade-off above.
+  return CSP_DIRECTIVES.map((d) =>
+    d.startsWith("img-src ") || d.startsWith("media-src ") ? `${d} ${testOrigin}` : d,
+  ).join("; ");
 }
 
 export { OVERLAY_RUNTIME_PATH, OVERLAY_RUNTIME_BUNDLE_PATH };

@@ -3,7 +3,7 @@ import { eq } from "drizzle-orm";
 import { ChromiumRenderBackend } from "@/lib/export/backends/chromium-render";
 import { classifyExportShape } from "@/lib/export/classifier";
 import { attachOverlaySourceDims } from "@/lib/export/source-dims";
-import { stripHiddenLayerArrays } from "@/lib/overlays/hidden";
+import { manifestAsExported } from "@/lib/overlays/hidden";
 import { getCompositionFrames } from "@/lib/engine/renderer";
 import { loadComposition } from "@/lib/composition/persistence";
 import type { CompositionManifest } from "@/lib/composition/persistence";
@@ -55,10 +55,7 @@ export async function POST(req: Request): Promise<Response> {
   // classifying — the render payload below reads the same filtered arrays, so
   // the hidden layer neither renders in the chromium pass nor sounds in the
   // audio mux.
-  const stripped = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
-  if (stripped.changed) {
-    manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
-  }
+  manifest = manifestAsExported(manifest);
 
   const composition = buildCompositionFromManifest(manifest);
 

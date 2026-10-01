@@ -1,10 +1,8 @@
 "use client";
 
-import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
 import { useCallback, useMemo, useState } from "react";
-import Link from "next/link";
-import { openPostingTab } from "@/hooks/social/use-posting-intent";
-import { useSocialStatus } from "@/lib/queries/social";
+import { openExportInTab } from "@/hooks/exports/use-open-export";
+import { markExportForPost, openPostingTab } from "@/hooks/social/use-posting-intent";
 import {
   Dialog,
   DialogContent,
@@ -15,8 +13,9 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import { BusyLabel, BUSY_BUTTON_CLASS } from "@/components/agents-page/agents-tab/steps/busy-label";
 import { Input } from "@/components/ui/input";
-import { ExportProgressBar } from "@/components/export/export-progress-bar";
 import {
   type ExportSource,
   type ExportQuality,
@@ -33,14 +32,24 @@ import {
   GRAPHICS_SHARPNESS_WARNING,
   graphicsLosesSharpness,
 } from "@/lib/export/quality";
-import { revealFile, pickDirectory, hasElectronBridge } from "@/lib/shell/client";
-import { droppedClipsNote, type DroppedOverlay } from "@/lib/export/dropped-overlays";
+import { ExportAudioSection } from "@/components/export/export-audio-section";
+import {
+  audioRequest,
+  exportSummary,
+  isIncluded,
+  overridesAfterPurpose,
+  type ExportAudioTrack,
+  type ExportPurpose,
+  type IncludeOverrides,
+} from "@/components/export/audio-defaults";
 
 /** The dialog offers no Custom UI (removed — API-only now), so its media
  *  quality state never takes the "custom" value. Narrowing the local state
  *  to this type lets `presetDimensions`/`resolveOutputDimensions` calls
  *  below skip re-litigating the custom-dims case. */
 type DialogQuality = Exclude<ExportQuality, "custom">;
+
+const QUALITY_LABEL: Record<DialogQuality, string> = { source: "Original", "1080p": "1080p", "1440p": "1440p", "4k": "4K" };
 
 interface ExportDialogProps {
   pieceId: string | null;
@@ -60,18 +69,33 @@ interface ExportDialogProps {
   /** Render the dialog with no Trigger when caller controls the open state. */
   openOverride?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Every track the export plays (addendum §7). */
+  audioTracks?: ExportAudioTrack[];
+  /** True while the piece's audio rights are still loading — an empty
+   *  `audioTracks` here means "not known yet", never "no audio", so Export
+   *  stays disabled and the Audio column shows a skeleton instead of the
+   *  empty-piece message. */
+  audioTracksLoading?: boolean;
+  /** True when the piece's audio rights failed to load — Export stays
+   *  disabled and the Audio column offers "Try again". */
+  audioTracksError?: boolean;
+  onRetryAudioTracks?: () => void;
+  /** Preselects the purpose; Social when absent (never empty). */
+  initialPurpose?: ExportPurpose | null;
+  /** The composer sent the user here: once Start queues the export, close the
+   *  dialog and take them back to the Posting tab, where the composer waits
+   *  for that export. */
+  returnToPost?: boolean;
+  /** The draft that composer was editing: the way back reopens it. */
+  returnDraftPostId?: string | null;
 }
 
 /**
- * Modal export dialog. Hosts:
- *   - Filename + source + format + quality form (idle state)
- *   - Live progress + ETA + cancel (running state)
- *   - Success card with show-in-folder (success state)
- *   - Error card with retry/dismiss (failed/cancelled state)
- *
- * Closing the dialog mid-export does NOT cancel — the flow stays alive and
- * the dialog will re-open into the live progress view next time. Cancel
- * only happens via the explicit Cancel button.
+ * Modal export dialog. It hosts the export form and nothing else: Start queues
+ * an export and the dialog shows the form again with an "Export queued" banner
+ * and a link to the Exports tab. Several exports can run at once; their
+ * progress and finish are on each export's record (Exports tab, canvas bar,
+ * finish toast), never here. Closing the dialog never affects an export.
  */
 export function ExportDialog(props: ExportDialogProps) {
   const {
@@ -85,17 +109,23 @@ export function ExportDialog(props: ExportDialogProps) {
     hasDraft,
     openOverride,
     onOpenChange,
+    audioTracks = [],
+    audioTracksLoading = false,
+    audioTracksError = false,
+    onRetryAudioTracks,
+    initialPurpose,
+    returnToPost = false,
+    returnDraftPostId = null,
   } = props;
 
   const [innerOpen, setInnerOpen] = useState(false);
   const open = openOverride ?? innerOpen;
 
-  const isTerminalFlow =
-    flow.status === "success" || flow.status === "failed" || flow.status === "cancelled";
+  const isTerminalFlow = flow.status === "queued" || flow.status === "failed";
 
   // When the dialog closes (any path: backdrop click, Esc, X button, our
-  // explicit Done button) AND we're in a terminal state, reset the hook so
-  // the next open shows the form fresh instead of the stale success card.
+  // Close button) AND the last Start has an outcome, reset the hook so the
+  // next open shows the form fresh instead of a stale queued banner.
   const setOpen = useCallback(
     (next: boolean) => {
       if (!next && isTerminalFlow) {
@@ -122,7 +152,6 @@ export function ExportDialog(props: ExportDialogProps) {
   );
 
   const { data: defaults } = useExportDefaults();
-  const socialStatus = useSocialStatus();
 
   // Lazy initializers seed from whatever is already known at mount; the
   // previous-state blocks below fold in later arrivals during render (React's
@@ -136,7 +165,55 @@ export function ExportDialog(props: ExportDialogProps) {
     defaults?.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
   );
   const [filename, setFilename] = useState<string>(pieceName ?? "libi-export");
-  const [folderOverride, setFolderOverride] = useState<string | null>(null);
+
+  const [purpose, setPurposeState] = useState<ExportPurpose>(initialPurpose ?? "social");
+  const [overrides, setOverrides] = useState<IncludeOverrides>({});
+  const choosePurpose = useCallback(
+    (p: ExportPurpose) => {
+      // Re-clicking the already-selected purpose is a no-op: it must not
+      // wipe a copyrighted track's toggle. Only an actual purpose CHANGE
+      // re-applies the copyrighted defaults.
+      if (p === purpose) return;
+      setPurposeState(p);
+      setOverrides((o) => overridesAfterPurpose(audioTracks, o));
+    },
+    [purpose, audioTracks],
+  );
+
+  // `ExportDialog` is ONE long-lived instance (mounted once in
+  // preview-player.tsx) — the `useState(initialPurpose ?? "social")` above
+  // only ever seeds on this component's first-ever mount, so a later open
+  // (e.g. the Posting tab's "Export & post", which passes a fresh
+  // `initialPurpose` each time) never re-applied it, and whatever purpose
+  // was last chosen carried into the next, unrelated export. Re-seed on the
+  // closed→open edge only — same compare-in-render pattern as
+  // `prevPieceName` / `prevDefaults` above — never while the dialog stays
+  // open, so a purpose the user is actively choosing isn't clobbered
+  // mid-session.
+  const [presetUndo, setPresetUndo] = useState<{ quality: DialogQuality; graphicsQuality: GraphicsQuality; format: ExportFormat } | null>(null);
+  const [prevOpenForPurpose, setPrevOpenForPurpose] = useState(open);
+  if (open !== prevOpenForPurpose) {
+    setPrevOpenForPurpose(open);
+    if (open) {
+      setPurposeState(initialPurpose ?? "social");
+      setOverrides({});
+      if (returnToPost) {
+        // From the post composer: Instagram and TikTok gain nothing from a 4K
+        // upload, and it is 4x the bytes to send, and they want MP4. Preset
+        // 1080p MP4 (the user can still change it; the saved export defaults
+        // are never written), remembering what was there for the next plain open.
+        if (!presetUndo) setPresetUndo({ quality, graphicsQuality, format });
+        setQuality("1080p");
+        setGraphicsQuality("1080p");
+        setFormat("mp4");
+      } else if (presetUndo) {
+        setQuality(presetUndo.quality);
+        setGraphicsQuality(presetUndo.graphicsQuality);
+        setFormat(presetUndo.format);
+        setPresetUndo(null);
+      }
+    }
+  }
 
   const [prevPieceName, setPrevPieceName] = useState(pieceName);
   if (pieceName !== prevPieceName) {
@@ -195,22 +272,12 @@ export function ExportDialog(props: ExportDialogProps) {
     graphicsLosesSharpness(graphicsQuality) &&
     outputDims.width * outputDims.height < fullGraphics.width * fullGraphics.height;
 
-  const isRunning = flow.status === "starting" || flow.status === "running";
-
-  // null until the first real tick → the running button shows its indeterminate
-  // shimmer instead of a frozen 0% fill.
-  const exportWaiting = isExportWaiting(flow.progress);
-  const exportPercent =
-    !exportWaiting && flow.progress && flow.progress.total > 0
-      ? Math.max(0, Math.min(100, Math.round((flow.progress.done / flow.progress.total) * 100)))
-      : null;
-
-  const folder = folderOverride ?? defaults?.effectiveFolder ?? "";
+  const starting = flow.status === "starting";
 
   const handleStart = useCallback(async () => {
     if (!pieceId) return;
     const stem = filename.trim() || pieceName?.trim() || "libi-export";
-    await flow.start({
+    const queued = await flow.start({
       pieceId,
       source,
       filename: stem,
@@ -220,29 +287,28 @@ export function ExportDialog(props: ExportDialogProps) {
       // graphics-free piece, and keeping it always-present means it never
       // silently drops out of the payload if graphics get added later.
       graphicsQuality,
-      destFolder: folderOverride ?? undefined,
+      // `audioRequest` always carries a `purpose` ("social" by default), so
+      // this dialog's own submissions can never draw the API's 422
+      // `purpose_required` — that refusal (`flow.purposeRequired`) still
+      // exists for callers that omit purpose (`app/api/export/route.ts`),
+      // which is why the dialog no longer renders a line for it.
+      ...audioRequest(audioTracks, purpose, overrides),
     });
-  }, [pieceId, filename, pieceName, flow, source, format, quality, graphicsQuality, folderOverride]);
-
-  const handlePickFolder = useCallback(async () => {
-    const picked = await pickDirectory(folder);
-    if (picked === undefined) {
-      // No bridge — surface a hint in the input.
-      return;
+    if (queued && returnToPost) {
+      // The export belongs to the post being composed: hand it over and go
+      // back to it. The Timeline tab (and this dialog with it) unmounts.
+      markExportForPost(queued.exportId);
+      openPostingTab({
+        pieceId: queued.pieceId,
+        awaitExportId: queued.exportId,
+        ...(returnDraftPostId ? { providerPostId: returnDraftPostId } : {}),
+      });
+      setOpen(false);
     }
-    if (picked === null) return;
-    setFolderOverride(picked);
-  }, [folder]);
-
-  const resultFilePath = flow.result?.filePath ?? null;
-  const handleReveal = useCallback(async () => {
-    if (resultFilePath) {
-      await revealFile(resultFilePath);
-    }
-  }, [resultFilePath]);
+  }, [pieceId, filename, pieceName, flow, source, format, quality, graphicsQuality, audioTracks, purpose, overrides, returnToPost, returnDraftPostId, setOpen]);
 
   const handleClose = useCallback(() => {
-    // setOpen handles the terminal-reset for us.
+    // setOpen handles the reset for us.
     setOpen(false);
   }, [setOpen]);
 
@@ -254,77 +320,32 @@ export function ExportDialog(props: ExportDialogProps) {
             <button
               disabled={!pieceId}
               data-testid="export-button"
-              className={
-                "export-trigger group relative inline-flex cursor-pointer items-center overflow-hidden rounded-md px-3.5 py-1.5 text-xs font-semibold ring-1 ring-black/10 transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-none " +
-                (isRunning
-                  ? "bg-primary/15 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
-                  : "export-trigger-idle text-primary-foreground shadow-[0_1px_2px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.22)] hover:-translate-y-px hover:shadow-[0_4px_12px_-2px_color-mix(in_oklab,var(--primary)_70%,transparent),inset_0_1px_0_rgba(255,255,255,0.28)] active:translate-y-0 active:shadow-[inset_0_1px_2px_rgba(0,0,0,0.25)]")
-              }
+              className="export-trigger export-trigger-idle group relative inline-flex cursor-pointer items-center overflow-hidden rounded-md px-3.5 py-1.5 text-xs font-semibold text-primary-foreground ring-1 ring-black/10 shadow-[0_1px_2px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.22)] transition-all duration-150 hover:-translate-y-px hover:shadow-[0_4px_12px_-2px_color-mix(in_oklab,var(--primary)_70%,transparent),inset_0_1px_0_rgba(255,255,255,0.28)] active:translate-y-0 active:shadow-[inset_0_1px_2px_rgba(0,0,0,0.25)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0 disabled:hover:shadow-none"
             >
-              {/* Running: determinate fill grows to the real %, or an
-                  indeterminate shimmer band before the first tick. */}
-              {isRunning &&
-                (exportPercent != null ? (
-                  <span
-                    aria-hidden
-                    className="absolute inset-y-0 left-0 bg-gradient-to-r from-primary/85 to-primary transition-[width] duration-300 ease-out"
-                    style={{ width: `${exportPercent}%` }}
-                  />
-                ) : (
-                  <span aria-hidden className="absolute inset-0 overflow-hidden">
-                    <span className="export-trigger-shimmer absolute inset-y-0 w-2/5 bg-gradient-to-r from-transparent via-primary/60 to-transparent" />
-                  </span>
-                ))}
-
-              {/* Idle: one-shot light sheen sweep on hover. */}
-              {!isRunning && (
-                <span
-                  aria-hidden
-                  className="export-trigger-sheen pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-transparent via-white/35 to-transparent"
-                />
-              )}
-
               <span
-                className={
-                  "relative z-10 inline-flex items-center gap-1.5 " +
-                  (isRunning ? "[text-shadow:0_1px_2px_rgba(0,0,0,0.65)]" : "")
-                }
-              >
-                {isRunning ? (
-                  <>
-                    <ExportSpinner />
-                    {exportWaiting ? "Waiting for another export…" : <>Exporting {exportPercent != null ? `${exportPercent}%` : "…"}</>}
-                  </>
-                ) : (
-                  <>
-                    <ExportIcon className="transition-transform duration-150 group-hover:translate-y-0.5" />
-                    Export
-                  </>
-                )}
+                aria-hidden
+                className="export-trigger-sheen pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-transparent via-white/35 to-transparent"
+              />
+              <span className="relative z-10 inline-flex items-center gap-1.5">
+                <ExportIcon className="transition-transform duration-150 group-hover:translate-y-0.5" />
+                Export
               </span>
             </button>
           }
         />
       )}
 
-      <DialogContent className="sm:max-w-md">
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Export video</DialogTitle>
           <DialogDescription>
-            {isRunning
-              ? "Rendering — feel free to close this dialog and keep working."
-              : flow.status === "success"
-                ? "Done."
-                : flow.status === "failed"
-                  ? "Export failed."
-                  : flow.status === "cancelled"
-                    ? "Export cancelled."
-                    : "Choose format, quality, and where to save."}
+            Choose format and quality. The file is saved with the piece — find it in the Exports tab.
           </DialogDescription>
         </DialogHeader>
 
-        {flow.status === "idle" || flow.status === "cancelled" ? (
-          <div className="flex flex-col gap-4">
+        <div className="grid gap-6 md:grid-cols-2">
+          <section data-testid="export-video-column" className="flex min-w-0 flex-col gap-4">
+            <h3 className="text-sm font-medium">Video</h3>
             <Field label="Filename">
               <div className="flex items-center gap-2">
                 <Input
@@ -395,65 +416,23 @@ export function ExportDialog(props: ExportDialogProps) {
                 )}
               </Field>
             )}
+          </section>
 
-            <Field label="Save to">
-              <div className="flex items-center gap-2">
-                <div className="min-w-0 flex-1 overflow-hidden truncate rounded-md border border-input bg-background px-2 py-1.5 text-xs text-muted-foreground">
-                  {folder || "(default folder)"}
-                </div>
-                {hasElectronBridge() ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={handlePickFolder}
-                    className="cursor-pointer"
-                    type="button"
-                  >
-                    Change…
-                  </Button>
-                ) : null}
-                {folderOverride && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setFolderOverride(null)}
-                    className="cursor-pointer"
-                    type="button"
-                  >
-                    Reset
-                  </Button>
-                )}
-              </div>
-            </Field>
+          <section data-testid="export-audio-column" className="flex min-w-0 flex-col gap-4">
+            <h3 className="text-sm font-medium">Audio</h3>
+            <ExportAudioSection
+              tracks={audioTracks}
+              purpose={purpose}
+              onPurpose={choosePurpose}
+              isOn={(t) => isIncluded(t, purpose, overrides)}
+              onToggle={(id, on) => setOverrides((prev) => ({ ...prev, [id]: on }))}
+              loading={audioTracksLoading}
+              error={audioTracksError}
+              onRetry={onRetryAudioTracks}
+            />
+          </section>
 
-            {flow.status === "cancelled" && (
-              <div className="rounded bg-muted/30 p-2 text-xs text-muted-foreground">
-                Last export was cancelled. Adjust the settings and try again.
-              </div>
-            )}
-          </div>
-        ) : null}
-
-        {isRunning ? (
-          <ProgressView
-            progress={flow.progress}
-            onCancel={flow.cancel}
-          />
-        ) : null}
-
-        {flow.status === "success" && flow.result ? (
-          <SuccessView
-            result={flow.result}
-            onReveal={handleReveal}
-            pieceId={pieceId ?? ""}
-            socialReady={socialStatus.data ? !!socialStatus.data.providerId : null}
-            onPost={() => {
-              if (!pieceId || !flow.result) return;
-              openPostingTab({ pieceId, exportPath: flow.result.filePath });
-              setOpen(false);
-            }}
-          />
-        ) : null}
+        </div>
 
         {flow.status === "failed" ? (
           <div className="rounded bg-red-500/10 p-3 text-xs text-red-600 dark:text-red-400">
@@ -461,29 +440,45 @@ export function ExportDialog(props: ExportDialogProps) {
           </div>
         ) : null}
 
+        {flow.status === "queued" && flow.queued ? (
+          <div data-testid="export-queued" role="status" className="flex min-w-0 flex-col gap-1.5 rounded bg-emerald-500/10 p-3 text-xs">
+            <div className="break-words font-medium text-emerald-700 dark:text-emerald-400">
+              Export queued — see the Exports tab
+            </div>
+            <div className="truncate text-muted-foreground">{flow.queued.name}</div>
+            <button
+              type="button"
+              className="cursor-pointer self-start text-xs underline"
+              onClick={() => {
+                const q = flow.queued;
+                setOpen(false);
+                if (q) openExportInTab({ pieceId: q.pieceId, exportId: q.exportId });
+              }}
+            >
+              Open the Exports tab
+            </button>
+          </div>
+        ) : null}
+
         <DialogFooter>
-          {flow.status === "idle" || flow.status === "cancelled" ? (
-            <>
-              <Button variant="ghost" onClick={handleClose} className="cursor-pointer">
-                Cancel
-              </Button>
-              <Button
-                onClick={handleStart}
-                disabled={!pieceId || !filename.trim()}
-                className="cursor-pointer"
-              >
-                Export
-              </Button>
-            </>
-          ) : flow.status === "success" || flow.status === "failed" ? (
-            <Button onClick={handleClose} className="cursor-pointer">
-              Done
-            </Button>
+          {audioTracksLoading ? (
+            <Skeleton data-testid="export-summary-loading" className="h-3 w-40 sm:mr-auto sm:self-center" />
           ) : (
-            <Button variant="outline" onClick={handleClose} className="cursor-pointer">
-              Hide (export keeps running)
-            </Button>
+            <span data-testid="export-summary" className="text-xs text-muted-foreground sm:mr-auto sm:self-center">
+              {audioTracksError ? "Couldn't load this piece's audio" : exportSummary(format, QUALITY_LABEL[quality], audioTracks, purpose, overrides)}
+            </span>
           )}
+          <Button variant="ghost" onClick={handleClose} className="cursor-pointer">
+            {flow.status === "queued" ? "Close" : "Cancel"}
+          </Button>
+          <Button
+            onClick={handleStart}
+            disabled={!pieceId || !filename.trim() || audioTracksLoading || audioTracksError || starting}
+            focusableWhenDisabled={starting}
+            className={`cursor-pointer ${BUSY_BUTTON_CLASS}`}
+          >
+            {starting ? <BusyLabel>Queuing…</BusyLabel> : "Export"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -549,115 +544,6 @@ function Field({
   );
 }
 
-function ProgressView({
-  progress,
-  onCancel,
-}: {
-  progress: { done: number; total: number; unit: string; etaMs: number | null } | null;
-  onCancel: () => Promise<void>;
-}) {
-  // null until the first real tick → the bar renders its indeterminate
-  // shimmer (so "Preparing…/encoding" never looks frozen). Once progress
-  // arrives we drive the determinate filmstrip fill off the actual %.
-  const waiting = isExportWaiting(progress);
-  const percent =
-    !waiting && progress && progress.total > 0
-      ? Math.max(0, Math.min(100, Math.round((progress.done / progress.total) * 100)))
-      : null;
-  const eta = !waiting && progress?.etaMs != null ? `~${formatEta(progress.etaMs)} left` : null;
-
-  return (
-    <div className="flex flex-col gap-3">
-      <ExportProgressBar percent={percent} etaLabel={eta} />
-      {waiting && (
-        <p role="status" className="text-xs text-muted-foreground" data-testid="export-waiting">
-          {EXPORT_WAITING_MESSAGE}
-        </p>
-      )}
-      <Button
-        variant="outline"
-        size="sm"
-        onClick={() => void onCancel()}
-        className="cursor-pointer self-start"
-      >
-        Cancel export
-      </Button>
-    </div>
-  );
-}
-
-function SuccessView({
-  result,
-  onReveal,
-  pieceId,
-  onPost,
-  socialReady,
-}: {
-  result: {
-    filePath: string;
-    sizeBytes: number;
-    durationSeconds: number;
-    backend: string;
-    width: number;
-    height: number;
-    droppedOverlays?: DroppedOverlay[];
-  };
-  onReveal: () => Promise<void>;
-  pieceId: string;
-  onPost: () => void;
-  /** `null` while `/api/social/status` hasn't answered yet — render nothing
-   *  rather than guess whether posting is set up. */
-  socialReady: boolean | null;
-}) {
-  const filename = result.filePath.split(/[\\/]/).pop() ?? result.filePath;
-  const droppedNote = droppedClipsNote(result.droppedOverlays);
-  return (
-    // min-w-0: as a grid item of DialogContent's `grid`, this card's min-content
-    // would otherwise be driven by the no-wrap full file path below, forcing the
-    // grid track (and the whole dialog) wider than max-w-md and spilling the
-    // footer past the rounded corner. min-w-0 caps the track so the path truncates.
-    <div className="flex min-w-0 flex-col gap-2 rounded bg-emerald-500/10 p-3 text-xs" data-piece-id={pieceId}>
-      <div className="break-words font-medium text-emerald-700 dark:text-emerald-400">
-        Saved {filename}
-      </div>
-      <div className="text-muted-foreground">
-        {formatBytes(result.sizeBytes)} · {result.width}×{result.height} · {result.backend}
-      </div>
-      <div className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-muted-foreground">
-        {result.filePath}
-      </div>
-      {droppedNote && (
-        <div
-          role="status"
-          data-testid="export-dropped-clips"
-          className="break-words rounded bg-amber-500/10 px-2 py-1.5 text-amber-700 dark:text-amber-300"
-        >
-          {droppedNote} Check that the file still plays, or replace the clip, then export again.
-        </div>
-      )}
-      <div className="flex items-center gap-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => void onReveal()}
-          className="cursor-pointer self-start"
-        >
-          Show in folder
-        </Button>
-        {socialReady === null ? null : socialReady ? (
-          <Button variant="default" size="sm" className="cursor-pointer self-start" onClick={onPost} data-testid="export-post-button">
-            Post…
-          </Button>
-        ) : (
-          <Link href="/social" className="text-xs underline cursor-pointer" data-testid="export-setup-social">
-            Set up social posting
-          </Link>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function ExportIcon({ className }: { className?: string }) {
   // Download glyph: arrow pointing down to a baseline. Stroke-based (refined
   // over the old solid-fill version) for a lighter look at small size.
@@ -681,28 +567,4 @@ function ExportIcon({ className }: { className?: string }) {
       <path d="M3.6 12.8h8.8" />
     </svg>
   );
-}
-
-function ExportSpinner() {
-  return (
-    <svg className="h-3 w-3 animate-spin" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-      <circle cx="8" cy="8" r="6" strokeOpacity="0.3" />
-      <path d="M8 2a6 6 0 0 1 6 6" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
-}
-
-function formatEta(ms: number): string {
-  const sec = Math.round(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const min = Math.floor(sec / 60);
-  const rem = sec % 60;
-  return rem === 0 ? `${min}m` : `${min}m ${rem}s`;
 }

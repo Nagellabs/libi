@@ -105,6 +105,12 @@ test.describe("Overlay export flow (e2e)", () => {
 
     const dialog = page.getByRole("dialog");
     await expect(dialog).toBeVisible({ timeout: 15_000 });
+
+    // Every export shows what it's for (Social preselected) and every track;
+    // clip-red-3s.mp4 was uploaded, so its sound is the user's own and on.
+    await expect(dialog.getByTestId("export-purpose-social")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByTestId("export-audio-list")).toBeVisible();
+
     const enqueued = page.waitForResponse(
       (resp) => new URL(resp.url()).pathname === "/api/export" && resp.request().method() === "POST",
       { timeout: 30_000 },
@@ -115,16 +121,21 @@ test.describe("Overlay export flow (e2e)", () => {
     const { jobId } = (await enqueueResponse.json()) as { jobId: string };
     expect(jobId).toBeTruthy();
 
-    // The dialog's success card names the file and the backend that made it.
-    await expect(dialog.getByText(/^Saved /)).toBeVisible({ timeout: 90_000 });
-    await expect(dialog).toContainText("ffmpeg-overlay");
-
-    // The job's own record is the source of truth for where the file went.
-    const job = (await (await page.request.get(`/api/jobs/${jobId}`)).json()) as {
-      status: string;
-      resultJson?: string | null;
-    };
-    expect(job.status).toBe("completed");
+    // The dialog queues the export and steps aside (exports rework B2): it shows
+    // the queued banner, not a success card. The job's own record is the source
+    // of truth for when it finished and where the file went.
+    await expect(dialog.getByTestId("export-queued")).toBeVisible({ timeout: 15_000 });
+    type JobRow = { status: string; resultJson?: string | null };
+    let job: JobRow = { status: "" };
+    await expect
+      .poll(
+        async () => {
+          job = (await (await page.request.get(`/api/jobs/${jobId}`)).json()) as JobRow;
+          return job.status;
+        },
+        { timeout: 90_000, intervals: [500, 1000] },
+      )
+      .toBe("completed");
     const result = JSON.parse(job.resultJson ?? "null") as { filePath: string; backend: string } | null;
     expect(result?.backend).toBe("ffmpeg-overlay");
     const filePath = result!.filePath;

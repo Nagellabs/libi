@@ -10,8 +10,18 @@
  * So the invariants are asserted against the YAML and the scripts directly.
  */
 import { describe, it, expect } from "vitest";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { load } from "js-yaml";
 
@@ -594,6 +604,187 @@ describe("three gates jobs, or three chances to drift apart", () => {
       );
     }
   });
+
+  // 0.1.16: test.yml installed BtbN's ffmpeg 9.0, the release gates installed
+  // none, and every real-ffmpeg test in them SKIPPED through hasFfmpeg() — the
+  // gates reported green over coverage they never ran. One shared action keeps
+  // the three installs identical, and LIBI_REQUIRE_FFMPEG turns a missing
+  // ffmpeg into a failure instead of a skip.
+  type Step = Record<string, unknown>;
+  it.each([
+    ["test.yml", () => Object.values(testWf.jobs)[0].steps as Step[]],
+    ["release-npm.yml", () => stepsIn(npmWf, "gates")],
+    ["release-electron.yml", () => stepsIn(elWf, "gates")],
+  ])("%s installs libi's ffmpeg before the tests, through the one shared action", (_n, steps) => {
+    const s = steps();
+    const ff = s.findIndex((st) => st.uses === "./.github/actions/setup-ffmpeg");
+    const test = s.findIndex((st) => String(st.name).toLowerCase() === "test");
+    expect(ff, "no setup-ffmpeg step").toBeGreaterThanOrEqual(0);
+    expect(ff).toBeLessThan(test);
+    expect((s[test].env as Record<string, string> | undefined)?.LIBI_REQUIRE_FFMPEG).toBe("1");
+  });
+
+  it("the shared action pins the n9.0 line and proves drawtext", () => {
+    const a = readFileSync(path.join(ROOT, ".github/actions/setup-ffmpeg/action.yml"), "utf8");
+    expect(a).toContain("ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz");
+    expect(a).toMatch(/-filters\)"\s*\n\s*if ! grep -q drawtext/);
+    // curl's plain --retry does not retry a 404, which is what BtbN's daily
+    // re-upload window looks like.
+    expect(a).toContain("--retry 5 --retry-all-errors");
+    expect(a).toContain("sha256sum -c");
+    // A composite action's `run` steps need an explicit shell, and bash is what
+    // makes `set -o pipefail` mean anything.
+    const parsed = load(a) as { runs: { using: string; steps: Step[] } };
+    expect(parsed.runs.using).toBe("composite");
+    for (const st of parsed.runs.steps.filter((x) => x.run)) {
+      expect(st.shell).toBe("bash");
+    }
+  });
+});
+
+describe("setup-ffmpeg, run for real against a fake BtbN release", () => {
+  // The action is on the release path now (both gates jobs), so its failure
+  // modes are exercised, not just string-matched: the script in action.yml is
+  // executed under bash with `curl` answering from a fixture directory.
+  type ActionStep = { run: string; env: Record<string, string> };
+  const action = load(
+    readFileSync(path.join(ROOT, ".github/actions/setup-ffmpeg/action.yml"), "utf8"),
+  ) as { runs: { steps: ActionStep[] } };
+  const step = action.runs.steps[0];
+  const ASSET = step.env.ASSET;
+
+  const FAKE_FFMPEG = (filters: string) =>
+    `#!/bin/bash\ncase "$1" in\n  -version) echo "ffmpeg version n9.0-fake Copyright"; echo "built with gcc";;\n` +
+    `  -hide_banner) echo " ... ${filters} V->V  (fake)";;\nesac\n`;
+
+  function runAction(opts: {
+    listed?: boolean;
+    corrupt?: boolean;
+    /** Only the FIRST download of the asset is corrupt (a re-upload race). */
+    corruptOnce?: boolean;
+    checksumsMissing?: boolean;
+    drawtext?: boolean;
+  }) {
+    const dir = mkdtempSync(path.join(tmpdir(), "setup-ffmpeg-"));
+    const release = path.join(dir, "release");
+    const bin = path.join(dir, "bin");
+    const dest = path.join(dir, "dest");
+    const log = path.join(dir, "curl.log");
+    const workParent = path.join(dir, "work");
+    for (const d of [release, bin, dest, workParent]) mkdirSync(d);
+    // Something of the caller's in the directory it hands the action.
+    writeFileSync(path.join(workParent, "keep-me"), "not the action's to delete");
+    try {
+      // A tarball shaped like BtbN's: <top>/bin/{ffmpeg,ffprobe}.
+      const top = path.join(dir, "pkg", "ffmpeg-n9.0-fake");
+      mkdirSync(path.join(top, "bin"), { recursive: true });
+      const ff = FAKE_FFMPEG(opts.drawtext === false ? "scale" : "drawtext");
+      writeFileSync(path.join(top, "bin", "ffmpeg"), ff);
+      writeFileSync(path.join(top, "bin", "ffprobe"), ff);
+      chmodSync(path.join(top, "bin", "ffmpeg"), 0o755);
+      chmodSync(path.join(top, "bin", "ffprobe"), 0o755);
+      execFileSync("tar", ["-cJf", path.join(release, ASSET), "-C", path.join(dir, "pkg"), "ffmpeg-n9.0-fake"]);
+      const sum = execFileSync("sha256sum", [path.join(release, ASSET)], { encoding: "utf8" }).split(" ")[0];
+      if (opts.corrupt) writeFileSync(path.join(release, ASSET), "not the bytes BtbN hashed");
+      // <asset>.1 is what the FIRST fetch of <asset> gets, when present.
+      if (opts.corruptOnce) writeFileSync(path.join(release, `${ASSET}.1`), "an upload mid-replacement");
+      const lines = [`${"0".repeat(64)}  ffmpeg-master-latest-linux64-gpl.tar.xz`];
+      if (opts.listed !== false) lines.push(`${sum}  ${ASSET}`);
+      if (!opts.checksumsMissing) writeFileSync(path.join(release, "checksums.sha256"), lines.join("\n") + "\n");
+      // curl -fsSL --retry … -o <out> <url>: serve <url>'s basename from the
+      // fixture release, exit 22 (curl -f's HTTP error) when absent.
+      writeFileSync(
+        path.join(bin, "curl"),
+        `#!/bin/bash\necho "$*" >> "${log}"\nout=""; url=""\n` +
+          `while [ $# -gt 0 ]; do case "$1" in -o) out="$2"; shift 2;; --retry|--retry-delay) shift 2;; -*) shift;; *) url="$1"; shift;; esac; done\n` +
+          `f="${release}/\${url##*/}"\n[ -f "$f" ] || exit 22\n` +
+          // Count fetches per file; serve <file>.<n> for the n-th when it exists.
+          `n=$(( $(cat "$f.count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$f.count"\n` +
+          `[ -f "$f.$n" ] && f="$f.$n"\ncp "$f" "$out"\n`,
+      );
+      chmodSync(path.join(bin, "curl"), 0o755);
+      const r = spawnSync("bash", ["--noprofile", "--norc", "-eo", "pipefail", "-c", step.run], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...step.env,
+          PATH: `${dest}:${bin}:${process.env.PATH}`,
+          SETUP_FFMPEG_WORK_DIR: workParent,
+          SETUP_FFMPEG_INSTALL_DIR: dest,
+        },
+      });
+      return {
+        status: r.status,
+        out: r.stdout + r.stderr,
+        installed: existsSync(path.join(dest, "ffmpeg")) && existsSync(path.join(dest, "ffprobe")),
+        curl: existsSync(log) ? readFileSync(log, "utf8") : "",
+        keptCallersFile: existsSync(path.join(workParent, "keep-me")),
+        assetFetches: Number(
+          existsSync(path.join(release, `${ASSET}.count`))
+            ? readFileSync(path.join(release, `${ASSET}.count`), "utf8").trim()
+            : "0",
+        ),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("verifies the asset against checksums.sha256, installs both binaries and prints the version", () => {
+    const r = runAction({});
+    expect(r.status, r.out).toBe(0);
+    expect(r.installed).toBe(true);
+    expect(r.out).toContain(`${ASSET}: OK`);
+    expect(r.out).toContain("ffmpeg version n9.0-fake");
+    expect(r.curl).toContain("--retry 5 --retry-all-errors");
+    expect(r.assetFetches).toBe(1);
+  });
+
+  it("never deletes the directory it is given, only its own subdirectory", () => {
+    for (const r of [runAction({}), runAction({ corrupt: true })]) {
+      expect(r.keptCallersFile).toBe(true);
+    }
+  });
+
+  it("a mismatch from a re-upload race is re-fetched once and then installs", () => {
+    const r = runAction({ corruptOnce: true });
+    expect(r.status, r.out).toBe(0);
+    expect(r.out).toMatch(/re-fetching both once/);
+    expect(r.assetFetches).toBe(2);
+    expect(r.installed).toBe(true);
+  });
+
+  it("a rotated-out release line fails naming the asset and the file to update", () => {
+    const r = runAction({ listed: false });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/::error[^\n]*ffmpeg-n9\.0-latest-linux64-gpl-9\.0\.tar\.xz is no longer in BtbN's latest release/);
+    expect(r.out).toContain("Update ASSET in .github/actions/setup-ffmpeg/action.yml");
+    expect(r.installed).toBe(false);
+    // It never even downloads the tarball.
+    expect(r.curl).not.toContain(`/${ASSET}`);
+  });
+
+  it("bytes that do not match the checksum are refused, not installed", () => {
+    const r = runAction({ corrupt: true });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/::error[^\n]*does not match BtbN's checksums\.sha256, twice/);
+    // Says what it most likely is, and what to do.
+    expect(r.out).toMatch(/::error[^\n]*daily re-upload[^\n]*re-run the job/);
+    expect(r.assetFetches).toBe(2);
+    expect(r.installed).toBe(false);
+  });
+
+  it("no checksums file (after the retries) fails with its own message", () => {
+    const r = runAction({ checksumsMissing: true });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/::error[^\n]*could not download .*checksums\.sha256/);
+  });
+
+  it("an ffmpeg without drawtext fails the step", () => {
+    const r = runAction({ drawtext: false });
+    expect(r.status).toBe(1);
+    expect(r.out).toMatch(/::error[^\n]*no drawtext filter/);
+  });
 });
 
 describe("Sentry source maps reach the build that actually ships", () => {
@@ -833,5 +1024,184 @@ describe("release-electron.yml: the shapes a dispatch can produce", () => {
     expect(shapeOf({}, { mac: "failure" }).publish).toBe("skipped");
     // Including on a dry run, where there is nothing to publish anyway.
     expect(shapeOf({ dry_run: true }, { mac: "failure" }).publish).toBe("skipped");
+  });
+});
+
+describe("the release candidate branch gets every check main does", () => {
+  // Release day squashes the week branch onto `release/<version>`, pushes it,
+  // and fast-forwards `main` only once that candidate is green. On 0.1.16 the
+  // candidate ran Tests but NOT the License check — license-check.yml listened
+  // to `main` alone — although the runbook said both. A check that first runs
+  // on `main` can only report a problem as a public fix-up commit.
+  type Triggers = { on: { push?: { branches?: string[] } | null } };
+
+  it("runs the licence check on release candidates as well as main", () => {
+    const lic = read("license-check.yml") as unknown as Triggers;
+    const branches = lic.on.push?.branches ?? [];
+    expect(branches).toContain("main");
+    expect(branches).toContain("release/**");
+  });
+
+  it("runs Tests on every push", () => {
+    // test.yml has no branch filter at all, which is what makes it cover the
+    // candidate. A `branches:` added here would silently drop release/**.
+    const tests = read("test.yml") as unknown as Triggers;
+    expect("push" in tests.on).toBe(true);
+    expect(tests.on.push?.branches).toBeUndefined();
+  });
+});
+
+describe("a slow registry never turns a good publish red — 0.1.16", () => {
+  // 0.1.16 sat in npm "processing" for ~56 minutes. The npm job's verify
+  // (~25 min) exited 1 on a good publish, and the Electron side would have
+  // failed on the same lag: `resolve` asked npm ONCE, and release-electron.js
+  // polled only 20 × 15 s.
+  const resolveRun = stepsIn(elWf, "resolve")
+    .map((st) => String(st.run ?? ""))
+    .join("\n");
+
+  it("resolve polls the per-version document for up to an hour, 15 s apart", () => {
+    expect(resolveRun).toMatch(/\bfor\b|\bwhile\b|\buntil\b/);
+    expect(resolveRun).toContain("sleep 15");
+    const bound = Number(/attempts=(\d+)/.exec(resolveRun)?.[1] ?? "0");
+    expect(bound, "resolve must poll ≥ 240 × 15 s").toBeGreaterThanOrEqual(240);
+    expect(resolveRun).toMatch(/npm view[^\n]*"@nagellabs\/libi@\$v"/);
+  });
+
+  it("and says to re-dispatch with the same version when it gives up", () => {
+    expect(resolveRun).toMatch(/not served yet/);
+    expect(resolveRun).toMatch(/re-dispatch later with the same version/);
+  });
+
+  /** Run the resolve step for real under `bash -e` (GitHub's default shell),
+   *  with `npm` answering from a script and `sleep` a no-op. */
+  function runResolve(opts: { failuresBeforeServed: number; version?: string }) {
+    const dir = mkdtempSync(path.join(tmpdir(), "resolve-step-"));
+    const bin = path.join(dir, "bin");
+    mkdirSync(bin);
+    const counter = path.join(dir, "calls");
+    writeFileSync(counter, "0");
+    // `npm view @nagellabs/libi@<v> version …` → E404 for the first N calls,
+    // then the version. Every call is counted.
+    writeFileSync(
+      path.join(bin, "npm"),
+      `#!/bin/bash\nn=$(( $(cat "${counter}") + 1 )); echo "$n" > "${counter}"\n` +
+        `if [ "$n" -le ${opts.failuresBeforeServed} ]; then echo "npm error 404" >&2; exit 1; fi\n` +
+        `echo "\${2#@nagellabs/libi@}"\n`,
+    );
+    writeFileSync(path.join(bin, "sleep"), "#!/bin/bash\nexit 0\n");
+    chmodSync(path.join(bin, "npm"), 0o755);
+    chmodSync(path.join(bin, "sleep"), 0o755);
+    const output = path.join(dir, "out");
+    writeFileSync(output, "");
+    const script = String(stepsIn(elWf, "resolve")[0].run)
+      .replaceAll("${{ inputs.version }}", opts.version ?? "0.1.17")
+      .replaceAll("${{ inputs.build_ref }}", "");
+    try {
+      const r = spawnSync("bash", ["-e", "-c", script], {
+        env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, GITHUB_OUTPUT: output },
+        encoding: "utf8",
+      });
+      return {
+        status: r.status,
+        stdout: r.stdout,
+        calls: Number(readFileSync(counter, "utf8").trim()),
+        output: readFileSync(output, "utf8"),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("resolve, run for real: served on the 4th ask → outputs the version", () => {
+    const r = runResolve({ failuresBeforeServed: 3 });
+    expect(r.status).toBe(0);
+    expect(r.calls).toBe(4);
+    expect(r.output).toContain("version=0.1.17");
+    expect(r.output).toContain("ref=v0.1.17");
+  });
+
+  it("resolve, run for real: never served → fails after exactly 240 asks, naming the re-dispatch", () => {
+    const r = runResolve({ failuresBeforeServed: 10_000 });
+    expect(r.status).toBe(1);
+    expect(r.calls).toBe(240);
+    expect(r.stdout).toMatch(/::error::.*not served yet.*re-dispatch later with the same version/);
+    expect(r.output).not.toContain("version=");
+  });
+
+  it("the resolve job's own timeout leaves room for that hour", () => {
+    const t = Number((jobIn(elWf, "resolve") as { "timeout-minutes"?: number })["timeout-minutes"] ?? 360);
+    expect(t).toBeGreaterThan(60);
+  });
+
+  it("release-electron.js waits as long as resolve does", () => {
+    const src = readFileSync(path.join(ROOT, "scripts/release-electron.js"), "utf8");
+    const attempts = Number(/REGISTRY_ATTEMPTS = (\d+)/.exec(src)?.[1] ?? "0");
+    const delay = Number((/REGISTRY_DELAY_MS = ([\d_]+)/.exec(src)?.[1] ?? "0").replace(/_/g, ""));
+    expect(attempts).toBeGreaterThanOrEqual(240);
+    expect(delay).toBe(15_000);
+  });
+
+  it("the version commit + tag push still runs after a publish npm accepted", () => {
+    // Exit 0 on "accepted, not yet served" keeps success() true; the
+    // published=='true' arm keeps the push alive even if the step fails for
+    // another reason AFTER npm accepted (a mismatch, a killed runner).
+    const push = stepsIn(npmWf, "npm").find((st) =>
+      String(st.run ?? "").includes("git push --follow-tags origin HEAD:main"),
+    );
+    expect(push, "the version commit/tag push step is gone").toBeDefined();
+    const cond = String(push!.if);
+    expect(cond).toContain("success()");
+    expect(cond).toContain("steps.publish.outputs.published == 'true'");
+    expect(cond).toContain("!inputs.dry_run");
+  });
+
+  it("the local live check is wired as npm run release:verify-live", () => {
+    const pkg = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf8"));
+    expect(pkg.scripts["release:verify-live"]).toBe("node scripts/verify-npm-live.js");
+  });
+});
+
+describe("the macOS shell build says how close it came to its memory ceiling", () => {
+  // 0.1.16's `next build` worker ran out of heap twice on the 7 GB macos-15
+  // runner; cf7ad01f raised the heap to 5 GB. Without a measurement the next
+  // dependency bump finds the new ceiling on a real release run.
+  const mac = stepsIn(elWf, "mac");
+  const buildAt = mac.findIndex((st) =>
+    String(st.run ?? "").includes("node scripts/release-electron.js --target=mac"),
+  );
+
+  it("runs the build under /usr/bin/time -l, into RUNNER_TEMP", () => {
+    expect(buildAt, "mac build step not found").toBeGreaterThanOrEqual(0);
+    const run = String(mac[buildAt].run);
+    expect(run).toMatch(
+      /\/usr\/bin\/time -l -o "\$RUNNER_TEMP\/build-time\.txt" node scripts\/release-electron\.js --target=mac/,
+    );
+  });
+
+  it("reports it in a later step that runs even when the build failed", () => {
+    const report = mac.findIndex((st) =>
+      String(st.run ?? "").includes('node scripts/build-memory-report.js "$RUNNER_TEMP/build-time.txt"'),
+    );
+    expect(report, "no memory-report step").toBeGreaterThan(buildAt);
+    expect(String(mac[report].if)).toContain("always()");
+  });
+
+  it("fails a DRY run, but never withholds a real Release after a good build", () => {
+    // Review I-3: a trip on the real run would mark `mac` failed and `publish`
+    // would skip, after a signed, notarized build. continue-on-error is TRUE
+    // exactly when this is not a dry run.
+    const report = mac.find((st) =>
+      String(st.run ?? "").includes("node scripts/build-memory-report.js"),
+    )!;
+    expect(String(report["continue-on-error"]).replace(/\s+/g, "")).toBe("${{!inputs.dry_run}}");
+    // And it sits after the artifact upload, so a red dry run still has them.
+    const upload = mac.findIndex((st) => String(st.uses ?? "").includes("actions/upload-artifact"));
+    expect(mac.indexOf(report)).toBeGreaterThan(upload);
+  });
+
+  it("the heap limit it reports against is still the one the job sets", () => {
+    const env = (jobIn(elWf, "mac").env ?? {}) as Record<string, string>;
+    expect(env.NODE_OPTIONS).toContain("--max-old-space-size=5120");
   });
 });

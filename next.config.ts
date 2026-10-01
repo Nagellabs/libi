@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { NextConfig } from "next";
+import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
 import { withSentryConfig } from "@sentry/nextjs";
 
 // Pin the Sentry release to the package version so uploaded source maps and
@@ -12,6 +13,27 @@ const libiVersion: string = JSON.parse(
 ).version;
 
 const nextConfig: NextConfig = {
+  // DEV/E2E ONLY. The e2e harnesses (playwright.config.ts, and the Electron
+  // one) and the skill-eval harness (scripts/skill-eval/harness.ts) boot
+  // `next dev` with LIBI_NEXT_DIST_DIR set, so their server builds into its
+  // own dir. Next 16 locks `<distDir>/dev/lock` for a dev server, and with one
+  // shared `.next` the eval server died with "Another next dev server is
+  // already running" whenever the checkout's own dev app was up.
+  //
+  // Honoured ONLY in Next's dev-server phase (`nextConfigFor` below, keyed on
+  // PHASE_DEVELOPMENT_SERVER — not on NODE_ENV, which an inherited
+  // NODE_ENV=test would defeat): this file ships in the tarball and
+  // `next({ dev: false })` re-reads it at runtime, so a value exported in a
+  // developer's shell must never send `next build` or the packaged / `npx`
+  // server (lib/server/next-server.ts, lib/cli/studio.ts — both serve `.next`)
+  // to another dir. scripts/next-build-release.js also drops the variable
+  // before `next build`. Every e2e dir must also be gitignored, listed in
+  // tsconfig.json's `include` AND `exclude` (see the comment there), and
+  // excluded from tracing below — __tests__/unit/build/next-config-dist-dir.test.ts
+  // holds all four. Any OTHER value makes `next dev` append its type globs to
+  // the tracked tsconfig.json (and re-append them whenever the file changes):
+  // for a second dev server of your own, use another worktree.
+  distDir: ".next",
   // NO `output: "standalone"`. Nothing libi ships ever read it: both
   // production paths boot Next PROGRAMMATICALLY (`next({ dev: false, dir })`
   // — lib/server/next-server.ts for the packaged app, lib/cli/studio.ts for
@@ -34,8 +56,25 @@ const nextConfig: NextConfig = {
       "dist-electron/**",
       "docs-local/**",
       ".next/dev/**",
+      // The e2e servers' own Next dirs (distDir above).
+      ".next-e2e/**",
+      ".next-electron-e2e/**",
+      // The skill-eval scenario server's own Next dir (same mechanism).
+      ".next-skill-eval/**",
     ],
   },
+  // Turbopack resolves modules only inside its root. Left unset, Next takes the
+  // directory of the OUTERMOST lockfile above the app — for a worktree under
+  // `.claude/worktrees/<name>/` that is the canonical checkout, which printed
+  // "Next.js inferred your workspace root" on every worktree boot. Each
+  // checkout is its own root; the npm tarball and the Electron bundle build
+  // from the package root, so they get the root they always had. Next sets
+  // `outputFileTracingRoot` to the same value (the two must agree), so that
+  // one stays unset. `__dirname`: Next transpiles this file to CommonJS.
+  //
+  // Not the cure for a `@vercel/turbopack-next/internal/font/google/font`
+  // build error in a worktree: that is a stale `.next` (AGENTS.md → Testing).
+  turbopack: { root: __dirname },
   // Next 16 ships a cross-origin guard that blocks dev-resource requests
   // (HMR socket, RSC payload, chunk preload) coming from hosts other than
   // the one Next started on. We bind on `localhost`, but the Electron main
@@ -130,7 +169,18 @@ const nextConfig: NextConfig = {
 // when SENTRY_AUTH_TOKEN (plus org + project) is set, so local/dev builds are
 // unaffected. No `tunnelRoute`: this is an Electron desktop app, not a browser
 // deploy, so ad-blocker bypass is irrelevant and a proxy route only adds surface.
-export default withSentryConfig(nextConfig, {
+/**
+ * The config for one Next phase. Only a dev server (`next dev`) takes its dir
+ * from LIBI_NEXT_DIST_DIR — see `distDir` above.
+ */
+export function nextConfigFor(phase: string): NextConfig {
+  const devDistDir = phase === PHASE_DEVELOPMENT_SERVER ? process.env.LIBI_NEXT_DIST_DIR : undefined;
+  return devDistDir ? { ...nextConfig, distDir: devDistDir } : nextConfig;
+}
+
+// A config FUNCTION, so the phase decides the dir. Next calls it with
+// `(phase, { defaultConfig })`; withSentryConfig wraps a function as a function.
+export default withSentryConfig((phase: string) => nextConfigFor(phase), {
   // Org/project slugs are not secret — committed as defaults so release builds
   // only need the secret SENTRY_AUTH_TOKEN. Override via env for a fork/staging.
   org: process.env.SENTRY_ORG || "nagellabs",

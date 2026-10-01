@@ -3,7 +3,7 @@ import os from "os";
 import { stat as fsStat, mkdtemp, writeFile as fsWriteFile, rm as fsRm } from "fs/promises";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema/sqlite";
 import { getStorage } from "@/lib/storage";
@@ -12,6 +12,8 @@ import { runFfmpeg, resolveFfprobePath } from "@/lib/ffmpeg/exec";
 import { probeMedia } from "@/lib/ffmpeg/probe";
 import { streamHasAlpha } from "@/lib/ffmpeg/alpha";
 import { buildThumbnailArgs } from "@/lib/ffmpeg/thumb-args";
+import { derivedRights, fileCarriesAudio } from "@/lib/audio-rights/read";
+import { serializeAudioRights } from "@/lib/audio-rights/types";
 import type { ToolResult } from "./types";
 
 const execFileAsync = promisify(execFile);
@@ -54,9 +56,29 @@ export async function insertFileRow(args: {
    *  recorded. Leaving it unset persists NULL, which consumers read as
    *  opaque. */
   hasAlpha?: boolean | null;
+  /** The files this one was made from. An audio-bearing output takes the most
+   *  restrictive of their rights (`derivedRights`), so a trim of a download
+   *  stays copyrighted and a trim of libi's own music stays generated. */
+  derivedFrom?: string[];
 }): Promise<string> {
   const db = getDb();
   const id = crypto.randomUUID();
+  let audioRights: string | null = null;
+  if (args.derivedFrom?.length && fileCarriesAudio({ type: args.type, hasAudio: args.hasAudio ?? null, audioRights: null })) {
+    const inputs = db
+      .select({
+        type: files.type,
+        hasAudio: files.hasAudio,
+        audioRights: files.audioRights,
+        createdAt: files.createdAt,
+        aiGeneration: files.aiGeneration,
+        description: files.description,
+      })
+      .from(files)
+      .where(inArray(files.id, args.derivedFrom))
+      .all();
+    audioRights = serializeAudioRights(derivedRights(inputs));
+  }
   db.insert(files)
     .values({
       id,
@@ -73,6 +95,7 @@ export async function insertFileRow(args: {
       mediaHeight: args.mediaHeight ?? null,
       hasAudio: args.hasAudio ?? null,
       hasAlpha: args.hasAlpha ?? null,
+      audioRights,
     })
     .run();
   return id;
@@ -222,6 +245,7 @@ export async function trimVideo(params: TrimVideoParams): Promise<ToolResult> {
     // what gets recorded (a -c copy to .mp4 loses the WebM alpha side-band —
     // hasAlpha honestly lands false in that case).
     hasAlpha: probed.hasAlpha,
+    derivedFrom: [params.fileId],
   });
 
   return {
@@ -316,6 +340,7 @@ export async function extractAudio(params: ExtractAudioParams): Promise<ToolResu
     size: stat.size,
     mediaDuration: probed.duration,
     hasAudio: probed.hasAudio,
+    derivedFrom: [params.fileId],
   });
 
   return { success: true, data: { fileId, filename: outFilename, durationSeconds: probed.duration } };
@@ -483,6 +508,7 @@ export async function concatVideos(params: ConcatVideosParams): Promise<ToolResu
       mediaHeight: probed.height,
       hasAudio: probed.hasAudio,
       hasAlpha: probed.hasAlpha,
+      derivedFrom: params.fileIds,
     });
 
     return {

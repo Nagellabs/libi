@@ -112,16 +112,25 @@ function VideoBranch({
   // When the proxy is a genuine downscale, expose a "View original" toggle.
   const downscaled = isProxyDownscaled(asset.proxyHeight, asset.mediaHeight);
   const [showOriginal, setShowOriginal] = useState(false);
+  // A proxy the browser couldn't load (gone from disk, unreadable): play the
+  // original instead of a dead player, and stop offering the proxy back.
+  const [proxyFailed, setProxyFailed] = useState(false);
 
   // Reset to the (scrub-friendly) proxy whenever the asset changes —
   // adjusted during render (previous-state pattern), not in an effect.
   const [prevAssetId, setPrevAssetId] = useState(asset.id);
+  const [prevProxyKey, setPrevProxyKey] = useState(asset.proxyFilename);
   if (asset.id !== prevAssetId) {
     setPrevAssetId(asset.id);
     setShowOriginal(false);
+    setProxyFailed(false);
+  }
+  if (asset.proxyFilename !== prevProxyKey) {
+    setPrevProxyKey(asset.proxyFilename);
+    setProxyFailed(false);
   }
 
-  const useProxy = proxyReady && !showOriginal;
+  const useProxy = proxyReady && !showOriginal && !proxyFailed;
   const videoUrl = useProxy
     ? `/api/files/by-id/${asset.id}/proxy`
     : `/api/files/by-id/${asset.id}/content`;
@@ -150,6 +159,9 @@ function VideoBranch({
         }}
         src={videoUrl}
         controls
+        onError={() => {
+          if (useProxy) setProxyFailed(true);
+        }}
         onLoadedMetadata={(e) => {
           const v = e.currentTarget;
           if (v.videoWidth > 0 && v.videoHeight > 0) {
@@ -158,7 +170,7 @@ function VideoBranch({
         }}
         className="h-full w-full rounded object-contain"
       />
-      {downscaled && (
+      {downscaled && !proxyFailed && (
         <div className="absolute left-2 top-2 flex items-center gap-2">
           {useProxy ? (
             <>
@@ -222,5 +234,43 @@ function TextViewer({ url }: { url: string }) {
     <pre className="max-h-full w-full max-w-3xl overflow-auto rounded bg-background p-4 font-mono text-xs text-foreground">
       {text}
     </pre>
+  );
+}
+
+/**
+ * A playable video that is not a `files` row — an export (spec §A4). The same
+ * resizable box and plain player an asset video gets; `boxKey` keys the box's
+ * remembered size.
+ */
+export function MediaSrcView({
+  src,
+  boxKey,
+  width,
+  height,
+  onPlay,
+}: {
+  src: string;
+  boxKey: string;
+  width: number | null;
+  height: number | null;
+  onPlay?: () => void;
+}) {
+  const [measuredAspect, setMeasuredAspect] = useState<number | null>(null);
+  const aspect = width && height ? width / height : measuredAspect;
+  return (
+    <div className="h-full w-full bg-black/20">
+      <ResizableMediaBox key={boxKey} assetId={boxKey} aspect={aspect}>
+        <video
+          src={src}
+          controls
+          onPlay={onPlay}
+          onLoadedMetadata={(e) => {
+            const v = e.currentTarget;
+            if (v.videoWidth > 0 && v.videoHeight > 0) setMeasuredAspect(v.videoWidth / v.videoHeight);
+          }}
+          className="h-full w-full rounded object-contain"
+        />
+      </ResizableMediaBox>
+    </div>
   );
 }

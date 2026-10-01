@@ -15,6 +15,7 @@ import { files } from "@/lib/db/schema/sqlite";
 import { getLibiStorageDir } from "@/lib/libi-home";
 import { proxyLogger as logger } from "@/lib/logger";
 import { navigationEmitter } from "@/lib/navigation-events";
+import { forgetEvictedProxies, recordEvictedProxy } from "@/lib/proxy/evicted";
 
 /**
  * Best-effort: unlink the proxy file for a `fileId` (if one exists on disk)
@@ -31,10 +32,15 @@ export function dropProxyFile(
   const db = getDb();
   const [row] = db.select().from(files).where(eq(files.id, fileId)).limit(1).all();
   if (!row) return;
-  if (row.proxyStatus === "idle" && !row.proxyFilename) return;
+  if (row.proxyStatus === "idle" && !row.proxyFilename) {
+    // Nothing to drop; a file going away forgets any eviction record.
+    if (reason !== "lru") forgetEvictedProxies([fileId]);
+    return;
+  }
 
   logger.info({ fileId, event: "drop", reason }, "proxy.drop");
 
+  let bytes = 0;
   if (row.proxyFilename) {
     const proxyPath = path.join(
       getLibiStorageDir(),
@@ -42,10 +48,25 @@ export function dropProxyFile(
       row.proxyFilename,
     );
     try {
+      bytes = fs.statSync(proxyPath).size;
+    } catch {
+      /* already gone */
+    }
+    try {
       fs.unlinkSync(proxyPath);
     } catch {
       /* ignore — already gone is fine */
     }
+  }
+
+  // The LRU's evictions are recorded: the only proxies the piece's next open
+  // re-makes (lib/proxy/ensure.ts, review I2). Any other drop (a deleted
+  // file, a user's drop, an alpha backfill) means the proxy isn't wanted back.
+  try {
+    if (reason === "lru") recordEvictedProxy(fileId, bytes);
+    else forgetEvictedProxies([fileId]);
+  } catch (err) {
+    logger.warn({ tag: "proxy", op: "evicted_record_failed", fileId, reason, err: err instanceof Error ? err.message : String(err) }, "proxy.evicted_record_failed");
   }
 
   db.update(files)

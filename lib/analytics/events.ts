@@ -68,6 +68,21 @@ export const EVENT_NAMES = [
   "piece_created",
   "export_started",
   "export_completed",
+  // An export of a piece WITH copyrighted audio was started (POST /api/export).
+  // Params: purpose "social" | "personal"; copyrighted "include" | "exclude"
+  // (does the file carry any copyrighted song). Pieces without copyrighted
+  // audio fire nothing.
+  "export_audio_decision",
+  // An export was queued (POST /api/export → a piece_exports record). Params:
+  // source "user" | "agent" (libi's own page vs a tool call); variants
+  // "1" | "2-3" | "4+" — how many exports that one request queued
+  // (libi.export_video's `variants`, sent as `batchSize`).
+  "export_queued",
+  // An action on a finished export, from the piece's Exports tab ("tab") or
+  // the resources panel's Exports folder ("resources"). Params: action
+  // reveal | copy (the file itself) | copy_path (the fallback: its location) |
+  // rename | delete | play | post (opened the Posting tab on it); surface tab | resources.
+  "export_action",
   "agent_message_sent",
   // The user restarted a chat from its right-click menu and it loaded again
   // (`SessionManager.restartSession`, success path only). Params:
@@ -229,6 +244,10 @@ export const EVENT_NAMES = [
   // Params: provider (SocialProviderId); platform_count "1"|"2"|"3+";
   // mode draft|schedule|now; source ui|agent.
   "social_post_created",
+  // A post was created through libi with a music decision on a target (spec
+  // §6): once per such target, from `POST /api/social/posts`. Params: platform
+  // instagram|tiktok; mode attach|draft|include|strip.
+  "social_music_plan",
   // An existing post was changed through libi — edit, (re)schedule, publish
   // now, cancel a schedule, delete or retry a failed post. One event for all
   // of them so the action itself is the bounded-cardinality param rather than

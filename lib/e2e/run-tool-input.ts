@@ -51,6 +51,7 @@ import {
   deleteTemplateSchema,
   listTemplatesSchema,
   publishTemplateSchema,
+  audioAddClipSchema,
 } from "@/mcp/tools/schemas";
 
 /** Each tool's `inputSchema` exactly as `mcp/server.ts` passes it to `registerTool`. */
@@ -71,6 +72,7 @@ export const RUN_TOOL_INPUT_SCHEMAS = {
   "libi.delete_template": deleteTemplateSchema,
   "libi.list_templates": listTemplatesSchema,
   "libi.publish_template": publishTemplateSchema,
+  "libi.audio_add_clip": audioAddClipSchema,
 } as const;
 
 export type RunToolName = keyof typeof RUN_TOOL_INPUT_SCHEMAS;

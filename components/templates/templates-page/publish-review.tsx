@@ -12,6 +12,8 @@ import { CreatorGatePrompt } from "@/components/templates/templates-page/creator
 import { OpensOutside } from "@/components/templates/templates-page/opens-outside";
 import { CloudRouteError, useConfirmPublishRequest, useCreatorStatus, useDiscardPublishRequest, usePublishRequests } from "@/lib/queries/templates-cloud";
 import { PUBLISH_PUBLIC_WARNING, RIGHTS_CONFIRMATION_LABEL } from "@/lib/templates/cloud/constants";
+import { confirmPublish, hasNativePublishConfirm } from "@/lib/shell/client";
+import { singleLineTextProblem } from "@/lib/templates/cloud/text-rules";
 import type { PublishRequestView } from "@/lib/templates/types";
 
 /** What makes a review a new one to look at: the request, its state and its confirm code (which rotates on every claim). */
@@ -104,9 +106,10 @@ export function PublishReviewPanel({
   const confirm = useConfirmPublishRequest();
   const discard = useDiscardPublishRequest();
   const creator = useCreatorStatus();
-  // The Terms of the catalog this request publishes to: a development site's own, else the page's.
+  // The Terms of the catalog this request publishes to, production's included — never the page's, which
+  // follow the ACTIVE catalog and may already name another (review N2). Test mode has no origin: the page's.
   const pageLinks = useLegalLinks();
-  const links = r.catalog.kind === "development" && r.catalog.origin ? legalLinksFor(r.catalog.origin) : pageLinks;
+  const links = r.catalog.origin ? legalLinksFor(r.catalog.origin) : pageLinks;
   const gate = creator.data?.status;
   const creatorGate = gate === "none" || gate === "pending" || gate === "rejected" ? gate : null;
   const [refusal, setRefusal] = useState<string | null>(null);
@@ -121,11 +124,13 @@ export function PublishReviewPanel({
     return () => clearTimeout(t);
   }, [armKey]);
   const armed = armedKey === armKey;
+  // The desktop app's native confirm is up (EL-1): nothing else may be pressed until it answers.
+  const [asking, setAsking] = useState(false);
   // Busy from the click until the list says how it went: a confirm that just
   // succeeded reads "awaiting" until the refetch lands.
   const publishing = r.state === "publishing" || confirm.isPending || (confirm.isSuccess && r.state === "awaiting");
   const publishable = (r.state === "awaiting" || r.state === "failed") && !!r.confirmCode;
-  const canPublish = armed && rights && !publishing && !discard.isPending && publishable;
+  const canPublish = armed && rights && !publishing && !asking && !discard.isPending && publishable;
   // Only the rights box holds Publish back: say so beside it, and tie it to the button for a screen reader.
   const needsRights = !creatorGate && !rights && !publishing && publishable;
   const rightsHintId = useId();
@@ -139,7 +144,40 @@ export function PublishReviewPanel({
     // trust the component library alone to swallow the click.
     if (!canPublish || !r.confirmCode) return;
     setRefusal(null);
-    confirm.mutate({ id: r.id, confirmCode: r.confirmCode, rightsConfirmed: rights }, { onError: (e) => setRefusal(e instanceof CloudRouteError ? e.message : "Couldn't start the publish. Try again.") });
+    // What this click publishes, fixed now: a request that changes while the
+    // native dialog is up is refused by the confirm route (its code rotated).
+    const send = { id: r.id, confirmCode: r.confirmCode, rightsConfirmed: rights };
+    const go = () =>
+      confirm.mutate(send, { onError: (e) => setRefusal(e instanceof CloudRouteError ? e.message : "Couldn't start the publish. Try again.") });
+    // No native confirm here (web/npx, or an older desktop shell): publish as always.
+    if (!hasNativePublishConfirm()) {
+      go();
+      return;
+    }
+    // The desktop app asks once more, natively, before anything is sent — on
+    // top of the arming delay and the rights box, never instead of them.
+    setAsking(true);
+    confirmPublish({ templateName: r.name, catalogHost: r.catalog.host ?? "the test-mode catalog" })
+      .then(
+        (ok) => {
+          if (ok === false) return; // Cancel: nothing sent, nothing to say.
+          if (ok === "refused") {
+            // The shell answers "refused" for the name OR the host (electron/confirm-publish.ts):
+            // only a name problem points at the name — anything else is the host, most likely an
+            // over-long development catalog address.
+            const problem = singleLineTextProblem(r.name);
+            setRefusal(
+              problem
+                ? `The desktop app won't show this template's name in its confirmation: the name ${problem}. Ask the agent to rename it and prepare the publish again.`
+                : "The desktop app refused to show its confirmation, so nothing was sent. If you're using a development catalog, check its address in Settings → Templates, then try again.",
+            );
+            return;
+          }
+          go();
+        },
+        () => setRefusal("The desktop app couldn't ask you to confirm. Try again."),
+      )
+      .finally(() => setAsking(false));
   };
   const onDiscard = () => {
     setRefusal(null);
@@ -260,14 +298,14 @@ export function PublishReviewPanel({
           <Button
             data-testid="publish-review-publish"
             // Busy reads as busy (the shared style); settling reads as disabled.
-            className={`cursor-pointer ${publishing ? BUSY_BUTTON_CLASS : "aria-disabled:pointer-events-none aria-disabled:opacity-50"}`}
+            className={`cursor-pointer ${publishing || asking ? BUSY_BUTTON_CLASS : "aria-disabled:pointer-events-none aria-disabled:opacity-50"}`}
             disabled={!canPublish}
             // Focusable while busy, settling or waiting for the rights box, so a keyboard user can reach it and hear why.
-            focusableWhenDisabled={publishing || !armed || needsRights}
+            focusableWhenDisabled={publishing || asking || !armed || needsRights}
             aria-describedby={needsRights ? rightsHintId : undefined}
             onClick={onPublish}
           >
-            {publishing ? <BusyLabel>Publishing…</BusyLabel> : r.state === "failed" ? "Try again: publish publicly" : "Publish publicly"}
+            {publishing ? <BusyLabel>Publishing…</BusyLabel> : asking ? <BusyLabel>Confirm in the dialog…</BusyLabel> : r.state === "failed" ? "Try again: publish publicly" : "Publish publicly"}
           </Button>
         )}
         {needsRights && (
@@ -279,7 +317,7 @@ export function PublishReviewPanel({
           data-testid="publish-review-discard"
           variant="outline"
           className={`cursor-pointer ${BUSY_BUTTON_CLASS}`}
-          disabled={publishing || discard.isPending}
+          disabled={publishing || asking || discard.isPending}
           focusableWhenDisabled={discard.isPending}
           onClick={onDiscard}
         >

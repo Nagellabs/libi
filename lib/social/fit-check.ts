@@ -8,7 +8,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import { probeMedia } from "@/lib/ffmpeg/probe";
-import { resolveExportFolder } from "@/lib/db/settings";
 import { getLibiStorageDir } from "@/lib/libi-home";
 import { findSocialProvider, type SocialPlatform, type SocialProviderId } from "@/lib/social/catalog";
 import { SocialError } from "@/lib/social/errors";
@@ -91,18 +90,16 @@ export function checkFit(probe: FitProbe, target: FitTarget, providerId: SocialP
 }
 
 /**
- * An export path libi may read: inside the export folder or libi's storage,
- * after realpath (no traversal, no symlink escape). Export/media code must
- * only ever read from these two roots — never an arbitrary path handed up
- * from a client.
+ * An export path libi may read: inside libi's storage, after realpath (no
+ * traversal, no symlink escape). Exports live in `<storage>/<pieceId>/exports/`
+ * (lib/exports/paths.ts); nothing outside storage is one of the user's exports.
  */
 export function isAllowedExportPath(p: string): boolean {
   try {
     const real = fs.realpathSync(p);
-    return [resolveExportFolder(), getLibiStorageDir()].some((root) => {
-      const r = fs.existsSync(root) ? fs.realpathSync(root) : root;
-      return real === r || real.startsWith(r + path.sep);
-    });
+    const root = getLibiStorageDir();
+    const r = fs.existsSync(root) ? fs.realpathSync(root) : root;
+    return real === r || real.startsWith(r + path.sep);
   } catch {
     return false;
   }

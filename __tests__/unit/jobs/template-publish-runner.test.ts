@@ -476,6 +476,17 @@ describe("template_publish runner — identity", () => {
     expect(vi.mocked(setNickname).mock.invocationCallOrder[0]).toBeLessThan(secondPrep);
   });
 
+  it("a first publish to Production sends Production's nickname, never one cached from a development catalog (review M4)", async () => {
+    const { key } = getTemplatesAuthor()!;
+    setTemplatesAuthorNickname(key, "Dev Nick", { source: "https://libi-site-git-templates-nagellabs.vercel.app" });
+    vi.mocked(publishPrepare).mockResolvedValueOnce(SITE.nickname_required);
+    await run({});
+    expect(setNickname).toHaveBeenCalledTimes(1);
+    expect(setNickname).toHaveBeenCalledWith(key, "nadav");
+    expect(getTemplatesAuthor()?.nickname).toBe("nadav");
+    expect(getTemplatesAuthor("https://libi-site-git-templates-nagellabs.vercel.app")?.nickname).toBe("Dev Nick");
+  });
+
   it("a nickname the site already shows for this key is never replaced by the stored one: nothing is sent unless the site asks", async () => {
     await run({});
     expect(setNickname).not.toHaveBeenCalled();

@@ -30,10 +30,11 @@ import {
   templatePublishRequests,
   catalogIndex,
   catalogIndexMeta,
+  pieceExports,
 } from "@/lib/db/schema/sqlite";
 import { TEMPLATES_FTS_STATEMENTS } from "@/lib/db/templates-fts";
 
-const schema = { pieces, files, settings, mcpServers, legacyProviderKeys, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue, skillInstalls, socialPostLinks, socialPostIntents, socialAdLinks, templates, templateUses, templatePublishRequests, catalogIndex, catalogIndexMeta };
+const schema = { pieces, files, settings, mcpServers, legacyProviderKeys, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, seenAnnouncements, analyticsQueue, skillInstalls, socialPostLinks, socialPostIntents, socialAdLinks, templates, templateUses, templatePublishRequests, catalogIndex, catalogIndexMeta, pieceExports };
 
 declare global {
   var __libi_test_db: BetterSQLite3Database<typeof schema> | undefined;
@@ -114,6 +115,7 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
       filmstrip_height INTEGER,
       notes TEXT,
       ai_generation TEXT,
+      audio_rights TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     CREATE INDEX idx_files_folder_id ON files(folder_id);
@@ -312,6 +314,35 @@ export function createTestDb(): BetterSQLite3Database<typeof schema> {
     CREATE INDEX jobs_status_idx ON jobs(status);
     CREATE INDEX jobs_piece_idx ON jobs(piece_id);
     CREATE INDEX jobs_file_idx ON jobs(file_id);
+    CREATE TABLE piece_exports (
+      id TEXT PRIMARY KEY NOT NULL,
+      piece_id TEXT NOT NULL REFERENCES pieces(id) ON DELETE CASCADE,
+      job_id TEXT,
+      name TEXT NOT NULL,
+      rel_path TEXT,
+      status TEXT NOT NULL,
+      error TEXT,
+      queued_at INTEGER NOT NULL,
+      started_at INTEGER,
+      completed_at INTEGER,
+      size_bytes INTEGER,
+      duration_sec REAL,
+      width INTEGER,
+      height INTEGER,
+      aspect TEXT NOT NULL,
+      container TEXT NOT NULL,
+      codec TEXT NOT NULL,
+      fps INTEGER NOT NULL,
+      quality TEXT,
+      graphics_quality TEXT,
+      purpose TEXT,
+      carries_copyrighted INTEGER NOT NULL DEFAULT 0,
+      excluded_file_ids TEXT NOT NULL DEFAULT '[]',
+      backend TEXT,
+      dropped_overlays TEXT,
+      source TEXT NOT NULL
+    );
+    CREATE INDEX idx_piece_exports_piece_queued ON piece_exports(piece_id, queued_at);
     CREATE TABLE model_schemas (
       id TEXT PRIMARY KEY,
       api_url TEXT NOT NULL,

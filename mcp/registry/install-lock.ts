@@ -57,6 +57,35 @@ const TRANSIENT_CREATE_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
 const TRANSIENT_CREATE_RETRIES = 5;
 const TRANSIENT_CREATE_DELAY_MS = 100;
 
+/** A waiter stopped waiting because its caller was cancelled (a `video_download` job, say): the other
+ *  install carries on, this caller simply no longer needs it. `name` is "AbortError", as a DOM abort's is. */
+export class InstallWaitAbortedError extends Error {
+  constructor(what: string) {
+    super(`Stopped waiting for the install of ${what}: the job that needed it was cancelled.`);
+    this.name = "AbortError";
+  }
+}
+
+/** `promise`, or a rejection with InstallWaitAbortedError as soon as `signal` aborts. Without a signal, `promise` itself. */
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined, what = "this dependency"): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new InstallWaitAbortedError(what));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new InstallWaitAbortedError(what));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (v) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(v);
+      },
+      (e: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(e);
+      },
+    );
+  });
+}
+
 /** A waiter gave up on a live owner after INSTALL_LOCK_MAX_WAIT_MS. */
 export class InstallLockTimeoutError extends Error {
   constructor(lockPath: string, waitedMs: number) {
@@ -85,6 +114,8 @@ export interface InstallLockOptions {
   heartbeatMs?: number;
   pollMs?: number;
   maxWaitMs?: number;
+  /** Stops the wait on a live owner: the waiter rejects with InstallWaitAbortedError, leaving the owner's lock alone. */
+  signal?: AbortSignal;
   /** Injected for tests. */
   isAlive?: (pid: number) => boolean;
 }
@@ -181,7 +212,8 @@ function staleReason(
 /**
  * Take the lock at `lockPath`, waiting while another live process holds it.
  * Throws only when a live owner has held it past `maxWaitMs`
- * (InstallLockTimeoutError). An unexpected filesystem error (the directory is
+ * (InstallLockTimeoutError), or when `opts.signal` aborts while it waits
+ * (InstallWaitAbortedError, at once — not at the next poll). An unexpected filesystem error (the directory is
  * not writable, say) is logged and the caller proceeds unlocked — the lock is
  * coordination, and an install must not fail because of it.
  */
@@ -264,7 +296,16 @@ export async function acquireInstallLock(
       );
     }
     waited = true;
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+    const what = path.basename(lockPath).replace(/\.install-lock$/, "");
+    try {
+      await untilAborted(new Promise((resolve) => setTimeout(resolve, pollMs)), opts.signal, what);
+    } catch (err) {
+      logger.info(
+        { tag: "dep-install", op: "install_lock_wait_aborted", lockPath, waitedMs: Date.now() - firstTry },
+        "stopped waiting on another libi's install: the caller was cancelled",
+      );
+      throw err;
+    }
   }
 
   heldByThisProcess().add(lockPath);

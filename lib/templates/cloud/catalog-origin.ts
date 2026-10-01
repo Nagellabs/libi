@@ -46,6 +46,10 @@ export function parseDevOrigin(raw: string): DevOriginResult {
     return { ok: false, error: "That isn't a web address. Paste it with https://." };
   }
   if (u.username || u.password) return { ok: false, error: "The address can't carry a user name or password." };
+  // Longer than a valid DNS host ever is, and past what the desktop shell's native
+  // confirm dialog will render (CATALOG_HOST_MAX_CHARS, electron/confirm-publish.ts) —
+  // refused here, at the address, rather than surfacing as a "refused" confirm later.
+  if (u.host.length > 253) return { ok: false, error: "That address is too long for a web address." };
   if (u.protocol === "http:") {
     if (!LOCAL_HOSTS.has(u.hostname)) return { ok: false, error: "Only a site on this machine (localhost or 127.0.0.1) may use http://; anything else needs https://." };
   } else if (u.protocol !== "https:") {

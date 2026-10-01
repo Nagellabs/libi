@@ -66,6 +66,13 @@ vi.mock("@/lib/queries/duplication", () => ({
   useDuplicatingPieceIds: () => new Set<string>(),
 }));
 
+vi.mock("@/lib/queries/exports", () => ({
+  useActiveExports: () => ({ data: [] }),
+  useExports: () => ({ data: [] }),
+  useRenameExport: () => ({ mutateAsync: vi.fn() }),
+  useDeleteExport: () => ({ mutateAsync: vi.fn() }),
+}));
+
 import FileTree from "@/components/resources/file-tree";
 import { ROOT_SORT_KEY } from "@/components/resources/sort-utils";
 

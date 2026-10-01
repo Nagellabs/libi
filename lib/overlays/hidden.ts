@@ -98,6 +98,24 @@ export function stripHiddenLayerArrays<
   return { overlays: nextOverlays, audioClips: nextClips, changed: true };
 }
 
+/**
+ * The manifest the export will actually play: hidden layers and their coupled
+ * inline audio gone (`stripHiddenLayerArrays`). Every export entry point and
+ * every reader that must agree with the export — the piece's copyrighted-audio
+ * list, the posting music plan — goes through this, so a song that lives only
+ * on a hidden layer is neither asked about, planned nor listed. Identity
+ * passthrough when nothing hides.
+ */
+export function manifestAsExported<
+  M extends {
+    overlays?: Array<{ id: string; hidden?: boolean }>;
+    audioClips?: Array<{ kind: string; linkedOverlayId?: string | null }>;
+  },
+>(manifest: M): M {
+  const { overlays, audioClips, changed } = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
+  return changed ? { ...manifest, overlays, audioClips } : manifest;
+}
+
 /** Composition-level strip (overlays + coupled audio) for the export entry
  *  points (runner, ffmpeg/chromium routes, client router / canvas-source).
  *  Identity passthrough when nothing is hidden. */

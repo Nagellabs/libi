@@ -689,4 +689,32 @@ describe("ensureChromium", () => {
       await expect(runB).resolves.toBeUndefined();
     });
   });
+
+  // A production Next build bundles the export/tracking job runners and the Settings
+  // dependencies route apart, so each loads its own copy of this module. Before this fix,
+  // a download started in one copy was invisible to `chromiumInstallInFlight()` read from
+  // the other, which let a Settings click start a second `playwright install` (d2f3ea41's
+  // class of bug, fixed there for lib/agents/acp/agent-registry.ts).
+  describe("the install flight across module copies (a production build loads the runner and the route apart)", () => {
+    it("a download started in one copy is reported by a copy loaded separately", async () => {
+      vi.resetModules();
+      const job = await import("@/lib/export/ensure-chromium");
+      job._resetChromiumInstallState();
+      const child = makeChild();
+      spawn.mockReturnValue(child);
+      const running = job.ensureChromium(); // the fake spawn in this file never exits until told
+      await flush();
+
+      vi.resetModules();
+      const route = await import("@/lib/export/ensure-chromium");
+      expect(route).not.toBe(job);
+      expect(route.chromiumInstallInFlight()).not.toBeNull();
+
+      // finish the fake child the way the existing cases do, then:
+      layDownChromium();
+      child.emit("close", 0, null);
+      await running;
+      expect(route.chromiumInstallInFlight()).toBeNull();
+    });
+  });
 });

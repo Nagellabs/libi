@@ -25,7 +25,7 @@ function summary(over: Partial<TemplateSummary> = {}): InstalledTemplate {
     slots: [], slotCount: 0, canvas: { width: 1080, height: 1920, fps: 30 }, duration: 4, usesTotal: 3, uses7d: 2, lastUsedAt: null,
     createdAt: "2026-09-23T00:00:00.000Z", updatedAt: "2026-09-23T00:00:00.000Z", hasPoster: true, hasExample: true,
     poster: "/api/templates/t1/media/poster.jpg", video: "/api/templates/t1/media/example.mp4", nickname: null, broken: null, otherCatalog: null,
-    mediaRev: 0, canRenderExample: true, sourcePieceName: "Summer promo",
+    mediaRev: 0, canRenderExample: true, sourcePieceName: "Summer promo", sourceEmpty: false,
     ...over,
   } as InstalledTemplate;
 }

@@ -3,13 +3,11 @@
 import { useState } from "react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
   useExportDefaults,
   useUpdateExportDefaults,
   type ExportDefaultsValue,
 } from "@/lib/queries/export-defaults";
-import { pickDirectory, hasElectronBridge } from "@/lib/shell/client";
 import {
   DEFAULT_GRAPHICS_QUALITY,
   GRAPHICS_SHARPNESS_WARNING,
@@ -23,7 +21,6 @@ export function ExportTab() {
   // Local form mirror so the user can edit before pressing Save. Seeded from
   // whatever the query already resolved at mount; the previous-state block
   // below folds in later arrivals.
-  const [folder, setFolder] = useState<string | null>(data?.folder ?? null);
   const [format, setFormat] = useState<ExportDefaultsValue["format"]>(data?.format ?? "mp4");
   const [quality, setQuality] = useState<ExportDefaultsValue["quality"]>(
     data?.quality ?? "source",
@@ -40,7 +37,6 @@ export function ExportTab() {
   if (data !== prevData) {
     setPrevData(data);
     if (data) {
-      setFolder(data.folder);
       setFormat(data.format);
       setQuality(data.quality);
       setGraphicsQuality(data.graphicsQuality);
@@ -48,14 +44,7 @@ export function ExportTab() {
   }
 
   const handleSave = async () => {
-    await update.mutateAsync({ folder, format, quality, graphicsQuality });
-  };
-
-  const handlePickFolder = async () => {
-    const picked = await pickDirectory(folder ?? data?.osDefaultFolder);
-    if (picked === undefined) return; // no bridge — user uses the text input
-    if (picked === null) return;
-    setFolder(picked);
+    await update.mutateAsync({ format, quality, graphicsQuality });
   };
 
   if (isLoading || !data) {
@@ -68,53 +57,17 @@ export function ExportTab() {
     );
   }
 
-  const effectiveFolder = folder ?? data.osDefaultFolder;
   const dirty =
-    folder !== data.folder ||
     format !== data.format ||
     quality !== data.quality ||
     graphicsQuality !== data.graphicsQuality;
 
   return (
     <div className="space-y-6">
-      <div className="space-y-2">
-        <label className="text-sm font-medium">Default output folder</label>
-        <p className="text-xs text-muted-foreground">
-          Exports save here unless you pick a different folder in the export dialog.
-          Defaults to <code className="rounded bg-muted/40 px-1">{data.osDefaultFolder}</code>{" "}
-          on this machine. The folder is created automatically the first time you export to it.
-        </p>
-        <div className="flex items-center gap-2">
-          <Input
-            value={effectiveFolder}
-            onChange={(e) => setFolder(e.target.value || null)}
-            placeholder={data.osDefaultFolder}
-            className="flex-1 font-mono text-xs"
-          />
-          {hasElectronBridge() ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={handlePickFolder}
-              className="cursor-pointer"
-            >
-              Choose…
-            </Button>
-          ) : null}
-          {folder !== null ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => setFolder(null)}
-              className="cursor-pointer"
-            >
-              Reset
-            </Button>
-          ) : null}
-        </div>
-      </div>
+      <p className="text-xs text-muted-foreground" data-testid="export-location-note">
+        Exports are saved with each piece. Find them in the piece&apos;s Exports tab, or under the piece in
+        Resources.
+      </p>
 
       <div className="space-y-2">
         <label className="text-sm font-medium">Default format</label>

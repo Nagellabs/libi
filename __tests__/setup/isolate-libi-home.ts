@@ -14,6 +14,13 @@
  * workspace. That bit us with the YouTube Downloader MCP disappearing
  * from the BYO-CLI settings file mid-session.
  *
+ * This temp dir is the RUN ROOT, published to the workers as
+ * `$LIBI_VITEST_RUN_ROOT`. Each worker then runs under its own home inside it,
+ * `<root>/w<VITEST_POOL_ID>` (`per-worker-libi-home.ts`, a setupFiles entry),
+ * so two test files running at once never share `<LIBI_HOME>/agent/` or an
+ * install lock. `LIBI_HOME` is still set to the root here, for anything that
+ * runs without the setup file.
+ *
  * Individual tests that need their own LIBI_HOME (e.g. libi-home.test.ts)
  * can still override `process.env.LIBI_HOME` inside `beforeEach` — this
  * setup just establishes a safe default for everyone else.
@@ -27,6 +34,9 @@ import os from "node:os";
 import path from "node:path";
 import { linkProvisionedBinaries } from "../helpers/provisioned-bin";
 
+/** The env var that carries the run root from this global setup to every worker. */
+export const RUN_ROOT_ENV = "LIBI_VITEST_RUN_ROOT";
+
 let tempRoot: string | null = null;
 
 export async function setup(): Promise<void> {
@@ -35,6 +45,7 @@ export async function setup(): Promise<void> {
   linkProvisionedBinaries(tempRoot);
 
   process.env.LIBI_HOME = tempRoot;
+  process.env[RUN_ROOT_ENV] = tempRoot;
 
   // The Codex home too: outside test mode `resolveCodexHome()` names the user's
   // real `~/.codex`, so a test that reaches a codex spawn or a config backup

@@ -13,6 +13,7 @@ import { PassThrough, Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   __setAssetStreamDepsForTests,
+  ASSET_STREAM_IMAGE_MAX_BYTES,
   ASSET_STREAM_MAX_BYTES,
   ASSET_STREAM_MAX_REDIRECTS,
   AssetStreamRefusal,
@@ -122,6 +123,28 @@ describe("openAssetStream — refusals", () => {
     );
     expect((await refusal(open("https://media.example.com/a.mp4"))).code).toBe("invalid_url");
     expect((await refusal(open("https://media.example.com/b.mp4"))).code).toBe("invalid_url");
+  });
+
+  it("checks the caller's allowUrl on every hop: a redirect off the allowed hosts is refused, and so is a first hop", async () => {
+    const calls = fakeNet(
+      { "a.tiktokcdn.com": ["93.184.216.34"], "media.example.com": ["93.184.216.35"] },
+      {
+        "https://a.tiktokcdn.com/x": { status: 302, headers: { location: "https://media.example.com/y.mp3" } },
+        "https://media.example.com/y.mp3": { status: 200, headers: { "content-type": "audio/mpeg" }, body: "song" },
+      },
+    );
+    const allowUrl = (u: URL) => u.hostname.endsWith(".tiktokcdn.com");
+    const signal = new AbortController().signal;
+    const off = await refusal(openAssetStream("https://a.tiktokcdn.com/x", { signal, allowUrl }));
+    expect(off.code).toBe("invalid_url");
+    expect(off.message).toBe("The media's host redirected off its allowed hosts.");
+    expect(calls.map((c) => c.url)).toEqual(["https://a.tiktokcdn.com/x"]); // the off-list host is never contacted
+    calls.length = 0;
+    expect((await refusal(openAssetStream("https://media.example.com/y.mp3", { signal, allowUrl }))).code).toBe("invalid_url");
+    expect(calls).toEqual([]);
+    // Without it (the template asset stream), the same redirect is followed as before.
+    const s = await openAssetStream("https://a.tiktokcdn.com/x", { signal });
+    expect(await text(s.body)).toBe("song");
   });
 
   it(`follows at most ${ASSET_STREAM_MAX_REDIRECTS} redirects`, async () => {
@@ -293,6 +316,40 @@ describe("openAssetStream — a refused upstream is closed, never drained (fix-r
     } finally {
       await net.close();
     }
+  });
+});
+
+describe("openAssetStream — kinds (image artwork, review round 2)", () => {
+  it('kinds: ["image"] sends accept: image/*, accepts a raster type, and refuses svg, html and audio with wrong_type', async () => {
+    const replies: Record<string, Reply> = {
+      "https://media.example.com/ok.png": { status: 200, headers: { "content-type": "image/png" }, body: "x" },
+      "https://media.example.com/x.svg": { status: 200, headers: { "content-type": "image/svg+xml" }, body: "x" },
+      "https://media.example.com/x.html": { status: 200, headers: { "content-type": "text/html" }, body: "x" },
+      "https://media.example.com/x.mp3": { status: 200, headers: { "content-type": "audio/mpeg" }, body: "x" },
+    };
+    const calls = fakeNet({ "media.example.com": ["93.184.216.34"] }, replies);
+    const signal = new AbortController().signal;
+    const s = await openAssetStream("https://media.example.com/ok.png", { signal, kinds: ["image"] });
+    expect(s.headers["content-type"]).toBe("image/png");
+    expect(calls[0].headers.accept).toBe("image/*");
+    for (const path of ["x.svg", "x.html", "x.mp3"]) {
+      expect((await refusal(openAssetStream(`https://media.example.com/${path}`, { signal, kinds: ["image"] }))).code, path).toBe("wrong_type");
+    }
+  });
+
+  it("an empty kinds array falls back to the default audio/video kinds, not to matching nothing", async () => {
+    fakeNet({ "media.example.com": ["93.184.216.34"] }, { "https://media.example.com/a.mp4": { status: 200, headers: { "content-type": "video/mp4" }, body: "x" } });
+    const s = await openAssetStream("https://media.example.com/a.mp4", { signal: new AbortController().signal, kinds: [] });
+    expect(s.headers["content-type"]).toBe("video/mp4");
+  });
+
+  it("an image gets a far smaller byte cap than a clip", async () => {
+    fakeNet(
+      { "media.example.com": ["93.184.216.34"] },
+      { "https://media.example.com/big.png": { status: 200, headers: { "content-type": "image/png", "content-length": String(ASSET_STREAM_IMAGE_MAX_BYTES + 1) } } },
+    );
+    const r = await refusal(openAssetStream("https://media.example.com/big.png", { signal: new AbortController().signal, kinds: ["image"] }));
+    expect(r.code).toBe("too_large");
   });
 });
 

@@ -70,7 +70,7 @@ export function OverlayAgentDialog({
             "Copy the prompt into your own CLI, or pick an agent in the sidebar.",
         });
       } else if (!r.ok) {
-        toast.error("Couldn't send to the agent");
+        toast.error("Couldn't send to the agent", r.error ? { description: r.error } : undefined);
       } else {
         toast.success("Sent to the libi agent");
         onOpenChange(false);

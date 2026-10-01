@@ -730,6 +730,7 @@ async function summarize(stored: TemplateRow, uses7d: Map<string, number>): Prom
     mediaRev: Math.round(Math.max(posterMtime ?? 0, exampleMtime ?? 0)),
     canRenderExample: sourceName !== null,
     sourcePieceName: sourceName,
+    sourceEmpty: row.origin === "local" && s !== null && s.overlays.length === 0 && s.audioClips.length === 0,
   };
 }
 

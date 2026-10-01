@@ -28,6 +28,17 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts",
+    // `next dev` adds its distDir's two type globs here whenever they are
+    // missing, so an e2e server (LIBI_NEXT_DIST_DIR, next.config.ts) would edit
+    // this tracked file on every run. They are listed up front for that reason
+    // only, and the dirs are EXCLUDED below: a second copy of Next's global
+    // route types (`LayoutProps`, …) would fail the type-check as duplicates.
+    ".next-e2e/types/**/*.ts",
+    ".next-e2e/dev/types/**/*.ts",
+    ".next-electron-e2e/types/**/*.ts",
+    ".next-electron-e2e/dev/types/**/*.ts",
+    ".next-skill-eval/types/**/*.ts",
+    ".next-skill-eval/dev/types/**/*.ts",
     "**/*.mts"
   ],
   "exclude": [
@@ -39,6 +50,10 @@
     // of the product and a clone never has them, but `**/*.ts` swept them in:
     // one scratch .ts file archived here broke `next build`'s type check with
     // 10 errors in a file nothing imports.
-    "docs-local"
+    "docs-local",
+    // The e2e servers' own Next dirs — see `include` above.
+    ".next-e2e",
+    ".next-electron-e2e",
+    ".next-skill-eval"
   ]
 }

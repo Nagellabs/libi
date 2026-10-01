@@ -10,7 +10,7 @@ import type { FileRecord } from "@/lib/db/schema/types";
 import EditorLayout from "@/components/layout/editor-layout";
 import ChatPanel from "@/components/chat/chat-panel";
 import TerminalPanel from "@/components/terminal/terminal-panel";
-import EditorPanel from "@/components/editor/editor-panel";
+import EditorPanel, { type PieceTab } from "@/components/editor/editor-panel";
 import { AssetPreviewPanel } from "@/components/editor/asset-preview-panel";
 import { NoPieceEmptyState } from "@/components/editor/no-piece-empty-state";
 import ResourcesPanel from "@/components/resources/resources-panel";
@@ -34,11 +34,13 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarInset } from "@/components/ui/sidebar";
 import { InstructionsUpdatedBanner } from "@/components/banner/instructions-updated-banner";
 import { usePieceState } from "@/lib/queries/snapshots";
+import { pieceAudioKeys } from "@/lib/queries/audio-rights";
 import { useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import { FirstLaunchGate } from "@/components/onboarding/first-launch-gate";
 import { readinessAllowsChat, readinessMessage } from "@/lib/agents/agent-readiness";
 import { agentSetupHref } from "@/lib/agents/setup/registry";
 import { openPostingTab, subscribeExportDialogRequest, subscribePostingIntent } from "@/hooks/social/use-posting-intent";
+import { subscribeOpenExport } from "@/hooks/exports/use-open-export";
 
 /**
  * A first launch belongs on the Agents tab, with the persona question over it —
@@ -79,6 +81,7 @@ function navigateOpensPiece(event: { target: string; pieceId: string; fileId?: s
     case "preview":
     case "storyboard":
     case "posting":
+    case "exports":
       return !!event.pieceId;
     case "asset":
       return !!event.pieceId && !!event.fileId;
@@ -237,7 +240,10 @@ function EditorWorkspace() {
   ]);
 
   // Editor panel tab state
-  const [editorTab, setEditorTab] = useState<"preview" | "storyboard" | "assets" | "objects" | "posting">("preview");
+  const [editorTab, setEditorTab] = useState<PieceTab>("preview");
+  // The export selected in the Exports tab (spec §A4) — here, beside the tab,
+  // so the resources panel and an agent navigate can open "piece X, export Y".
+  const [selectedExportId, setSelectedExportId] = useState<string | null>(null);
   const [selectedAsset, setSelectedAsset] = useState<FileRecord | null>(null);
 
   // ── Restore the previously-opened piece / tab / asset on mount ─────
@@ -560,6 +566,11 @@ function EditorWorkspace() {
     } else if (event.target === "storyboard" && event.pieceId) {
       setActivePieceId(event.pieceId);
       setEditorTab("storyboard");
+    } else if (event.target === "exports" && event.pieceId) {
+      setActivePieceId(event.pieceId);
+      setSelectedAsset(null);
+      setEditorTab("exports");
+      setSelectedExportId(event.id ?? null);
     } else if (event.target === "posting" && event.pieceId) {
       // openPostingTab's own subscription (below) switches the piece and the
       // tab — the same path the export dialog's "Post…" uses, so both hand-
@@ -597,6 +608,24 @@ function EditorWorkspace() {
     return subscribePostingIntent((intent) => {
       setActivePieceId(intent.pieceId);
       setEditorTab("posting");
+    });
+  }, []);
+
+  // The resources panel's Exports folder, and the finish toast's Open, open a piece's
+  // Exports tab on one export. Like a navigate that opens a piece (`handleNavigate`),
+  // it outranks the "reopen the last piece" restore — a toast's Open from another
+  // page is parked and claimed here on a COLD load, before the pieces list arrives,
+  // and the restore would otherwise overwrite the piece and tab it just chose.
+  useEffect(() => {
+    return subscribeOpenExport((intent) => {
+      if (!restoreAttemptedRef.current) {
+        restoreAttemptedRef.current = true;
+        setRestoreAttempted(true);
+      }
+      setActivePieceId(intent.pieceId);
+      setSelectedAsset(null);
+      setEditorTab("exports");
+      setSelectedExportId(intent.exportId);
     });
   }, []);
 
@@ -638,7 +667,13 @@ function EditorWorkspace() {
   const hasSnapshot = !!(pieceState?.snapshotCommittedAt);
   const hasDraft = pieceState?.hasDraft ?? true;
 
-  const exportFlow = useExportFlow();
+  // A `purpose_required` refusal means the piece's audio rights changed since
+  // the dialog read them: refetch, and the purpose question appears.
+  const refetchPieceAudioRights = useCallback(
+    (pieceId: string) => queryClient.invalidateQueries({ queryKey: pieceAudioKeys.forPiece(pieceId) }),
+    [queryClient],
+  );
+  const exportFlow = useExportFlow({ onPurposeRequired: refetchPieceAudioRights });
 
   const isLoadingQueries = !!activePieceId && (pieceQuery.isLoading || isCompositionLoading);
 
@@ -811,6 +846,8 @@ function EditorWorkspace() {
           onToggleChat={toggleChat}
           onToggleResources={toggleResources}
           pieceId={activePieceId}
+          selectedExportId={selectedExportId}
+          onSelectExport={setSelectedExportId}
           previewArea={
             <PreviewSurface
               composition={composition}

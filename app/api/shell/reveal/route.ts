@@ -11,7 +11,7 @@ import { revealRoots, isPathRevealable, realpathOrSelf } from "@/lib/shell/revea
  *
  * Path-traversal guard: the resolved absolute path must live inside one of
  * the roots libi legitimately writes to (see `lib/shell/reveal-roots.ts` —
- * $HOME, the OS temp dir, LIBI_HOME, and the configured export folder).
+ * $HOME, the OS temp dir and LIBI_HOME, which holds the exports).
  * Anything else is silently ignored — no reveal is performed.
  *
  * Non-oracle response (RC-A defense-in-depth): once the request body is

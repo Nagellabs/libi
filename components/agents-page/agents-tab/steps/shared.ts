@@ -8,9 +8,11 @@ export function cliMeetsMinimum(cli: AgentStatus["cli"]): boolean {
   return cli !== null && "meetsMinimum" in cli && cli.meetsMinimum;
 }
 
-/** The CLI a printed command runs — its resolved realpath. `null` when nothing runnable was found. */
+/** The CLI a printed command runs — its resolved realpath (and, on Windows, a `.cmd` shim's own target). `null` when
+ *  nothing runnable was found. */
 export function setupCliFor(agent: SetupAgentId, cli: AgentStatus["cli"]): SetupCli | null {
-  return cli !== null && "realPath" in cli ? { agentId: agent, realPath: cli.realPath } : null;
+  if (cli === null || !("realPath" in cli)) return null;
+  return { agentId: agent, realPath: cli.realPath, ...(cli.launch ? { launch: cli.launch } : {}) };
 }
 
 /** Counted on a step's success path only, never on a click alone. */

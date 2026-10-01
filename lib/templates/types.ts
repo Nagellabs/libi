@@ -67,6 +67,14 @@ export interface TemplateSummary {
    * the template was made, so the page names it before rendering.
    */
   sourcePieceName: string | null;
+  /**
+   * True for a LOCAL template whose scaffold was captured with no overlays
+   * and no audio clips — the source piece was empty at creation time, so
+   * `libi.create_template_from_piece` never started a `template_example`
+   * render (the export renderer has nothing to read). Always false for
+   * installed and public templates, and for a broken scaffold.
+   */
+  sourceEmpty: boolean;
 }
 
 /** One cached public entry as `GET /api/templates/cloud/catalog` sends it.

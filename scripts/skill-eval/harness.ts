@@ -15,6 +15,35 @@ import { basename, join, resolve, sep } from "node:path";
 import { createServer } from "node:net";
 import type { ParsedScenario, TraceCall, TranscriptView } from "./types";
 import { provisionSharedDeps } from "./shared-deps";
+import { rememberNextEnvDts, restoreNextEnvDts } from "@/e2e/support/harness";
+
+/**
+ * The eval scenario server's own Next dir — same mechanism `E2E-1` gave the
+ * Playwright e2e servers (`LIBI_NEXT_DIST_DIR`, `next.config.ts`). Without
+ * it, `node bin/libi.js` here builds into the checkout's shared `.next`, and
+ * Next 16's dev-server lock (`<distDir>/dev/lock`) makes the eval's server
+ * die with "Another next dev server is already running" whenever the
+ * owner's own `npm run dev` / `dev:electron` is up in the same worktree.
+ * Kept in lockstep with `.gitignore`, `tsconfig.json`, `eslint.config.mjs`
+ * and `next.config.ts#outputFileTracingExcludes` —
+ * `__tests__/unit/build/next-config-dist-dir.test.ts` holds all four.
+ */
+export const SKILL_EVAL_NEXT_DIST_DIR = ".next-skill-eval";
+
+/**
+ * Next's dev-server lock refusal ("Another next dev server is already
+ * running", with the PID/Dir/Log of the holder) inside a server's own
+ * stdout/stderr, or null when the log carries no such refusal. Lets the
+ * harness fail fast and name the cause instead of burning the full
+ * `waitForPort` timeout on a server that already exited.
+ */
+const NEXT_DEV_LOCK_PATTERN =
+  /Another next dev server is already running\.[^\n]*\n(?:[ \t]*\n)?(?:[ \t]*-[^\n]*\n?)*/;
+
+export function devServerLockMessage(log: string): string | null {
+  const match = NEXT_DEV_LOCK_PATTERN.exec(log);
+  return match ? match[0].trim() : null;
+}
 
 export interface HarnessResult {
   status: "completed" | "errored" | "timeout";
@@ -884,6 +913,11 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
     // env here is what reaches the fake; nothing else propagates.
     const fakeFalCfgPath = join(home, "fake-fal-config.json");
     writeFileSync(fakeFalCfgPath, JSON.stringify(buildFakeFalConfig(opts.scenario)));
+    // `next dev` rewrites the checkout's next-env.d.ts to import its own
+    // distDir's route types (see e2e/support/harness.ts) — remember it now so
+    // the `finally` below can put it back, the same way the Playwright e2e
+    // runs do.
+    rememberNextEnvDts(REPO_ROOT);
     // Normal headless boot: skill-eval drives the in-app agent, not an outside CLI, so it must NOT short-circuit agent warm or write files into the repo root.
     child = spawn("node", ["bin/libi.js"], {
       cwd: REPO_ROOT,
@@ -895,6 +929,11 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
         // /api/skill-eval/configure below, so it must opt the spawned libi in.
         LIBI_ENABLE_TEST_ROUTES: "1",
         LIBI_FAKE_FAL_CONFIG: fakeFalCfgPath,
+        // Its own Next dir (next.config.ts, dev phase only) — so this server
+        // builds beside a dev app (or another eval) from the same checkout
+        // instead of fighting it for `.next`'s dev-server lock. See
+        // SKILL_EVAL_NEXT_DIST_DIR above.
+        LIBI_NEXT_DIST_DIR: SKILL_EVAL_NEXT_DIST_DIR,
         // Keep the HOST user's Claude config out of the inner agent: without this
         // their ~/.claude/CLAUDE.md, settings (hooks, plugins) and ~/.claude/skills
         // load into every eval session (lib/sessions/session-meta.ts). Only the
@@ -925,10 +964,33 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
       detached: true,
     });
     const serverLog: string[] = [];
-    child.stdout?.on("data", (d) => serverLog.push(String(d)));
-    child.stderr?.on("data", (d) => serverLog.push(String(d)));
+    // Races the port-file poll against Next's own dev-server lock refusal
+    // showing up in the child's stdout/stderr, so a scenario started beside
+    // another server on the same LIBI_NEXT_DIST_DIR fails within seconds
+    // naming the holder's PID/Dir instead of burning the full 180s timeout
+    // below on a server that already exited.
+    let rejectOnLock: ((e: Error) => void) | undefined;
+    const lockRefusal = new Promise<never>((_resolve, reject) => {
+      rejectOnLock = reject;
+    });
+    const watchForLock = (chunk: string) => {
+      serverLog.push(chunk);
+      if (!rejectOnLock) return;
+      const msg = devServerLockMessage(serverLog.join(""));
+      if (!msg) return;
+      const reject = rejectOnLock;
+      rejectOnLock = undefined;
+      reject(
+        new Error(
+          `skill-eval: the scenario's libi server could not start — ${msg}. A dev server on ` +
+            `${SKILL_EVAL_NEXT_DIST_DIR} is already running (another skill-eval?) — stop it or wait.`,
+        ),
+      );
+    };
+    child.stdout?.on("data", (d) => watchForLock(String(d)));
+    child.stderr?.on("data", (d) => watchForLock(String(d)));
 
-    const port = await waitForPort(home, 180_000).catch((e) => {
+    const port = await Promise.race([waitForPort(home, 180_000), lockRefusal]).catch((e) => {
       throw new Error(`${e.message}\n--- server log tail ---\n${serverLog.slice(-40).join("")}`);
     });
     const base = `http://127.0.0.1:${port}`;
@@ -1083,6 +1145,9 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
       killProcessTree(child, "SIGKILL");
     }
     if (!opts.keep && existsSync(home)) rmSync(home, { recursive: true, force: true });
+    // Put next-env.d.ts back the way `rememberNextEnvDts` found it (see the
+    // call above) — the same cleanup the Playwright e2e runs do.
+    restoreNextEnvDts(REPO_ROOT);
   }
 }
 

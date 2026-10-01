@@ -15,6 +15,11 @@
 
 # next.js
 /.next/
+# the e2e servers' own Next dirs (next.config.ts distDir, LIBI_NEXT_DIST_DIR)
+/.next-e2e/
+/.next-electron-e2e/
+# the skill-eval scenario server's own Next dir (same mechanism)
+/.next-skill-eval/
 /out/
 
 # production build OUTPUTS. Deliberately not the whole of /build — that

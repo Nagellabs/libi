@@ -46,6 +46,7 @@ import {
   LIBI_MCP_FALLBACK_ENTRY_NAME,
 } from "@/lib/mcp/agent-surface";
 import { isTestMode } from "@/lib/test-mode";
+import { skipsUserSettings } from "@/lib/sessions/skip-user-settings";
 import { fakeZernioUrl } from "@/lib/social/test-fake";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import {
@@ -563,8 +564,8 @@ const FAKE_PROVIDER: Record<(typeof TEST_MODE_FAKE_NAMES)[number], ProviderId> =
 
 /**
  * Every MCP server in Claude Code's config that an in-app session sees, by name, with its url when it has one:
- * the user scope, the agent folder's local scope and its `.mcp.json` — the three places provider detection reads
- * (`lib/providers/detect.ts`). Nothing else is taken from an entry; a config that can't be read has none.
+ * the user scope (never in a skill-eval session — `skipsUserSettings`), the agent folder's local scope and its
+ * `.mcp.json` — the three places provider detection reads (`lib/providers/detect.ts`). Nothing else is taken from an entry; a config that can't be read has none.
  */
 function claudeConfigEntries(): Array<{ name: string; url?: string }> {
   const read = (file: string): Record<string, unknown> | null => {
@@ -585,7 +586,8 @@ function claudeConfigEntries(): Array<{ name: string; url?: string }> {
     }
   };
   const cfg = read(claudeConfigPath());
-  add(cfg?.mcpServers);
+  // A skill-eval session loads no user scope, so nothing there needs a fake beside it.
+  if (!skipsUserSettings()) add(cfg?.mcpServers);
   const projects = cfg?.projects;
   if (projects && typeof projects === "object") {
     // Claude Code keys a project by its path, with forward slashes on Windows.

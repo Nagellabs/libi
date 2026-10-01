@@ -23,6 +23,10 @@ import {
   tarballIntegrityMatches,
   classifyTarballAttempt,
   curlGetSucceeded,
+  computeIntegrity,
+  packumentServes,
+  liveCheckCommand,
+  LIVE_CHECK_DEFAULT_MINUTES,
 } from "@/scripts/lib/release-verify.js";
 
 describe("verify budget", () => {
@@ -71,15 +75,20 @@ describe("describeVerifyTimeout", () => {
       whatIsMissing: "unused on the success path",
     });
     expect(outcome.exitCode).toBe(0);
+    expect(outcome.kind).toBe("served");
+    expect(outcome.annotation).toBeNull();
     expect(outcome.message).toMatch(/IS published/i);
   });
 
-  // The known-bad case: npm PUT already returned 200 (published=true is
-  // already in GITHUB_OUTPUT by the time this runs) but the CDN still isn't
-  // serving even the per-version document after the whole budget. This must
-  // never read as "the publish failed" — that invites a re-dispatch, which
-  // either double-bumps or dies on a duplicate version.
-  it("reports npm-accepted-but-CDN-lagging (exit 1) when the version document is still absent", () => {
+  // npm PUT already returned 200 (published=true is already in GITHUB_OUTPUT
+  // by the time this runs) but the CDN still isn't serving even the
+  // per-version document after the whole budget. Until 0.1.17 this exited 1,
+  // so 0.1.16 — held ~56 min in npm "processing" — turned the run red on a
+  // good publish. It is now "accepted, not yet served": green, with a
+  // ::warning:: annotation and the exact local command that finishes the
+  // check. It must still never read as "the publish failed" — that invites a
+  // re-dispatch, which either double-bumps or dies on a duplicate version.
+  it("npm-accepted-but-not-served exits 0 with a ::warning:: and names `npm run release:verify-live -- <v>`", () => {
     const outcome = describeVerifyTimeout({
       pkgName: "@nagellabs/libi",
       version: "0.1.16",
@@ -88,7 +97,13 @@ describe("describeVerifyTimeout", () => {
       delayMs: VERIFY_DELAY_MS,
       whatIsMissing: "still isn't being served",
     });
-    expect(outcome.exitCode).toBe(1);
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.kind).toBe("accepted-not-served");
+    // GitHub reads an annotation only as ONE line starting with the command.
+    expect(outcome.annotation).toMatch(/^::warning( [^:]*)?::/);
+    expect(outcome.annotation).not.toContain("\n");
+    expect(outcome.annotation).toContain("npm run release:verify-live -- 0.1.16");
+    expect(outcome.message).toContain("npm run release:verify-live -- 0.1.16");
     expect(outcome.message).toMatch(/ACCEPTED the publish/i);
     expect(outcome.message).toMatch(/published=true/);
     expect(outcome.message).toMatch(/never re-dispatch|do not re-dispatch/i);
@@ -115,7 +130,10 @@ describe("describeVerifyTimeout", () => {
       delayMs: TARBALL_VERIFY_DELAY_MS,
       whatIsMissing: "its tarball still couldn't be confirmed by a successful GET",
     });
-    expect(outcome.exitCode).toBe(1);
+    // A GET that never completed proves nothing about the bytes: same
+    // "accepted, not yet served" verdict, not a failure.
+    expect(outcome.exitCode).toBe(0);
+    expect(outcome.kind).toBe("accepted-not-served");
     expect(outcome.message).toMatch(/its tarball still couldn't be confirmed by a successful GET/);
     expect(outcome.message).toMatch(/~5 minutes/);
     expect(outcome.message).toMatch(/20 attempts × 15s/);
@@ -252,5 +270,81 @@ describe("release-npm.js curl invocations (source guard)", () => {
     expect(curlArgsMatch, "expected a spawnSync(\"curl\", [...]) call in verifyTarballIntegrity").not.toBeNull();
     const argsSrc = curlArgsMatch![1];
     expect(argsSrc).toMatch(/"-f[a-zA-Z]*"/); // e.g. "-fsSL", "-fL"
+  });
+});
+
+describe("the live check's pure pieces", () => {
+  it("names the command a maintainer runs locally to finish the check", () => {
+    expect(liveCheckCommand("0.1.17")).toBe("npm run release:verify-live -- 0.1.17");
+  });
+
+  it("waits 90 minutes by default — 0.1.16 took ~56", () => {
+    expect(LIVE_CHECK_DEFAULT_MINUTES).toBe(90);
+  });
+
+  it("computes an npm-style integrity string with the declared algorithm", () => {
+    const bytes = Buffer.from("tarball bytes");
+    const sha512 = computeIntegrity(bytes, "sha512-whatever");
+    expect(sha512).toMatch(/^sha512-[A-Za-z0-9+/]+=*$/);
+    expect(computeIntegrity(bytes, "sha1-x")).toMatch(/^sha1-/);
+    expect(computeIntegrity(bytes, sha512!)).toBe(sha512);
+    // An integrity string naming no algorithm we can compute is not knowable.
+    expect(computeIntegrity(bytes, "nonsense")).toBeNull();
+    expect(computeIntegrity(bytes, null)).toBeNull();
+  });
+
+  describe("packumentServes", () => {
+    const pack = (latest: string, versions: string[]) => ({
+      "dist-tags": { latest },
+      versions: Object.fromEntries(versions.map((v) => [v, {}])),
+    });
+
+    it("is true once the packument lists the version and latest points at it", () => {
+      expect(packumentServes(pack("0.1.17", ["0.1.16", "0.1.17"]), "0.1.17")).toBe(true);
+    });
+
+    it("is false while the packument still shows the previous release", () => {
+      expect(packumentServes(pack("0.1.16", ["0.1.16"]), "0.1.17")).toBe(false);
+      // listed but latest not moved yet
+      expect(packumentServes(pack("0.1.16", ["0.1.16", "0.1.17"]), "0.1.17")).toBe(false);
+    });
+
+    it("accepts an OLDER version once a newer one is latest (re-checking a past release)", () => {
+      expect(packumentServes(pack("0.1.18", ["0.1.16", "0.1.17", "0.1.18"]), "0.1.17")).toBe(true);
+      expect(packumentServes(pack("0.1.10", ["0.1.9", "0.1.10"]), "0.1.9")).toBe(true);
+    });
+
+    it("is false for an absent or malformed packument", () => {
+      expect(packumentServes(null, "0.1.17")).toBe(false);
+      expect(packumentServes({}, "0.1.17")).toBe(false);
+    });
+  });
+});
+
+// A slow registry must never turn a good publish red — and must never be able
+// to hide a real corruption or cost the version commit/tag push either.
+describe("release-npm.js keeps the two things a lenient timeout must not touch", () => {
+  const source = fs.readFileSync(
+    path.join(__dirname, "..", "..", "..", "scripts", "release-npm.js"),
+    "utf8",
+  );
+
+  it("a tarball digest MISMATCH still exits 1 at once", () => {
+    const at = source.indexOf('if (status === "mismatch")');
+    expect(at, "mismatch branch not found").toBeGreaterThan(-1);
+    const branch = source.slice(at, source.indexOf("}", source.indexOf("process.exit", at)) + 1);
+    expect(branch).toContain("process.exit(1)");
+    expect(branch).toMatch(/real corruption signal/);
+  });
+
+  it("records published=true before any poll starts, so the push step still runs", () => {
+    const published = source.indexOf('"published=true\\n"');
+    const firstPoll = source.indexOf("for (let attempt = 1; attempt <= VERIFY_ATTEMPTS");
+    expect(published).toBeGreaterThan(-1);
+    expect(firstPoll).toBeGreaterThan(published);
+  });
+
+  it("prints the ::warning:: annotation on the accepted-not-served path", () => {
+    expect(source).toContain("outcome.annotation");
   });
 });

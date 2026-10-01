@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { config as proxyConfig } from "@/proxy";
-import nextConfig from "../../../next.config";
+import { PHASE_PRODUCTION_BUILD } from "next/constants";
+import exportedConfig from "../../../next.config";
+
+// next.config.ts exports a config FUNCTION of Next's phase (withSentryConfig keeps it one).
+const nextConfig =
+  typeof exportedConfig === "function"
+    ? (exportedConfig as (phase: string, ctx: { defaultConfig: object }) => object)(PHASE_PRODUCTION_BUILD, { defaultConfig: {} })
+    : exportedConfig;
 
 /**
  * Regression pin for the Next 16 proxy body-clone limit (the

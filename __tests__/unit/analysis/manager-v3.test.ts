@@ -583,6 +583,80 @@ describe("transcribeAudio (with mock STT)", () => {
     expect(result.status).toBe("ready");
   });
 
+  // AUD-3: a `ready` chunk with no words (an STT pass that heard nothing, or a
+  // flat-text save that carried no timings) could never be re-run — retry took
+  // only failed/not_started rows — so the file could never be captioned. No
+  // per-chunk RMS is stored, so retry re-runs every such chunk.
+  it("retry: true also re-runs a READY chunk whose words came back empty", async () => {
+    const db = getDb();
+    await db.update(files).set({ mediaDuration: 200 }).where(eq(files.id, fid));
+    const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
+    await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });
+
+    let firstPassCalls = 0;
+    const first = await transcribeAudio({
+      fileId: fid,
+      chunkSeconds: 60,
+      sttFn: async () => {
+        firstPassCalls++;
+        if (firstPassCalls === 2) return { text: "", words: [] };
+        return { text: `c${firstPassCalls}`, words: [{ text: `c${firstPassCalls}`, start: 0, end: 1, type: "word" }] };
+      },
+    });
+    expect(first.status).toBe("ready");
+    const emptyIndex = db
+      .select()
+      .from(analysisAudioChunks)
+      .where(eq(analysisAudioChunks.fileId, fid))
+      .all()
+      .find((c) => c.words === "[]")!.chunkIndex;
+
+    const seen: string[] = [];
+    const result = await transcribeAudio({
+      fileId: fid,
+      chunkSeconds: 60,
+      retry: true,
+      sttFn: async (audioPath) => {
+        seen.push(audioPath);
+        return { text: "found", words: [{ text: "found", start: 0.5, end: 1, type: "word" }] };
+      },
+    });
+
+    expect(seen).toHaveLength(1);
+    expect(result.status).toBe("ready");
+    const rerun = db
+      .select()
+      .from(analysisAudioChunks)
+      .where(eq(analysisAudioChunks.fileId, fid))
+      .all()
+      .find((c) => c.chunkIndex === emptyIndex)!;
+    expect(JSON.parse(rerun.words!)).toHaveLength(1);
+    expect(rerun.text).toBe("found");
+  });
+
+  it("retry: true re-runs a ready chunk saved with text but no words; a plain re-call does not", async () => {
+    const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
+    await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });
+    const db = getDb();
+    const [chunk] = db.select().from(analysisAudioChunks).where(eq(analysisAudioChunks.fileId, fid)).all();
+    db.update(analysisAudioChunks)
+      .set({ status: "ready", text: "flat text, no timings", words: null })
+      .where(eq(analysisAudioChunks.id, chunk.id))
+      .run();
+
+    let calls = 0;
+    const sttFn = async () => {
+      calls++;
+      return { text: "timed", words: [{ text: "timed", start: 0, end: 1, type: "word" }] };
+    };
+    await transcribeAudio({ fileId: fid, sttFn });
+    expect(calls).toBe(0);
+    await transcribeAudio({ fileId: fid, retry: true, sttFn });
+    expect(calls).toBe(1);
+    const [after] = db.select().from(analysisAudioChunks).where(eq(analysisAudioChunks.id, chunk.id)).all();
+    expect(after.text).toBe("timed");
+  });
+
   it("re-call on ready chunks does NOT redo work (no spurious re-runs)", async () => {
     const { transcribeAudio, chunkAudio } = await import("@/lib/analysis/manager");
     await chunkAudio({ fileId: fid, chunkSeconds: 60, skipExtraction: true });

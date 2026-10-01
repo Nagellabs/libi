@@ -2,7 +2,8 @@ import { describe, expect, it, vi, afterEach } from "vitest";
 
 /**
  * `defaultCategoryBDeps.recoverOrphanedJobs` wires the real dependency as
- * `() => recoverOrphanedJobsImpl(Date.now() - process.uptime() * 1000)` — a
+ * `recoverOrphanedJobsImpl(startedAt)` (then the export-record sweep, with the
+ * SAME `startedAt`) where `startedAt = Date.now() - process.uptime() * 1000` — a
  * process-start estimate, not the moment recovery actually runs (category A
  * can take a while first). The other lifecycle tests
  * (category-b.test.ts, runner.test.ts) stub `recoverOrphanedJobs` as a no-op,
@@ -18,6 +19,10 @@ describe("Category B jobs-recover cutoff", () => {
   it("passes a process-start estimate, not the moment recovery runs", async () => {
     const recoverOrphanedJobs = vi.fn(async () => {});
     vi.doMock("@/lib/jobs/scheduler", () => ({ recoverOrphanedJobs }));
+    // The export-record sweep reads the DB (`piece_exports`), which this
+    // isolation test deliberately doesn't build: stub it like the job sweep.
+    const recoverOrphanedExports = vi.fn(async () => 0);
+    vi.doMock("@/lib/exports/store", () => ({ recoverOrphanedExports }));
     // Pretend this process has been up 2 minutes, so the expected cutoff is
     // unambiguously distinct from "now" regardless of how long the test
     // runner itself has been alive.
@@ -34,5 +39,8 @@ describe("Category B jobs-recover cutoff", () => {
     // while still failing if the wiring regresses to plain `Date.now()`.
     expect(cutoff).toBeGreaterThanOrEqual(before - 120_000 - 1000);
     expect(cutoff).toBeLessThanOrEqual(after - 120_000 + 1000);
+    // An export record shadows its job: the same boot cutoff sweeps it too.
+    expect(recoverOrphanedExports).toHaveBeenCalledOnce();
+    expect(recoverOrphanedExports).toHaveBeenCalledWith(cutoff);
   });
 });

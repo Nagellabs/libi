@@ -45,6 +45,7 @@ function video(): FileRecord {
     filmstripFilename: null, filmstripStatus: "idle", filmstripGeneratedAt: null, filmstripFrames: null, filmstripHeight: null,
     notes: null,
     aiGeneration: null,
+    audioRights: null,
     createdAt: new Date(),
   };
 }

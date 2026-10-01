@@ -8,8 +8,10 @@
  * is classified here, and `applyScaffold` (materialize.ts) applies the
  * classification to any template that is not the user's own:
  *
- *  - **kept** — the template itself: the text its layers show, and font
- *    families. The apply result labels these (`authorFields.inPiece`).
+ *  - **kept** — the template itself: the text its layers show, font
+ *    families, and the song it names (title, artist and the link it is
+ *    fetched from, left pending in the piece). The apply result labels these
+ *    (`authorFields.inPiece`, and `pendingMusic[]` in `authorFields.fields`).
  *  - **neutralised** — replaced by a name libi makes up, dropped, or kept only
  *    when it is one of a closed set of values the renderer understands (a CSS
  *    colour, a known effect, an easing preset), so no free text survives.
@@ -57,6 +59,7 @@ export const AUTHOR_TEXT_FIELDS: Readonly<Record<string, { treatment: AuthorText
   "overlays.*.codeFile": notCopied("the path is the template's own; the body is written under the new layer's id"),
   "overlays.*.source.assetRef": REWRITTEN,
   "overlays.*.source.slot": REWRITTEN,
+  "overlays.*.source.musicRef": notCopied("refused by the schema: a music link can only be an audio clip's source"),
   "overlays.*.text.fixed": kept("the text the layer shows: it IS the template, labelled by authorFields.inPiece"),
   "overlays.*.text.slot": notCopied("replaced by the slot's value, or by the \"Slot <n> (fill me)\" placeholder"),
   "overlays.*.fontFileId": REWRITTEN,
@@ -104,12 +107,17 @@ export const AUTHOR_TEXT_FIELDS: Readonly<Record<string, { treatment: AuthorText
   "audioClips.*.effects.loop.params.<entry>": EFFECT_PARAM_VALUE,
   "audioClips.*.source.assetRef": REWRITTEN,
   "audioClips.*.source.slot": REWRITTEN,
+  "audioClips.*.source.musicRef": notCopied("a clip on a music link creates no clip: its timing is recorded under the song's pendingMusic entry"),
 
   "assets.*.ref": notCopied("a scaffold key; the file it names gets a file id"),
   "assets.*.file": neutralised("the file is stored as template-asset-<n><ext>"),
   "assets.*.url": neutralised("downloaded and stored as template-asset-<n><ext>; the url itself is not stored in the piece"),
   "assets.*.sha256": notCopied("checked by the install, not stored"),
   "assets.*.contentType": notCopied("ignored: the stored type comes from the media allowlist"),
+  "musicLinks.*.ref": notCopied("a scaffold key: it ties clips to the song they name; a stranger's pendingMusic entry is named tpl-<id8>-music-<n>"),
+  "musicLinks.*.track.title": kept("the song the template names: left pending in the piece (pendingMusic) so the user can be asked about it, labelled by the apply result's authorFields"),
+  "musicLinks.*.track.artist": kept("the song the template names: left pending in the piece (pendingMusic) so the user can be asked about it, labelled by the apply result's authorFields"),
+  "musicLinks.*.sourceUrl": kept("where the song is fetched from on the user's yes (libi.fetch_template_music): kept in pendingMusic only when it is a public https url (hostedUrlProblem), otherwise dropped; never fetched by the apply"),
   "fonts.*.family": notCopied("named only in the apply result's labelled warnings; the layer's family is in its `font`"),
   "fonts.*.assetRef": REWRITTEN,
 
@@ -125,12 +133,15 @@ export const AUTHOR_TEXT_FIELDS: Readonly<Record<string, { treatment: AuthorText
   "captionStyles.*.fields.reveal.highlightColor": COLOUR,
 };
 
-/** The only author text a stranger's template leaves in the user's piece: what its layers show, and font families. */
+/** The only author text a stranger's template leaves in the user's piece: what its layers show, font families, and the song it names. */
 export const KEPT_AUTHOR_TEXT: readonly string[] = [
   "overlays.*.text.fixed",
   "overlays.*.font",
   "overlays.*.fontFamily",
   "captionStyles.*.fields.fontFamily",
+  "musicLinks.*.track.title",
+  "musicLinks.*.track.artist",
+  "musicLinks.*.sourceUrl",
 ];
 
 // ---------------------------------------------------------------------------

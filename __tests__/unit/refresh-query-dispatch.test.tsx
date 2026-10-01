@@ -3,6 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { dispatchRefreshQueryData } from "@/lib/queries/dispatch-refresh-query";
 import { pieceKeys } from "@/lib/queries/pieces";
 import { fileKeys } from "@/lib/queries/files";
+import { pieceAudioKeys } from "@/lib/queries/audio-rights";
 import { effectsCatalogKeys } from "@/lib/queries/effects-catalog";
 import { characterKeys, itemKeys } from "@/lib/queries/catalog";
 
@@ -35,13 +36,14 @@ describe("dispatchRefreshQueryData", () => {
     expect(spy).toHaveBeenCalledWith({ queryKey: fileKeys.forPiece("abc") });
   });
 
-  it("invalidates only global files when pieceId absent", () => {
+  it("invalidates only global files (plus piece-audio-rights) when pieceId absent", () => {
     const qc = new QueryClient();
     const spy = vi.spyOn(qc, "invalidateQueries");
     const handled = dispatchRefreshQueryData({ queryKey: "files" }, qc);
     expect(handled).toBe(true);
     expect(spy).toHaveBeenCalledWith({ queryKey: fileKeys.global() });
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith({ queryKey: pieceAudioKeys.all });
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 
   it("invalidates piece detail, all, and forPiece in order for queryKey=piece", () => {

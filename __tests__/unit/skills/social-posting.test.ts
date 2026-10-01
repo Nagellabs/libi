@@ -34,6 +34,11 @@ describe("social-posting skill", () => {
     expect(skill).toMatch(/^---\nname: social-posting\ndescription: .+\n---/);
   });
 
+  it("tells the agent to put pieceId at the top level of a variants call, not in an entry (entries are strict)", () => {
+    expect(skill).toMatch(/`pieceId` at the top level/);
+    expect(skill).toMatch(/exportVideoArgs` minus `pieceId`/);
+  });
+
   it("pins the libi tools and the provider tools it must use", () => {
     for (const line of [
       "libi.social_status",

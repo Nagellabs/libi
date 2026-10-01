@@ -70,10 +70,18 @@ describe("the author-text audit", () => {
     expect(walkZodSchema(inner.extend({ canvas: z.object({ width: z.number() }).strict() })).opaque).toEqual([]);
   });
 
-  it("keeps only on-screen text and font families", () => {
+  it("keeps only on-screen text, font families and the song a template names", () => {
     const keptPaths = Object.entries(AUTHOR_TEXT_FIELDS).filter(([, v]) => v.treatment === "kept").map(([p]) => p);
     expect(keptPaths.sort()).toEqual([...KEPT_AUTHOR_TEXT].sort());
-    expect([...KEPT_AUTHOR_TEXT].sort()).toEqual(["captionStyles.*.fields.fontFamily", "overlays.*.font", "overlays.*.fontFamily", "overlays.*.text.fixed"]);
+    expect([...KEPT_AUTHOR_TEXT].sort()).toEqual([
+      "captionStyles.*.fields.fontFamily",
+      "musicLinks.*.sourceUrl",
+      "musicLinks.*.track.artist",
+      "musicLinks.*.track.title",
+      "overlays.*.font",
+      "overlays.*.fontFamily",
+      "overlays.*.text.fixed",
+    ]);
   });
 
   it("a colour is a colour, never a sentence", () => {

@@ -68,7 +68,7 @@ export function useDispatchToAgent() {
         return false;
       }
       if (!r.ok) {
-        toast.error("Couldn't send to the agent");
+        toast.error("Couldn't send to the agent", r.error ? { description: r.error } : undefined);
         return false;
       }
       toast.success("Sent to the libi agent");

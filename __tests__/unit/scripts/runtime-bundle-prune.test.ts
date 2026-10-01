@@ -215,6 +215,43 @@ describe("pruneBundle", () => {
     ).toEqual(["another-one", "some-future-naming-scheme"]);
   });
 
+  /**
+   * EL-3: Windows terminals spawn with `useConptyDll: true`, which LoadLibrary's
+   * `conpty\\conpty.dll` next to conpty.node — `prebuilds/win32-<arch>/conpty/`
+   * (conpty.dll + OpenConsole.exe). node-pty also ships the same pair under
+   * `third_party/conpty/<version>/win10-<arch>/`. A win32 bundle must keep both:
+   * without the first, every Windows terminal fails to spawn ("Cannot find
+   * conpty.dll"). Platform and arch are pinned here — CI is ubuntu.
+   */
+  it("a win32-x64 bundle keeps node-pty's conpty.dll + OpenConsole.exe (prebuilds and third_party)", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    const arch = Object.getOwnPropertyDescriptor(process, "arch")!;
+    Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+    Object.defineProperty(process, "arch", { value: "x64", configurable: true });
+    try {
+      plantPrebuilds(["darwin-arm64", "win32-arm64"]);
+      const nodePty = path.join(tmp, "node_modules", "node-pty");
+      const kept = [
+        "prebuilds/win32-x64/conpty.node",
+        "prebuilds/win32-x64/conpty/conpty.dll",
+        "prebuilds/win32-x64/conpty/OpenConsole.exe",
+        "third_party/conpty/1.23.251008001/win10-x64/conpty.dll",
+        "third_party/conpty/1.23.251008001/win10-x64/OpenConsole.exe",
+        "third_party/conpty/1.23.251008001/win10-arm64/conpty.dll",
+      ];
+      for (const rel of kept) {
+        fs.mkdirSync(path.dirname(path.join(nodePty, rel)), { recursive: true });
+        fs.writeFileSync(path.join(nodePty, rel), "x");
+      }
+      const { removed } = pruneBundle(tmp);
+      expect(removed.map((r) => r.pkg).sort()).toEqual(["node-pty/prebuilds/darwin-arm64", "node-pty/prebuilds/win32-arm64"]);
+      for (const rel of kept) expect(fs.existsSync(path.join(nodePty, rel)), rel).toBe(true);
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+      Object.defineProperty(process, "arch", arch);
+    }
+  });
+
   it("still sweeps when node-pty built from source instead of shipping a host prebuild", () => {
     plantPrebuilds(["darwin-x64", "win32-x64"]);
     const rel = path.join(tmp, "node_modules", "node-pty", "build", "Release");

@@ -152,9 +152,11 @@ can't express, it can STILL be word-accurate — never fake the timing:
 1. Create the overlay: `libi.add_overlay({ kind: "code" | "three", body })`.
 2. Attach the transcript: `libi.update_overlay({ pieceId, overlayId,
    captionFromFileId: "<the spoken file's id>" })`. This reads that file's STT
-   words, windows them to the overlay's `[startTime, startTime+duration]`, and
-   stores them as `caption.words` (element-local). The transcript is the source
-   of truth; this is just the derived snapshot.
+   words, maps them through where the file plays on the timeline (its audio
+   clip or video overlay), windows them to the overlay's
+   `[startTime, startTime+duration]`, and stores them as `caption.words`
+   (element-local). The transcript is the source of truth; this is just the
+   derived snapshot.
 3. In the draw body, read the injected `words` + element-local `time` and use the
    provided helpers — `activeWordIndex(words, time)` (karaoke),
    `currentWord(words, time)` (word-by-word), `cumulativeLabel(words, time)`,
@@ -165,6 +167,29 @@ can't express, it can STILL be word-accurate — never fake the timing:
 **Never embed a per-word timing array literally in a code body.** That copy
 drifts from the transcript and won't survive a re-transcribe. Attach via
 `captionFromFileId` so there is one source and one snapshot.
+
+## Re-splitting generated cues
+
+To re-split or re-time the cues of a `generate_captions` track (at commas,
+sentence ends, shorter lines), give every cue its new text and timing with
+`libi.update_overlay({ pieceId, overlayId, content, startTime, duration,
+captionFromFileId: "<the spoken file's id>" })`:
+
+- **Existing cues** are re-worded / re-timed in place and stay in the track
+  with the track style.
+- **More cues than before:** `libi.add_overlay({ kind: "text", content,
+  startTime, duration })` for each extra one, then the same `update_overlay`
+  call on it. A text overlay with no caption joins the file's track and takes
+  the look of its nearest cue (font, colours, reveal, placement).
+- **Fewer cues:** `libi.remove_overlay` the ones no longer needed.
+- Start each cue at (or just before) its first word's `start` and end it by the
+  next cue's start, both on the TIMELINE. A cue gets exactly the words its text
+  says — by where each word starts — so a neighbour's word at a shared boundary
+  never shifts its highlight. If the text doesn't match the words heard in the
+  window, the result carries a `note`: fix that cue's timing.
+
+Never re-run `generate_captions` to "restore sync" after such an edit: it
+rebuilds the whole track and throws the re-split away.
 
 ## Guardrails
 

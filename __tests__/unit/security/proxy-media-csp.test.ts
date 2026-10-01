@@ -22,6 +22,8 @@ describe("proxy: media-serving paths get the media CSP", () => {
     expect(cspFor("/api/templates/0b1c/media/poster.jpg")).toBe("default-src 'none'; sandbox");
     // A stranger's audio/video, streamed from their host (D5–D6): the media policy too.
     expect(cspFor("/api/templates/cloud/asset-stream")).toBe("default-src 'none'; sandbox");
+    // A platform catalog track's preview, streamed from the platform's CDN (social music).
+    expect(cspFor("/api/social/music/preview")).toBe("default-src 'none'; sandbox");
     expect(cspFor("/api/files/by-id/f-1/content")).toBe("default-src 'none'; sandbox");
   });
   // Final re-review 1, I1: the by-FILENAME route serves the same stored bytes.
@@ -30,7 +32,7 @@ describe("proxy: media-serving paths get the media CSP", () => {
     expect(cspFor("/api/files/piece-1/x.svg")).toBe("default-src 'none'; sandbox");
   });
   it("every other path keeps the page CSP", () => {
-    for (const p of ["/editor", "/api/templates", "/api/templates/0b1c", "/api/files/by-id/f-1/proxy", "/api/files/by-id/f-1/content/x", "/templates"]) {
+    for (const p of ["/editor", "/api/templates", "/api/templates/0b1c", "/api/files/by-id/f-1/proxy", "/api/files/by-id/f-1/content/x", "/templates", "/api/social/music/plan"]) {
       expect(cspFor(p), p).toBe(buildCsp());
     }
   });

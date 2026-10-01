@@ -25,41 +25,36 @@ and if it ever moves, re-run `libi connect` to update the registration.
 - **Real editing tools** — timeline, audio mixer with ducking, object tracking, background removal, video analysis.
 - **Bring any MCP server.** Generate clips, voiceover, music or sound effects through fal.ai, ElevenLabs, YouTube download, or anything you connect yourself.
 - **Fast exports.** A trim is a stream copy; overlays composite in a single ffmpeg pass; anything else renders through WebCodecs.
-- **Publish and measure, in the app.** Post a finished piece to Instagram or TikTok, schedule it, and see how each post and ad did — through a posting provider you sign up with yourself. libi charges nothing for this; the provider may ([what it costs](#social-posting-what-it-costs)).
+- **Post and measure, without leaving the app.** Send a finished piece straight to Instagram or TikTok, schedule it, and see how every post and ad is doing — [social posting](#social-posting-built-in) is built in.
 - **Local-first.** Your media, database and generated assets stay on your machine in `~/.libi/`.
 
 > **libi is in beta.** It moves fast and has rough edges. Please tell us about the ones you hit.
 
 ---
 
-## Social posting: what it costs
+## Social posting, built in
 
-**libi charges nothing for social posting**, and it isn't part of any paid membership. But it
-is not free end to end, because libi doesn't post anything itself. It works through a
-**third-party posting provider** you sign up with — [Zernio](https://zernio.com) today — and
-that provider is a paid service with its own plans:
+Finish a video and put it in front of your audience from the same window. libi's social
+posting is part of the app, and part of the chat:
 
-- **The provider bills you, not libi.** Zernio charges per connected social account and meters
-  some platforms separately (X's API, for one). A free-tier allowance covers a small setup
-  today, but its size and prices are Zernio's to set and change. Check Zernio's pricing before
-  you connect more accounts.
-- **Your agent's usage is yours.** When the agent drafts or posts for you, it uses your own
-  Claude Code or Codex plan, like any other chat.
-- **Ad spend is between you and the ad network.** libi only reads ads; it never creates,
-  funds or pauses one. Ask your agent for those changes — it states the budget and waits for
-  your yes.
+- **Compose once, post anywhere it fits.** Instagram (Reel, Feed, Story) and TikTok from a
+  piece's Posting tab: caption, accounts and timing in one place. libi checks the
+  video against each platform's limits before anything goes out.
+- **Schedule it.** Post now, or pick the day and time it goes out.
+- **Let your agent do it.** Ask in chat — "post this as a Reel tomorrow at 9" — and the
+  agent prepares the post for you to review. It can also reach Facebook, X and YouTube.
+- **See how it did.** Every post, with its status and numbers, on the Social page, plus
+  read-only reporting for your ads.
 
-What the app covers today:
+**Works through the posting provider you choose.** libi is built to plug into social
+posting providers rather than lock you into one; [Zernio](https://zernio.com) is the
+provider supported today. You connect it once in your browser — libi never sees a password
+or API key, and your posts, media and metrics stay with your provider. libi itself only
+remembers which provider you picked and which post belongs to which piece.
 
-- **Composing in libi:** Instagram (Reel, Feed, Story) and TikTok.
-- **Posts made elsewhere:** your agent can post to Facebook, X and YouTube through the same
-  provider, and those posts show up in libi's lists, but libi's composer can't target those
-  networks yet.
-- **Ads:** read-only reporting, and not yet checked against a live ad account.
-
-libi stores only your provider choice and a piece ↔ post link. The posts, media and metrics
-stay on the provider. You sign in to the provider in your browser; libi never sees or stores
-a password or API key.
+> Posting is included in libi at no charge. The posting provider is a separate service with
+> its own plans (Zernio has a free allowance for small setups), so check its pricing when
+> you connect accounts.
 
 ---
 

@@ -1,24 +1,28 @@
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
+import path from "node:path";
 import { eq, inArray } from "drizzle-orm";
 import { z } from "zod/v3";
 import { CancelledError, type JobContext, type JobRunner } from "@/lib/jobs/types";
-import { getExportLane } from "@/lib/export/export-lane";
+import { detectAvailableEncoders, pickEncoder } from "@/lib/export/hw-accel";
+import { estimateCost, type CostEstimate } from "@/lib/export/cost";
+import { resolveChunkWorkers } from "@/lib/export/chunk-plan";
+import type { ExportPriority } from "@/lib/export/admission";
+import { getExportScheduler, isHwEncoderSessionError, HW_SESSION_FAILED_MESSAGE, type Reservation } from "@/lib/export/scheduler";
+import type { ExportWaiting } from "@/lib/exports/types";
 import { EXPORT_WAITING_UNIT } from "@/lib/export/export-waiting";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { loadComposition } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { classifyExportShape } from "@/lib/export/classifier";
 import { resolveExportBase } from "@/lib/export/export-base";
-import { stripHiddenLayerArrays } from "@/lib/overlays/hidden";
+import { manifestAsExported } from "@/lib/overlays/hidden";
 import { attachOverlaySourceDims } from "@/lib/export/source-dims";
 import { StreamCopyTrimBackend } from "@/lib/export/backends/stream-copy-trim";
 import { FfmpegOverlayBackend, overlayGraphNeedsBrowser } from "@/lib/export/backends/ffmpeg-overlay";
 import { ChromiumRenderBackend } from "@/lib/export/backends/chromium-render";
-import { resolveExportFolder } from "@/lib/db/settings";
-import { ensureFolderExists } from "@/lib/export/folder";
-import { claimExportPath } from "@/lib/export/filename";
+import { claimExportFile } from "@/lib/export/filename";
 import { ensureChromium } from "@/lib/export/ensure-chromium";
 import { getDb } from "@/lib/db/client";
 import { files as filesTable, pieces } from "@/lib/db/schema";
@@ -30,17 +34,33 @@ import type {
   ExportSettings,
   Overlay,
 } from "@/lib/engine/types";
-import { exportLogger } from "@/lib/logger";
+import { exportLogger, serverLogger as logger } from "@/lib/logger";
 import { cssFamilyForFontFile } from "@/lib/fonts/family";
 import { describeDroppedOverlays, droppedVideoFileIds, type DroppedOverlay } from "@/lib/export/dropped-overlays";
+import { applyAudioExclusion, purposeRequiredMessage, resolveExportAudio, type AudioDecision } from "@/lib/export/audio-policy";
+import { filesForManifest } from "@/lib/audio-rights/piece-reader";
+import { pieceAudioOf } from "@/lib/audio-rights/piece-audio";
+import {
+  createExportRecord,
+  getExportRecord,
+  markExportCancelled,
+  markExportDone,
+  markExportFailed,
+  markExportRunning,
+  setExportFile,
+  uniqueExportName,
+} from "@/lib/exports/store";
+import { exportsDirFor, fileStem, relPathFor } from "@/lib/exports/paths";
 
 /**
  * Unified `export` job. One entry point covers all three server-side backends
  * (stream-copy-trim, ffmpeg-overlay, chromium-render) so the UI + chat + MCP
  * surface get one progress stream and one cancel handle.
  *
- * Output is written DIRECTLY to the configured export folder under the
- * resolved filename — there's no browser-download round-trip.
+ * Output is written DIRECTLY to the piece's exports folder
+ * (`<storage>/<pieceId>/exports/`, lib/exports/paths.ts), and the export's
+ * `piece_exports` record (lib/exports/store.ts) follows it: running, file
+ * claimed, done / failed / cancelled. No browser-download round-trip.
  *
  * Cancellation: the runner forwards JobManager's AbortSignal to the
  * underlying backend. The ffmpeg helper SIGKILLs its child on abort and
@@ -73,10 +93,18 @@ const exportParamsSchema = z.object({
       quality: z.enum(["source", "1080p", "1440p", "4k", "custom"]).optional(),
       graphicsQuality: z.enum(["1080p", "1440p", "4k"]).optional(),
       audioBitrate: z.number().int().positive().optional(),
+      purpose: z.enum(["social", "personal"]).optional(),
+      copyrightedAudio: z.enum(["exclude", "include"]).optional(),
+      includeFileIds: z.array(z.string()).optional(),
+      excludeFileIds: z.array(z.string()).optional(),
     })
     .passthrough(),
-  /** Absolute folder to write to. Empty/missing = use the configured default. */
-  destFolder: z.string().optional(),
+  /** The `piece_exports` row this job fills (lib/exports/store.ts). One per
+   *  export, so it also keeps two same-settings exports from sharing a
+   *  paramsHash: `forceNew` never deletes another export's job row. Absent on a
+   *  job enqueued some other way (`POST /api/jobs`) — the runner then creates
+   *  the record itself. An old queued job's `destFolder` is stripped by zod. */
+  exportId: z.string().min(1).optional(),
 });
 
 export type ExportParams = z.infer<typeof exportParamsSchema>;
@@ -102,23 +130,23 @@ export interface ExportResult {
    *  agent tells the user which font and why. Bounded; absent when every
    *  font loaded. `family` is the one libi.upload_font returned. */
   unloadedFonts?: Array<{ fontFileId: string; family: string; reason: string }>;
+  /** Which copyrighted audio this file carries (spec §5.1). `latestExportFor`
+   *  (mcp/tools/social-tools.ts) and the Posting tab reuse an export only when
+   *  it matches what the post needs. Required: a result without it must not
+   *  compile, because the record would read as song-free. */
+  audioDecision: AudioDecision;
 }
-
-/** How often an export waiting for the lane checks for a cancel. */
-const LANE_CANCEL_POLL_MS = 250;
 
 /** Cap on the reported unloaded-fonts list. */
 const MAX_UNLOADED_FONTS = 20;
 
 export const exportRunner: JobRunner<ExportParams, ExportResult> = {
   kind: "export",
-  // Single-slot. On macOS, h264_videotoolbox is a single-session encoder on
-  // older models; two parallel exports will silently serialize at the kernel
-  // level or fail one with "Error while opening encoder". libx264 with
-  // -preset slow also saturates CPU and starves the rest of the app
-  // (chat agent, preview rendering). Users who want a second variant can
-  // queue it — JobManager dispatches the next on completion.
-  maxConcurrent: 1,
+  // Not a limit: the export scheduler (lib/export/scheduler.ts) decides how
+  // many exports run at once from each one's cost, the free memory, the CPU
+  // load and the hardware encoder's session cap (plan task B0). A job slot
+  // here would only hide an export from the scheduler's queue.
+  maxConcurrent: 32,
   paramsSchema: exportParamsSchema as unknown as z.ZodSchema<ExportParams>,
   resumable: false,
   // ffmpeg + chromium may go silent for stretches; the surrounding backends
@@ -128,49 +156,201 @@ export const exportRunner: JobRunner<ExportParams, ExportResult> = {
   // map from this declaration.
   mcpToolId: makeMcpToolId("libi", "libi.export_video"),
   async run(ctx: JobContext<ExportParams>): Promise<ExportResult> {
-    // The export lane (lib/export/export-lane.ts): a user's export goes first —
-    // a background example render in progress yields to it at once. A cancel
-    // while it waits behind another export gives up its place at once.
-    const waiting = new AbortController();
-    const poll = setInterval(() => {
-      if (ctx.shouldCancel()) waiting.abort(new CancelledError(ctx.jobId));
-    }, LANE_CANCEL_POLL_MS);
-    let release: () => void;
+    const exportId = await ensureExportRecord(ctx);
+    // The file this run claimed, and who it was when claimed (see `FileClaim`).
+    const held: { claim: FileClaim | null } = { claim: null };
     try {
-      // Behind another export: say so, rather than sit at "running 0 %" (final review F7).
-      if (getExportLane().foregroundBusy()) ctx.reportProgress(0, 1, EXPORT_WAITING_UNIT);
-      release = await getExportLane().foreground({ signal: waiting.signal });
+      const result = await renderRecorded(ctx, exportId, (c) => {
+        held.claim = c;
+      });
+      // Deleted while it rendered: the user wanted it gone — the file too, but only
+      // OUR file: the name was free the moment the row went, and another export may
+      // already own the path.
+      if (!markExportDone(exportId, result)) removeClaimedFile(held.claim);
+      return result;
+    } catch (err) {
+      // Normally the render's own catch removed the file already; this covers a throw
+      // after a successful render (a refused done write). Release the claim either way.
+      removeClaimedFile(held.claim);
+      if (err instanceof CancelledError || ctx.shouldCancel()) markExportCancelled(exportId);
+      else markExportFailed(exportId, err instanceof Error ? err.message : String(err));
+      throw err;
     } finally {
-      clearInterval(poll);
-    }
-    try {
-      if (ctx.shouldCancel()) throw new CancelledError(ctx.jobId);
-      return await renderExport(ctx);
-    } finally {
-      release();
+      // The claim stayed open through every cleanup above; only now may its inode be reused.
+      held.claim?.release();
     }
   },
 };
 
+/** An export whose record is gone never writes a file. */
+export const EXPORT_DELETED_MESSAGE = "This export was deleted before it finished.";
+
 /**
- * The export itself: the piece rendered to `destFolder` by the backend the
+ * The record this job fills: the one `/api/export` created, or a new one for
+ * a job enqueued without it. Controller amendment (preflight-scan Minor #5):
+ * an `exportId` is only ever honored for THIS job's own piece and while it is
+ * still queued/failed — a job enqueued via `POST /api/jobs` with another
+ * piece's exportId (or one already claimed by a different run) must not fill
+ * that record; its file would land in the wrong piece's folder while
+ * `relPath` still resolves under the other one.
+ */
+async function ensureExportRecord(ctx: JobContext<ExportParams>): Promise<string> {
+  const { exportId, pieceId, filename, settings } = ctx.params;
+  if (exportId) {
+    const record = getExportRecord(exportId);
+    if (!record || record.pieceId !== pieceId || (record.status !== "queued" && record.status !== "failed")) {
+      throw new Error(EXPORT_DELETED_MESSAGE);
+    }
+    return exportId;
+  }
+  const name = await uniqueExportName(pieceId, filename, settings.format);
+  return createExportRecord({
+    pieceId,
+    name,
+    jobId: ctx.jobId,
+    source: "agent",
+    settings: {
+      format: settings.format,
+      codec: settings.codec,
+      fps: settings.fps,
+      width: settings.width,
+      height: settings.height,
+      quality: settings.quality ?? null,
+      graphicsQuality: settings.graphicsQuality ?? null,
+      purpose: settings.purpose ?? null,
+    },
+  }).id;
+}
+
+/** Render into the record's file, admitted by the export scheduler in the foreground. */
+async function renderRecorded(ctx: JobContext<ExportParams>, exportId: string, onClaimed: (claim: FileClaim) => void): Promise<ExportResult> {
+  if (ctx.shouldCancel()) throw new CancelledError(ctx.jobId);
+  return renderExport(ctx, { kind: "record", exportId }, {
+    onClaimed,
+    priority: "foreground",
+    schedulerId: exportId,
+    // Waiting its turn: say so, rather than sit at "running 0 %" (final review F7).
+    onWait: () => ctx.reportProgress(0, 1, EXPORT_WAITING_UNIT),
+    onAdmitted: () => markExportRunning(exportId, ctx.jobId),
+  });
+}
+
+/** Where an export's file goes. */
+export type ExportTarget =
+  /** A user/agent export: the piece's exports folder, named by its record. */
+  | { kind: "record"; exportId: string }
+  /** A template example render: a work folder its caller owns. No record. */
+  | { kind: "dir"; dir: string };
+
+/**
+ * The export itself: the piece rendered into `target` by the backend the
  * classifier picks, reading ORIGINAL media. The `export` job runs it (above);
  * so does a template's example render (lib/templates/example-export.ts), in
- * its own job and under its own lane slot, so that no `export` row — the
+ * its own job and under its own scheduler slot, so that no `export` row — the
  * Posting tab's "latest export", `libi.post_piece`'s, the jobs list's — is
- * ever recorded for it. The caller holds the export lane.
+ * ever recorded for it. It is admitted by the export scheduler
+ * (lib/export/scheduler.ts) once it knows its backend, unless the caller
+ * already holds a slot (`opts.reservation`).
  */
-export async function renderExport(ctx: JobContext<ExportParams>): Promise<ExportResult> {
-  const { pieceId, source, filename, settings } = ctx.params;
-  const destFolder = ctx.params.destFolder?.trim() || resolveExportFolder();
 
-  // Validate / create the destination folder up front so we fail fast.
+/** How a render is admitted (lib/export/scheduler.ts). */
+export interface RenderExportOptions {
+  /** A slot the caller already holds — a background example render. Skips admission. */
+  reservation?: Reservation;
+  /** Default "foreground". */
+  priority?: ExportPriority;
+  /** Names the render in the scheduler's logs; defaults to the record's id, else the job id. */
+  schedulerId?: string;
+  onWait?: (waiting: ExportWaiting) => void;
+  /** Called once admitted, before the file is claimed. */
+  onAdmitted?: () => void;
+  /**
+   * Called with the file this render claimed, right after the claim. Giving it
+   * hands the claim to the caller: the render leaves the claim's descriptor
+   * open and the caller must `release()` it once its own cleanup is done.
+   * Without it the render releases the claim itself when it ends.
+   */
+  onClaimed?: (claim: FileClaim) => void;
+}
+
+/**
+ * The file a render claimed, and which file that was. A path is not an
+ * identity — a cancelled or deleted export frees its name at once, and the
+ * next export of the same name claims the same path while the old runner is
+ * still tearing down. The old runner must then leave that file alone, so every
+ * removal of "its" file goes through `removeClaimedFile`, which unlinks only
+ * when the path still names this file.
+ *
+ * Identity is device + inode, and it is sound because the claim keeps the
+ * placeholder's descriptor OPEN from the `wx` create until `release()`: an
+ * open descriptor keeps the inode allocated, so no other file can be given its
+ * number meanwhile — not even on a filesystem that reuses freed inodes at once
+ * (ext4). Birth time is deliberately NOT part of it: it is 0 where the
+ * filesystem keeps none (ext2/3, small-inode ext4, NFS, some FUSE), and
+ * where statx is unavailable libuv reports ctime in its place, which ffmpeg's
+ * in-place writes change — either way it would make a file look foreign (a
+ * leaked partial) or tell nothing. ffmpeg opens the path and writes the same
+ * inode in place; no backend renames over the output.
+ */
+export interface FileClaim {
+  path: string;
+  /** `dev:ino` of the claimed file, or null when it could not be read (such a claim owns nothing). */
+  identity: string | null;
+  /** Closes the held descriptor. Idempotent. */
+  release: () => void;
+}
+
+function identityOfPath(filePath: string): string | null {
   try {
-    ensureFolderExists(destFolder);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Export folder not writable: ${destFolder} (${msg})`);
+    const st = fsSync.statSync(filePath, { bigint: true });
+    return `${st.dev}:${st.ino}`;
+  } catch {
+    return null;
   }
+}
+
+/** Takes the identity from the open descriptor; the claim then owns (and must release) it. */
+function takeClaim(filePath: string, fd: number): FileClaim {
+  let identity: string | null = null;
+  try {
+    const st = fsSync.fstatSync(fd, { bigint: true });
+    identity = `${st.dev}:${st.ino}`;
+  } catch {
+    identity = null;
+  }
+  let open = true;
+  return {
+    path: filePath,
+    identity,
+    release: () => {
+      if (!open) return;
+      open = false;
+      try {
+        fsSync.closeSync(fd);
+      } catch {
+        // Already closed: nothing to release.
+      }
+    },
+  };
+}
+
+/** True while the path still names the file this render claimed. A claim that could not be identified owns nothing. */
+function stillOwns(claim: FileClaim): boolean {
+  return claim.identity !== null && identityOfPath(claim.path) === claim.identity;
+}
+
+/** Removes the claimed file when it is still ours; never anything else that now sits at the path. Never throws. */
+function removeClaimedFile(claim: FileClaim | null): void {
+  if (!claim || !stillOwns(claim)) return;
+  try {
+    fsSync.unlinkSync(claim.path);
+  } catch {
+    // Already gone, or held open (Windows): nothing more to do.
+  }
+}
+
+export async function renderExport(ctx: JobContext<ExportParams>, target: ExportTarget, opts: RenderExportOptions = {}): Promise<ExportResult> {
+  const { pieceId, source, filename, settings } = ctx.params;
 
   // Load composition (draft or snapshot).
   let manifest: CompositionManifest;
@@ -188,9 +368,33 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
   // backends, the chromium render payload + its audio mux) reads the
   // filtered arrays. This is what makes agent/server exports honor the eye
   // with no client threading.
-  const stripped = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
-  if (stripped.changed) {
-    manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
+  manifest = manifestAsExported(manifest);
+
+  // Spec §5.2, enforced HERE rather than only in /api/export: a job enqueued
+  // any other way (`POST /api/jobs {kind:"export"}`, a retry, a future
+  // caller) must not quietly default to "include" and ship the song. Judged
+  // on the manifest AS EXPORTED, like the route. An explicit
+  // `copyrightedAudio` is an answer too.
+  const pieceFiles = filesForManifest(manifest);
+  if (!settings.purpose && !settings.copyrightedAudio) {
+    const songs = pieceAudioOf(manifest, pieceFiles).copyrighted;
+    if (songs.length > 0) throw new Error(purposeRequiredMessage(songs));
+  }
+
+  // Copyrighted audio (spec §5.1): dropped from the MANIFEST so every backend
+  // — stream-copy, the ffmpeg graph, the chromium mux — sees the same clips.
+  const audioPolicy = resolveExportAudio(manifest, pieceFiles, {
+    purpose: settings.purpose,
+    copyrightedAudio: settings.copyrightedAudio,
+    includeFileIds: settings.includeFileIds,
+    excludeFileIds: settings.excludeFileIds,
+  });
+  if (audioPolicy.excludedFileIds.length > 0) {
+    manifest = { ...manifest, audioClips: applyAudioExclusion(manifest.audioClips, audioPolicy.excludedFileIds) };
+    logger.info(
+      { tag: "social-music", op: "export_audio_excluded", jobId: ctx.jobId, pieceId, excluded: audioPolicy.excludedFileIds.length, purpose: settings.purpose ?? null },
+      "audio left out of this export",
+    );
   }
 
   const composition = buildCompositionFromManifest(manifest);
@@ -218,6 +422,14 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
   ) {
     shape = "ffmpeg-overlay";
   }
+
+  // With `-c copy`, the base's audio would already come out `-an`: excluding
+  // a file removes its inline clip from the manifest above, so
+  // `keepsBaseAudio` (lib/export/export-base.ts) — which StreamCopyTrimBackend
+  // reads to decide `-an` vs `-map …audio` — sees no clip left once the
+  // excluded file WAS the base's own audio. Forcing ffmpeg-overlay here is
+  // defence in depth, not the thing that mutes it.
+  if (shape === "stream-copy-trim" && audioPolicy.excludedFileIds.length > 0) shape = "ffmpeg-overlay";
 
   // stream-copy-trim only ships the source bytes verbatim. If the requested
   // container ≠ what the source actually contains, the output file would be
@@ -255,7 +467,7 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
   // The classifier is pure — the `fallbackShape()` sites in
   // lib/export/classifier.ts know an export needs a browser but cannot
   // fetch one. This is the first impure place that knows `shape`, and it is
-  // deliberately BEFORE `claimExportPath` so a failed or cancelled download
+  // deliberately BEFORE `claimExportFile` so a failed or cancelled download
   // leaves no placeholder file behind.
   //
   // Progress is reported in MB, not on the 0..100 "%" scale the render uses
@@ -272,12 +484,17 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
   // the download (and later ffmpeg + chromium) a SIGKILL/teardown on cancel
   // without waiting for the poll. ONE `finally` owns the interval from
   // here to the end of the run — every exit path clears it, including a
-  // throw from `claimExportPath` between the download and the render,
+  // throw from `claimExportFile` between the download and the render,
   // which used to leak a poll that outlived the failed job.
   const ac = new AbortController();
   const cancelPoll = setInterval(() => {
     if (ctx.shouldCancel() && !ac.signal.aborted) ac.abort();
   }, 500);
+  let reservation: Reservation | null = null;
+  let ownsReservation = false;
+  // The claimed file, held open while the render runs (see `FileClaim`). Released here
+  // unless the caller took the claim over with `onClaimed`.
+  const claimed: { claim: FileClaim | null; handedOver: boolean } = { claim: null, handedOver: false };
 
   try {
     if (shape === "chromium-render") {
@@ -296,39 +513,66 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
       if (ctx.shouldCancel()) throw new Error("cancelled");
     }
 
+    // ── Admission ───────────────────────────────────────────────────────
+    // After the Chromium download (a download is not a render) and before the
+    // claim (a waiting export holds no file). A cancel while it waits leaves
+    // the queue at once (`ac` aborts on the cancel poll).
+    if (opts.reservation) {
+      reservation = opts.reservation;
+    } else {
+      reservation = await getExportScheduler().acquire({
+        id: opts.schedulerId ?? (target.kind === "record" ? target.exportId : ctx.jobId),
+        priority: opts.priority ?? "foreground",
+        estimate: await estimateFor(shape, resolvedSettings),
+        signal: ac.signal,
+        onWait: opts.onWait,
+      });
+      ownsReservation = true;
+    }
+    opts.onAdmitted?.();
+
     // Claim the destination path atomically.
     const ext = resolvedSettings.format;
-    const outputPath = claimExportPath(destFolder, filename, ext);
-
-    exportLogger.info(
-      {
-        event: "start",
-        jobId: ctx.jobId,
-        backend: shape,
-        pieceId,
-        source,
-        outputPath,
-        targetWidth: resolvedSettings.width,
-        targetHeight: resolvedSettings.height,
-        bitrate: resolvedSettings.bitrate,
-      },
-      "export.start",
-    );
-
-    // Progress is reported as a percentage on a fixed 0..100 scale. The
-    // underlying ffmpeg-overlay / stream-copy backends compute the ratio
-    // against their OWN duration math (which is the trimmed window, not the
-    // composition total) — keeping the runner's denominator fixed at 100
-    // means the bar moves monotonically and ends exactly at 100% no matter
-    // which backend ran.
-    ctx.reportProgress(0, 100, "%");
-
-    const onProgress = (ratio: number) => {
-      const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
-      ctx.reportProgress(pct, 100, "%");
-    };
-
+    const { path: outputPath, fd: claimFd } = await claimOutputPath(target, pieceId, filename, ext);
+    const claim = takeClaim(outputPath, claimFd);
+    claimed.claim = claim;
+    if (opts.onClaimed) {
+      opts.onClaimed(claim);
+      claimed.handedOver = true;
+    }
+    // From here a throw is cleaned up by the catch below (the claimed placeholder is ours to remove).
     try {
+      // Handed to the backends: their own cleanup of a failed run is skipped once the path is no longer ours.
+      const ownsOutput = () => stillOwns(claim);
+
+      exportLogger.info(
+        {
+          event: "start",
+          jobId: ctx.jobId,
+          backend: shape,
+          pieceId,
+          source,
+          outputPath,
+          targetWidth: resolvedSettings.width,
+          targetHeight: resolvedSettings.height,
+          bitrate: resolvedSettings.bitrate,
+        },
+        "export.start",
+      );
+
+      // Progress is reported as a percentage on a fixed 0..100 scale. The
+      // underlying ffmpeg-overlay / stream-copy backends compute the ratio
+      // against their OWN duration math (which is the trimmed window, not the
+      // composition total) — keeping the runner's denominator fixed at 100
+      // means the bar moves monotonically and ends exactly at 100% no matter
+      // which backend ran.
+      ctx.reportProgress(0, 100, "%");
+
+      const onProgress = (ratio: number) => {
+        const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
+        ctx.reportProgress(pct, 100, "%");
+      };
+
       let durationSeconds = 0;
       let droppedOverlays: DroppedOverlay[] | undefined;
       let unloadedFonts: ExportResult["unloadedFonts"];
@@ -341,6 +585,7 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
           outputPath,
           onProgress,
           signal: ac.signal,
+          ownsOutput,
         });
         durationSeconds = result.duration;
       } else if (shape === "ffmpeg-overlay") {
@@ -351,6 +596,8 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
           outputPath,
           onProgress,
           signal: ac.signal,
+          forceSoftwareEncoder: reservation?.software === true,
+          ownsOutput,
         });
         durationSeconds = result.duration;
       } else {
@@ -402,6 +649,8 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
         }
         // The chromium backend returned a Blob; write it to our claimed path.
         const buf = Buffer.from(await result.blob.arrayBuffer());
+        // Cancelled or deleted while it rendered, and the name since taken: never write into their file.
+        if (!ownsOutput()) throw new Error(EXPORT_DELETED_MESSAGE);
         await fs.writeFile(outputPath, new Uint8Array(buf));
       }
 
@@ -428,12 +677,13 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
         backend: shape as ExportResult["backend"],
         width: resolvedSettings.width,
         height: resolvedSettings.height,
+        audioDecision: audioPolicy.decision,
         ...(droppedOverlays?.length ? { droppedOverlays } : {}),
         ...(unloadedFonts?.length ? { unloadedFonts } : {}),
       };
     } catch (err) {
-      // Clean up the claimed placeholder/partial file.
-      try { fsSync.unlinkSync(outputPath); } catch { /* ignore */ }
+      // Clean up the claimed placeholder/partial file — ours only (see `FileClaim`).
+      removeClaimedFile(claim);
       const message = err instanceof Error ? err.message : String(err);
       const isCancel = ctx.shouldCancel() || ac.signal.aborted;
       exportLogger.warn(
@@ -449,11 +699,71 @@ export async function renderExport(ctx: JobContext<ExportParams>): Promise<Expor
         },
         `export.${isCancel ? "cancel" : "fail"}`,
       );
+      // The hardware encoder refused a session despite B0's cap: run fewer at once from now on.
+      // (The line above kept ffmpeg's own words; the user gets the plain sentence.)
+      if (!isCancel && reservation?.usesHwEncoder && isHwEncoderSessionError(message)) {
+        getExportScheduler().lowerHwSessionCap(reservation.id);
+        throw new Error(HW_SESSION_FAILED_MESSAGE);
+      }
       throw err;
     }
   } finally {
     clearInterval(cancelPoll);
+    // The descriptor stays open through the catch above (its cleanup compares identities).
+    if (!claimed.handedOver) claimed.claim?.release();
+    // ALWAYS give the slot back — a failed or cancelled export included.
+    if (ownsReservation) reservation?.release();
   }
+}
+
+/**
+ * Claim the output file atomically (`claimExportFile`: a `wx` placeholder,
+ * `-1`/`-2` on collision). For a record the file goes in the piece's exports
+ * folder under the record's name, and the record learns the name the claim
+ * settled on — the file's stem IS the export's name.
+ */
+async function claimOutputPath(target: ExportTarget, pieceId: string, filename: string, ext: string): Promise<{ path: string; fd: number }> {
+  if (target.kind === "dir") {
+    fsSync.mkdirSync(target.dir, { recursive: true });
+    return claimExportFile(target.dir, filename, ext);
+  }
+  const record = getExportRecord(target.exportId);
+  if (!record) throw new Error(EXPORT_DELETED_MESSAGE);
+  const dir = await exportsDirFor(pieceId);
+  fsSync.mkdirSync(dir, { recursive: true });
+  const claimedFile = claimExportFile(dir, record.name, ext);
+  const fileName = path.basename(claimedFile.path);
+  try {
+    setExportFile(target.exportId, { name: fileStem(fileName), relPath: relPathFor(fileName) });
+  } catch (err) {
+    // Nothing else holds this descriptor yet, and no record points at the placeholder: the file is ours alone.
+    try {
+      fsSync.unlinkSync(claimedFile.path);
+    } catch {
+      // Already gone.
+    }
+    fsSync.closeSync(claimedFile.fd);
+    throw err;
+  }
+  return claimedFile;
+}
+
+/**
+ * The admission estimate for this export (lib/export/cost.ts). A Chromium
+ * render is sized by the render mode `export_render` last probed (software →
+ * up to 4 pages, GPU → 1); until one has run in this process the mode is
+ * unknown and it is estimated as ONE page, rather than assuming software.
+ */
+async function estimateFor(shape: ExportResult["backend"], settings: ExportSettings): Promise<CostEstimate> {
+  const cores = os.cpus().length;
+  const scheduler = getExportScheduler();
+  const encoders = shape === "ffmpeg-overlay" && settings.format === "mp4" ? await detectAvailableEncoders() : new Set<string>();
+  const hwEncoderAvailable = (pickEncoder("h264", encoders, process.platform) ?? "libx264") !== "libx264";
+  const renderWorkers =
+    shape === "chromium-render"
+      ? resolveChunkWorkers(process.env.LIBI_RENDER_CHUNK_WORKERS, scheduler.knownRenderMode(), cores, scheduler.heldRenderWorkers())
+      : 0;
+  return estimateCost({ backend: shape, width: settings.width, height: settings.height, format: settings.format, cores, hwEncoderAvailable, renderWorkers });
 }
 
 function buildCompositionFromManifest(

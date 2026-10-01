@@ -167,6 +167,49 @@ describe("ChromiumRenderBackend", () => {
     expect(result.droppedOverlays).toBeUndefined();
   });
 
+  it("two renders with identical params run side by side, each cancellable on its own (the scheduler admits several at once)", async () => {
+    // `forceNew` replaces any job row with the same params hash — including a RUNNING one,
+    // whose cancel would then find no row. Each render must hash differently.
+    const gates = new Map<string, () => void>();
+    const started: string[] = [];
+    currentDriver = {
+      name: "electron",
+      runJob: async ({ jobId }: { jobId: string }) => {
+        started.push(jobId);
+        await new Promise<void>((release) => gates.set(jobId, release));
+        const dir = await mkdtemp(join(tmpdir(), "test-render-"));
+        const filePath = join(dir, "out.mp4");
+        await writeFile(filePath, new Uint8Array([1, 2, 3, 4]));
+        const { getRenderJobTokenByJobId } = await import("@/lib/export/render-jobs");
+        const entry = getRenderJobTokenByJobId(jobId);
+        if (entry) resolveRenderJob(jobId, entry.token, { tempFilePath: filePath, durationSeconds: 1 });
+      },
+      shutdown: async () => {},
+    };
+    const ctx = (signal: AbortSignal) => ({
+      pieceId: "p1",
+      composition: { id: "c1" } as never,
+      payload: { overlays: [], audioClips: [], width: 1920, height: 1080, fps: 30, files: [] },
+      settings: { format: "mp4", codec: "avc", bitrate: 1_000_000, width: 1920, height: 1080, fps: 30 } as never,
+      onProgress: () => {},
+      signal,
+    });
+    const acA = new AbortController();
+    const a = new ChromiumRenderBackend().run(ctx(acA.signal));
+    const aOutcome = a.then(() => "done", () => "cancelled");
+    // B is enqueued while A is already running — the case a second export hits.
+    for (let i = 0; i < 100 && started.length < 1; i++) await new Promise((r) => setTimeout(r, 20));
+    const b = new ChromiumRenderBackend().run(ctx(new AbortController().signal));
+    for (let i = 0; i < 100 && started.length < 2; i++) await new Promise((r) => setTimeout(r, 20));
+    expect(started).toHaveLength(2);
+    acA.abort();
+    const first = await Promise.race([aOutcome, new Promise<string>((r) => setTimeout(() => r("still running"), 3000))]);
+    expect(first).toBe("cancelled");
+    gates.get(started[1])?.();
+    expect((await b).blob.size).toBe(4);
+    gates.get(started[0])?.();
+  });
+
   it("rejects the job when the driver throws", async () => {
     // The driver's `name` union is narrow (electron | playwright), but
     // here we want to assert the error message format. Use "electron" —

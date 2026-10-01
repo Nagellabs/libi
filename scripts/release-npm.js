@@ -61,6 +61,7 @@ const {
   describeVerifyTimeout,
   classifyTarballAttempt,
   curlGetSucceeded,
+  liveCheckCommand,
 } = require("./lib/release-verify");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -468,6 +469,53 @@ function verifyTarballIntegrity(doc) {
   const actual = `${algo}-${digest}`;
   return { checked: true, getSucceeded: true, expected, actual };
 }
+// The real sleeps are VERIFY_DELAY_MS / TARBALL_VERIFY_DELAY_MS (15 s). The
+// release-npm-exit-paths unit test runs this script end to end against a fake
+// registry and needs the polls without the wait. The override is honoured ONLY
+// together with VITEST=true — a marker vitest sets and no workflow does
+// (GITHUB_ACTIONS would not do: the test sets it too) — so an exported knob
+// alone can never collapse a real release's ~25 min wait into seconds. When it
+// is active it says so.
+const pollDelayOverrideMs = (() => {
+  const raw = process.env.LIBI_RELEASE_VERIFY_DELAY_MS_FOR_TESTS;
+  if (raw === undefined || raw === "") return null;
+  if (process.env.VITEST !== "true") {
+    console.log(
+      "  (ignoring LIBI_RELEASE_VERIFY_DELAY_MS_FOR_TESTS: it is honoured only under vitest)",
+    );
+    return null;
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return null;
+  console.log(
+    `  ⚠ TEST-ONLY registry poll delay override active: ${n} ms between attempts ` +
+      `(not ${VERIFY_DELAY_MS} ms). The budget texts below still describe the real wait.`,
+  );
+  return n;
+})();
+// npm ACCEPTED the package, but a budget ran out before the registry served
+// it. Since 0.1.17 that ends the run GREEN: 0.1.16 sat ~56 min in npm
+// "processing" and went red on a good publish. Print the one-line ::warning::
+// annotation, say how to finish the check locally (verify-npm-live.js, 90 min
+// by default), and exit 0 — which keeps the workflow's version commit + tag
+// push running on `success()`. Never reached on a tarball MISMATCH: that
+// exits 1 below, at once.
+function finishAcceptedNotServed(outcome) {
+  console.log(outcome.annotation);
+  console.log(outcome.message);
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    require("node:fs").appendFileSync(
+      process.env.GITHUB_STEP_SUMMARY,
+      `> **npm accepted ${PKG_NAME}@${version} but was not serving it yet** when this run ` +
+        `stopped waiting. Finish the check locally: \`${liveCheckCommand(version)}\`\n\n`,
+    );
+  }
+  if (!process.env.GITHUB_ACTIONS) {
+    // Locally nothing pushes for us; keep the reminder the live path prints.
+    console.log("\n   Don't forget: git push the version commit + tag.");
+  }
+  process.exit(outcome.exitCode);
+}
 let served = null;
 let latest = null;
 for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
@@ -490,14 +538,15 @@ for (let attempt = 1; attempt <= VERIFY_ATTEMPTS; attempt++) {
       delayMs: VERIFY_DELAY_MS,
       whatIsMissing: "still isn't being served",
     });
-    if (outcome.exitCode === 0) {
+    if (outcome.kind === "served") {
       console.log(outcome.message);
       break;
     }
-    console.error(outcome.message);
-    process.exit(outcome.exitCode);
+    // Not even the version document yet: the tarball can't be fetched either,
+    // so hand the whole check to the local live check.
+    finishAcceptedNotServed(outcome);
   }
-  sleepSync(VERIFY_DELAY_MS);
+  sleepSync(pollDelayOverrideMs ?? VERIFY_DELAY_MS);
 }
 // Only reached once the version document is confirmed live (either the
 // packument caught up, or the final attempt above confirmed a 200) — never on
@@ -550,15 +599,14 @@ for (let attempt = 1; attempt <= TARBALL_VERIFY_ATTEMPTS; attempt++) {
       delayMs: TARBALL_VERIFY_DELAY_MS,
       whatIsMissing: "its tarball still couldn't be confirmed by a successful GET",
     });
-    console.error(
+    console.log(
       "\n  This is unresolved GET/network flakiness, not a confirmed corrupt tarball —\n" +
         "  a corruption verdict only ever comes from a completed GET whose digest\n" +
-        "  disagrees with dist.integrity, which never happened here.\n" +
-        outcome.message,
+        "  disagrees with dist.integrity, which never happened here.",
     );
-    process.exit(outcome.exitCode);
+    finishAcceptedNotServed(outcome);
   }
-  sleepSync(TARBALL_VERIFY_DELAY_MS);
+  sleepSync(pollDelayOverrideMs ?? TARBALL_VERIFY_DELAY_MS);
 }
 const shellApi = capture("npm", ["view", PKG_NAME, "libi.shellApiVersion"]);
 console.log(`\n  registry serves : ${served}\n  dist-tags.latest: ${latest}\n  shellApiVersion : ${shellApi}`);

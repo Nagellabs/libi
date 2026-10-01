@@ -1,6 +1,22 @@
 import { describe, it, expect } from "vitest";
-import { defaultOptions, seedFromCreatorInfo } from "@/components/social/composer/types";
+import {
+  defaultOptions,
+  seedFromCreatorInfo,
+  exportVariantOf,
+  mixedVariants,
+  exportFitsVariant,
+  STEPS,
+  STEP_LABEL,
+  type TargetDraft,
+} from "@/components/social/composer/types";
 import type { TikTokCreatorInfo, TargetOptions } from "@/lib/social/types";
+
+describe("STEPS", () => {
+  it("Music is its own step, between Targets and Caption", () => {
+    expect(STEPS).toEqual(["media", "targets", "music", "caption", "when", "review"]);
+    expect(STEP_LABEL.music).toBe("Music");
+  });
+});
 
 function info(over: Partial<TikTokCreatorInfo["interactions"]> = {}): TikTokCreatorInfo {
   return {
@@ -55,5 +71,36 @@ describe("seedFromCreatorInfo", () => {
       tiktok: { ...tiktokDraft().tiktok, privacyLevel: "SELF_ONLY" },
     };
     expect(seedFromCreatorInfo(stale, info(), false).tiktok.privacyLevel).toBe("PUBLIC_TO_EVERYONE");
+  });
+});
+
+describe("music helpers", () => {
+  const TT_OPTIONS = tiktokDraft().tiktok;
+  const CREATOR_INFO = info();
+  const draft = (music?: object): TargetDraft =>
+    ({ platform: "tiktok", accountId: "a", options: { platform: "tiktok", tiktok: TT_OPTIONS, ...(music ? { music } : {}) } as TargetDraft["options"] });
+
+  it("variants", () => {
+    expect(exportVariantOf(draft({ mode: "include" }))).toBe("with-song");
+    expect(exportVariantOf(draft({ mode: "draft" }))).toBe("without-song");
+    expect(exportVariantOf(draft())).toBe("without-song");
+    expect(mixedVariants([draft({ mode: "include" }), draft({ mode: "strip" })])).toBe(true);
+    expect(mixedVariants([draft({ mode: "attach" }), draft({ mode: "strip" })])).toBe(false);
+  });
+
+  it("an export fits a variant only when its decision says so", () => {
+    const e = { filePath: "x", width: 1, height: 1, sizeBytes: 1, durationSeconds: 1 };
+    expect(
+      exportFitsVariant({ ...e, audioDecision: { purpose: "social", excludedFileIds: ["s"], carriesCopyrighted: false } }, "without-song"),
+    ).toBe(true);
+    expect(
+      exportFitsVariant({ ...e, audioDecision: { purpose: "personal", excludedFileIds: [], carriesCopyrighted: true } }, "without-song"),
+    ).toBe(false);
+    expect(exportFitsVariant(e, "without-song")).toBe(false);
+  });
+
+  it("seedFromCreatorInfo keeps the target's music", () => {
+    const o = { platform: "tiktok" as const, tiktok: { ...TT_OPTIONS, privacyLevel: "GONE" }, music: { mode: "draft" as const } };
+    expect(seedFromCreatorInfo(o, CREATOR_INFO, true).music).toEqual({ mode: "draft" });
   });
 });

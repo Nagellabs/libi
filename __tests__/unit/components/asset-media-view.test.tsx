@@ -1,10 +1,17 @@
 // @vitest-environment jsdom
-import { render } from "@testing-library/react";
+import { render, fireEvent, screen } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createRef } from "react";
 import { AssetMediaView } from "@/components/editor/asset-media-view";
 import type { FileRecord } from "@/lib/db/schema/types";
+
+// AudioAssetView mounts AudioRightsSection, which reads files via React Query
+// (useFileById); it has its own test, so stub it here to keep this view
+// renderable without a QueryClientProvider.
+vi.mock("@/components/preview/audio-rights-section", () => ({
+  AudioRightsSection: () => null,
+}));
 
 function vid(): FileRecord {
   return {
@@ -14,6 +21,7 @@ function vid(): FileRecord {
     proxyFilename: null, proxyStatus: "idle", proxyGeneratedAt: null, proxyHeight: null,
     filmstripFilename: null, filmstripStatus: "idle", filmstripGeneratedAt: null, filmstripFrames: null, filmstripHeight: null,
     aiGeneration: null,
+    audioRights: null,
     notes: null,
     createdAt: new Date(),
   };
@@ -29,6 +37,26 @@ describe("AssetMediaView", () => {
     expect(video).toBeTruthy();
     expect(video!.hasAttribute("controls")).toBe(true);
     expect(ref.current).toBe(video);
+  });
+
+  it("plays the original when the proxy fails to load, and stops offering the proxy", () => {
+    const file: FileRecord = {
+      ...vid(), mediaWidth: 1080, mediaHeight: 1920,
+      proxyFilename: "x-proxy.mp4", proxyStatus: "ready", proxyHeight: 1080,
+    };
+    const ref = createRef<HTMLMediaElement>();
+    const { container } = render(
+      <AssetMediaView asset={file} onTimeUpdate={() => {}} mediaRef={ref} />,
+    );
+    const video = container.querySelector("video")!;
+    expect(video.getAttribute("src")).toBe("/api/files/by-id/v/proxy");
+    expect(screen.getByText("View original")).toBeInTheDocument();
+
+    fireEvent.error(video);
+
+    expect(container.querySelector("video")!.getAttribute("src")).toBe("/api/files/by-id/v/content");
+    expect(screen.queryByText("View original")).toBeNull();
+    expect(screen.queryByText("View preview")).toBeNull();
   });
 
   it("renders an image for image files", () => {

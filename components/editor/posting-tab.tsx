@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { trackEvent } from "@/lib/analytics/client";
 import { Button } from "@/components/ui/button";
@@ -10,66 +10,46 @@ import { ConnectLibiEmptyState } from "@/components/social/connect-libi-empty-st
 import { PostDetailSheet } from "@/components/social/post-detail-sheet";
 import { PostListSkeleton } from "@/components/social/social-skeletons";
 import { PostRow } from "@/components/social/post-row";
+import { PostMusicSummary, hasPostMusic } from "@/components/social/music/post-music-summary";
 import { Composer } from "@/components/social/composer/composer";
 import type { LatestExport } from "@/components/social/composer/types";
+import { isActiveExport, type ExportRecordView } from "@/lib/exports/types";
 import { platformLabel } from "@/lib/social/catalog";
 import { CONTENT_TYPE_LABEL, postEntryLabel, postTypes, whenLabel } from "@/lib/social/format";
 import { AdRow, NETWORK_GLYPH, adEntryLabel } from "@/components/social/ad-row";
 import { PostNav, postAnchorId, type PostNavItem } from "@/components/social/post-nav";
-import { useAllJobs } from "@/lib/queries/jobs";
+import { useExports } from "@/lib/queries/exports";
 import { usePiece } from "@/lib/queries/pieces";
+import { usePieceAudioRights } from "@/lib/queries/audio-rights";
 import { useSocialPieceAds, useSocialPiecePosts, useSocialStatus } from "@/lib/queries/social";
 import { consumePostingIntent, requestExportDialog, usePostingIntent } from "@/hooks/social/use-posting-intent";
 
-/** One export job's recorded result — a subset of `ExportSuccess`
- *  (`hooks/editor/use-export-flow.ts`), read back off the job row rather than
- *  a live export flow. Unknown/missing fields make the row unusable rather
- *  than guessed at. */
-interface ExportJobResult {
-  filePath?: unknown;
-  width?: unknown;
-  height?: unknown;
-  sizeBytes?: unknown;
-  durationSeconds?: unknown;
+/**
+ * The piece's finished exports that are still on disk, newest first — from
+ * its export records (`GET /api/pieces/:id/exports`, the same list the
+ * Exports tab shows). Pure; exported for its test.
+ */
+export function latestExportsOf(views: ExportRecordView[]): LatestExport[] {
+  return views
+    .filter((e) => e.status === "done" && !e.missing && !!e.path && !!e.width && !!e.height)
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
+    .map((e) => ({
+      exportId: e.id,
+      name: e.name,
+      aspect: e.aspect,
+      filePath: e.path as string,
+      width: e.width as number,
+      height: e.height as number,
+      sizeBytes: e.sizeBytes ?? 0,
+      durationSeconds: e.durationSec ?? 0,
+      audioDecision: {
+        purpose: e.purpose === "social" || e.purpose === "personal" ? e.purpose : null,
+        excludedFileIds: e.excludedFileIds,
+        carriesCopyrighted: e.carriesCopyrighted,
+      },
+    }));
 }
 
-/**
- * This piece's most recent completed export, from the SAME jobs the
- * Background Jobs tab reads (`GET /api/jobs?kind=export`) — no new route.
- * `/api/jobs` does not filter by piece server-side, so the piece match and
- * "most recent" pick happen here, over whatever the (small, polled-only-while-
- * inflight) export job list already contains.
- */
-function useLatestExport(pieceId: string): LatestExport | null {
-  const jobs = useAllJobs({ kind: "export" });
-  return useMemo(() => {
-    const rows = jobs.data?.jobs ?? [];
-    const parsed = rows
-      .filter((j) => j.pieceId === pieceId && j.status === "completed" && !!j.resultJson)
-      .map((j) => {
-        let result: ExportJobResult;
-        try {
-          result = JSON.parse(j.resultJson as string) as ExportJobResult;
-        } catch {
-          return null;
-        }
-        if (typeof result.filePath !== "string" || typeof result.width !== "number" || typeof result.height !== "number") {
-          return null;
-        }
-        const latest: LatestExport = {
-          filePath: result.filePath,
-          width: result.width,
-          height: result.height,
-          sizeBytes: typeof result.sizeBytes === "number" ? result.sizeBytes : 0,
-          durationSeconds: typeof result.durationSeconds === "number" ? result.durationSeconds : 0,
-        };
-        return { latest, completedAt: j.completedAt };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
-      .sort((a, b) => new Date(b.completedAt ?? 0).getTime() - new Date(a.completedAt ?? 0).getTime());
-    return parsed[0]?.latest ?? null;
-  }, [jobs.data, pieceId]);
-}
 
 /**
  * The piece editor's Posting tab — a filtered lens over the same social
@@ -96,19 +76,33 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
   const posts = useSocialPiecePosts(pieceId, !!status.data?.connected);
   const ads = useSocialPieceAds(pieceId, !!status.data?.connected);
   const intent = usePostingIntent(pieceId);
-  const latest = useLatestExport(pieceId);
+  // Every export record of this piece: the finished ones feed the composer's
+  // picker, and the one it is waiting for (if any) is looked up by id.
+  const exportsQuery = useExports(pieceId);
+  const exportRecords = exportsQuery.data;
+  const exports = useMemo(() => latestExportsOf(exportRecords ?? []), [exportRecords]);
+  const latest = exports[0] ?? null;
+  // The piece's CURRENT audio: whether a published post still has a song
+  // someone may need to finish by hand (YouTube Studio, Instagram's app).
+  const pieceAudio = usePieceAudioRights(pieceId);
+  const pieceHasCopyrighted = (pieceAudio.data?.copyrighted.length ?? 0) > 0;
   // Two different things, deliberately two states. `reviewing` is the detail
   // sheet (a post you clicked to read); `editing` is the post the COMPOSER is
   // open on. They were one field, which is why a draft could not have an Edit
   // button: clicking it would have opened the sheet as well.
   const [reviewing, setReviewing] = useState<string | null>(null);
-  const [editing, setEditing] = useState<string | null>(null);
+  // Seeded from the intent too: a composer that went to the export dialog and
+  // came back (`openPostingTab({ providerPostId })`) reopens the SAME draft.
+  const [editing, setEditing] = useState<string | null>(intent?.providerPostId ?? null);
   const [view, setView] = useState<"posts" | "new">("new");
   const [platform, setPlatform] = useState<string>("");
   const [type, setType] = useState<string>("");
   // The one post (or ad) the user came here to look at, from the Social
   // page's "Piece" link. A filter like the two above, with its own way out.
   const [focus, setFocus] = useState<string | null>(intent?.focusPostId ?? null);
+  /** The post the composer just sent: scrolled to once it is in the list, so
+   *  what it says to do next (a TikTok draft's "finish in the app") is on screen. */
+  const justSent = useRef<string | null>(null);
 
   // Mount-once: this tab is remounted by switching away and back, and each
   // such visit is its own "viewed" moment, not a re-render inside one visit.
@@ -122,25 +116,48 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
   // `export-dialog.tsx`'s `prevPieceName`/`prevDefaults` blocks for the same
   // pattern) — so there is no extra render lagging behind the intent arriving.
   const [seenNonce, setSeenNonce] = useState(intent?.nonce ?? 0);
+  // The export the composer sent the user to make (the export dialog's Start,
+  // from the composer). Local to this mount; read from the intent the same way
+  // `seenNonce` is, so it is known on the very first render too.
+  const [awaitedId, setAwaitedId] = useState<string | null>(intent?.awaitExportId ?? null);
+  // The export a "Post…" asked the composer to start on. Applied to the
+  // composer that opens with the hand-off and to none after it: a later
+  // composer in this visit (Posts list, then + New post) starts clean.
+  const [startExport, setStartExport] = useState<string | null>(intent?.exportPath ?? null);
   if ((intent?.nonce ?? 0) !== seenNonce) {
     setSeenNonce(intent?.nonce ?? 0);
+    setAwaitedId(intent?.awaitExportId ?? null);
+    setStartExport(intent?.exportPath ?? null);
     if (intent?.focusPostId) {
       // "Show me this post" — the list, narrowed to it. Never the composer.
       setFocus(intent.focusPostId);
       setView("posts");
     } else {
       if (intent?.providerPostId) setEditing(intent.providerPostId);
-      // Otherwise an intent is someone ASKING to post — the export dialog's
-      // "Post…", `libi.post_piece`, or reopening a draft. It goes to the
-      // composer whatever the history says.
+      // Otherwise an intent is someone ASKING to post — `libi.post_piece` or
+      // reopening a draft. It goes to the composer whatever the history says.
       setView("new");
     }
   }
-  // A focus hand-off is read once; leaving it in the store would replay it
-  // every time this tab remounts, long after the user cleared it.
+  const awaitedExport = useMemo(
+    () => (awaitedId ? ((exportRecords ?? []).find((e) => e.id === awaitedId) ?? null) : null),
+    [awaitedId, exportRecords],
+  );
+  // Settled: finished, failed or cancelled — or GONE (deleted meanwhile), which
+  // is only knowable from a list that is current, not a cached one still being
+  // refetched. A vanished record would otherwise keep the hand-off alive for ever.
+  const awaitedGone = !!awaitedId && exportRecords !== undefined && !exportsQuery.isFetching && !awaitedExport;
+  const awaitedSettled = awaitedGone || (!!awaitedExport && !isActiveExport(awaitedExport));
+  // A hand-off is read once; leaving it in the store would replay it every
+  // time this tab remounts, long after it was acted on (a draft reopened that
+  // has since been published or deleted, a focus the user cleared). This mount
+  // keeps what it read in its own state. Only a hand-off waiting for an export
+  // that is still rendering stays alive across a remount, until that export
+  // settles: the composer has then taken it (or said it failed).
   useEffect(() => {
-    if (intent?.focusPostId) consumePostingIntent();
-  }, [intent]);
+    const spent = intent?.awaitExportId ? awaitedSettled : !!(intent?.focusPostId || intent?.providerPostId || intent?.exportPath);
+    if (spent) consumePostingIntent();
+  }, [intent, awaitedSettled]);
 
   // Which view to open on, decided ONCE and only when the answer is knowable:
   // until the piece's posts have loaded, "has it been posted?" has no answer,
@@ -195,6 +212,12 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
       ),
     [all, platform, type, boostsByPost, focus],
   );
+  useEffect(() => {
+    const id = justSent.current;
+    if (!id || view !== "posts" || !shown.some((p) => p.id === id)) return;
+    justSent.current = null;
+    document.querySelector(`[data-post-id="${CSS.escape(id)}"]`)?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [shown, view]);
   const shownAds = useMemo(
     () =>
       focus
@@ -233,6 +256,15 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
 
   /** Open the composer on an existing post — the draft's Edit button, and the
    *  same path `openPostingTab({ providerPostId })` takes. */
+  /** A brand-new post: no draft, and none of the previous composer's hand-offs. */
+  const openNewComposer = () => {
+    setEditing(null);
+    setStartExport(null);
+    // An export still rendering for the post being left is not lost: the new
+    // composer carries on waiting for it. A settled one has been handled.
+    if (awaitedSettled || !awaitedExport) setAwaitedId(null);
+    setView("new");
+  };
   const openComposerFor = (id: string) => {
     setEditing(id);
     setView("new");
@@ -263,8 +295,7 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
                 // "New post" always means a NEW one — leaving a draft open
                 // behind this button made it silently mean "keep editing
                 // that draft", which is not what it says.
-                setEditing(null);
-                setView("new");
+                openNewComposer();
               }}
             >
               + New post
@@ -293,7 +324,7 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
             ) : totalItems === 0 ? (
               <div className="space-y-2 py-6 text-center">
                 <p className="text-sm text-muted-foreground">Nothing posted from this piece yet.</p>
-                <Button size="sm" className="cursor-pointer" onClick={() => setView("new")}>
+                <Button size="sm" className="cursor-pointer" onClick={openNewComposer}>
                   Post it
                 </Button>
               </div>
@@ -373,9 +404,11 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
                       // Computed, not inlined: `{cond && <x/>}` still hands
                       // `children` a truthy array, and PostRow would then draw
                       // an empty divider under every draft.
+                      const hasMusic = hasPostMusic(p, pieceHasCopyrighted);
                       const detail =
-                        boosts.length > 0 || hasAnalytics ? (
+                        boosts.length > 0 || hasAnalytics || hasMusic ? (
                           <>
+                            {hasMusic && <PostMusicSummary post={p} pieceHasCopyrighted={pieceHasCopyrighted} />}
                             {boosts.length > 0 && (
                               <div className="space-y-2" data-testid={`piece-post-ad-${p.id}`}>
                                 <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
@@ -449,7 +482,10 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
                 <button
                   type="button"
                   data-testid="posting-back-to-posts"
-                  onClick={() => setView("posts")}
+                  onClick={() => {
+                    setStartExport(null);
+                    setView("posts");
+                  }}
                   className="mb-3 cursor-pointer text-xs text-muted-foreground hover:underline"
                 >
                   ← Back to this piece&apos;s posts
@@ -460,14 +496,22 @@ export function PostingTab({ pieceId }: { pieceId: string }) {
                 intent={{
                   pieceId,
                   pieceName: piece.data?.name ?? "Untitled",
-                  exportPath: intent?.exportPath ?? latest?.filePath ?? null,
+                  // Only an explicit "start on this export" (Post… on an
+                  // export) — otherwise the composer picks the newest itself.
+                  exportPath: startExport,
                   draftPostId: editing,
                 }}
                 latestExport={latest}
-                onExportRequested={() => requestExportDialog(pieceId)}
-                onDone={() => {
+                exports={exports}
+                awaitedExport={awaitedExport}
+                onAwaitedHandled={() => setAwaitedId(null)}
+                onExportRequested={() => requestExportDialog(pieceId, { purpose: "social", returnToPost: true, draftPostId: editing })}
+                onDone={(postId) => {
+                  justSent.current = postId;
                   consumePostingIntent();
                   setEditing(null);
+                  setStartExport(null);
+                  setAwaitedId(null);
                   // The post exists now: the thing worth looking at is the
                   // history, not the form that made it — and not a detail
                   // sheet drawn over the top of it either.

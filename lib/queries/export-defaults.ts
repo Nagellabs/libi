@@ -4,12 +4,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { GraphicsQuality } from "@/lib/engine/types";
 
 export interface ExportDefaultsValue {
-  folder: string | null;
   format: "mp4" | "webm";
   quality: "source" | "1080p" | "1440p" | "4k";
   graphicsQuality: GraphicsQuality;
-  effectiveFolder: string;
-  osDefaultFolder: string;
 }
 
 export const exportDefaultsKeys = {
@@ -32,7 +29,7 @@ export function useUpdateExportDefaults() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: async (
-      partial: Pick<ExportDefaultsValue, "folder" | "format" | "quality"> &
+      partial: Pick<ExportDefaultsValue, "format" | "quality"> &
         Partial<Pick<ExportDefaultsValue, "graphicsQuality">>,
     ): Promise<ExportDefaultsValue> => {
       const res = await fetch("/api/settings/export", {

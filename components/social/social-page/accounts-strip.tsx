@@ -3,8 +3,11 @@
 import { AccountsStripSkeleton } from "@/components/social/social-skeletons";
 import { AGENT_ONLY_BLURB } from "@/components/social/platform-support";
 import { useSocialAccounts, useSocialStatus } from "@/lib/queries/social";
+import { useSocialMusicFacts, useSetTikTokKind } from "@/lib/queries/social-music";
 import { isComposablePlatform, platformLabel } from "@/lib/social/catalog";
 import { PlatformBadge } from "@/components/social/platform-icon";
+import type { SocialAccount } from "@/lib/social/types";
+import type { AccountMusicFacts } from "@/lib/social/music-policy";
 
 /**
  * Deliberately NO expiry countdown anywhere in this card. TikTok's token
@@ -18,6 +21,8 @@ import { PlatformBadge } from "@/components/social/platform-icon";
 export function AccountsStrip() {
   const accounts = useSocialAccounts();
   const status = useSocialStatus();
+  const musicFacts = useSocialMusicFacts();
+  const setKind = useSetTikTokKind();
 
   if (accounts.isLoading) return <AccountsStripSkeleton />;
 
@@ -57,6 +62,9 @@ export function AccountsStrip() {
             ) : a.health?.status === "healthy" ? (
               <span className="mt-0.5 inline-block text-xs text-emerald-500">ok</span>
             ) : null}
+            {(a.platform === "tiktok" || a.platform === "instagram") && (
+              <AccountMusicLine account={a} facts={musicFacts.data?.facts[a.id]} dashboardUrl={dashboardUrl} onKind={(v) => setKind.mutate({ accountId: a.id, tiktokKind: v })} />
+            )}
           </div>
         </div>
       ))}
@@ -73,5 +81,54 @@ export function AccountsStrip() {
         </a>
       )}
     </div>
+  );
+}
+
+function AccountMusicLine({
+  account,
+  facts,
+  dashboardUrl,
+  onKind,
+}: {
+  account: SocialAccount;
+  facts: AccountMusicFacts | undefined;
+  dashboardUrl: string | undefined;
+  onKind: (v: "business" | "personal") => void;
+}) {
+  if (account.platform === "tiktok") {
+    const k = facts?.tiktokKind;
+    const text = k ? `TikTok · ${k.value === "business" ? "Business" : "Personal"}${k.source === "detected" ? " (detected)" : ""}` : "TikTok · type unknown";
+    return (
+      <p data-testid={`account-music-${account.id}`} className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+        {text}
+        <select
+          data-testid={`tiktok-kind-${account.id}`}
+          aria-label="TikTok account type"
+          value={k?.value ?? ""}
+          onChange={(e) => onKind(e.target.value as "business" | "personal")}
+          className="cursor-pointer rounded border border-border bg-background px-1 py-0.5 text-xs"
+        >
+          {!k && <option value="">Choose…</option>}
+          <option value="business">Business</option>
+          <option value="personal">Personal</option>
+        </select>
+      </p>
+    );
+  }
+  const fb = facts?.instagramFacebookLogin;
+  return (
+    <p data-testid={`account-music-${account.id}`} className="mt-0.5 text-xs text-muted-foreground">
+      {fb?.value === true ? (
+        "Music: available"
+      ) : fb?.value === false ? (
+        <>
+          Music needs Facebook Login —{" "}
+          <a href={dashboardUrl} target="_blank" rel="noopener noreferrer" className="cursor-pointer text-amber-500 hover:underline">
+            Reconnect at Zernio
+          </a>{" "}
+          and choose Facebook
+        </>
+      ) : null}
+    </p>
   );
 }

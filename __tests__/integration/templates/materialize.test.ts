@@ -13,6 +13,7 @@ import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-s
 import { LocalFileStorage } from "@/lib/storage/local";
 import { seedTemplateFixturePiece, type FixtureIds } from "@/__tests__/helpers/template-fixture-piece";
 import { files } from "@/lib/db/schema/sqlite";
+import { parseAudioRights } from "@/lib/audio-rights/types";
 import type { TemplateScaffold } from "@/lib/templates/scaffold";
 import { loadManifest, saveManifest, type PersistedAudioClip, type PersistedOverlay } from "@/lib/composition/persistence";
 import { getUserPreset, saveUserPreset } from "@/lib/overlays/preset-store";
@@ -194,6 +195,20 @@ describe("applyScaffold", () => {
 
     expect(getTemplate(fullId)!.useCount).toBe(1);
     expect(getTemplate(fullId)!.lastUsedAt).not.toBeNull();
+  });
+
+  // A template's audio travels as bytes only when extract found it not
+  // copyrighted (a copyrighted song becomes a music link; a public template's
+  // audio arrives as a hosted url through remote_fetch). So the bytes an apply
+  // stores are the author's own — stamped owned explicitly, never left null.
+  it("stamps an audio asset the template carried as bytes owned, decided by provenance", async () => {
+    const dst = seedPiece(testDb, { id: "dst" });
+    const r = await applyScaffold({ templateId: fullId, pieceId: dst, fetchUrls: noUrls });
+    const out = await loadManifest(dst);
+    const music = out.audioClips!.find((c) => c.id === r.clips.music)!;
+    const row = testDb.select().from(files).where(eq(files.id, music.fileId)).get()!;
+    expect(row.type).toBe("audio");
+    expect(parseAudioRights(row.audioRights)).toMatchObject({ class: "owned", decidedBy: "provenance" });
   });
 
   it("keeps the user's own caption style when it is identical, and suffixes it when it is not", async () => {
@@ -706,12 +721,101 @@ describe("applyScaffold", () => {
     expect(r.warnings.some((w) => /slot "logo" is unfilled/.test(w))).toBe(true);
     expect(testDb.select().from(files).where(eq(files.pieceId, dst)).all().some((f) => f.filename.endsWith(".heic"))).toBe(false);
   });
+  // Social music §7: a template names a copyrighted song (musicLinks) and never
+  // carries it. Applying one leaves the song PENDING in the piece, at the
+  // template's timing, for libi.fetch_template_music on the user's yes.
+  describe("a template that names a song", () => {
+    function musicScaffold(musicLinks: TemplateScaffold["musicLinks"]): TemplateScaffold {
+      return {
+        schema: 1, name: "Beat", description: "", tags: [], canvas: { width: 1080, height: 1920, fps: 30 }, duration: 6,
+        slots: [], overlays: [], assets: [], fonts: [], captionStyles: [],
+        musicLinks,
+        audioClips: [
+          { key: "a", kind: "standalone", startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true, source: { musicRef: "espresso" } },
+          { key: "b", kind: "standalone", startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true, source: { musicRef: "espresso" } },
+        ] as TemplateScaffold["audioClips"],
+      };
+    }
+    const ESPRESSO = { ref: "espresso", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" };
+    const createFrom = async (scaffold: TemplateScaffold, extra: Record<string, unknown> = {}) =>
+      (await createTemplate({ name: "Beat", description: "", tags: [], scaffold, instructions: "", copies: [], writes: [], ...extra })).id;
+
+    it("a music link becomes pendingMusic at the template's timing — nothing fetched, no clip", async () => {
+      const templateId = await createFrom(musicScaffold([ESPRESSO]));
+      const pieceId = seedPiece(testDb as never, { id: "dst-music" });
+      const fetched: string[] = [];
+      const r = await applyScaffold({ templateId, pieceId, fetchUrls: async (urls) => { fetched.push(...urls); return []; } });
+      expect(fetched).toEqual([]);
+      expect(r.pendingMusic).toEqual([{
+        assetId: `tpl-${templateId.slice(0, 8)}-espresso`, templateId,
+        track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc",
+        clips: [{ startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true }, { startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true }],
+      }]);
+      const m = await loadManifest(pieceId);
+      expect(m.audioClips ?? []).toEqual([]);
+      expect(m.pendingMusic).toEqual(r.pendingMusic);
+      await applyScaffold({ templateId, pieceId, fetchUrls: noUrls });
+      expect((await loadManifest(pieceId)).pendingMusic).toHaveLength(1); // append merges by assetId
+    });
+
+    it("append keeps another template's pending song; replace resets to this apply's; a template with none clears it on replace", async () => {
+      const first = await createFrom(musicScaffold([ESPRESSO]));
+      const second = await createFrom(musicScaffold([{ ...ESPRESSO, track: { title: "Please Please Please" } }]));
+      const pieceId = seedPiece(testDb as never, { id: "dst-music-2" });
+      await applyScaffold({ templateId: first, pieceId, fetchUrls: noUrls });
+      await applyScaffold({ templateId: second, pieceId, fetchUrls: noUrls });
+      expect((await loadManifest(pieceId)).pendingMusic!.map((p) => p.templateId)).toEqual([first, second]);
+      const r = await applyScaffold({ templateId: second, pieceId, fetchUrls: noUrls, mode: "replace" });
+      expect((await loadManifest(pieceId)).pendingMusic).toEqual(r.pendingMusic);
+      expect(r.pendingMusic.map((p) => p.templateId)).toEqual([second]);
+      await applyScaffold({ templateId: fullId, pieceId, fetchUrls: noUrls, mode: "replace" });
+      expect((await loadManifest(pieceId)).pendingMusic).toBeUndefined();
+    });
+
+    it("a pending clip keeps the template's enabled flag and duck, its sidechains re-minted to this apply's clip ids", async () => {
+      const DUCK = { thresholdDb: -30, ratio: 4, attackMs: 10, releaseMs: 200, reductionDb: -12 };
+      const scaffold = musicScaffold([ESPRESSO]);
+      scaffold.slots = [{ key: "voice", kind: "audio", label: "Voice", required: false }];
+      scaffold.audioClips = [
+        { key: "vo", kind: "standalone", startTime: 0, duration: 6, trimStart: 0, volume: 1, enabled: true, source: { slot: "voice" } },
+        // Ducked under the voice; "b" is another pending clip, so it names no clip in the piece.
+        { key: "a", kind: "standalone", startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: false, source: { musicRef: "espresso" }, duck: { sidechainClipIds: ["vo", "b"], ...DUCK } },
+        { key: "b", kind: "standalone", startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true, source: { musicRef: "espresso" } },
+      ] as TemplateScaffold["audioClips"];
+      const templateId = await createFrom(scaffold);
+      const pieceId = seedPiece(testDb as never, { id: "dst-music-duck" });
+      testDb.insert(files).values({ id: "dst-vo", pieceId, filename: "vo.mp3", name: "vo", description: "", type: "audio", storagePath: `${pieceId}/vo.mp3`, contentType: "audio/mpeg", size: 10 }).run();
+      const r = await applyScaffold({ templateId, pieceId, slotValues: { voice: "dst-vo" }, fetchUrls: noUrls });
+      expect(r.clips.vo).toBeDefined();
+      expect(r.pendingMusic[0].clips).toEqual([
+        { startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: false, duck: { sidechainClipIds: [r.clips.vo], ...DUCK } },
+        { startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true },
+      ]);
+      expect((await loadManifest(pieceId)).pendingMusic).toEqual(r.pendingMusic);
+    });
+
+    it("a stranger's link is named by its position, and a source link that is not a public https url is dropped", async () => {
+      const templateId = await createFrom(
+        musicScaffold([{ ...ESPRESSO, sourceUrl: "https://127.0.0.1/espresso.mp3" }]),
+        { origin: "installed", cloudId: "cdefghijklmnopqrstu3" },
+      );
+      const pieceId = seedPiece(testDb as never, { id: "dst-music-3" });
+      const r = await applyScaffold({ templateId, pieceId, fetchUrls: noUrls });
+      expect(r.pendingMusic).toEqual([{
+        assetId: `tpl-${templateId.slice(0, 8)}-music-1`, templateId,
+        track: { title: "Espresso", artist: "Sabrina Carpenter" },
+        clips: [{ startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true }, { startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true }],
+      }]);
+      expect(r.clips).toEqual({});
+    });
+  });
+
   // Fix round 2, N1: every string a STRANGER's template can carry is decided
   // on (lib/templates/author-text.ts). This scaffold puts a marker in every
   // one of them — the coverage check below fails if the schema grows a string
   // this fixture does not exercise — and the marker may survive in the piece
   // only as on-screen text or a font family.
-  describe("a stranger's template: its words reach the piece only as on-screen text and font families", () => {
+  describe("a stranger's template: its words reach the piece only as on-screen text, font families and the song it names", () => {
     const Z = "zzauthor";
     const rect = { x: 0, y: 0, width: 100, height: 100 };
     const kf = (value: unknown, easing: string) => ({ keyframes: [{ t: 0, value, easing }, { t: 1, value, easing: "ease-in" }] });
@@ -813,10 +917,17 @@ describe("applyScaffold", () => {
         effects: { in: { effectId: Z }, out: { effectId: Z }, loop: { effectId: "audio-fade-in", params: { [Z]: 1 } } },
       } as TemplateScaffold["audioClips"][number]);
       s.captionStyles.push({ id: `${Z}-style2`, fields: { highlightColor: Z, shadow: { color: Z, blur: 1 }, background: { color: Z }, reveal: { mode: Z } } } as TemplateScaffold["captionStyles"][number]);
+      s.musicLinks = [{ ref: `${Z}-tune`, track: { title: `${Z} tune`, artist: `${Z} band` }, sourceUrl: `https://cdn.example.com/${Z}-tune` }];
+      s.audioClips.push({
+        key: `${Z}-tune-clip`, kind: "standalone", startTime: 0, duration: 4, trimStart: 0, volume: 1, enabled: true, source: { musicRef: `${Z}-tune` },
+      } as TemplateScaffold["audioClips"][number]);
       return s;
     }
-    /** String paths whose schema admits no words at all, so no marker can sit there. */
-    const CANNOT_CARRY_WORDS = ["assets.*.sha256"]; // ^[0-9a-f]{64}$
+    /** String paths no valid scaffold can put the marker at. */
+    const CANNOT_CARRY_WORDS = [
+      "assets.*.sha256", // ^[0-9a-f]{64}$
+      "overlays.*.source.musicRef", // the schema's cross-check refuses a music link on an overlay
+    ];
 
     /** Every string in `v`, by path pattern (`*` an index; a record's key and value as `<key>` / `<entry>`). */
     function stringPaths(v: unknown, at: string[] = [], out = new Map<string, string[]>()): Map<string, string[]> {
@@ -847,7 +958,7 @@ describe("applyScaffold", () => {
       expect(stringPaths(v.ok ? v.scaffold : null).get("assets.*.sha256")).toEqual(["0".repeat(64)]);
     });
 
-    it("with the marker at every path, it still reaches the piece only as on-screen text and font families", async () => {
+    it("with the marker at every path, it still reaches the piece only as on-screen text, font families and the song it names", async () => {
       const { listUserPresets } = await import("@/lib/overlays/preset-store");
       const tid = (
         await createTemplate({
@@ -861,7 +972,12 @@ describe("applyScaffold", () => {
       const r = await applyScaffold({ templateId: tid, pieceId: dst, fetchUrls });
       expect(r.overlays[`${Z}-marked`]).toBeDefined();
       expect(r.clips[`${Z}-marked-clip`]).toBeDefined();
-      expect(marked(await loadManifest(dst))).toEqual(["overlays.*.content", "overlays.*.fontFamily"]);
+      // The song a template names is kept too, as its pending entry: the title and artist
+      // the user is asked about, and the link it is fetched from on their yes — labelled
+      // by the apply result's authorFields. Its ref is not: the entry is named by position.
+      expect(marked(await loadManifest(dst))).toEqual([
+        "overlays.*.content", "overlays.*.fontFamily", "pendingMusic.*.sourceUrl", "pendingMusic.*.track.artist", "pendingMusic.*.track.title",
+      ]);
       const presets = (await listUserPresets()).filter((p) => p.id.startsWith(`template-${tid.slice(0, 8)}`));
       expect(presets).toHaveLength(2);
       expect(marked(presets)).toEqual(["*.fields.fontFamily"]);

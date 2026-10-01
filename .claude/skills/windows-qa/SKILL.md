@@ -104,9 +104,13 @@ The silent install takes **~12 minutes**. Everything here follows from that.
   the exe, the shortcut, the registry entry, and `.next` present inside the
   bundle — the last being what the shell actually loads. Report readiness on
   that set, never on any single one.
-- **The installer launches the app when it finishes.** It lands in session 0
-  with nowhere to render but still creates its data directory, so clear that
-  afterwards or the "fresh install" being handed over is not one.
+- **Whether the installer launches the app when it finishes is NOT
+  guaranteed.** It usually does — landing in session 0 with nowhere to render,
+  but still creating its data directory, so clear that afterwards or the
+  "fresh install" being handed over is not one. On the 0.1.16 run it did
+  NOT: no `Libi.exe` process and no `%APPDATA%\Libi` existed right after the
+  installer process exited. Check for the data directory rather than assuming
+  either behaviour, and only clear it if it is actually there.
 
 ## Proving the build is the code you think it is
 
@@ -130,12 +134,63 @@ Search the INSTALLED tree, at
   `node_modules`, so excluding `\node_modules\` by full path excludes
   everything and reports zero files.
 
+### Proving the `runAsNode` fuse holds (reusable check)
+
+Electron's `runAsNode: false` fuse is what stops `Libi.exe` from being
+invoked as a bare Node process — reachable to check WITHOUT a screen. Do this
+under an S4U task (**never bare over SSH — see the warning below**), on any
+build:
+
+```powershell
+$env:ELECTRON_RUN_AS_NODE = "1"
+& "<install>\Libi.exe" C:\path\to\probe.js
+Remove-Item Env:\ELECTRON_RUN_AS_NODE
+```
+
+Read the result the right way round — it is easy to get backwards, and
+getting it backwards sends the next QA pass chasing the wrong cause:
+
+- **The fuse HOLDS (the shipped, correct configuration) when NO marker/output
+  from `probe.js` appears and the whole APP boots instead** — confirmed on the
+  0.1.16 build via `electron-main-sync.log`: `module loaded … app.on ready …
+  about to createSplash`, the ordinary boot sequence, not the probe script's
+  output. This is EXACTLY why closing a terminal launches a second `Libi.exe`
+  (F1/EL-3, pre-fix): node-pty's Windows kill path `fork`s a helper script
+  under `ELECTRON_RUN_AS_NODE=1` expecting it to run as a harmless Node
+  process, and with the fuse holding, Electron ignores that variable and runs
+  the fork as the full app instead — refused by the single-instance lock
+  (`second-instance: another launch was refused`). Seeing that log line after
+  closing a terminal means the fuse is fine; it is a relaunch problem
+  (EL-3's fix — `useConptyDll: true` — is what actually stops the fork), not a
+  fuse regression.
+- **The fuse is OFF (a security regression) when `probe.js`'s marker/output
+  DOES appear.** That means the signed binary just ran ARBITRARY JavaScript
+  because it was asked to — the real security problem this check exists to
+  catch, on a build that should never allow it.
+
+**Never run this bare over SSH.** With the fuse holding it boots the whole
+app: that creates `%APPDATA%\Libi`, which destroys a prepared "genuine
+first-run" snapshot, and leaves `Libi.exe` running after the SSH session
+ends (the app is not killed with it, unlike a plain script). Launch it as an
+S4U task, wait for it to finish, then kill `Libi.exe`/`node.exe` and check
+whether `%APPDATA%\Libi` now exists (F1's `fusetest.ps1` does exactly this) —
+clean up the same way the install section's reset does.
+
 ## Resetting to a first run
 
 The app keeps everything under `%APPDATA%\Libi` — the database, the persisted
 UI state and ~700 MB of downloaded binaries. **The uninstaller leaves it**, so
 uninstall + reinstall drops you back into the app you already set up while
 looking like a fresh install.
+
+**A full uninstall is not fast either — budget ~11.5 minutes** (0.1.14,
+40465 files removed as an S4U task, same reasoning as the install: launch it
+that way, don't `-Wait` over SSH, poll from separate short calls). A naive
+"is the app still there" PowerShell probe run in a loop can itself cost
+~1 minute per check on this box, which stacks up and reads like the uninstall
+is hung when it is the probing that is slow. Don't kill a long-running
+uninstall on a hunch; verify with a cheap check (the install directory or the
+uninstall registry entry gone) rather than a heavy one run repeatedly.
 
 ```powershell
 # Fast: back at the first screen in seconds, keeps the downloads.
@@ -202,6 +257,13 @@ token, not a UAC-filtered one, and it fails in ways real users never see —
 junctions it creates are structurally perfect and permanently unreadable, which
 looked exactly like a second product bug and cost an hour to disprove.
 
+**An S4U task run as `libiqa` with `-RunLevel Limited` (requesting no
+elevation) is not a stand-in either.** Confirmed 2026-09-26: it still measured
+High IL. The account is still `libiqa`, still an administrator — asking the
+task not to elevate does not change which account it runs as. Only
+`NT AUTHORITY\LOCAL SERVICE` (above) or an actual RDP session under a
+genuinely non-administrator account is a real stand-in for an ordinary user.
+
 The GUI half still needs a screen. Launching over SSH gives an elevated token,
 so "it booted over SSH" says nothing about a real first run; do that check at
 an RDP session.
@@ -230,6 +292,19 @@ curl -s -o /dev/null -w "%{redirect_url}" \
 Write that URL to a file, `scp` the file (it is a few hundred bytes), and have a
 `.ps1` on the box `Invoke-WebRequest` it. The URL is short-lived, so fetch it
 immediately before use.
+
+## Driving a setup/chat terminal over its WebSocket (a probe harness)
+
+Exercising a Providers/Agents setup terminal or a chat terminal headlessly (no
+RDP) means talking to `lib/terminal/ws-server.ts` directly rather than through
+the editor UI. **Send the first `resize` only AFTER the snapshot frame
+arrives, never at `open`.** A `resize` sent immediately on connect races the
+server's own initial snapshot and is dropped; the terminal then never applies
+the size the held input assumed, the command typed against it is never
+actually typed into the PTY, and the `Enter` that was meant to submit it sits
+as a pending keystroke with nothing to apply to. This cost one probe run on
+2026-09-26. Wait for the snapshot message, THEN resize, THEN type, THEN send
+`Enter`.
 
 ## Two habits that prevent most of the above
 

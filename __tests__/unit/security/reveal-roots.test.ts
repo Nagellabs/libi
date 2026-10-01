@@ -32,7 +32,7 @@ describe("isPathRevealable", () => {
     expect(isPathRevealable(p("Users", "nadav", ".libi", "storage", "p1", "clip.mp4"), roots)).toBe(true);
   });
 
-  it("accepts a path under a non-$HOME root (the LIBI_HOME / export-folder case)", () => {
+  it("accepts a path under a non-$HOME root (the LIBI_HOME case)", () => {
     // The bug this whole change exists to fix: storage honours LIBI_HOME and
     // the export folder is user-set, so both routinely sit off $HOME.
     expect(isPathRevealable(p("Volumes", "Media", "libi", "storage", "p1", "clip.mp4"), roots)).toBe(true);
@@ -195,9 +195,6 @@ describe("revealRoots", () => {
 
   it("includes $HOME, the temp dir and a relocated LIBI_HOME", async () => {
     process.env.LIBI_HOME = p("Volumes", "Media", "libi");
-    vi.doMock("@/lib/db/settings", () => ({
-      resolveExportFolder: () => path.join(os.homedir(), "Movies", "libi exports"),
-    }));
     const { revealRoots } = await import("@/lib/shell/reveal-roots");
 
     const roots = revealRoots();
@@ -210,26 +207,11 @@ describe("revealRoots", () => {
     expect(roots).toContain(realpathOrSelf(path.resolve(process.env.LIBI_HOME!)));
   });
 
-  it("includes the configured export folder even when it is outside $HOME", async () => {
-    const external = p("Volumes", "Media", "exports");
-    vi.doMock("@/lib/db/settings", () => ({ resolveExportFolder: () => external }));
+  it("is exactly $HOME, the temp dir and LIBI_HOME — exports live in LIBI_HOME's storage", async () => {
+    process.env.LIBI_HOME = p("Volumes", "Media", "libi");
     const { revealRoots } = await import("@/lib/shell/reveal-roots");
-
-    // Not on disk, so realpathOrSelf falls back to the lexical path — a
-    // configured-but-never-used export folder must still count as a root.
-    expect(revealRoots()).toContain(path.resolve(external));
-  });
-
-  it("still returns the other roots when the export-folder lookup throws", async () => {
-    vi.doMock("@/lib/db/settings", () => ({
-      resolveExportFolder: () => {
-        throw new Error("no db");
-      },
-    }));
-    const { revealRoots } = await import("@/lib/shell/reveal-roots");
-
-    const roots = revealRoots();
-    expect(roots).toContain(realpathOrSelf(path.resolve(os.homedir())));
-    expect(roots.length).toBeGreaterThan(0);
+    expect(revealRoots()).toEqual(
+      normalizeRoots([os.homedir(), os.tmpdir(), process.env.LIBI_HOME]).map(realpathOrSelf),
+    );
   });
 });

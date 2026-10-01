@@ -14,13 +14,19 @@ publish:
   provider: github
   owner: Nagellabs
   repo: libi
-# Post-pack licence gate. The `!node_modules/@anthropic-ai/**` exclusion below
+# Post-pack hook (scripts/afterpack.js), two steps:
+#   1. A Windows pack drops `resources/libi-bundle/.next/node_modules`. The
+#      build-time farm is junctions there, which electron-builder copies as
+#      dereferenced real directories (883 files on 0.1.16) that the first boot
+#      only deletes again to build its own junctions (Windows verification F5).
+#      The dmg keeps its relative symlinks. See scripts/afterpack-windows-externals.js.
+#   2. The licence gate. The `!node_modules/@anthropic-ai/**` exclusion below
 # is a TOP-LEVEL glob and does not match a nested
 # `node_modules/<x>/node_modules/@anthropic-ai/**`, and check-licenses.sh only
 # scans `--production` while this artifact ships devDependencies too — so a
 # future dep that nests proprietary Anthropic code would evade both gates.
 # This hook scans what was ACTUALLY packed and fails the build on any hit.
-afterPack: "scripts/afterpack-license-guard.js"
+afterPack: "scripts/afterpack.js"
 # Pre-pack gate. The packaged shell ships no product code of its own, so a
 # missing or stale `build/libi-bundle/` yields an app that opens a splash and
 # can never start. Fail the build instead — see the script header for why an

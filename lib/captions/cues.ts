@@ -3,7 +3,8 @@ import type { SttWord } from "@/lib/analysis/types";
 import type { CaptionCue } from "@/lib/captions/types";
 
 export interface BuildCuesOpts {
-  /** Approx max characters per line (width budget). Default 32. */
+  /** Approx max characters per line (width budget). Default 32 — callers
+   *  that know the canvas pass `captionCharsPerLine`. */
   maxCharsPerLine?: number;
   /** Max lines per cue. Default 2. */
   maxLines?: number;
@@ -22,6 +23,16 @@ export interface BuildCuesOpts {
    *  already shifted the words onto the piece's timeline, so a cue can't
    *  lead-in before that overlay begins. */
   minStart?: number;
+}
+
+/** The no-wrap character budget for one caption line on a canvas `frameWidth`
+ *  px wide at `fontSize` px: an average glyph is ~0.6 em, and a line may use
+ *  84% of the width (inside the renderer's 90% wrap width, with slack for wide
+ *  glyphs). Clamped to 12..42 — narrower is unreadable churn, wider is a line
+ *  too long to read at a glance. 1080 wide at 90 px → 16; 1920 at 59 px → 42. */
+export function captionCharsPerLine(frameWidth: number, fontSize: number): number {
+  const raw = Math.floor((0.84 * frameWidth) / (0.6 * fontSize));
+  return Math.min(42, Math.max(12, raw));
 }
 
 /** Group spoken words into readable, timed cues. Pure. Ignores non-"word"

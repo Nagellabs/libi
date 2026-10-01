@@ -6,6 +6,7 @@ import {
   type SynthesisResult,
 } from "@/lib/tts/synthesize";
 import { storeFile } from "@/mcp/tools/file-tools";
+import { generatedStamp } from "@/lib/audio-rights/stamp";
 import {
   runJobViaServer,
   LibiServerUnavailableError,
@@ -164,6 +165,7 @@ export async function generateSpeech(
       description: `[TTS ${result.voice}] ${params.text.slice(0, 120)}`,
       mediaDuration: result.durationSeconds,
       hasAudio: true,
+      audioRights: generatedStamp(`Voiceover: ${params.text.slice(0, 60)}`),
     });
     return {
       success: true,

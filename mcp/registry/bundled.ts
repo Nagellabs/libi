@@ -1,7 +1,55 @@
 import * as path from "node:path";
-import type { BundledMcpDef } from "./types";
+import type { BundledDependency, BundledMcpDef } from "./types";
 import { CHROMIUM_DOWNLOAD_MB } from "@/lib/export/chromium-size";
 import { YT_DLP_INSTALL_MB } from "@/lib/video-download/install-size";
+
+/**
+ * The ONE `uv` dependency, spread into every extension that runs something
+ * through uv (video download, tracking, Whisper, Kokoro, ACE-Step).
+ *
+ * One object, not five copies: in 0.1.16 only the Video download card's copy
+ * carried `manualInstall`, so the Whisper card rendered uv as "queued… will
+ * start automatically" with no Download button — while Whisper's install plan
+ * sent the user to exactly that button, and "Set up with agent" looped on it
+ * (full verification F6). `__tests__/unit/registry/uv-dependency-consistency
+ * .test.ts` keeps every extension on this object.
+ *
+ * - tier-2 since 2026-09-08: uv is 52 MB and only a user who reaches one of
+ *   these extensions needs it. Boot never installs it.
+ * - `manualInstall`: on demand — a job that needs it `ensureDep`s it (video
+ *   download, tracking), and every card's chip offers Download / Re-download
+ *   on the retry-dep route. The install-token dedup and the per-dep
+ *   single-flight make a second card's (or a job's) install a no-op.
+ * - `pinnedInstallToken`: the date convention for a "latest" URL — bump it to
+ *   push every install onto the current upstream uv.
+ */
+export const UV_DEPENDENCY: Readonly<BundledDependency> = Object.freeze<BundledDependency>({
+  binary: "uv",
+  installFlow: "tier-2",
+  pinnedInstallToken: "2026-05-15",
+  downloadUrl: {
+    darwin: {
+      arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
+      x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
+    },
+    linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
+    win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
+  },
+  archive: {
+    format: "tar.gz",
+    binaryPathInArchive: {
+      darwin: {
+        arm64: "uv-aarch64-apple-darwin/uv",
+        x64: "uv-x86_64-apple-darwin/uv",
+      },
+      linux: "uv-x86_64-unknown-linux-gnu/uv",
+      // zip ROOT, not a target directory — astral-sh publishes the Windows
+      // build with the executables at the top level.
+      win32: "uv.exe",
+    },
+  },
+  manualInstall: true,
+});
 
 /**
  * Libi's own MCP server + its on-device extensions. libi bundles no
@@ -237,38 +285,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
     dependencies: [
       // uv must install first — the yt-dlp custom installer shells out to it.
       // BOTH deps are tier-2 now: nothing about a download belongs at boot.
-      {
-        binary: "uv",
-        installFlow: "tier-2",
-        pinnedInstallToken: "2026-05-15",
-        downloadUrl: {
-          darwin: {
-            arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-            x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-          },
-          linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
-          win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        },
-        archive: {
-          format: "tar.gz",
-          binaryPathInArchive: {
-            darwin: {
-              arm64: "uv-aarch64-apple-darwin/uv",
-              x64: "uv-x86_64-apple-darwin/uv",
-            },
-            linux: "uv-x86_64-unknown-linux-gnu/uv",
-            // zip ROOT, not a target directory — astral-sh publishes the
-            // Windows build with the executables at the top level.
-            win32: "uv.exe",
-          },
-        },
-        // On demand, like libi-export's chromium: the first
-        // libi.download_video fetches it (the runner's ensureDep), and the
-        // Settings chip offers Download / Re-download. Without the flag the
-        // chip would claim the install "will start automatically" — nothing
-        // in Category A ever will.
-        manualInstall: true,
-      },
+      // The first libi.download_video fetches uv (the runner's ensureDep).
+      { ...UV_DEPENDENCY },
       {
         binary: "yt-dlp",
         installFlow: "tier-2",
@@ -388,35 +406,8 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
       // Two callers rely on the declaration: `ensureMcp` (standard deps
       // install before custom installers) and the tracking_engine_install
       // job, which `ensureDep`s uv explicitly because it calls `retryDep`
-      // on the pyenv dep directly and bypasses that loop. Same spelling as
-      // the other uv entries (whisper/yt-dlp/…); install-token dedup makes
-      // the duplicate idempotent.
-      {
-        binary: "uv",
-        installFlow: "tier-2",
-        pinnedInstallToken: "2026-05-15",
-        downloadUrl: {
-          darwin: {
-            arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-            x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-          },
-          linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
-          win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        },
-        archive: {
-          format: "tar.gz",
-          binaryPathInArchive: {
-            darwin: {
-              arm64: "uv-aarch64-apple-darwin/uv",
-              x64: "uv-x86_64-apple-darwin/uv",
-            },
-            linux: "uv-x86_64-unknown-linux-gnu/uv",
-            // zip root, not a target directory — see the uv dep on
-            // youtube-download.
-            win32: "uv.exe",
-          },
-        },
-      },
+      // on the pyenv dep directly and bypasses that loop.
+      { ...UV_DEPENDENCY },
       {
         // Local tracking engine: a uv-managed Python sidecar (boxmot
         // BoT-SORT/ReID + onnxruntime + opencv + torch) plus the four
@@ -450,35 +441,13 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
     requireApproval: false,
     installFlow: "tier-2",
     installPlanPath: "mcp/bundled-mcps/plans/whisper.md",
+    // Nothing here ensureDep()s uv: the tools return needs_install and the
+    // plan sends the user to the uv chip's Download.
+    buttonOnlyDeps: ["uv"],
     dependencies: [
-      // uv runs faster-whisper via `uv run --with`. tier-2 as of 2026-09-08 —
-      // uv is 52 MB and only a user who reaches this extension needs it
-      // (shared with yt-dlp; install-token dedup makes the duplicate
-      // idempotent).
-      {
-        binary: "uv",
-        pinnedInstallToken: "2026-05-15",
-        downloadUrl: {
-          darwin: {
-            arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-            x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-          },
-          linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
-          win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        },
-        archive: {
-          format: "tar.gz",
-          binaryPathInArchive: {
-            darwin: {
-              arm64: "uv-aarch64-apple-darwin/uv",
-              x64: "uv-x86_64-apple-darwin/uv",
-            },
-            linux: "uv-x86_64-unknown-linux-gnu/uv",
-            // zip root, not a target directory — see the uv dep above.
-            win32: "uv.exe",
-          },
-        },
-      },
+      // uv runs faster-whisper via `uv run --with`. The model download runs
+      // through it too, so the plan sends the user to this chip's Download.
+      { ...UV_DEPENDENCY },
       // Whisper model status + download is owned by the
       // `whisper-model` virtual dep (see lib/mcp-virtual-deps/whisper.ts).
     ],
@@ -503,35 +472,13 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
     requireApproval: false,
     installFlow: "tier-2",
     installPlanPath: "mcp/bundled-mcps/plans/local-tts.md",
+    // Nothing here ensureDep()s uv: the tools return needs_install and the
+    // plan sends the user to the uv chip's Download.
+    buttonOnlyDeps: ["uv"],
     dependencies: [
-      // uv runs kokoro-onnx via `uv run --with`. tier-2 as of 2026-09-08 —
-      // uv is 52 MB and only a user who reaches this extension needs it
-      // (shared with yt-dlp/whisper; install-token dedup makes the
-      // duplicate idempotent).
-      {
-        binary: "uv",
-        pinnedInstallToken: "2026-05-15",
-        downloadUrl: {
-          darwin: {
-            arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-            x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-          },
-          linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
-          win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        },
-        archive: {
-          format: "tar.gz",
-          binaryPathInArchive: {
-            darwin: {
-              arm64: "uv-aarch64-apple-darwin/uv",
-              x64: "uv-x86_64-apple-darwin/uv",
-            },
-            linux: "uv-x86_64-unknown-linux-gnu/uv",
-            // zip root, not a target directory — see the uv dep above.
-            win32: "uv.exe",
-          },
-        },
-      },
+      // uv runs kokoro-onnx via `uv run --with`; the plan sends the user to
+      // this chip's Download when it is missing.
+      { ...UV_DEPENDENCY },
       // Kokoro model status + download is owned by the `tts-model`
       // virtual dep (see lib/mcp-virtual-deps/local-tts.ts). The
       // download runs through downloadModel() in lib/tts/synthesize.ts.
@@ -556,35 +503,13 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
     requireApproval: false,
     installFlow: "tier-2",
     installPlanPath: "mcp/bundled-mcps/plans/local-music.md",
+    // Nothing here ensureDep()s uv: the tools return needs_install and the
+    // plan sends the user to the uv chip's Download.
+    buttonOnlyDeps: ["uv"],
     dependencies: [
-      // uv runs acestep via `uv run --with`. tier-2 as of 2026-09-08 — uv
-      // is 52 MB and only a user who reaches this extension needs it
-      // (shared with whisper/local-tts/yt-dlp; install-token dedup makes
-      // the duplicate idempotent).
-      {
-        binary: "uv",
-        pinnedInstallToken: "2026-05-15",
-        downloadUrl: {
-          darwin: {
-            arm64: "https://github.com/astral-sh/uv/releases/latest/download/uv-aarch64-apple-darwin.tar.gz",
-            x64: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz",
-          },
-          linux: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz",
-          win32: "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip",
-        },
-        archive: {
-          format: "tar.gz",
-          binaryPathInArchive: {
-            darwin: {
-              arm64: "uv-aarch64-apple-darwin/uv",
-              x64: "uv-x86_64-apple-darwin/uv",
-            },
-            linux: "uv-x86_64-unknown-linux-gnu/uv",
-            // zip root, not a target directory — see the uv dep above.
-            win32: "uv.exe",
-          },
-        },
-      },
+      // uv runs acestep via `uv run --with`; the plan sends the user to this
+      // chip's Download when it is missing.
+      { ...UV_DEPENDENCY },
       // ACE-Step weights status + download is owned by the
       // `ace-step-model` virtual dep (see lib/mcp-virtual-deps/local-music.ts).
       // The download runs through the music_model_download JobManager

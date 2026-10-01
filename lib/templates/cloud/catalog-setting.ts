@@ -22,10 +22,13 @@
  * deployment (`bypassHeadersFor`). Every catalog request refuses redirects
  * (lib/templates/cloud/client.ts#call), so the header can't be carried on.
  */
-import { getTemplatesCatalogSetting, type TemplatesCatalogChoice, type TemplatesCatalogSetting } from "@/lib/db/settings";
+import fs from "node:fs";
+import path from "node:path";
+import { getDb } from "@/lib/db/client";
+import { getTemplatesCatalogSetting, templatesCatalogSettingGeneration, type TemplatesCatalogChoice, type TemplatesCatalogSetting } from "@/lib/db/settings";
 import { serverLogger as logger } from "@/lib/logger";
 import { describeCurrentRuntime } from "@/lib/runtime/current-runtime";
-import { packageRoot } from "@/lib/runtime/package-root";
+import { packageRoot, packageRootFound } from "@/lib/runtime/package-root";
 import { PRODUCTION_SITE_URL, SITE_URL } from "@/lib/site-url";
 import { VERCEL_BYPASS_HEADER, isVercelPreviewOrigin, parseDevOrigin } from "@/lib/templates/cloud/catalog-origin";
 import { TEST_MODE_SOURCE } from "@/lib/templates/cloud/constants";
@@ -51,18 +54,52 @@ export function isDevBuildAt(root: string, env: Record<string, string | undefine
  * user's project folder — a cwd outside `node_modules`, even a git checkout —
  * and must still read as installed: a dev checkout and npx share `~/.libi`,
  * so a Development choice stored by one must never steer the other.
- * (Under Turbopack `packageRoot()` falls back to cwd, which both studio entry
- * points set to the app root first.) Memoized — it cannot change while the
- * process runs.
+ * Memoized — it cannot change while the process runs.
  */
 export function isDevBuild(): boolean {
-  devBuildMemo ??= isDevBuildAt(packageRoot());
+  devBuildMemo ??= isDevBuildFrom();
   return devBuildMemo;
 }
 
-/** Tests only: forget the memoized answer (after stubbing LIBI_RUNTIME_SOURCE). */
+/**
+ * `isDevBuild` for code at `dirname` (default: `packageRoot()`'s own), with
+ * this env and cwd. A root found from there keeps the answer above. Not found
+ * — inside a Turbopack-bundled Next server `__dirname` is the build-time
+ * `/ROOT/…`, and `packageRoot()` falls back to the cwd — it is a dev build
+ * only when the dev launcher said so (`isMarkedDevCheckout`), never because
+ * the cwd looks like a checkout: an entry point that starts Next without
+ * chdir-ing would otherwise classify a user's project (often a git repo) as
+ * one — the I1 bug, in the studio (review N1). A forgotten marker fails
+ * closed: a dev studio reads Production and hides the Settings tab.
+ */
+export function isDevBuildFrom(dirname?: string, env: Record<string, string | undefined> = process.env, cwd: string = process.cwd()): boolean {
+  if (packageRootFound(dirname)) return isDevBuildAt(packageRoot(dirname), env);
+  return isMarkedDevCheckout(env, cwd);
+}
+
+/**
+ * The dev launcher's word (`bin/libi.js`, its `inDevCheckout()` branch, sets
+ * `LIBI_DEV_CHECKOUT_ROOT`): the marker names this process's own cwd (real
+ * paths, both), that folder is a git checkout, and nothing else says this is
+ * an installed or packaged runtime. Consulted only when libi can't find its
+ * own code, so an inherited marker can't turn the compiled CLI or a tsx child
+ * into a dev build.
+ */
+function isMarkedDevCheckout(env: Record<string, string | undefined>, cwd: string): boolean {
+  const marker = env.LIBI_DEV_CHECKOUT_ROOT;
+  if (!marker) return false;
+  try {
+    if (fs.realpathSync(marker) !== fs.realpathSync(cwd)) return false;
+  } catch {
+    return false;
+  }
+  return fs.existsSync(path.join(marker, ".git")) && isDevBuildAt(cwd, env);
+}
+
+/** Tests only: forget the memoized answers (after stubbing LIBI_RUNTIME_SOURCE). */
 export function __resetDevBuildForTests(): void {
   devBuildMemo = null;
+  storedMemo = null;
 }
 
 /** The development address a fresh dev install starts with: NEXT_PUBLIC_LIBI_SITE_URL, when it names another site than production. */
@@ -74,13 +111,42 @@ export function defaultDevOrigin(): string | null {
 
 let readFailed = false;
 
+/**
+ * How long a read of the setting is trusted (review M7): `catalogSource()` is
+ * asked once per template in a listing, and each read is a SELECT, a JSON
+ * parse and a URL parse. A switch made in THIS process is seen at once (the
+ * write bumps `templatesCatalogSettingGeneration`); one made by another
+ * process on the same settings row — the studio and its MCP child — within
+ * this. Not keyed by the row's `updated_at`: it is whole seconds, so a second
+ * write in the same second as a read would go unseen for good.
+ *
+ * That second is for READS only. Whatever writes or queues work on a catalog —
+ * a job's enqueue, a job's check at start, the index cache's superseded check —
+ * passes `{ fresh: true }` and reads the row itself (review m1/m2), so the MCP
+ * child never acts on the catalog the user has just left.
+ */
+export interface CatalogReadOptions {
+  /** Read the setting from the database now, not from the ≤ 1 s memo (it is refreshed too). */
+  fresh?: boolean;
+}
+
+const STORED_TTL_MS = 1000;
+let storedMemo: { value: TemplatesCatalogSetting | null; at: number; generation: number; db: unknown } | null = null;
+
 /** The stored setting; an unreadable database reads as none (logged once, never the value). */
-function stored(): TemplatesCatalogSetting | null {
+function stored(opts: CatalogReadOptions = {}): TemplatesCatalogSetting | null {
   try {
+    const db = getDb();
+    const generation = templatesCatalogSettingGeneration();
+    const now = Date.now();
+    // Keyed by the database handle too: a DB reset (or a test's fresh one) is never answered from the old one.
+    if (!opts.fresh && storedMemo && storedMemo.db === db && storedMemo.generation === generation && now >= storedMemo.at && now - storedMemo.at < STORED_TTL_MS) return storedMemo.value;
     const s = getTemplatesCatalogSetting();
     readFailed = false;
+    storedMemo = { value: s, at: now, generation, db };
     return s;
   } catch (err) {
+    storedMemo = null;
     if (!readFailed) logger.warn({ tag: TAG, op: "catalog_setting_unreadable", err: err instanceof Error ? err.name : "unknown" }, "the templates catalog setting could not be read; using the default");
     readFailed = true;
     return null;
@@ -104,7 +170,7 @@ export interface ResolvedCatalog {
   active: string;
 }
 
-export function resolveCatalog(): ResolvedCatalog {
+export function resolveCatalog(opts: CatalogReadOptions = {}): ResolvedCatalog {
   const testMode = isTestMode();
   if (!isDevBuild()) {
     return {
@@ -118,7 +184,7 @@ export function resolveCatalog(): ResolvedCatalog {
       active: testMode ? TEST_MODE_SOURCE : SITE_URL,
     };
   }
-  const s = stored();
+  const s = stored(opts);
   const fallback = defaultDevOrigin();
   const devOrigin = s?.devOrigin ?? fallback;
   const wanted: TemplatesCatalogChoice = s ? s.choice : fallback ? "development" : "production";
@@ -138,8 +204,8 @@ export function resolveCatalog(): ResolvedCatalog {
 }
 
 /** The catalog this process reads now (unpinned). */
-export function activeCatalogSource(): string {
-  return resolveCatalog().active;
+export function activeCatalogSource(opts: CatalogReadOptions = {}): string {
+  return resolveCatalog(opts).active;
 }
 
 /**
@@ -148,8 +214,8 @@ export function activeCatalogSource(): string {
  * from Development still reaches Development after a switch to Production
  * (lib/templates/cloud/use-reporter.ts). A packaged build: its own site only.
  */
-export function reachableCatalogSources(): string[] {
-  const r = resolveCatalog();
+export function reachableCatalogSources(opts: CatalogReadOptions = {}): string[] {
+  const r = resolveCatalog(opts);
   if (r.testMode) return [TEST_MODE_SOURCE];
   if (!r.devBuild) return [r.active];
   return [...new Set([PRODUCTION_SITE_URL, ...(r.devOrigin ? [r.devOrigin] : [])])];

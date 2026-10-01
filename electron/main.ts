@@ -14,6 +14,10 @@ import { navigationDecision, windowOpenExternal } from "./nav-guard";
 import { installContextMenu } from "./context-menu";
 import { initShellUpdater } from "./shell-updater";
 import { createSplash } from "./splash-window";
+import { registerConfirmPublishIpc } from "./confirm-publish";
+import { registerCopyFileIpc } from "./copy-file";
+import { claimQuitSignalsIfSupported, installQuitShutdown } from "./quit-shutdown";
+import { createKeychainCipher } from "./secret-cipher";
 import {
   describeNoRuntimeFailure,
   resolveRuntime,
@@ -468,6 +472,12 @@ ipcMain.handle("libi:window-is-maximized", () =>
   mainWindow?.isMaximized() ?? false,
 );
 
+/** The native confirm before a template goes public (EL-1) — an extra gate on the page's own. */
+registerConfirmPublishIpc(() => (serverPort ? `http://127.0.0.1:${serverPort}` : null));
+
+/** "Copy" on an export: the file itself on the clipboard (electron/copy-file.ts). */
+registerCopyFileIpc();
+
 app.on("ready", async () => {
   // A launch that lost the single-instance lock has already asked to quit, and
   // Electron may still deliver `ready` to it. It must not boot anything on the
@@ -570,29 +580,17 @@ app.on("ready", async () => {
   // below: with no cipher registered the store falls back to a PLAINTEXT
   // `enc: "none"` file, so a grant written in that window would be persisted
   // in the clear on a keychain-capable machine (and an existing encrypted one
-  // would read as "not connected"). It used to run at the tail of this
-  // handler, after the server was already answering.
+  // would read as "not connected").
+  // Registering reads NOTHING from the keychain (electron/secret-cipher.ts):
+  // 0.1.16 asked `isEncryptionAvailable()` right here, and on macOS that is a
+  // keychain read — a password prompt on every launch whenever the item's
+  // access list didn't name this build.
   // Feature-detected — the export is additive, so an older runtime that
   // predates it simply keeps its private 0600 file and SHELL_API_VERSION is
   // unchanged.
   if (typeof runtime.api.registerSecretCipher === "function") {
-    const encryptionAvailable = safeStorage.isEncryptionAvailable();
-    if (encryptionAvailable) {
-      runtime.api.registerSecretCipher({
-        label: "keychain",
-        encrypt: (plain: string) => safeStorage.encryptString(plain),
-        decrypt: (blob: Buffer) => safeStorage.decryptString(blob),
-      });
-    }
-    // The ONLY signal that a packaged build is keeping the grant in a plain
-    // file — `isEncryptionAvailable()` is false on a Linux box with no
-    // keyring, and silence there is how we would never find out. No secret,
-    // and nothing about whether a grant exists.
-    mainSyncLog(
-      encryptionAvailable
-        ? "main.ts: secret cipher registered (OS keychain); social grants are encrypted at rest"
-        : "main.ts: safeStorage reports encryption UNAVAILABLE; social grants fall back to a private 0600 file",
-    );
+    runtime.api.registerSecretCipher(createKeychainCipher(safeStorage, mainSyncLog));
+    mainSyncLog("main.ts: secret cipher registered (OS keychain, read on first use)");
   } else {
     mainSyncLog(
       "main.ts: runtime predates registerSecretCipher; social grants fall back to a private 0600 file",
@@ -616,6 +614,10 @@ app.on("ready", async () => {
   } catch (err) {
     mainSyncLog(`main.ts: chdir(${runtime.root}) failed: ${(err as Error).message}`);
   }
+
+  // Before the server starts: Category B reads the claim when it installs its
+  // signal listeners (EL-2, electron/quit-shutdown.ts).
+  claimQuitSignalsIfSupported(runtime.api, mainSyncLog);
 
   runtime.api.setRelaunchHandler(() => {
     app.relaunch();
@@ -706,6 +708,8 @@ app.on("child-process-gone", (_e, details) => {
 
 // Final exit breadcrumbs — captures the actual exit code no matter which path
 // (window close, crash handler, relaunch, parent signal) led here.
-app.on("before-quit", () => mainSyncLog("app before-quit"));
+// `before-quit` also runs libi's shutdown in the packaged app (EL-2): the quit
+// is held once until it settles, bounded. It logs "app before-quit" itself.
+installQuitShutdown(app, () => runtime?.api, mainSyncLog);
 app.on("will-quit", () => mainSyncLog("app will-quit"));
 app.on("quit", (_e, exitCode) => mainSyncLog(`app quit: exitCode=${exitCode}`));

@@ -120,6 +120,34 @@ describe("SessionEventHandler — a Write/Edit row takes its real title", () => 
     expect(titleEvents(emitted)).toEqual([]);
   });
 
+  it("SES-3: a LESS specific title never replaces a specific one (placeholder, or a strict prefix)", () => {
+    const session = makeSession();
+    const { update, emitted } = makeHandler(session);
+    update({ sessionUpdate: "tool_call", toolCallId: "w3", title: "Preparing file…", rawInput: {} });
+    update({ sessionUpdate: "tool_call_update", toolCallId: "w3", title: "Write a.txt", rawInput: { file_path: "/agent/a.txt" } });
+    // A vaguer title on a later update (as codex could send on completion) is ignored.
+    update({ sessionUpdate: "tool_call_update", toolCallId: "w3", status: "completed", title: "Preparing file…", rawOutput: "ok" });
+    expect(cachedTitle(session, "w3")).toBe("Write a.txt");
+
+    update({ sessionUpdate: "tool_call", toolCallId: "e3", title: "Edit", rawInput: {} });
+    update({ sessionUpdate: "tool_call_update", toolCallId: "e3", title: "Edit notes.md", rawInput: { file_path: "/agent/notes.md" } });
+    update({ sessionUpdate: "tool_call_update", toolCallId: "e3", status: "completed", title: "Edit" });
+    expect(cachedTitle(session, "e3")).toBe("Edit notes.md");
+
+    expect(titleEvents(emitted)).toEqual([
+      { type: "agent-tool-title", toolCallId: "w3", rawTitle: "Write a.txt" },
+      { type: "agent-tool-title", toolCallId: "e3", rawTitle: "Edit notes.md" },
+    ]);
+  });
+
+  it("SES-3: a different title just as specific is still adopted", () => {
+    const session = makeSession();
+    const { update } = makeHandler(session);
+    update({ sessionUpdate: "tool_call", toolCallId: "x1", title: "Run npm test", rawInput: {} });
+    update({ sessionUpdate: "tool_call_update", toolCallId: "x1", status: "completed", title: "Ran npm test" });
+    expect(cachedTitle(session, "x1")).toBe("Ran npm test");
+  });
+
   it("an MCP tool row keeps its title — it is named by its toolId, not its title", () => {
     const session = makeSession();
     const { update, emitted } = makeHandler(session);

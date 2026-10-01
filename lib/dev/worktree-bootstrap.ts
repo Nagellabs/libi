@@ -764,13 +764,21 @@ export async function resolveWorktreeEnv(
     // process inherits the same keys the canonical libi would auto-load via
     // Next.js. Caller merges these into the spawned env with shell exports
     // taking precedence — see bin/libi.js.
+    //
+    // LIBI_NO_ENV_FILES=1 skips this merge. TEST-ONLY: both e2e configs set it,
+    // so a server they spawn from a worktree doesn't get the main checkout's
+    // keys (0.1.16 suites report F7: `+envFiles=.env.local` carried FAL_AI into
+    // the web e2e server). It covers only THIS merge: Next's own loader still
+    // reads `.env*` from the directory it boots in.
     let envOverrides: Record<string, string> = {};
     let envFiles: string[] = [];
     const canonicalRoot = resolveCanonicalRoot(cwd);
     if (canonicalRoot) {
-      const loaded = loadCanonicalDotenv(canonicalRoot);
-      envOverrides = loaded.envOverrides;
-      envFiles = loaded.envFiles;
+      if (env.LIBI_NO_ENV_FILES !== "1") {
+        const loaded = loadCanonicalDotenv(canonicalRoot);
+        envOverrides = loaded.envOverrides;
+        envFiles = loaded.envFiles;
+      }
 
       // Register worktree-specific launch configs in the canonical repo so a
       // `preview_start` run from there can target THIS worktree (instead of

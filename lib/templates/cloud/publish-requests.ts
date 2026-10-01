@@ -38,7 +38,7 @@ import type { TemplatePublishRequestRow } from "@/lib/db/schema/types";
 import { getOrCreateTemplatesAuthor, getTemplatesAuthorForDisplay } from "@/lib/db/settings";
 import { serverLogger as logger } from "@/lib/logger";
 import { describeCatalogSource } from "@/lib/templates/cloud/catalog-origin";
-import { catalogSource } from "@/lib/templates/cloud/catalog-source";
+import { catalogSource, recordedSource } from "@/lib/templates/cloud/catalog-source";
 import { NICKNAME_PATTERN } from "@/lib/templates/cloud/constants";
 import {
   CHANGED_SINCE_REVIEW,
@@ -165,7 +165,8 @@ export async function recordPublishRequest(input: PublishRequestInput & { id: st
   // publish job to make it (and the review without a nickname line meanwhile).
   let stored: string | null = null;
   try {
-    stored = getOrCreateTemplatesAuthor().nickname;
+    // This catalog's own nickname (review M4): never one learned from another catalog.
+    stored = getOrCreateTemplatesAuthor(catalogSource()).nickname;
   } catch (err) {
     logger.warn({ tag: TAG, op: "publish_request_author_unavailable", error: err instanceof Error ? err.name : "unknown" }, "could not make the creator identity for a publish request");
   }
@@ -398,7 +399,8 @@ function exampleView(exampleVideo: ExampleVideoSource): PublishRequestExample {
 export async function toView(row: TemplatePublishRequestRow, opts: { withConfirmCode: boolean }): Promise<PublishRequestView> {
   const exampleVideo = parseExample(row.exampleVideo);
   const example = exampleView(exampleVideo);
-  const current = getTemplatesAuthorForDisplay()?.nickname ?? null;
+  // The nickname the request's own catalog knows this key by (review M4).
+  const current = getTemplatesAuthorForDisplay(recordedSource(row.source))?.nickname ?? null;
   const nickname = { value: row.nickname ?? current, isNew: row.nickname !== null && row.nickname !== current, replaces: row.nickname !== null && current !== row.nickname ? current : null };
   let content: PublishContent | null = null;
   let stale: string | null = null;

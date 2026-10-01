@@ -21,10 +21,19 @@ import type { KnownPlatform } from "./catalog";
  * `markUnauthorized()`, and it is what the SDK's auth machinery treats as
  * "these credentials are bad". One feature is unavailable; nothing needs
  * reconnecting.
+ *
+ * `unavailable` is the other kind `withAdapter` must NEVER escalate: a
+ * TRANSIENT failure reaching the token endpoint while refreshing an
+ * already-established session's grant (network blip, DNS failure, abort, a
+ * 5xx from the endpoint itself). It is deliberately distinct from `provider`
+ * (an upstream failure on the actual API call) so a caller can tell "the
+ * sign-in round trip could not complete this time" from "the request itself
+ * failed" — both retryable, but only one of them is ever produced by the
+ * refresh path in `lib/social/mcp-client.ts#runRefresh`.
  */
 export type SocialErrorKind =
   | "unauthorized" | "forbidden" | "rate_limited" | "partial" | "duplicate" | "validation" | "not_found" | "provider"
-  | "unsupported" | "needs_confirmation";
+  | "unsupported" | "needs_confirmation" | "unavailable";
 
 export class SocialError extends Error {
   readonly kind: SocialErrorKind;
@@ -34,13 +43,23 @@ export class SocialError extends Error {
   /** 207 partial: which targets failed and why (verbatim provider text). `accountId` lets a
    * platform with several connected accounts be attributed to the one that actually failed. */
   readonly perTarget?: Array<{ platform: KnownPlatform; accountId?: string; error: string }>;
-  constructor(kind: SocialErrorKind, message: string, extra: { status?: number; retryAt?: string; perTarget?: SocialError["perTarget"] } = {}) {
+  /** Where `status` came from (`mcp-client.ts#toSocialError`): true when it was
+   *  read out of a tool answer's TEXT (the provider itself refusing), false when
+   *  the transport reported it (or there was none). The music catalog reads
+   *  only a text-borne 4xx as "this connection cannot use it". */
+  readonly statusFromText?: boolean;
+  constructor(
+    kind: SocialErrorKind,
+    message: string,
+    extra: { status?: number; retryAt?: string; perTarget?: SocialError["perTarget"]; statusFromText?: boolean } = {},
+  ) {
     super(message);
     this.name = "SocialError";
     this.kind = kind;
     this.status = extra.status;
     this.retryAt = extra.retryAt;
     this.perTarget = extra.perTarget;
+    this.statusFromText = extra.statusFromText;
   }
 }
 
@@ -78,6 +97,9 @@ export function socialErrorToResponse(e: SocialError): { status: number; body: R
     // 409 because it IS a conflict with a possible existing post. The body
     // key is what the UI branches on to offer "publish again anyway".
     case "needs_confirmation": return { status: 409, body: { error: "confirm_republish", message: e.message } };
+    // 503, not 502: the provider itself was never reached — this is libi's OWN
+    // token refresh failing to reach the endpoint, not an answer from it.
+    case "unavailable":  return { status: 503, body: { error: "unavailable", message: e.message } };
     default:             return { status: 502, body: { error: "provider", message: e.message } };
   }
 }
@@ -129,6 +151,9 @@ export function isRetryable(e: SocialError, op: SocialOperation): boolean {
   switch (e.kind) {
     case "rate_limited":
     case "provider":
+    // A network blip reaching the token endpoint is exactly the transient
+    // upstream failure this branch already covers for `provider`.
+    case "unavailable":
       return true;
     case "unauthorized":
     case "forbidden":

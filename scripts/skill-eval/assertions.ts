@@ -11,11 +11,28 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function getPath(obj: unknown, dotted: string): unknown {
-  return dotted.split(".").reduce<unknown>((acc, key) => {
-    if (acc && typeof acc === "object") return (acc as Record<string, unknown>)[key];
-    return undefined;
-  }, obj);
+/**
+ * Every value a dotted path reaches. A plain path reaches exactly one (possibly
+ * `undefined`). A `*` segment fans out over the elements of an array — so
+ * `input.platforms.*.accountId` reaches each platform row's `accountId` — and
+ * reaches nothing on a non-array or an empty array. Callers treat the path as
+ * satisfied when ANY reached value satisfies the predicate, which is what makes
+ * an assertion independent of the order the agent listed the elements in.
+ */
+function getPathValues(obj: unknown, dotted: string): unknown[] {
+  return dotted.split(".").reduce<unknown[]>((values, key) => {
+    const next: unknown[] = [];
+    for (const acc of values) {
+      if (key === "*") {
+        if (Array.isArray(acc)) next.push(...acc);
+      } else if (acc && typeof acc === "object") {
+        next.push((acc as Record<string, unknown>)[key]);
+      } else {
+        next.push(undefined);
+      }
+    }
+    return next;
+  }, [obj]);
 }
 
 /** Parse a literal token into string | number | boolean. */
@@ -32,7 +49,8 @@ type Op = (typeof OPS)[number];
 
 /**
  * Evaluate a single predicate against a call: either `input.<path> <op>
- * <literal>` or the unary `input.<path> exists`.
+ * <literal>` or the unary `input.<path> exists`. A `*` path segment matches any
+ * element of an array; the predicate holds when any element satisfies it.
  *
  * `exists` is not sugar. There is no literal that means "absent" here —
  * `parseLiteral` turns `null` into the STRING "null", so `input.a.b != null`
@@ -43,7 +61,7 @@ type Op = (typeof OPS)[number];
  */
 function evalWhere(call: TraceCall, where: string): boolean {
   const unary = /^\s*(input\.[^\s]+)\s+exists\s*$/.exec(where);
-  if (unary) return getPath({ input: call.input }, unary[1]) !== undefined;
+  if (unary) return getPathValues({ input: call.input }, unary[1]).some((v) => v !== undefined);
   const op = OPS.find((o) => where.includes(o));
   if (!op) throw new Error(`Invalid where predicate (no operator): "${where}"`);
   const idx = where.indexOf(op);
@@ -52,9 +70,8 @@ function evalWhere(call: TraceCall, where: string): boolean {
   if (!lhs.startsWith("input.")) {
     throw new Error(`Invalid where predicate (must start with "input."): "${where}"`);
   }
-  const actual = getPath({ input: call.input }, lhs);
   const expected = parseLiteral(rhsRaw);
-  return compare(actual, expected, op);
+  return getPathValues({ input: call.input }, lhs).some((actual) => compare(actual, expected, op));
 }
 
 function compare(actual: unknown, expected: string | number | boolean, op: Op): boolean {

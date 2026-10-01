@@ -1,5 +1,5 @@
-import { agentChildPath } from "@/lib/agents/agent-path";
-import { lastLoginShellPathDirs } from "@/lib/agents/cli/login-shell-path";
+import { agentChildPath, freshPathDirs, pathEnvKey } from "@/lib/agents/agent-path";
+import { skipsUserSettings } from "@/lib/sessions/skip-user-settings";
 
 /**
  * Per-agent session `_meta` for `newSession(...)`.
@@ -30,10 +30,10 @@ import { lastLoginShellPathDirs } from "@/lib/agents/cli/login-shell-path";
 export function sessionMetaFor(
   agentId: string,
   env: Readonly<Record<string, string | undefined>> = process.env,
-  loginDirs: readonly string[] | null = lastLoginShellPathDirs(),
+  loginDirs: readonly string[] | null = freshPathDirs(),
 ): Record<string, unknown> {
   if (agentId === "claude-code") {
-    const skipUser = env.LIBI_TEST_MODE === "1" && env.LIBI_AGENT_SKIP_USER_SETTINGS === "1";
+    const skipUser = skipsUserSettings(env);
     // A launcher installed since libi booted is on the login-shell PATH but not on the adapter's: claude-agent-acp
     // starts this chat's `claude` with its own environment plus `options.env`, so the PATH goes here — only when
     // the login shell adds a folder (`lib/agents/agent-path.ts`).
@@ -43,7 +43,7 @@ export function sessionMetaFor(
         options: {
           thinking: { type: "adaptive", display: "summarized" },
           ...(skipUser ? { settingSources: ["project", "local"] } : {}),
-          ...(childPath !== undefined && childPath !== env.PATH ? { env: { PATH: childPath } } : {}),
+          ...(childPath !== undefined && childPath !== env[pathEnvKey(env)] ? { env: { [pathEnvKey(env)]: childPath } } : {}),
         },
       },
     };

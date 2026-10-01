@@ -13,6 +13,9 @@ import type { ReactNode } from "react";
  * - An event that OPENS a piece (the hand-off's parked `piece` event after Use
  *   on /templates) must win: the restore would otherwise overwrite it with the
  *   previously open piece.
+ * - The finish toast's Open (`openExportInTab`) is such an event too: made from another page it
+ *   is parked, then claimed as this page mounts — before the pieces list — and must beat the
+ *   restore (Task B3, from Task A6's review).
  * - An event that opens NO piece (`show_folder`) must leave the restore alone.
  *   It used to cancel it too, so the user got the "no piece open" state, the
  *   saved last piece / asset were overwritten with null, and a `?piece=` deep
@@ -87,7 +90,9 @@ vi.mock("@/components/layout/editor-layout", () => ({
 vi.mock("@/components/chat/chat-panel", () => ({ default: stub("chat-panel") }));
 vi.mock("@/components/terminal/terminal-panel", () => ({ default: stub("terminal-panel") }));
 vi.mock("@/components/editor/editor-panel", () => ({
-  default: ({ pieceId }: { pieceId: string }) => <div data-testid="editor-panel" data-piece-id={pieceId} />,
+  default: ({ pieceId, activeTab, selectedExportId }: { pieceId: string; activeTab: string; selectedExportId: string | null }) => (
+    <div data-testid="editor-panel" data-piece-id={pieceId} data-tab={activeTab} data-selected-export={selectedExportId ?? ""} />
+  ),
 }));
 vi.mock("@/components/editor/asset-preview-panel", () => ({ AssetPreviewPanel: stub("asset-preview") }));
 vi.mock("@/components/editor/no-piece-empty-state", () => ({ NoPieceEmptyState: stub("no-piece-empty-state") }));
@@ -101,6 +106,7 @@ vi.mock("@/components/banner/instructions-updated-banner", () => ({ Instructions
 
 const { default: EditorPage } = await import("@/app/(app)/editor/page");
 const { resetAgentHandoffForTests } = await import("@/lib/agents/agent-handoff");
+const { openExportInTab } = await import("@/hooks/exports/use-open-export");
 
 // ── Harness ─────────────────────────────────────────────────────────────
 const P_LAST = { id: "p-last", name: "Previously open" };
@@ -242,5 +248,34 @@ describe("editor page — a navigate event during a cold load vs the last-piece 
 
     expect(page.getByTestId("editor-panel").getAttribute("data-piece-id")).toBe(P_NEW.id);
     expect(openPieceCalls()).not.toContain(P_DEEP.id);
+  });
+});
+
+describe("editor page — an export the finish toast opens vs the last-piece restore", () => {
+  it("toast Open on a cold load lands on the Exports tab with that export selected", async () => {
+    // The toast fires while the editor page is not mounted: the intent is parked.
+    openExportInTab({ pieceId: P_NEW.id, exportId: "exp_7" });
+    const page = mountColdEditor();
+    await act(async () => {}); // the parked intent is delivered on a microtask
+    page.piecesArrive([P_LAST, P_NEW]);
+
+    const panel = page.getByTestId("editor-panel");
+    expect(panel.getAttribute("data-piece-id")).toBe(P_NEW.id);
+    expect(panel.getAttribute("data-tab")).toBe("exports");
+    expect(panel.getAttribute("data-selected-export")).toBe("exp_7");
+    // The restore neither reopened the previous piece nor reset the tab to the saved one.
+    expect(openPieceCalls()).not.toContain(P_LAST.id);
+    expect(setLastPieceId).toHaveBeenLastCalledWith(P_NEW.id);
+  });
+
+  it("the same intent on a warm page (no restore pending) still opens it", async () => {
+    const page = mountColdEditor();
+    page.piecesArrive([P_LAST, P_NEW]);
+    act(() => openExportInTab({ pieceId: P_NEW.id, exportId: "exp_8" }));
+
+    const panel = page.getByTestId("editor-panel");
+    expect(panel.getAttribute("data-piece-id")).toBe(P_NEW.id);
+    expect(panel.getAttribute("data-tab")).toBe("exports");
+    expect(panel.getAttribute("data-selected-export")).toBe("exp_8");
   });
 });

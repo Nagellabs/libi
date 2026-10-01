@@ -80,7 +80,15 @@ function authError(): Error & { code: number } {
 function createMockPm(opts: { canListSessions?: boolean } = {}) {
   const mockConnection = {
     listSessions: vi.fn().mockResolvedValue({ sessions: [], nextCursor: null }),
-    newSession: vi.fn().mockResolvedValue({ sessionId: "s-new" }),
+    // Both adapters advertise their modes on session/new. Without them a codex chat's approval
+    // mode can't be applied, and a chat whose Ask / Auto isn't applied holds its prompts.
+    newSession: vi.fn().mockResolvedValue({
+      sessionId: "s-new",
+      modes: {
+        currentModeId: "default",
+        availableModes: [{ id: "default" }, { id: "read-only" }, { id: "agent" }],
+      },
+    }),
     loadSession: vi.fn().mockResolvedValue(undefined),
     closeSession: vi.fn().mockResolvedValue(undefined),
     prompt: vi.fn().mockResolvedValue({ stopReason: "end_turn" }),

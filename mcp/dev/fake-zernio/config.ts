@@ -48,6 +48,16 @@ export interface FakeZernioConfig {
   multiLevelTikTokPrivacy?: boolean;
   /** The Instagram account has a linked ads tree, instead of the live 422. */
   adsEnabled?: boolean;
+  /**
+   * The TikTok connection's lane. `business` (default) is what the live
+   * account measured on 2026-09-27: the Commercial Music Library answers
+   * tracks. `developer` is the older lane, whose refusal shape is UNVERIFIED
+   * (Zernio documents none) — the fake answers a 403 in Zernio's envelope.
+   */
+  tiktokLane?: "business" | "developer";
+  /** The Instagram account was connected with Facebook Login (the live one was
+   *  not: it answers `instagram_audio_requires_facebook_login`). */
+  instagramFacebookLogin?: boolean;
 }
 
 /** Read the per-scenario override config. Unset/invalid → null. */

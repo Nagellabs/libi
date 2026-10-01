@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ExportBackend, ExportContext } from "@/lib/export/backend";
@@ -26,6 +27,9 @@ export class ChromiumRenderBackend implements ExportBackend {
         pieceId: ctx.pieceId,
         payload: ctx.payload,
         settings: ctx.settings,
+        // Several exports run at once now: two with the same piece and settings
+        // must not share a params hash (forceNew would delete the running one's row).
+        renderId: randomUUID(),
       },
       // Force a fresh run for every export — re-using a completed export job
       // for a "new" export would skip the actual Chromium render.

@@ -18,6 +18,8 @@ const MEDIA_SERVING_PATHS: readonly RegExp[] = [
   /^\/api\/files\/by-id\/[^/]+\/content$/,
   // A public template's link-only audio/video, fetched from a stranger's host (lib/templates/cloud/asset-stream.ts).
   /^\/api\/templates\/cloud\/asset-stream$/,
+  // A platform catalog track's preview, fetched from the platform's CDN (lib/social/music-preview.ts).
+  /^\/api\/social\/music\/preview$/,
   // A piece file by its stored name. Also matches the JSON `by-id/<id>` route,
   // where the policy is harmless (a fetch() ignores it).
   /^\/api\/files\/[^/]+\/[^/]+$/,

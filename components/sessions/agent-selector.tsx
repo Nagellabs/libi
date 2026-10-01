@@ -48,7 +48,7 @@ function AgentRow({
 }) {
   const reason = provider.available ? undefined : provider.unavailableReason;
   const installing = reason?.code === "installing";
-  const needsAuth = provider.available && readiness.state === "needs-auth";
+  const needsAuth = provider.available && (readiness.state === "needs-auth" || readiness.state === "config-error");
   const subtitle = reason?.message ?? (needsAuth ? readinessMessage(readiness) : null);
   const notReady = !provider.available || needsAuth;
 
@@ -125,7 +125,7 @@ export default function AgentSelector() {
     // Green is a claim that the agent works. It used to be made purely because
     // `_activeAgentId` had been assigned — true even for an agent whose every
     // session/new is rejected. Now an observed failure downgrades it.
-    if (activeReadiness.state === "needs-auth") return "bg-amber-400";
+    if (activeReadiness.state === "needs-auth" || activeReadiness.state === "config-error") return "bg-amber-400";
     if (activeReadiness.state === "not-installed") return "bg-destructive";
     if (activeProviderId) return "bg-emerald-500";
     return "bg-muted-foreground/40";

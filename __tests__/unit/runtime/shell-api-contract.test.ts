@@ -41,6 +41,10 @@ const REQUIRED_EXPORTS = [
   // Also feature-detected: an older shell never calls it, and the runtime
   // falls back to a private 0600 file (lib/social/token-store.ts).
   "registerSecretCipher",
+  // Feature-detected as a pair (EL-2): an older runtime without them keeps its
+  // own SIGINT/SIGTERM listeners and the shell never holds a quit for it.
+  "claimQuitSignals",
+  "shutdownForQuit",
 ] as const;
 
 describe("shell API contract", () => {

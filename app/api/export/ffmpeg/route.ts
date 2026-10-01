@@ -8,7 +8,7 @@ import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import type { AudioClip, Composition, ExportSettings, Overlay } from "@/lib/engine/types";
 import { classifyExportShape } from "@/lib/export/classifier";
 import { attachOverlaySourceDims } from "@/lib/export/source-dims";
-import { stripHiddenLayerArrays } from "@/lib/overlays/hidden";
+import { manifestAsExported } from "@/lib/overlays/hidden";
 import { StreamCopyTrimBackend } from "@/lib/export/backends/stream-copy-trim";
 import { FfmpegOverlayBackend, overlayGraphNeedsBrowser } from "@/lib/export/backends/ffmpeg-overlay";
 import type { ExportBackend } from "@/lib/export/backend";
@@ -51,10 +51,7 @@ export async function POST(req: Request): Promise<Response> {
   // entirely: strip them + their coupled inline audio BEFORE building/
   // classifying, so the second-pass check below grades the same filtered comp
   // the client classified (a hidden layer that changes the shape never 409s).
-  const stripped = stripHiddenLayerArrays(manifest.overlays, manifest.audioClips);
-  if (stripped.changed) {
-    manifest = { ...manifest, overlays: stripped.overlays, audioClips: stripped.audioClips };
-  }
+  manifest = manifestAsExported(manifest);
 
   const comp = buildCompositionFromManifest(manifest);
 

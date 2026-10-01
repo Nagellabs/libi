@@ -126,3 +126,66 @@ describe("where: exists", () => {
     expect(r.pass).toBe(true);
   });
 });
+
+/**
+ * `*` in a where path: a scenario that asserts on ONE element of an array must
+ * not depend on the order the agent listed the elements in (social-music/02
+ * asserted `input.platforms.1…` and failed whenever TikTok came first).
+ */
+describe("where: * matches any array element", () => {
+  const posts: TraceCall[] = [
+    {
+      tool: "posts_create_post",
+      provider: "zernio",
+      input: {
+        is_draft: true,
+        platforms: [
+          { platform: "tiktok", platformSpecificData: { tiktokSettings: { musicSoundInfo: { musicSoundId: "t1" } } } },
+          { platform: "instagram", platformSpecificData: {} },
+        ],
+      },
+    },
+    {
+      tool: "posts_create_post",
+      provider: "zernio",
+      input: { is_draft: true, platforms: [{ platform: "instagram", platformSpecificData: {} }] },
+    },
+    { tool: "posts_create_post", provider: "zernio", input: { is_draft: true, platforms: [] } },
+    { tool: "posts_create_post", provider: "zernio", input: { is_draft: true, platforms: "not-an-array" } },
+  ];
+
+  it("`exists` holds when any element carries the rest of the path, wherever it sits", () => {
+    const [r] = evaluate(posts, [
+      { provider: "zernio", where: "input.platforms.*.platformSpecificData.tiktokSettings.musicSoundInfo.musicSoundId exists", count: "==1" },
+    ]);
+    expect(r.pass).toBe(true);
+    const reversed: TraceCall[] = [{ ...posts[0], input: { platforms: [...(posts[0].input as { platforms: unknown[] }).platforms].reverse() } }];
+    const [r2] = evaluate(reversed, [
+      { provider: "zernio", where: "input.platforms.*.platformSpecificData.tiktokSettings.musicSoundInfo.musicSoundId exists", expect: "present" },
+    ]);
+    expect(r2.pass).toBe(true);
+  });
+
+  it("a comparison holds when any element satisfies it", () => {
+    const [r] = evaluate(posts, [{ provider: "zernio", where: "input.platforms.*.platform == tiktok", count: "==1" }]);
+    expect(r.pass).toBe(true);
+    const [r2] = evaluate(posts, [{ provider: "zernio", where: "input.platforms.*.platform == instagram", count: "==2" }]);
+    expect(r2.pass).toBe(true);
+  });
+
+  it("an empty array or a non-array reaches nothing — not even `!=`", () => {
+    const [r] = evaluate(posts.slice(2), [{ provider: "zernio", where: "input.platforms.*.platform != tiktok", expect: "absent" }]);
+    expect(r.pass).toBe(true);
+    const [r2] = evaluate(posts.slice(2), [{ provider: "zernio", where: "input.platforms.* exists", expect: "absent" }]);
+    expect(r2.pass).toBe(true);
+  });
+
+  it("a `*` can fan out twice, and index paths keep working", () => {
+    const nested: TraceCall[] = [
+      { tool: "t", input: { a: [{ b: [{ c: 1 }, { c: 2 }] }, { b: [{ c: 3 }] }] } },
+    ];
+    expect(evaluate(nested, [{ tool: "t", where: "input.a.*.b.*.c == 3", expect: "present" }])[0].pass).toBe(true);
+    expect(evaluate(nested, [{ tool: "t", where: "input.a.*.b.*.c == 4", expect: "absent" }])[0].pass).toBe(true);
+    expect(evaluate(nested, [{ tool: "t", where: "input.a.0.b.1.c == 2", expect: "present" }])[0].pass).toBe(true);
+  });
+});

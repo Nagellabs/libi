@@ -85,8 +85,10 @@
  * login-shell PATH (`lib/agents/agent-path.ts`), but a running Codex process
  * keeps the PATH it started with, and so do the MCP servers it starts. A Codex
  * row whose launcher is on none of that process's folders reads
- * `launcherAfterStart`, and the tab says to restart libi rather than that it is
- * ready.
+ * `launcherAfterStart`. `GET /api/providers` then has an IDLE Codex process
+ * restarted with the PATH as it is now (`SessionManager.restartIdleAgentForLauncher`)
+ * and drops the flag; while a chat runs on it the process is kept, and the tab
+ * says to restart libi rather than that it is ready.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -99,7 +101,8 @@ import { claudeConfigPath, codexSpawnShape } from "@/lib/agents/libi-registratio
 import { __clearCodexMcpListing, readCodexMcpListing, type CodexMcpListing } from "@/lib/agents/codex-mcp-listing";
 import { findProvider, matchProvider, type ProviderId } from "./catalog";
 import { launcherLookupForPass, launcherName, lookupLauncher, type LauncherDeps } from "./launcher";
-import { agentSpawnPathDirs } from "@/lib/agents/agent-path";
+import { agentSpawnPathDirs, refreshFreshPathDirs } from "@/lib/agents/agent-path";
+import { skipsUserSettings } from "@/lib/sessions/skip-user-settings";
 import {
   __clearClaudeSignInMemo,
   lookupClaudeSignIn,
@@ -145,6 +148,9 @@ export interface DetectedMcp {
    * until that process is replaced (restarting libi). See the header.
    */
   launcherAfterStart?: true;
+  /** With `launcherAfterStart`: the launcher's bare name (`uvx`), so a restart is made only when the new process
+   *  would find it (`SessionManager.restartIdleAgentForLauncher`). */
+  launcher?: string;
 }
 
 /** What detection answers. */
@@ -295,7 +301,7 @@ function launcherCheck(deps: LauncherDeps | undefined, agentPathDirs: NonNullabl
       logger.info({ tag: "providers", op: "launcher_found", agent: row.agent, entry: row.name, command: name }, "a local MCP server's launcher is back");
     }
     launcherLogged.set(key, found);
-    if (found === "found") return row.agent === "codex" && !codexProcessSees(command) ? { ...row, launcherAfterStart: true } : row;
+    if (found === "found") return row.agent === "codex" && !codexProcessSees(command) ? { ...row, launcherAfterStart: true, launcher: name } : row;
     // A server that can't start has no sign-in to speak of either.
     const next: DetectedMcp = { ...row, status: "cant-start", missingCommand: name };
     delete next.signIn;
@@ -329,7 +335,10 @@ function detectClaude(
 
   const cfg = readJson(configPath);
   if (cfg) {
-    addAll(cfg.mcpServers, "user");
+    // A skill-eval session does not load the user scope (`settingSources`
+    // without "user"); reporting the HOST's servers as connected would tell
+    // its agent it has tools it does not.
+    if (!skipsUserSettings()) addAll(cfg.mcpServers, "user");
     const projects = cfg.projects;
     if (projects && typeof projects === "object") {
       const scoped = (projects as Record<string, unknown>)[agentDir];
@@ -510,6 +519,12 @@ async function detectOnce(deps: DetectDeps): Promise<DetectedBase> {
   const configPath = deps.claudeConfigPath ?? claudeConfigPath();
   const agentDir = deps.agentDir ?? getLibiAgentDir();
 
+  // Windows: the registry's PATH, read now (bounded, memoized 5 s), so a launcher installed since libi started is
+  // found the way a new agent process finds it (`lib/agents/agent-path.ts`). Elsewhere nothing to wait on.
+  if (!deps.launcher) {
+    const pathRefresh = refreshFreshPathDirs();
+    if (pathRefresh) await pathRefresh;
+  }
   const check = launcherCheck(deps.launcher, deps.agentPathDirs ?? ((agent) => agentSpawnPathDirs(agent === "claude" ? "claude-code" : agent)));
   // Codex first: resolving codex may run the login-shell probe, whose PATH the launcher lookup then reads.
   const codex = await detectCodex(deps, check);

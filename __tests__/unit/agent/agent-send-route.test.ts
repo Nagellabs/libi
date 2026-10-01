@@ -16,6 +16,12 @@ const sm = {
   hasActiveSession: vi.fn<(id: string) => boolean>(),
   activateSession: vi.fn(async () => []),
   sendMessage: vi.fn(async () => {}),
+  markUserSent: vi.fn(),
+  awaitApprovalMode: vi.fn(
+    async (): Promise<
+      { ok: true } | { ok: false; mode: string; error: string; retryable: boolean }
+    > => ({ ok: true }),
+  ),
 };
 vi.mock("@/lib/sessions/session-manager", () => ({
   getSessionManager: () => sm,
@@ -45,6 +51,7 @@ beforeEach(() => {
   sm.hasActiveSession.mockReturnValue(true);
   sm.activateSession.mockResolvedValue([]);
   sm.sendMessage.mockResolvedValue(undefined);
+  sm.awaitApprovalMode.mockResolvedValue({ ok: true });
 });
 
 describe("POST /api/agent/send", () => {
@@ -97,5 +104,60 @@ describe("POST /api/agent/send", () => {
     const retry = await POST(req({ sessionId: SID, text: "precious words" }));
     expect(retry.status).toBe(200);
     expect(sm.sendMessage).toHaveBeenCalledWith(SID, "precious words");
+  });
+
+  it("waits for the chat's approval mode before sending", async () => {
+    const r = await POST(req({ sessionId: SID, text: "hi" }));
+    expect(r.status).toBe(200);
+    expect(sm.awaitApprovalMode).toHaveBeenCalledWith(SID);
+    expect(sm.awaitApprovalMode.mock.invocationCallOrder[0]).toBeLessThan(
+      sm.sendMessage.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("an approval mode that could not be applied in time fails the send retryably — nothing reaches the agent", async () => {
+    sm.awaitApprovalMode.mockResolvedValueOnce({
+      ok: false,
+      mode: "ask",
+      error: "libi couldn't apply 'Ask each time' to this chat in time",
+      retryable: true,
+    });
+
+    const r = await POST(req({ sessionId: SID, text: "rename it" }));
+
+    expect(r.status).toBe(503);
+    const body = await r.json();
+    expect(body).toMatchObject({ approvalModeNotApplied: "ask" });
+    expect(body.error).toContain("libi couldn't apply 'Ask each time' to this chat in time");
+    // Retryable: the reason says how to retry.
+    expect(body.error).toContain("retry button");
+    expect(sm.sendMessage).not.toHaveBeenCalled();
+    // Held, but the user wrote in this chat: it is never an untouched chat a dispatch may reuse.
+    expect(sm.markUserSent).toHaveBeenCalledWith(SID);
+    expect(sm.markUserSent.mock.invocationCallOrder[0]).toBeLessThan(
+      sm.awaitApprovalMode.mock.invocationCallOrder[0],
+    );
+
+    // Retry once the push has landed: goes straight through.
+    const retry = await POST(req({ sessionId: SID, text: "rename it" }));
+    expect(retry.status).toBe(200);
+    expect(sm.sendMessage).toHaveBeenCalledWith(SID, "rename it");
+  });
+
+  it("a held mode the agent doesn't offer: the reason is passed through without a Retry promise", async () => {
+    sm.awaitApprovalMode.mockResolvedValueOnce({
+      ok: false,
+      mode: "auto",
+      error: "The agent doesn't offer 'Auto' in this chat — pick another approval mode.",
+      retryable: false,
+    });
+
+    const r = await POST(req({ sessionId: SID, text: "go" }));
+
+    expect(r.status).toBe(503);
+    const body = await r.json();
+    expect(body.error).toContain("pick another approval mode");
+    expect(body.error).not.toContain("retry button");
+    expect(sm.sendMessage).not.toHaveBeenCalled();
   });
 });

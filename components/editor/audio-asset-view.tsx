@@ -11,6 +11,7 @@ import { Music } from "lucide-react";
 import type { FileRecord } from "@/lib/db/schema/types";
 import { formatFileSize, formatTimecode } from "@/lib/utils/format";
 import { playQuietly } from "@/lib/media/play-quietly";
+import { AudioRightsSection } from "@/components/preview/audio-rights-section";
 
 /**
  * Audio asset preview: a player card with file metadata, a click-to-seek
@@ -117,6 +118,10 @@ export function AudioAssetView({ asset, mediaRef, onTimeUpdate }: Props) {
             {meta}
           </div>
         </div>
+      </div>
+
+      <div className="mt-3">
+        <AudioRightsSection fileId={asset.id} />
       </div>
 
       {/* Waveform (skipped for oversized / undecodable files) */}

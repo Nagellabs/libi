@@ -6,6 +6,8 @@ import { seedPiece } from "@/__tests__/helpers/test-db";
 import { saveManifest, type CompositionManifest } from "@/lib/composition/persistence";
 import { saveUserPreset } from "@/lib/overlays/preset-store";
 import { writeTrack } from "@/lib/tracking/storage";
+import { serializeAudioRights } from "@/lib/audio-rights/types";
+import { ownedByProvenance } from "@/lib/audio-rights/stamp";
 
 export interface FixtureIds {
   text: string;
@@ -48,6 +50,9 @@ function seedFile(
       storagePath: `${pieceId}/${filename}`,
       contentType,
       size: 10,
+      // The fixture's media is the template author's own: it must travel. A
+      // copyrighted file becoming a music link / slot is its own test case.
+      ...(type === "video" || type === "audio" ? { audioRights: serializeAudioRights(ownedByProvenance(new Date("2026-09-27T00:00:00Z"))) } : {}),
     })
     .run();
 }

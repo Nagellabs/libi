@@ -20,8 +20,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const exportVideo = vi.hoisted(() => vi.fn());
 const runJobViaServer = vi.hoisted(() => vi.fn());
+/** When the piece's composition last changed (epoch ms); null = never saved. */
+const compositionChangedAtMs = vi.hoisted(() => vi.fn(async (): Promise<number | null> => null));
 
 vi.mock("@/mcp/tools/export-tools", () => ({ exportVideo }));
+vi.mock("@/lib/composition/changed-at", () => ({ compositionChangedAtMs }));
+// libi's storage is the OS temp dir here, so every fixture file below counts
+// as one of the user's exports (lib/social/fit-check.ts#isAllowedExportPath)
+// and this checkout's own files do not.
+vi.mock("@/lib/libi-home", async (orig) => ({
+  ...(await orig<typeof import("@/lib/libi-home")>()),
+  getLibiStorageDir: () => os.tmpdir(),
+}));
 vi.mock("@/mcp/jobs-client", () => ({
   runJobViaServer,
   LibiServerUnavailableError: class extends Error {},
@@ -75,11 +85,11 @@ interface Call {
 /** Every studio call this test made, in order. */
 let calls: Call[] = [];
 /** Route table: the FIRST matching entry answers. */
-let routes: Array<[RegExp, () => { status?: number; body: unknown }]> = [];
+let routes: Array<[RegExp, (url: string) => { status?: number; body: unknown }]> = [];
 
 function respond(url: string): Response {
   const route = routes.find(([re]) => re.test(url));
-  const answer = route ? route[1]() : { status: 404, body: { error: "no route in test" } };
+  const answer = route ? route[1](url) : { status: 404, body: { error: "no route in test" } };
   const status = answer.status ?? 200;
   return {
     ok: status >= 200 && status < 300,
@@ -102,8 +112,43 @@ const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
   return respond(u);
 });
 
+/**
+ * The tests' finished-export fixtures (written as the job rows they used to
+ * be) as the piece's export records the tool now reads — filtered to the piece
+ * in the URL, `missing` when the file is not on disk, like the route.
+ */
+function toExportViews(jobs: unknown[], url: string): Array<Record<string, unknown>> {
+  const pieceId = decodeURIComponent(url.match(/\/api\/pieces\/([^/]+)\/exports$/)?.[1] ?? "");
+  const rows = jobs as Array<{ pieceId: string; status: string; startedAt?: string; completedAt: string | null; resultJson: string }>;
+  return rows
+    .filter((j) => j.pieceId === pieceId && j.status === "completed")
+    .map((j, i) => {
+      const r = JSON.parse(j.resultJson) as {
+        filePath: string;
+        audioDecision?: { purpose: string | null; excludedFileIds: string[]; carriesCopyrighted: boolean };
+      };
+      return {
+        id: `exp_${i}`,
+        pieceId,
+        status: "done",
+        path: r.filePath,
+        missing: !fs.existsSync(r.filePath),
+        startedAt: j.startedAt ? Date.parse(j.startedAt) : null,
+        completedAt: j.completedAt ? Date.parse(j.completedAt) : null,
+        purpose: r.audioDecision?.purpose ?? null,
+        excludedFileIds: r.audioDecision?.excludedFileIds ?? [],
+        carriesCopyrighted: r.audioDecision?.carriesCopyrighted ?? false,
+      };
+    });
+}
+
 /** The default happy path: connected, one IG + one TikTok, everything fits. */
-function connectedRoutes(over: Partial<{ accounts: unknown[]; verdicts: unknown[]; jobs: unknown[] }> = {}) {
+function connectedRoutes(over: Partial<{ accounts: unknown[]; verdicts: unknown[]; jobs: unknown[]; plan: unknown }> = {}) {
+  let requestIds = 0;
+  const nextRequestId = (): string => {
+    requestIds += 1;
+    return requestIds === 1 ? "11111111-2222-3333-4444-555555555555" : `11111111-2222-3333-4444-${String(requestIds).padStart(12, "0")}`;
+  };
   routes = [
     [
       /\/api\/social\/status$/,
@@ -118,7 +163,7 @@ function connectedRoutes(over: Partial<{ accounts: unknown[]; verdicts: unknown[
     ],
     [/\/api\/social\/accounts$/, () => ({ body: { accounts: over.accounts ?? [IG, TT] } })],
     [/\/api\/social\/tiktok\/creator-info/, () => ({ body: CREATOR })],
-    [/\/api\/jobs\?kind=export/, () => ({ body: { jobs: over.jobs ?? [] } })],
+    [/\/api\/pieces\/[^/]+\/exports$/, (url) => ({ body: { exports: toExportViews(over.jobs ?? [], url) } })],
     [
       /\/api\/social\/fit$/,
       () => ({
@@ -130,7 +175,11 @@ function connectedRoutes(over: Partial<{ accounts: unknown[]; verdicts: unknown[
         },
       }),
     ],
-    [/\/api\/social\/request-id/, () => ({ body: { requestId: "11111111-2222-3333-4444-555555555555", source: "fresh" } })],
+    // A fresh id per call, as the route mints one per logical post: the first
+    // is the fixed id the single-draft tests assert, every later one differs.
+    [/\/api\/social\/request-id/, () => ({ body: { requestId: nextRequestId(), source: "fresh" } })],
+    // A piece without copyrighted or own music: no plan to stamp, one export.
+    [/\/api\/social\/music\/plan$/, () => ({ body: over.plan ?? { copyrighted: false, hasMusic: false, targets: [], variants: {} } })],
     [/\/api\/social\/posts$/, () => ({ body: { post: { id: "post-1", status: "draft" }, deduped: false } })],
     [/\/api\/social\/links$/, () => ({ body: { ok: true } })],
     [/\/api\/pieces\//, () => ({ body: { id: "piece-1", name: "My Piece" } })],
@@ -160,6 +209,8 @@ beforeEach(() => {
   fetchMock.mockClear();
   exportVideo.mockReset();
   runJobViaServer.mockReset();
+  compositionChangedAtMs.mockReset();
+  compositionChangedAtMs.mockResolvedValue(null);
   runJobViaServer.mockResolvedValue({ status: "completed", jobId: "job-1", result: UPLOAD });
   exportVideo.mockResolvedValue({ success: true, data: { filePath: EXPORT_FILE, jobId: "x" } });
   vi.stubGlobal("fetch", fetchMock);
@@ -362,7 +413,7 @@ describe("libi.post_piece exports only when it has to", () => {
   });
 
   it("reuses the piece's most recent completed export instead of re-rendering, and says so", async () => {
-    const existing = `${process.cwd()}/package.json`; // a file that really exists
+    const existing = EXPORT_FILE; // a file that really exists, inside libi's storage
     connectedRoutes({
       jobs: [
         { pieceId: "piece-1", status: "completed", completedAt: "2026-09-20T10:00:00.000Z", resultJson: JSON.stringify({ filePath: existing }) },
@@ -376,6 +427,73 @@ describe("libi.post_piece exports only when it has to", () => {
     expect(res.data!.reusedExport).toMatchObject({ completedAt: "2026-09-20T10:00:00.000Z" });
     // The agent must be able to tell the user which file went out.
     expect(String(res.data!.next)).toMatch(/re-export/);
+  });
+
+  it("skips a recorded export outside libi's storage, and renders a fresh one", async () => {
+    // Written somewhere outside libi's storage: the fit check
+    // would refuse it ("that file is not one of your exports"), so reusing it
+    // failed the whole post (QA 2026-09-28, F2).
+    const outside = `${process.cwd()}/package.json`; // real, but not an export
+    connectedRoutes({
+      jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-20T10:00:00.000Z", resultJson: JSON.stringify({ filePath: outside }) }],
+    });
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(res.data).toMatchObject({ exported: true, exportPath: EXPORT_FILE, reusedExport: null });
+  });
+
+  it("never reuses an export made before the composition last changed", async () => {
+    connectedRoutes({
+      jobs: [
+        {
+          pieceId: "piece-1",
+          status: "completed",
+          startedAt: "2026-09-20T09:59:00.000Z",
+          completedAt: "2026-09-20T10:00:00.000Z",
+          resultJson: JSON.stringify({ filePath: EXPORT_FILE }),
+        },
+      ],
+    });
+    compositionChangedAtMs.mockResolvedValueOnce(Date.parse("2026-09-20T10:05:00.000Z"));
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(compositionChangedAtMs).toHaveBeenCalledWith("piece-1");
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(res.data).toMatchObject({ exported: true, reusedExport: null });
+  });
+
+  it("an edit made while the export was rendering makes it stale too (judged from the job's start)", async () => {
+    connectedRoutes({
+      jobs: [
+        {
+          pieceId: "piece-1",
+          status: "completed",
+          startedAt: "2026-09-20T09:59:00.000Z",
+          completedAt: "2026-09-20T10:00:00.000Z",
+          resultJson: JSON.stringify({ filePath: EXPORT_FILE }),
+        },
+      ],
+    });
+    compositionChangedAtMs.mockResolvedValueOnce(Date.parse("2026-09-20T09:59:30.000Z"));
+    await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+  });
+
+  it("reuses an export made after the composition last changed", async () => {
+    connectedRoutes({
+      jobs: [
+        {
+          pieceId: "piece-1",
+          status: "completed",
+          startedAt: "2026-09-20T09:59:00.000Z",
+          completedAt: "2026-09-20T10:00:00.000Z",
+          resultJson: JSON.stringify({ filePath: EXPORT_FILE }),
+        },
+      ],
+    });
+    compositionChangedAtMs.mockResolvedValueOnce(Date.parse("2026-09-20T09:00:00.000Z"));
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).not.toHaveBeenCalled();
+    expect(res.data).toMatchObject({ exported: false, exportPath: EXPORT_FILE });
   });
 
   it("ignores a recorded export whose file is gone and renders a fresh one", async () => {
@@ -553,5 +671,267 @@ describe("libi.social_link_post", () => {
     await expect(socialLinkPost({ pieceId: "gone", providerPostId: "z" })).resolves.toMatchObject({ success: false, error: "piece_not_found" });
     routes[0] = [/\/api\/social\/links$/, () => ({ status: 409, body: { error: "no_provider" } })];
     await expect(socialLinkPost({ pieceId: "piece-1", providerPostId: "z" })).resolves.toMatchObject({ success: false, error: "no_provider" });
+  });
+});
+
+describe("post_piece — music", () => {
+  const WITHOUT = { purpose: "social", excludedFileIds: ["s"], carriesCopyrighted: false };
+  const WITH = { purpose: "social", excludedFileIds: [], carriesCopyrighted: true };
+  const plan = (igMode: string, igVariant: string) => ({
+    copyrighted: true,
+    hasMusic: true,
+    variants: { "without-song": WITHOUT, "with-song": WITH },
+    targets: [
+      { platform: "instagram", accountId: "acc-ig", plan: { mode: igMode, sentence: `IG ${igMode}`, warnings: [], exportVariant: igVariant, allowedModes: [] }, music: { mode: igMode } },
+      {
+        platform: "tiktok",
+        accountId: "acc-tt",
+        plan: { mode: "draft", sentence: "Sends a TikTok draft without the song. Open it in TikTok and add *Espresso* from the sound library.", warnings: [], exportVariant: "without-song", allowedModes: [] },
+        music: { mode: "draft" },
+      },
+    ],
+  });
+
+  // Real files: the upload fingerprints the bytes it is about to send.
+  const tmpFile = (name: string): string => {
+    const p = path.join(os.tmpdir(), `libi-social-music-${name}.mp4`);
+    fs.writeFileSync(p, name);
+    return p;
+  };
+  const A = tmpFile("a");
+  const WITH_FILE = tmpFile("with");
+  const WITHOUT_FILE = tmpFile("without");
+  const FRESH = tmpFile("fresh");
+  const creates = () => calls.filter((c) => c.url.endsWith("/api/social/posts") && c.method === "POST");
+
+  it("one variant: exports once for social WITHOUT the song and stamps each target's music", async () => {
+    connectedRoutes({ plan: plan("strip", "without-song") });
+    exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: A } });
+    runJobViaServer.mockResolvedValue({ status: "new", result: UPLOAD });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(exportVideo.mock.calls[0][0]).toMatchObject({ purpose: "social", copyrightedAudio: "exclude" });
+    expect(creates()).toHaveLength(1);
+    const targets = (creates()[0].body as { targets: Array<{ options: { music?: unknown } }> }).targets;
+    expect(targets.map((t) => t.options.music)).toEqual([{ mode: "strip" }, { mode: "draft" }]);
+    expect(r.data?.targets).toEqual([
+      { platform: "instagram", accountId: "acc-ig", plan: { mode: "strip", sentence: "IG strip", warnings: [] } },
+      {
+        platform: "tiktok",
+        accountId: "acc-tt",
+        plan: { mode: "draft", sentence: "Sends a TikTok draft without the song. Open it in TikTok and add *Espresso* from the sound library.", warnings: [] },
+      },
+    ]);
+    expect(String(r.data?.music)).toMatch(/plan\.sentence/);
+  });
+
+  it("two variants: two exports, two linked drafts", async () => {
+    connectedRoutes({ plan: plan("include", "with-song") });
+    exportVideo
+      .mockResolvedValueOnce({ success: true, data: { filePath: WITH_FILE } })
+      .mockResolvedValueOnce({ success: true, data: { filePath: WITHOUT_FILE } });
+    runJobViaServer.mockResolvedValue({ status: "new", result: UPLOAD });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo.mock.calls.map((c) => c[0].copyrightedAudio)).toEqual(["include", "exclude"]);
+    expect(creates()).toHaveLength(2);
+    // Each draft carries only its own variant's targets, with a fresh request id each.
+    expect(creates().map((c) => (c.body as { targets: Array<{ platform: string }> }).targets.map((t) => t.platform))).toEqual([["instagram"], ["tiktok"]]);
+    expect(calls.filter((c) => /\/api\/social\/request-id/.test(c.url))).toHaveLength(2);
+    const requestIds = creates().map((c) => (c.body as { requestId: string }).requestId);
+    expect(new Set(requestIds).size).toBe(2);
+    const posts = r.data?.posts as Array<{ exportVariant: string; exportPath: string; targets: Array<{ platform: string }> }>;
+    expect(posts.map((p) => [p.exportVariant, p.exportPath])).toEqual([
+      ["with-song", WITH_FILE],
+      ["without-song", WITHOUT_FILE],
+    ]);
+    // Both exports are made and fit-checked before anything is uploaded.
+    expect(calls.filter((c) => /\/api\/social\/fit$/.test(c.url))).toHaveLength(2);
+    expect(String(r.data?.next)).toMatch(/2 linked drafts/);
+  });
+
+  it("reuses an export only when its audioDecision matches the variant", async () => {
+    connectedRoutes({
+      plan: plan("strip", "without-song"),
+      jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T00:00:00Z", resultJson: JSON.stringify({ filePath: WITH_FILE, audioDecision: WITH }) }],
+    });
+    exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: FRESH } });
+    runJobViaServer.mockResolvedValue({ status: "new", result: UPLOAD });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1); // the with-song file was NOT reused for a without-song post
+    expect(r.data).toMatchObject({ exportPath: FRESH, exported: true, reusedExport: null });
+  });
+
+  it("reuses an export whose audioDecision matches", async () => {
+    connectedRoutes({
+      plan: plan("strip", "without-song"),
+      jobs: [
+        { pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T02:00:00Z", resultJson: JSON.stringify({ filePath: WITH_FILE, audioDecision: WITH }) },
+        { pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T01:00:00Z", resultJson: JSON.stringify({ filePath: WITHOUT_FILE, audioDecision: WITHOUT }) },
+        // An export from before audio decisions existed carries whatever the piece had.
+        { pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T03:00:00Z", resultJson: JSON.stringify({ filePath: A }) },
+      ],
+    });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).not.toHaveBeenCalled();
+    expect(r.data).toMatchObject({ exportPath: WITHOUT_FILE, exported: false });
+  });
+
+  it("sends the requested music override to the plan", async () => {
+    connectedRoutes({ plan: plan("strip", "without-song") });
+    exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: A } });
+    runJobViaServer.mockResolvedValue({ status: "new", result: UPLOAD });
+    await postPiece({ pieceId: "piece-1", targets: [{ platform: "instagram", music: { mode: "strip" } }, { platform: "tiktok" }] });
+    const planCall = calls.find((c) => c.url.endsWith("/api/social/music/plan"))!;
+    expect(planCall.body).toMatchObject({
+      pieceId: "piece-1",
+      targets: [
+        { platform: "instagram", accountId: "acc-ig", music: { mode: "strip" } },
+        { platform: "tiktok", accountId: "acc-tt" },
+      ],
+    });
+    expect((planCall.body as { targets: Array<Record<string, unknown>> }).targets[1]).not.toHaveProperty("music");
+  });
+
+  it("a plan failure stops before any export", async () => {
+    connectedRoutes();
+    routes.unshift([/\/api\/social\/music\/plan$/, () => ({ status: 502, body: { error: "provider", message: "down" } })]);
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(r).toMatchObject({ success: false, error: "music_plan_unavailable", data: { hint: "down", status: 502 } });
+    expect(exportVideo).not.toHaveBeenCalled();
+  });
+
+  it("a second variant that does not fit stops before ANY upload", async () => {
+    connectedRoutes({ plan: plan("include", "with-song") });
+    let fitCalls = 0;
+    routes.unshift([
+      /\/api\/social\/fit$/,
+      () => {
+        fitCalls += 1;
+        return fitCalls === 1
+          ? { body: { verdicts: [{ platform: "instagram", postType: "reel", ok: true, problems: [] }] } }
+          : { body: { verdicts: [{ platform: "tiktok", postType: "video", ok: false, problems: ["too long"] }] } };
+      },
+    ]);
+    exportVideo
+      .mockResolvedValueOnce({ success: true, data: { filePath: WITH_FILE } })
+      .mockResolvedValueOnce({ success: true, data: { filePath: WITHOUT_FILE } });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(r).toMatchObject({ success: false, error: "does_not_fit" });
+    expect(runJobViaServer).not.toHaveBeenCalled();
+    expect(creates()).toHaveLength(0);
+  });
+  describe("a given exportPath is used only where its audio fits", () => {
+    const PERSONAL_WITH = { purpose: "personal", excludedFileIds: [], carriesCopyrighted: true };
+
+    it("a file that matches one of two variants is used for that one; the other is exported", async () => {
+      connectedRoutes({
+        plan: plan("include", "with-song"),
+        jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T00:00:00Z", resultJson: JSON.stringify({ filePath: WITH_FILE, audioDecision: PERSONAL_WITH }) }],
+      });
+      exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: FRESH } });
+      const r = await postPiece({ pieceId: "piece-1", exportPath: WITH_FILE });
+      expect(exportVideo).toHaveBeenCalledTimes(1);
+      expect(exportVideo.mock.calls[0][0]).toMatchObject({ purpose: "social", copyrightedAudio: "exclude" });
+      const posts = r.data?.posts as Array<{ exportVariant: string; exportPath: string; exported: boolean }>;
+      expect(posts.map((p) => [p.exportVariant, p.exportPath, p.exported])).toEqual([
+        ["with-song", WITH_FILE, false],
+        ["without-song", FRESH, true],
+      ]);
+    });
+
+    it("a personal export that kept the song is NOT posted where the plan strips it", async () => {
+      connectedRoutes({
+        plan: plan("strip", "without-song"),
+        jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T00:00:00Z", resultJson: JSON.stringify({ filePath: WITH_FILE, audioDecision: PERSONAL_WITH }) }],
+      });
+      exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: FRESH } });
+      const r = await postPiece({ pieceId: "piece-1", exportPath: WITH_FILE });
+      expect(exportVideo).toHaveBeenCalledTimes(1);
+      expect(exportVideo.mock.calls[0][0]).toMatchObject({ copyrightedAudio: "exclude" });
+      expect(r.data).toMatchObject({ exportPath: FRESH, exported: true });
+      expect(creates().map((c) => (c.body as { exportPath: string }).exportPath)).toEqual([FRESH]);
+    });
+
+    it("a file that matches the only variant is used as given", async () => {
+      connectedRoutes({
+        plan: plan("strip", "without-song"),
+        jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-27T00:00:00Z", resultJson: JSON.stringify({ filePath: WITHOUT_FILE, audioDecision: WITHOUT }) }],
+      });
+      const r = await postPiece({ pieceId: "piece-1", exportPath: WITHOUT_FILE });
+      expect(exportVideo).not.toHaveBeenCalled();
+      expect(r.data).toMatchObject({ exportPath: WITHOUT_FILE, exported: false, reusedExport: null });
+      expect(creates()).toHaveLength(1);
+    });
+
+    it("a file whose audio libi cannot tell is refused before anything is exported or uploaded", async () => {
+      const hint = "This piece has copyrighted music and libi can't tell what audio that file carries — call libi.post_piece again without exportPath.";
+      // Not an export libi recorded at all.
+      connectedRoutes({ plan: plan("strip", "without-song") });
+      expect(await postPiece({ pieceId: "piece-1", exportPath: A })).toMatchObject({ success: false, data: { error: "export_audio_unknown", hint } });
+      // (An export record always says what its audio carries, so there is no
+      // "recorded but undecided" case left to refuse.)
+      expect(exportVideo).not.toHaveBeenCalled();
+      expect(runJobViaServer).not.toHaveBeenCalled();
+      expect(creates()).toHaveLength(0);
+    });
+  });
+
+  describe("a later draft failing after an earlier one was made", () => {
+    const madeHint = "Draft post-1 (with-song: instagram) WAS created and is in the Posting tab; do not re-run libi.post_piece — it would duplicate it. Tell the user which draft is missing.";
+
+    it("a failed second create names the draft that WAS made and opens it", async () => {
+      connectedRoutes({ plan: plan("include", "with-song") });
+      let creates = 0;
+      routes.unshift([
+        /\/api\/social\/posts$/,
+        () => {
+          creates += 1;
+          return creates === 1 ? { body: { post: { id: "post-1", status: "draft" }, deduped: false } } : { status: 502, body: { error: "provider", message: "Zernio is down" } };
+        },
+      ]);
+      exportVideo
+        .mockResolvedValueOnce({ success: true, data: { filePath: WITH_FILE } })
+        .mockResolvedValueOnce({ success: true, data: { filePath: WITHOUT_FILE } });
+      const spy = vi.spyOn(notify, "navigateAwaited");
+      const r = await postPiece({ pieceId: "piece-1" });
+      expect(r.success).toBe(false);
+      expect(r.data).toMatchObject({ providerPostId: "post-1", posts: [{ providerPostId: "post-1", exportVariant: "with-song" }], navigated: true });
+      expect(String(r.data!.hint)).toContain("Zernio is down");
+      expect(String(r.data!.hint)).toContain(madeHint);
+      expect(spy).toHaveBeenCalledWith({ target: "posting", pieceId: "piece-1", id: "post-1" });
+    });
+
+    it("a failed second upload says the same", async () => {
+      connectedRoutes({ plan: plan("include", "with-song") });
+      exportVideo
+        .mockResolvedValueOnce({ success: true, data: { filePath: WITH_FILE } })
+        .mockResolvedValueOnce({ success: true, data: { filePath: WITHOUT_FILE } });
+      runJobViaServer.mockReset();
+      runJobViaServer.mockResolvedValueOnce({ status: "new", result: UPLOAD }).mockRejectedValueOnce(new Error("storage said 500"));
+      const r = await postPiece({ pieceId: "piece-1" });
+      expect(r).toMatchObject({ success: false, error: "upload_failed", data: { providerPostId: "post-1" } });
+      expect(String(r.data!.hint)).toContain(madeHint);
+    });
+  });
+
+  it("asks the agent to relay the plan for generated music too, not only a copyrighted song", async () => {
+    connectedRoutes({
+      plan: {
+        copyrighted: false,
+        hasMusic: true,
+        variants: {},
+        targets: [
+          { platform: "instagram", accountId: "acc-ig", plan: { mode: "include", sentence: "Keeps your track.", warnings: [], exportVariant: "without-song", allowedModes: [] }, music: { mode: "include" } },
+          { platform: "tiktok", accountId: "acc-tt", plan: { mode: "include", sentence: "Keeps your track.", warnings: [], exportVariant: "without-song", allowedModes: [] }, music: { mode: "include" } },
+        ],
+      },
+    });
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(String(r.data?.music)).toMatch(/plan\.sentence/);
+  });
+
+  it("no music at all: no relay note", async () => {
+    const r = await postPiece({ pieceId: "piece-1" });
+    expect(r.data).not.toHaveProperty("music");
   });
 });

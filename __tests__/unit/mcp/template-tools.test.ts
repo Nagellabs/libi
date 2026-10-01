@@ -400,8 +400,8 @@ describe("template tools", () => {
     const extra = { signal: new AbortController().signal } as never;
     const r = await applyTemplate({ cloudId: "abcdefghijklmnopqrst", newPiece: {} }, extra);
     expect(r.success, r.error).toBe(true);
-    // Review I1: through the server's template_install job, keyed by the cloud id alone, never from a cached row.
-    expect(installCalls()).toEqual([["template_install", { cloudId: "abcdefghijklmnopqrst" }, expect.objectContaining({ forceNew: true, extra, signal: expect.any(AbortSignal) })]]);
+    // Review I1: through the server's template_install job, keyed by the cloud id and the catalog it was asked on (review M2), never from a cached row.
+    expect(installCalls()).toEqual([["template_install", { cloudId: "abcdefghijklmnopqrst", source: "https://libi.nagellabs.com" }, expect.objectContaining({ forceNew: true, extra, signal: expect.any(AbortSignal) })]]);
     const data = r.data as { templateId: string; unfilledSlots: Array<{ label: string }>; authorFields: { source: string; fields: string[] } };
     expect(data.templateId).toBe(d.templateId);
     expect(data.unfilledSlots.map((u) => u.label)).toEqual(["Headline"]);
@@ -870,6 +870,30 @@ describe("template tools", () => {
     } finally {
       clearCustomEffects();
     }
+  });
+
+  it("a template that names a song: the apply leaves it pending, says to ask first, and labels its name as the author's", async () => {
+    const { makeScaffold } = await import("@/__tests__/helpers/templates");
+    const scaffold = makeScaffold({
+      assets: [],
+      musicLinks: [{ ref: "espresso", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" }],
+      audioClips: [{ key: "a", kind: "standalone", startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true, source: { musicRef: "espresso" } }] as never,
+    });
+    const tid = (await createTemplate({ name: "Beat", description: "", tags: [], origin: "installed", cloudId: "abcdefghijklmnopqrst", instructions: "", copies: [], writes: [], scaffold: scaffold as never })).id;
+    const r = await applyTemplate({ templateId: tid, newPiece: {} });
+    expect(r.success, r.error).toBe(true);
+    const data = r.data as { pendingMusic: Array<{ assetId: string; track: object; sourceUrl?: string }>; pendingMusicNote: string; authorFields: { fields: string[] } };
+    expect(data.pendingMusic).toEqual([
+      expect.objectContaining({ assetId: `tpl-${tid.slice(0, 8)}-music-1`, track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" }),
+    ]);
+    expect(data.pendingMusicNote).toMatch(/libi\.fetch_template_music/);
+    expect(data.pendingMusicNote).toMatch(/ask whether to download/);
+    expect(data.authorFields.fields).toEqual(expect.arrayContaining(["pendingMusic[].track", "pendingMusic[].sourceUrl"]));
+    expect(runJobViaServer).not.toHaveBeenCalled();
+    // No song named: the list is empty and there is no note.
+    const plain = await applyTemplate({ templateId: (await create()).templateId, newPiece: {} });
+    expect(plain.data).toMatchObject({ pendingMusic: [] });
+    expect(plain.data).not.toHaveProperty("pendingMusicNote");
   });
 
   it("the same apply from the user's own template keeps its names", async () => {

@@ -193,6 +193,15 @@ export const files = sqliteTable(
      * generations from 2026-05-27 onwards — no backwards compatibility.
      */
     aiGeneration: text("ai_generation"),
+    /**
+     * Audio rights (spec 2026-09-27 social music): JSON `AudioRights`
+     * (`lib/audio-rights/types.ts`). NULL on an audio-bearing file = no stamp,
+     * read by provenance in `lib/audio-rights/read.ts#effectiveRights` — the one
+     * reader: generated, a legacy `Downloaded from` file (copyrighted), else
+     * owned (uploads are the user's; owner decision 2026-09-28). `owned` is only ever written by the user's own page
+     * (`PATCH /api/files/by-id/:fileId/audio-rights`, browser-only).
+     */
+    audioRights: text("audio_rights"),
     createdAt: integer("created_at", { mode: "timestamp" })
       .notNull()
       .default(sql`(unixepoch())`),
@@ -598,6 +607,61 @@ export const jobs = sqliteTable("jobs", {
   pieceIdx: index("jobs_piece_idx").on(table.pieceId),
   fileIdx: index("jobs_file_idx").on(table.fileId),
 }));
+
+/**
+ * One row per export of a piece — THE record of what exports exist (spec
+ * 2026-09-29 §A1). The file lives at `<storage>/<piece_id>/<rel_path>`
+ * (`exports/<name>.<ext>`); piece DELETE removes both, the storage dir with
+ * `deletePieceDir` and these rows by cascade. The export job's `result_json`
+ * still carries its `ExportResult`, but a same-params re-export can replace a
+ * job row — never this one.
+ *
+ * `job_id` is deliberately NOT a foreign key: a job row that is superseded or
+ * pruned must never fail a record write, and a job that is gone reads as gone
+ * (lib/exports/store.ts#staleStatus).
+ */
+export const pieceExports = sqliteTable(
+  "piece_exports",
+  {
+    id: text("id").primaryKey(),
+    pieceId: text("piece_id")
+      .notNull()
+      .references(() => pieces.id, { onDelete: "cascade" }),
+    jobId: text("job_id"),
+    /** Display name = the file's stem; unique per piece among rows that are not cancelled. */
+    name: text("name").notNull(),
+    /** `exports/<file>`, relative to the piece's storage dir; null until the file is claimed. */
+    relPath: text("rel_path"),
+    status: text("status", { enum: ["queued", "running", "done", "failed", "cancelled"] }).notNull(),
+    /** User-facing message for `failed`. */
+    error: text("error"),
+    queuedAt: integer("queued_at", { mode: "timestamp_ms" }).notNull(),
+    startedAt: integer("started_at", { mode: "timestamp_ms" }),
+    completedAt: integer("completed_at", { mode: "timestamp_ms" }),
+    sizeBytes: integer("size_bytes"),
+    durationSec: real("duration_sec"),
+    width: integer("width"),
+    height: integer("height"),
+    aspect: text("aspect", { enum: ["9:16", "16:9", "1:1", "4:5", "other"] }).notNull(),
+    container: text("container", { enum: ["mp4", "webm"] }).notNull(),
+    codec: text("codec").notNull(),
+    fps: integer("fps").notNull(),
+    quality: text("quality"),
+    graphicsQuality: text("graphics_quality"),
+    /** The audio-policy purpose (`social` | `personal`). */
+    purpose: text("purpose"),
+    carriesCopyrighted: integer("carries_copyrighted", { mode: "boolean" }).notNull().default(false),
+    /** JSON string[] — tracks the audio policy left out. */
+    excludedFileIds: text("excluded_file_ids").notNull().default("[]"),
+    backend: text("backend"),
+    /** JSON DroppedOverlay[] | null, as in ExportResult. */
+    droppedOverlays: text("dropped_overlays"),
+    source: text("source", { enum: ["user", "agent"] }).notNull(),
+  },
+  (t) => ({
+    pieceQueuedIdx: index("idx_piece_exports_piece_queued").on(t.pieceId, t.queuedAt),
+  }),
+);
 
 /** Analytics events waiting to reach GA4.
  *

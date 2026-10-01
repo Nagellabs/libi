@@ -9,6 +9,7 @@ import { cliAdapter } from "@/lib/server/lifecycle/adapters/cli";
 import { inDevCheckout } from "@/lib/dev/worktree-bootstrap";
 import { setRelaunchHandler } from "@/lib/server/lifecycle/relaunch";
 import { ensureNextExternalSymlinks } from "@/lib/install/next-externals";
+import { inspectFarmBeforeBoot, logBootTiming } from "@/lib/server/lifecycle/boot-timing";
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import { findPackageRoot } from "@/lib/runtime/package-root";
 import { maybePrintUpdateNotice } from "@/lib/cli/update-notice";
@@ -95,7 +96,27 @@ async function runProductionServer(port: string, dir: string): Promise<void> {
   // yields a server that binds its port and returns 500 for every route —
   // the one failure shape a user cannot distinguish from an app bug. The
   // caller (`startStudio`) prints the message and exits 1.
-  ensureNextExternalSymlinks(path.join(dir, ".next"));
+  const farmBefore = inspectFarmBeforeBoot(path.join(dir, ".next"));
+  const farmStarted = Date.now();
+  const externals = ensureNextExternalSymlinks(path.join(dir, ".next"));
+  const farmMs = Date.now() - farmStarted;
+
+  // Activate `next-logger` BEFORE `next()` is constructed, exactly as the
+  // packaged server does (lib/server/next-server.ts, which says why). Without
+  // it only `instrumentation.ts#register()` loaded it — after Next's own
+  // startup output, which went to stdout — and server.log stayed at 0 bytes on
+  // every CLI boot: the published 0.1.16 on macOS and the Windows headless
+  // boots alike (EL-5, Windows verification F7). Dynamic for the same reason as
+  // `next` below, and never fatal: logging must not stop the server booting.
+  try {
+    await import("next-logger");
+  } catch (err) {
+    process.stderr.write(
+      `[libi] next-logger failed to load — server.log will not be written: ${
+        err instanceof Error ? err.message : String(err)
+      }\n`,
+    );
+  }
 
   // Dynamic import: this module is imported unconditionally by
   // lib/cli/index.ts for every subcommand (serve-mcp, connect, …), so a
@@ -103,9 +124,15 @@ async function runProductionServer(port: string, dir: string): Promise<void> {
   // module graph into every CLI invocation. Load it only when actually
   // booting the production server.
   const { default: next } = await import("next");
-  const nextApp = next({ dev: false, dir });
+  // `port` / `hostname` bind nothing (the listener below does); they are what
+  // Next synthesizes each handler's `request.url` from, `localhost:3000` when
+  // absent — whatever port this server really listens on (SOC-3, see
+  // `lib/server/next-server.ts`). The hostname is the studio's own loopback
+  // address even under a deliberate LIBI_HOST: it names this server to itself.
+  const nextApp = next({ dev: false, dir, port: Number(port), hostname: "127.0.0.1" });
   const handle = nextApp.getRequestHandler();
   await nextApp.prepare();
+  const readyAt = Date.now();
   const server = createServer((req, res) => handle(req, res));
 
   // Loopback by default. A bare listen(port, cb) binds 0.0.0.0, which serves
@@ -136,6 +163,16 @@ async function runProductionServer(port: string, dir: string): Promise<void> {
       server.off("error", reject);
       resolve();
     });
+  });
+  // Here Next prepares BEFORE the bind (the port is fixed), so ready precedes port.
+  logBootTiming({
+    surface: "cli",
+    farmMs,
+    farmCreated: externals.created.length,
+    farmVerified: externals.verified.length,
+    ...farmBefore,
+    portAt: Date.now(),
+    readyAt,
   });
 }
 

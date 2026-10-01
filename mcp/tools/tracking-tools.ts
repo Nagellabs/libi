@@ -35,7 +35,11 @@ import {
 import type { TrackMethod, Anchor } from "@/lib/tracking/types";
 import { serverLogger as logger } from "@/lib/logger";
 import { requireDeps, markDepInstalled, type MissingDep } from "@/lib/dependencies/require-deps";
-import { trackingEngineInstalled } from "@/lib/tracking/not-installed";
+import {
+  trackingEngineInstalled,
+  parseTrackingNotInstalled,
+  type TrackingNotInstalled,
+} from "@/lib/tracking/not-installed";
 import {
   runJobViaServer,
   legacyTripleFromRunJobResult,
@@ -66,6 +70,35 @@ import { isTestMode } from "@/lib/test-mode";
 // but NOT re-exported — the barrel must expose only one `ToolResult`
 // (the loose `./types` one), which killed the prior dual-declaration collision.
 import type { ToolResultOf as ToolResult } from "./types";
+
+/** Shared fallback for every generic MCP-tool catch below: parse the caught
+ *  error for the `tracking_engine_not_installed` contract a job runner throws
+ *  as stringified JSON (`lib/jobs/runners/tracking.ts`, `matte-gen.ts`) before
+ *  falling back to the raw `err.message` — so a missing engine surfaces as the
+ *  structured error the agent can act on, not that JSON as a string.
+ *  Overloaded (rather than a single generic signature) so a no-`data` call
+ *  isn't contextually inferred against the enclosing function's SUCCESS data
+ *  type — the union stays assignable to each call site's declared
+ *  `ToolResult` error-data type without a cast. */
+function jobFailure(
+  err: unknown,
+): { success: false; error: string } | { success: false; error: string; data: TrackingNotInstalled["data"] };
+function jobFailure<D extends Record<string, unknown>>(
+  err: unknown,
+  data: D,
+):
+  | { success: false; error: string; data: D }
+  | { success: false; error: string; data: TrackingNotInstalled["data"] };
+function jobFailure(
+  err: unknown,
+  data?: Record<string, unknown>,
+): { success: false; error: string; data?: Record<string, unknown> } {
+  const notInstalled = parseTrackingNotInstalled(err);
+  if (notInstalled) return { success: false, error: notInstalled.error, data: notInstalled.data };
+  const message = err instanceof Error ? err.message : String(err);
+  if (data !== undefined) return { success: false, error: message, data };
+  return { success: false, error: message };
+}
 
 // Flags that indicate a track is too broken to attach an overlay without
 // explicit agent acknowledgement. `samples_exceed_clip_duration` is intentionally
@@ -318,7 +351,7 @@ async function runTrackingCommon(opts: TrackingCommonOpts): Promise<
     if (err instanceof CancelledError) {
       return { success: false, error: "cancelled", data: { jobId: err.jobId } };
     }
-    return { success: false, error: err instanceof Error ? err.message : String(err), data: { jobId: "" } };
+    return jobFailure(err, { jobId: "" });
   }
 
   const method: TrackMethod = opts.methodFor(params.objectKind);
@@ -701,11 +734,7 @@ export async function computeObjectTrack(
     if (err instanceof CancelledError) {
       return { success: false, error: "cancelled", data: { jobId: err.jobId } };
     }
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-      data: { jobId: "" },
-    };
+    return jobFailure(err, { jobId: "" });
   }
 }
 
@@ -964,7 +993,7 @@ export async function computeTrackSegment(
     if (err instanceof CancelledError) {
       return { success: false, error: "cancelled", data: { jobId: err.jobId } };
     }
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return jobFailure(err);
   }
 
   // Persist the agent's in-range corrective anchors to the TRANSPARENT
@@ -1080,7 +1109,7 @@ export async function skipSegment(
     });
     return { success: true, data: { trackId: params.trackId, segmentId } };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return jobFailure(err);
   }
 }
 
@@ -1227,7 +1256,7 @@ export async function groundTarget(
     if (err instanceof CancelledError) {
       return { success: false, error: "cancelled", data: { jobId: err.jobId } };
     }
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return jobFailure(err);
   }
 }
 
@@ -1349,7 +1378,7 @@ export async function listIdentityCandidates(
     if (err instanceof CancelledError) {
       return { success: false, error: "cancelled", data: { jobId: err.jobId } };
     }
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return jobFailure(err);
   }
 
   if (cands.length === 0) {
@@ -1445,7 +1474,7 @@ export async function pickCandidate(
       if (err instanceof CancelledError) {
         return { success: false, error: "cancelled", data: { jobId: err.jobId } };
       }
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
+      return jobFailure(err);
     }
   }
 
@@ -1522,7 +1551,7 @@ export async function pickCandidate(
       out: { samples, framerate },
     });
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return jobFailure(err);
   }
 
   // Record the pick in the same agentAnchors channel computeTrackSegment uses
@@ -1781,10 +1810,7 @@ export async function installTrackingEngine(
         data: { hint: err.hint },
       };
     }
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
+    return jobFailure(err);
   }
 }
 

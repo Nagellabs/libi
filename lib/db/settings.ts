@@ -10,6 +10,7 @@ import {
 } from "@/lib/analytics/settings-logic";
 import { crashReportChoiceAllowsReporting } from "@/lib/sentry/enabled";
 import { isSocialProviderId, type SocialProviderId, type InstagramPostType } from "@/lib/social/catalog";
+import type { AccountMusicFacts } from "@/lib/social/music-policy";
 
 export type { AnalyticsSettings };
 
@@ -193,15 +194,14 @@ export function setNotificationsSetting(s: NotificationsSetting): void {
 }
 
 // ---------------------------------------------------------------------------
-// Export defaults setting (folder + default format + default quality)
+// Export defaults setting (default format + default qualities). Exports are
+// saved in the piece (`<storage>/<pieceId>/exports/`, lib/exports/paths.ts);
+// a `folder` left in older stored JSON is ignored.
 // ---------------------------------------------------------------------------
 
-import { defaultExportFolder } from "@/lib/export/folder";
 import type { GraphicsQuality } from "@/lib/engine/types";
 
 export type ExportDefaultsSetting = {
-  /** Absolute path. Null = use OS-aware default (~/Movies/libi on darwin, ~/Videos/libi elsewhere). */
-  folder: string | null;
   format: "mp4" | "webm";
   /** Media (videos & images) resolution default. */
   quality: "source" | "1080p" | "1440p" | "4k";
@@ -210,14 +210,13 @@ export type ExportDefaultsSetting = {
 };
 
 const EXPORT_DEFAULTS_FALLBACK: ExportDefaultsSetting = {
-  folder: null,
   format: "mp4",
   quality: "source",
   graphicsQuality: "4k",
 };
 
-/** Read the export defaults. Falls back to OS-aware folder + MP4/Source if
- *  the row is missing, the column is empty, or the JSON is malformed. */
+/** Read the export defaults. Falls back to MP4/Source/4K if the row is
+ *  missing, the column is empty, or the JSON is malformed. */
 export function getExportDefaults(): ExportDefaultsSetting {
   const db = getDb();
   const [row] = db
@@ -234,7 +233,6 @@ export function getExportDefaults(): ExportDefaultsSetting {
     const parsed = JSON.parse(raw) as Partial<ExportDefaultsSetting> | null;
     if (!parsed || typeof parsed !== "object") return { ...EXPORT_DEFAULTS_FALLBACK };
     return {
-      folder: typeof parsed.folder === "string" && parsed.folder ? parsed.folder : null,
       format: parsed.format === "webm" ? "webm" : "mp4",
       quality:
         parsed.quality === "1080p" || parsed.quality === "1440p" || parsed.quality === "4k"
@@ -248,12 +246,6 @@ export function getExportDefaults(): ExportDefaultsSetting {
   } catch {
     return { ...EXPORT_DEFAULTS_FALLBACK };
   }
-}
-
-/** Resolve the effective export folder — settings if set, otherwise OS default. */
-export function resolveExportFolder(): string {
-  const defaults = getExportDefaults();
-  return defaults.folder ?? defaultExportFolder();
 }
 
 /** Persist the export defaults as JSON in the settings table. */
@@ -529,6 +521,11 @@ export type SocialSettings = {
   timezone: string | null;
   defaults: { instagramType: InstagramPostType; aiLabel: boolean };
   pollSeconds: 30;
+  /** Per account, what libi knows about its music (spec §6.3, D8), keyed
+   *  "<providerId>:<accountId>". Absent when empty. Detected facts are
+   *  refreshed by `lib/social/music-facts.ts`; a user-set TikTok kind is never
+   *  overwritten by detection. */
+  accountFacts?: Record<string, AccountMusicFacts>;
 };
 
 const SOCIAL_FALLBACK: SocialSettings = {
@@ -537,6 +534,28 @@ const SOCIAL_FALLBACK: SocialSettings = {
   defaults: { instagramType: "reel", aiLabel: true },
   pollSeconds: 30,
 };
+
+/** Tolerant parse of the stored `accountFacts` map: an entry with no
+ *  recognizable fact (junk, an unknown `tiktokKind.value`, …) is dropped
+ *  rather than kept malformed or thrown away wholesale. */
+function parseAccountFacts(raw: unknown): Record<string, AccountMusicFacts> {
+  const out: Record<string, AccountMusicFacts> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {
+    const f = (v ?? {}) as Record<string, Record<string, unknown> | undefined>;
+    const facts: AccountMusicFacts = {};
+    const k = f.tiktokKind;
+    if (k && (k.value === "business" || k.value === "personal") && (k.source === "detected" || k.source === "user") && typeof k.checkedAt === "string") {
+      facts.tiktokKind = { value: k.value, source: k.source, checkedAt: k.checkedAt };
+    }
+    const i = f.instagramFacebookLogin;
+    if (i && typeof i.value === "boolean" && typeof i.checkedAt === "string") {
+      facts.instagramFacebookLogin = { value: i.value, source: "detected", checkedAt: i.checkedAt };
+    }
+    if (facts.tiktokKind || facts.instagramFacebookLogin) out[key] = facts;
+  }
+  return out;
+}
 
 /** Read the social settings. Falls back to no provider / OS timezone / reel
  *  + AI-label-on defaults if the row is missing, the column is empty, the
@@ -557,17 +576,35 @@ export function getSocialSettings(): SocialSettings {
         aiLabel: d.aiLabel !== false,
       },
       pollSeconds: 30,
+      ...(() => {
+        const af = parseAccountFacts(p.accountFacts);
+        return Object.keys(af).length ? { accountFacts: af } : {};
+      })(),
     };
   } catch {
     return { ...SOCIAL_FALLBACK, defaults: { ...SOCIAL_FALLBACK.defaults } };
   }
 }
 
-/** Persist the social settings as JSON in the settings table. */
+/** Persist the social settings. `accountFacts` is kept as stored when the
+ *  caller does not send it — the settings PUT never does. */
 export function setSocialSettings(s: SocialSettings): void {
+  const facts = s.accountFacts ?? getSocialSettings().accountFacts;
+  const next: SocialSettings = { ...s, ...(facts && Object.keys(facts).length ? { accountFacts: facts } : {}) };
+  if (!next.accountFacts) delete next.accountFacts;
   const db = getDb();
-  const set = { social: JSON.stringify(s), updatedAt: new Date() };
+  const set = { social: JSON.stringify(next), updatedAt: new Date() };
   db.insert(settings).values({ id: 1, ...set }).onConflictDoUpdate({ target: settings.id, set }).run();
+}
+
+export function getAccountMusicFacts(key: string): AccountMusicFacts {
+  return getSocialSettings().accountFacts?.[key] ?? {};
+}
+
+export function setAccountMusicFacts(key: string, facts: AccountMusicFacts): void {
+  const s = getSocialSettings();
+  const all = { ...(s.accountFacts ?? {}), [key]: facts };
+  setSocialSettings({ ...s, accountFacts: parseAccountFacts(all) });
 }
 
 // ---------------------------------------------------------------------------
@@ -581,6 +618,8 @@ export function setSocialSettings(s: SocialSettings): void {
 // returns it.
 // ---------------------------------------------------------------------------
 
+import { PRODUCTION_SITE_URL } from "@/lib/site-url";
+import { TEST_MODE_SOURCE } from "@/lib/templates/cloud/constants";
 import { generateDefaultNickname } from "@/lib/templates/cloud/default-nickname";
 import { CREATOR_KEY_PATTERN, authorIdFromKey, generateCreatorKey } from "@/lib/templates/cloud/identity";
 import { serverLogger as logger } from "@/lib/logger";
@@ -678,6 +717,54 @@ function parseTemplatesAuthor(raw: string | null): TemplatesAuthorSetting | null
   }
 }
 
+/**
+ * Each templates catalog keeps its own nickname for a key (the site's
+ * `authors/<id>`), and a dev build can switch catalogs (review M4). The
+ * identity's `nickname` field is PRODUCTION's, in every row; every other
+ * catalog's — a development site's, and test mode's fixture (review I1: test
+ * mode shares LIBI_HOME with a normal boot) — is cached under
+ * `catalogNicknames[<source>]` in the same JSON, so a nickname learned from
+ * or set on another catalog never becomes the first public name on
+ * production. A catalog with no nickname of its own reads the production one
+ * (the default, or the user's production name): production's name may go to
+ * another catalog, never the reverse. The map belongs to the key: an import,
+ * which writes a fresh identity, drops it.
+ *
+ * `source` omitted is the catalog this mode reads by default: production's,
+ * or in test mode the fixture's.
+ */
+function isMainNicknameSlot(source: string | undefined): boolean {
+  return nicknameSlot(source) === PRODUCTION_SITE_URL;
+}
+
+function nicknameSlot(source: string | undefined): string {
+  return source ?? (isTestMode() ? TEST_MODE_SOURCE : PRODUCTION_SITE_URL);
+}
+
+/** The JSON path of `source`'s own nickname; null for a source that can't be quoted as a path key (a catalog source — an origin or "test-mode" — never has a quote or a backslash). */
+function catalogNicknamePath(source: string): string | null {
+  return /["\\]/.test(source) ? null : `$.catalogNicknames."${source}"`;
+}
+
+/** `source`'s own cached nickname in the stored identity, while it is still `key`'s; null when it has none. */
+function catalogNicknameOf(key: string, source: string): string | null {
+  try {
+    const p = JSON.parse(readTemplatesAuthorRaw() ?? "null") as { key?: unknown; catalogNicknames?: Record<string, unknown> } | null;
+    if (!p || p.key !== key || typeof p.catalogNicknames !== "object" || p.catalogNicknames === null) return null;
+    const own = Object.prototype.hasOwnProperty.call(p.catalogNicknames, source) ? p.catalogNicknames[source] : null;
+    return typeof own === "string" && own ? own : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `a` as `source` sees it: its own nickname there, else the production one. */
+function forCatalog(a: TemplatesAuthorSetting | null, source: string | undefined): TemplatesAuthorSetting | null {
+  if (!a || isMainNicknameSlot(source)) return a;
+  const own = catalogNicknameOf(a.key, nicknameSlot(source));
+  return own ? { ...a, nickname: own } : a;
+}
+
 function readTemplatesAuthorRaw(row: number = authorRow()): string | null {
   const db = getDb();
   const [found] = db
@@ -689,9 +776,13 @@ function readTemplatesAuthorRaw(row: number = authorRow()): string | null {
   return found?.templatesAuthor ?? null;
 }
 
-/** The stored identity, or null when there is none yet (or the stored value is unusable). */
-export function getTemplatesAuthor(): TemplatesAuthorSetting | null {
-  return parseTemplatesAuthor(readTemplatesAuthorRaw());
+/**
+ * The stored identity, or null when there is none yet (or the stored value is
+ * unusable). `source`: the catalog whose nickname to answer (see
+ * `isMainNicknameSlot`); omitted, this mode's own (production's; test mode's fixture's).
+ */
+export function getTemplatesAuthor(source?: string): TemplatesAuthorSetting | null {
+  return forCatalog(parseTemplatesAuthor(readTemplatesAuthorRaw()), source);
 }
 
 /**
@@ -762,20 +853,28 @@ function authorField(path: string) {
  * passes it, so a nickname the user set while the site was answering is never
  * overwritten by the older one the site sent. False then means either changed.
  */
-export function setTemplatesAuthorNickname(expectedKey: string, nickname: string | null, opts: { expectedNickname?: string | null } = {}): boolean {
+export function setTemplatesAuthorNickname(expectedKey: string, nickname: string | null, opts: { expectedNickname?: string | null; source?: string } = {}): boolean {
   if (!CREATOR_KEY_PATTERN.test(expectedKey)) return false;
+  // `source`: the catalog this nickname is that catalog's for — only its own slot is written (see isMainNicknameSlot).
+  const main = isMainNicknameSlot(opts.source);
+  const path = main ? "$.nickname" : catalogNicknamePath(nicknameSlot(opts.source));
+  if (path === null) return false;
   registerLiveSecret(expectedKey);
   const col = settings.templatesAuthor;
+  // What the caller read for that catalog: its own nickname, else the production one (`forCatalog`).
+  const current = main
+    ? authorField("$.nickname")
+    : sql`CASE WHEN json_valid(${col}) THEN coalesce(nullif(json_extract(${col}, ${path}), ''), json_extract(${col}, '$.nickname')) END`;
   const res = keyBoundWrite(() =>
     getDb()
       .update(settings)
-      .set({ templatesAuthor: sql`json_set(${col}, '$.nickname', ${nickname})`, updatedAt: new Date() })
+      .set({ templatesAuthor: sql`json_set(${col}, ${path}, ${nickname})`, updatedAt: new Date() })
       .where(
         and(
           eq(settings.id, authorRow()),
           sql`${authorField("$.key")} = ${expectedKey}`,
           // IS, not =: a stored null must match an expected null.
-          opts.expectedNickname === undefined ? undefined : sql`${authorField("$.nickname")} IS ${opts.expectedNickname}`,
+          opts.expectedNickname === undefined ? undefined : sql`${current} IS ${opts.expectedNickname}`,
         ),
       )
       .run(),
@@ -825,15 +924,15 @@ function backfillTemplatesAuthorNickname(cur: TemplatesAuthorSetting): Templates
  * Never creates the identity. A backfill the database refuses is logged and
  * the identity answered without one — a read must not fail on a cache write.
  */
-export function getTemplatesAuthorForDisplay(): TemplatesAuthorSetting | null {
+export function getTemplatesAuthorForDisplay(source?: string): TemplatesAuthorSetting | null {
   const cur = getTemplatesAuthor();
-  if (!cur || cur.nickname) return cur;
+  if (!cur || cur.nickname) return forCatalog(cur, source);
   try {
-    return backfillTemplatesAuthorNickname(cur);
+    return forCatalog(backfillTemplatesAuthorNickname(cur), source);
   } catch (err) {
     if (!(err instanceof TemplatesAuthorWriteError)) throw err;
     logger.warn({ tag: "templates", op: "author_nickname_default_failed", sqliteCode: err.sqliteCode }, "could not save a default nickname");
-    return cur;
+    return forCatalog(cur, source);
   }
 }
 
@@ -846,7 +945,11 @@ export function getTemplatesAuthorForDisplay(): TemplatesAuthorSetting | null {
  * identity carries a default nickname from the start; an existing one without
  * a nickname is given one here (`backfillTemplatesAuthorNickname`).
  */
-export function getOrCreateTemplatesAuthor(): TemplatesAuthorSetting {
+export function getOrCreateTemplatesAuthor(source?: string): TemplatesAuthorSetting {
+  return forCatalog(getOrCreateProductionTemplatesAuthor(), source)!;
+}
+
+function getOrCreateProductionTemplatesAuthor(): TemplatesAuthorSetting {
   const raw = readTemplatesAuthorRaw();
   const cur = parseTemplatesAuthor(raw);
   if (cur) return backfillTemplatesAuthorNickname(cur);
@@ -969,6 +1072,18 @@ export function parseTemplatesCatalogSetting(raw: string | null): TemplatesCatal
   return { choice, devOrigin, bypassToken };
 }
 
+/**
+ * Bumped by every write of the catalog setting in this process, so a memoized
+ * read (lib/templates/cloud/catalog-setting.ts) sees the write at once. On
+ * globalThis: Next can load this module more than once.
+ */
+declare global {
+  var __libiTemplatesCatalogSettingGeneration: number | undefined;
+}
+export function templatesCatalogSettingGeneration(): number {
+  return globalThis.__libiTemplatesCatalogSettingGeneration ?? 0;
+}
+
 export function getTemplatesCatalogSetting(): TemplatesCatalogSetting | null {
   const [found] = getDb().select({ v: settings.templatesCatalog }).from(settings).where(eq(settings.id, 1)).limit(1).all();
   return parseTemplatesCatalogSetting(found?.v ?? null);
@@ -981,5 +1096,8 @@ export function setTemplatesCatalogSetting(next: TemplatesCatalogSetting): void 
     getDb().insert(settings).values({ id: 1, ...set }).onConflictDoUpdate({ target: settings.id, set }).run();
   } catch (err) {
     throw new TemplatesCatalogWriteError(sqliteCodeOf(err));
+  } finally {
+    // Even a failed write: the next read goes to the database, never to what was remembered before it.
+    globalThis.__libiTemplatesCatalogSettingGeneration = templatesCatalogSettingGeneration() + 1;
   }
 }

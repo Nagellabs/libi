@@ -1274,11 +1274,15 @@ function materializeNextExternals(root) {
   // Windows builds junctions, which are absolute by definition (see the long
   // note in lib/install/next-externals.ts: a `"dir"` symlink there needs a
   // privilege ordinary users do not have). That is safe precisely because the
-  // relocation this check guards against cannot happen on Windows — NSIS does
-  // not store reparse points, so the farm never survives packaging and is
-  // always rebuilt in place at first boot. The rule still binds macOS, where
-  // the farm DOES ship inside the signed .app and an absolute target really
-  // would dangle on every user's disk.
+  // relocation this check guards against cannot happen on Windows — no link
+  // survives packaging there: electron-builder would copy each junction as a
+  // dereferenced real directory, and the afterPack hook strips the farm from the
+  // Windows payload (scripts/afterpack-windows-externals.js), so the first boot
+  // always builds it in place. It is built here anyway, on every platform: it
+  // proves the manifest resolves against this bundle's node_modules before
+  // anything ships. The rule still binds macOS, where the farm DOES ship inside
+  // the signed .app and an absolute target really would dangle on every
+  // user's disk.
   //
   // Asserted per platform rather than skipped, and kept identical to check (9)
   // in `verifyRuntimeBundle` — these two ran on the same artifact and disagreed
@@ -1702,9 +1706,11 @@ function verifyRuntimeBundle({ outDir, treeRoot = ROOT, abi: expectedAbi } = {})
   // junction is absolute by definition — Node resolves the target to an
   // absolute path whatever you pass it. That is safe on Windows for the reason
   // the relative rule exists elsewhere: the farm is only relative so it can
-  // survive being COPIED into Libi.app/Contents/Resources/, and on Windows NSIS
-  // stores no reparse points, so nothing survives packaging and every install
-  // rebuilds the farm in place at first boot.
+  // survive being COPIED into Libi.app/Contents/Resources/, and on Windows no
+  // link survives packaging: electron-builder copies each junction as a
+  // dereferenced real directory, and the afterPack hook then strips the whole
+  // farm from the Windows payload (scripts/afterpack-windows-externals.js), so
+  // every install builds the farm in place at first boot.
   //
   // So assert the platform's actual invariant rather than switching the check
   // off: absolute-and-resolvable on Windows, relative-and-resolvable elsewhere.

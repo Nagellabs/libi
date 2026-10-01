@@ -89,6 +89,27 @@ describe("checkYtDlp", () => {
     expect(result.detail).toContain("/gone/uv/tools/yt-dlp/bin/yt-dlp, which no longer exists");
   });
 
+  // UV-1 (G2 review M9): a cold first run of the Windows `.exe` trampoline (pyc compile, a Defender scan) can take
+  // several seconds on a healthy install. 3 s called that "too slow"; the bound is 10 s now.
+  it.skipIf(process.platform === "win32")(
+    "a slow cold start (3.5 s) still answers: the bound is 10 s, not 3",
+    async () => {
+      const entry = path.join(home, "slow-yt-dlp");
+      fs.writeFileSync(entry, "#!/bin/sh\nsleep 3.5\necho 2026.09.20\n", { mode: 0o755 });
+      const result = await checkYtDlp(() => ({ ok: true, launcher: "/h/.libi/bin/yt-dlp", target: entry }));
+      expect(result).toMatchObject({ name: "yt-dlp", ok: true });
+      expect(result.detail).toContain("2026.09.20");
+    },
+    15_000,
+  );
+
+  it.skipIf(process.platform === "win32")("past the bound it says how long it waited", async () => {
+    const entry = path.join(home, "hung-yt-dlp");
+    fs.writeFileSync(entry, "#!/bin/sh\nsleep 5\n", { mode: 0o755 });
+    const result = await checkYtDlp(() => ({ ok: true, launcher: "/h/.libi/bin/yt-dlp", target: entry }), 200);
+    expect(result).toMatchObject({ ok: false, detail: `${entry} timed out after 200ms — startup too slow` });
+  });
+
   it.skipIf(process.platform === "win32")("reports an entry point that does not run", async () => {
     const entry = path.join(home, "not-executable");
     fs.writeFileSync(entry, "x", { mode: 0o644 });

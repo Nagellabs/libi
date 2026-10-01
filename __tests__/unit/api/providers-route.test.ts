@@ -16,7 +16,14 @@ const { detect, detected, clearLegacy } = vi.hoisted(() => {
   };
 });
 vi.mock("@/lib/providers/legacy", () => ({ clearLegacyKeysForConnected: clearLegacy }));
-vi.mock("@/lib/providers/detect", () => ({ detectProviders: detect }));
+const { clearMemo, restartIdle } = vi.hoisted(() => ({
+  clearMemo: vi.fn(),
+  restartIdle: vi.fn<(agentId: string, launchers: readonly string[]) => Promise<{ restarting: Promise<void> } | { kept: string }>>(
+    async () => ({ kept: "active_sessions" }),
+  ),
+}));
+vi.mock("@/lib/providers/detect", () => ({ detectProviders: detect, __clearProviderMemo: clearMemo }));
+vi.mock("@/lib/sessions/session-manager", () => ({ getSessionManager: () => ({ restartIdleAgentForLauncher: restartIdle }) }));
 let fakesOn = true;
 vi.mock("@/lib/mcp-config", () => ({ TEST_MODE_STDIO_FAKE_NAMES: ["fal-ai", "elevenlabs"], testModeFakesEnabled: () => fakesOn }));
 
@@ -85,6 +92,47 @@ describe("GET /api/providers", () => {
     detect.mockImplementationOnce(async () => ({ connected: [detected[0]], codex: "unread" }));
     const res = await listProvidersRoute();
     expect(await res.json()).toEqual({ connected: [detected[0]], codex: "unread" });
+  });
+
+  // PRV-2: a Codex launcher installed after the running Codex process started.
+  describe("a Codex row whose launcher came after the Codex process (launcherAfterStart)", () => {
+    const flagged = { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected", launcherAfterStart: true, launcher: "uvx" };
+    beforeEach(() => {
+      restartIdle.mockClear();
+      clearMemo.mockClear();
+    });
+
+    it("an idle Codex process is restarted and the row drops the restart-libi hint; the memo is dropped once it is up", async () => {
+      let up!: () => void;
+      restartIdle.mockResolvedValueOnce({ restarting: new Promise<void>((r) => { up = r; }) });
+      detect.mockImplementationOnce(async () => ({ connected: [detected[0], flagged] }));
+      const body = (await (await listProvidersRoute()).json()) as { connected: Array<Record<string, unknown>> };
+      expect(restartIdle).toHaveBeenCalledWith("codex", ["uvx"]);
+      expect(body.connected[1]).toEqual({ agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected" });
+      expect(body.connected[0]).toEqual(detected[0]);
+      expect(clearMemo).not.toHaveBeenCalled();
+      up();
+      await vi.waitFor(() => expect(clearMemo).toHaveBeenCalledTimes(1));
+    });
+
+    it("a busy Codex process is kept, and so is the hint", async () => {
+      detect.mockImplementationOnce(async () => ({ connected: [flagged] }));
+      expect(await (await listProvidersRoute()).json()).toEqual({ connected: [flagged] });
+      expect(restartIdle).toHaveBeenCalledTimes(1);
+    });
+
+    // Review M1: this GET answers any page's poll; only the studio's own pages may make it restart a process.
+    it("a cross-site subresource request gets the answer, hint included, and restarts nothing", async () => {
+      detect.mockImplementationOnce(async () => ({ connected: [flagged] }));
+      const res = await GET(new Request("http://127.0.0.1:3456/api/providers", { headers: { "sec-fetch-site": "cross-site" } }));
+      expect(await res.json()).toEqual({ connected: [flagged] });
+      expect(restartIdle).not.toHaveBeenCalled();
+    });
+
+    it("asks nothing of the session manager when no row is flagged", async () => {
+      await listProvidersRoute();
+      expect(restartIdle).not.toHaveBeenCalled();
+    });
   });
 
   it("still degrades to an empty list when detection throws, and clears nothing", async () => {

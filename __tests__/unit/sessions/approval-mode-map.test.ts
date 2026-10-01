@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { acpModeFor } from "@/lib/sessions/approval-mode-map";
+import { acpModeFor, stableAcpModeCandidates } from "@/lib/sessions/approval-mode-map";
 import type { ApprovalMode } from "@/lib/approval/mode";
 
 // The advertised-mode sets each ACP adapter reports via
@@ -51,14 +51,15 @@ describe("acpModeFor", () => {
       ).toBe("bypassPermissions");
     });
 
-    // Under root the adapter never advertises `bypassPermissions`, so the
-    // never-prompt mode has nothing to push: null → the caller skips and
-    // warns, and the session stays in the adapter's own default (`default`),
-    // where gated extensions still prompt.
-    it("returns null for auto-with-generations when bypassPermissions is not advertised (root)", () => {
+    // Under root the adapter never advertises `bypassPermissions`. Pushing
+    // nothing would leave the chat in the user's own `permissions.defaultMode`
+    // (full-verification F5), so the never-prompt mode falls back to `default`:
+    // every tool call reaches libi's handler, which auto-allows all of them
+    // under this mode.
+    it("falls back to default for auto-with-generations when bypassPermissions is not advertised (root)", () => {
       expect(
         acpModeFor("claude-code", "auto-with-generations", CLAUDE_MODES_ROOT),
-      ).toBeNull();
+      ).toBe("default");
       // …while the two permission-routing modes are unaffected.
       expect(acpModeFor("claude-code", "ask", CLAUDE_MODES_ROOT)).toBe("default");
       expect(acpModeFor("claude-code", "auto", CLAUDE_MODES_ROOT)).toBe("default");
@@ -161,5 +162,20 @@ describe("acpModeFor", () => {
       expect(acpModeFor("claude-code", "auto", undefined)).toBeNull();
       expect(acpModeFor("codex", "auto", undefined)).toBeNull();
     });
+  });
+});
+
+describe("stableAcpModeCandidates (the blind push when no set is known)", () => {
+  it("Claude: every mapped candidate in order, so a root refusal of bypassPermissions falls back to default", () => {
+    expect(stableAcpModeCandidates("claude-code", "auto-with-generations")).toEqual([
+      "bypassPermissions",
+      "default",
+    ]);
+    expect(stableAcpModeCandidates("claude-code", "ask")).toEqual(["default"]);
+  });
+
+  it("Codex and unknown agents: nothing — their vocabulary is not stable enough to push blind", () => {
+    expect(stableAcpModeCandidates("codex", "ask")).toEqual([]);
+    expect(stableAcpModeCandidates("gemini", "ask")).toEqual([]);
   });
 });

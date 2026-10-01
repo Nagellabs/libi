@@ -1,4 +1,5 @@
 import { lifecycleEvents } from "./events";
+import { markInstallPhaseStart } from "./boot-timing";
 import {
   defaultCategoryADeps,
   runCategoryA,
@@ -51,6 +52,7 @@ function forwardBootWarnings(adapter: LifecycleAdapter): void {
 export async function runInstallPhase(
   opts: RunInstallPhaseOptions,
 ): Promise<InstallPhaseResult> {
+  markInstallPhaseStart();
   const unsubscribe = lifecycleEvents.on((e) => opts.adapter.onEvent(e));
   lifecycleEvents.emit({ kind: "prelude-start" });
   try {

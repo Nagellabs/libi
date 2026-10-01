@@ -53,6 +53,7 @@ import type { EffectHighlightStore } from "@/lib/preview/effect-highlight-store"
 import type { LayerKind } from "@/lib/effects/types";
 import { OverlayPresetDialog } from "@/components/preview/overlay-preset-dialog";
 import { TrackedAnchorsTab } from "@/components/preview/tracked-anchors-tab";
+import { AudioRightsSection } from "@/components/preview/audio-rights-section";
 
 interface LayersInspectorPanelProps {
   composition: Composition | null;
@@ -955,6 +956,7 @@ function AudioDetailsBody({
       </div>
 
       {file && <AssetSourceCard file={file} />}
+      {file && <AudioRightsSection fileId={file.fileId} />}
       <dl className="space-y-0.5 text-[11px] text-muted-foreground">
         <InfoRow k="Volume" v={`${Math.round(clip.volume * 100)}%`} />
         <InfoRow k="Trim start" v={`${clip.trimStart.toFixed(2)}s`} />

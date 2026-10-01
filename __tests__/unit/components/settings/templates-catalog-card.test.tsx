@@ -102,6 +102,28 @@ describe("TemplatesCatalogCard", () => {
     expect(document.body.innerHTML).not.toContain(TOKEN.slice(4));
   });
 
+  // Review M11: one creator key serves both catalogs, so a development address that is not this
+  // machine receives it. Said under the address, where the address is typed.
+  it("says the creator key goes to a development site that isn't this machine — stored or typed", () => {
+    const NOTE = "Your creator key is sent to this site.";
+    state.view = dev({ development: { origin: "https://x.vercel.app", isDefault: false, defaultOrigin: null } });
+    const { rerender } = render(<TemplatesCatalogCard />);
+    expect(screen.getByTestId("templates-catalog-key-note")).toHaveTextContent(NOTE);
+    state.view = dev({ development: { origin: "http://localhost:3300", isDefault: false, defaultOrigin: null } });
+    rerender(<TemplatesCatalogCard />);
+    expect(screen.queryByTestId("templates-catalog-key-note")).toBeNull();
+    expect(screen.queryByText(NOTE)).toBeNull();
+    fireEvent.change(screen.getByTestId("templates-catalog-origin"), { target: { value: "http://127.0.0.1:3300" } });
+    expect(screen.queryByTestId("templates-catalog-key-note")).toBeNull();
+    fireEvent.change(screen.getByTestId("templates-catalog-origin"), { target: { value: "https://x.vercel.app" } });
+    expect(screen.getByTestId("templates-catalog-key-note")).toHaveTextContent(NOTE);
+    // No address, or one that isn't valid: nothing to say it about.
+    fireEvent.change(screen.getByTestId("templates-catalog-origin"), { target: { value: "" } });
+    expect(screen.queryByTestId("templates-catalog-key-note")).toBeNull();
+    fireEvent.change(screen.getByTestId("templates-catalog-origin"), { target: { value: "http://example.com" } });
+    expect(screen.queryByTestId("templates-catalog-key-note")).toBeNull();
+  });
+
   it("every interactive element has cursor-pointer", () => {
     state.view = dev({ development: { origin: PREVIEW, isDefault: false, defaultOrigin: null }, bypassToken: { set: true, applies: true } });
     render(<TemplatesCatalogCard />);

@@ -35,7 +35,8 @@ export type ZernioOp =
   | "accounts.list" | "accounts.health" | "accounts.tiktokCreatorInfo"
   | "posts.list" | "posts.get" | "posts.create" | "posts.update" | "posts.delete" | "posts.retry"
   | "analytics.post" | "analytics.instagramStory" | "media.presign" | "validate.post" | "validate.media"
-  | "ads.accounts" | "ads.campaigns" | "ads.list";
+  | "ads.accounts" | "ads.campaigns" | "ads.list"
+  | "music.tiktokCommercial" | "music.instagramSearch" | "music.instagramGet";
 
 /**
  * Curated convenience tools that are LOSSY and must never implement an op, in
@@ -186,6 +187,12 @@ export const ZERNIO_OPS: Record<ZernioOp, ZernioOpDef> = {
   // connected: `{'ads': [], 'pagination': {...}}`, not an error — so an empty
   // ads section is a normal state rather than a failure to explain away.
   "ads.list":                   { candidates: ["ad_campaigns_list_ads"], search: "list ads", prefix: "ad_campaigns", action: "read" },
+  // Music (social-music spec §6.2). Unlisted full-shaped tools, reached by
+  // exact name through call_tool; names and arguments read off `search_tools`
+  // 2026-09-27, and `accounts_list_tik_tok_commercial_music` answered live.
+  "music.tiktokCommercial":     { candidates: ["accounts_list_tik_tok_commercial_music"], search: "list tiktok commercial music", prefix: "accounts", action: "read", requiredArgs: ["account_id"] },
+  "music.instagramSearch":      { candidates: ["instagram_search_instagram_audio"], search: "search instagram audio", prefix: "instagram", action: "read", requiredArgs: ["account_id", "audio_type"] },
+  "music.instagramGet":         { candidates: ["instagram_get_instagram_audio"], search: "get instagram audio", prefix: "instagram", action: "read", requiredArgs: ["account_id", "audio_id"] },
 };
 
 export const ZERNIO_OP_IDS = Object.keys(ZERNIO_OPS) as ZernioOp[];

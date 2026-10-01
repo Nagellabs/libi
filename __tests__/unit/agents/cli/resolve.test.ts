@@ -329,6 +329,21 @@ describe("resolveAgentCli — memo", () => {
     expect(spawnVersion).toHaveBeenCalledTimes(2); // nothing was memoized by the invalidated run
   });
 
+  // A production Next build loads this module once for the job runners and again for the
+  // routes; the agent_install job's invalidate must reach the copy the status route reads.
+  it.skipIf(process.platform === "win32")("an invalidate from a separately loaded copy clears this copy's memo", async () => {
+    const file = bin("codex", 'echo "codex-cli 0.160.0"');
+    const spawnVersion = vi.fn(async () => ({ ok: true, stdout: "codex-cli 0.160.0" }));
+    const deps = { ...posix, searchDirs: async () => [path.dirname(file)], spawnVersion, now: () => 5, mtimeOf: () => 1 };
+    await resolveAgentCli("codex", deps);
+    vi.resetModules();
+    const otherCopy = await import("@/lib/agents/cli/resolve");
+    expect(otherCopy.invalidateAgentCliMemo).not.toBe(invalidateAgentCliMemo);
+    otherCopy.invalidateAgentCliMemo("codex");
+    await resolveAgentCli("codex", deps);
+    expect(spawnVersion).toHaveBeenCalledTimes(2);
+  });
+
   it.skipIf(process.platform === "win32")("invalidating one agent does not discard the other agent's in-flight result", async () => {
     const file = bin("codex", 'echo "codex-cli 0.160.0"');
     let release!: () => void;

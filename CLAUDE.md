@@ -28,6 +28,14 @@ commits, including an experiment pushed on a theory that was disproven twenty
 minutes later and reverted in the next commit. Both are permanent public history
 now. A branch would have made that one reviewable commit, or none.
 
+On release day the week branch does not go to `main` directly. Squash it onto a
+`release/<version>` candidate branch, push that, and fast-forward `main` to it
+(`git push origin release/<version>:main`) only once **Tests + License check** are
+green on the candidate; then delete it. Both workflows run on `release/**`. The
+reason: a check that goes red on `main` can only be answered with a public fix-up
+commit. 0.1.16's candidate caught seventeen ffmpeg-6.x failures that way, before
+`main`.
+
 ## Skills and commands
 
 - `/feature-testing` (`.claude/skills/feature-testing/`) — the test-mode playbook. Force it
@@ -48,6 +56,8 @@ now. A branch would have made that one reviewable commit, or none.
 Feature work belongs in a worktree under `.claude/worktrees/<name>/`. The shell cwd resets
 between tool calls, so `cd` into the worktree before **every** dev launch — see the
 worktree rule in `AGENTS.md`, it is the most common way to verify a fix that isn't running.
+Each worktree needs its own `npm ci` (then `ensure-native-modules` + `ensure-electron-binary`);
+the canonical `node_modules` is not a fallback, and the dev boot refuses a worktree without one.
 
 ## Polling cadence
 

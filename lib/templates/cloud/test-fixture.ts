@@ -816,10 +816,21 @@ function stagedProblem(f: FixtureCatalog, staging: string, files: FileEntry[], p
 // Shapes (lib/templates/shape.ts, index-patch.ts)
 // ---------------------------------------------------------------------------
 
-function uses7d(byDay: Record<string, number>, now: number): number {
+function usesInDays(byDay: Record<string, number>, now: number, days: number): number {
   let sum = 0;
-  for (let i = 0; i < 7; i++) sum += byDay[dayKey(now - i * DAY_MS)] ?? 0;
+  for (let i = 0; i < days; i++) sum += byDay[dayKey(now - i * DAY_MS)] ?? 0;
   return sum;
+}
+
+function uses7d(byDay: Record<string, number>, now: number): number {
+  return usesInDays(byDay, now, 7);
+}
+
+/** The latest "YYYYMMDD" key with a use, as "YYYY-MM-DD" (libi-site's format); null if never used. */
+function lastUsedDay(byDay: Record<string, number>): string | null {
+  let latest: string | null = null;
+  for (const [key, n] of Object.entries(byDay)) if (n > 0 && (latest === null || key > latest)) latest = key;
+  return latest ? `${latest.slice(0, 4)}-${latest.slice(4, 6)}-${latest.slice(6, 8)}` : null;
 }
 
 function pruneByDay(byDay: Record<string, number>, now: number): Record<string, number> {
@@ -850,6 +861,8 @@ function shapePublic(d: FixtureDoc, base: string, now: number) {
     example: { durationSec: d.example.durationSec, width: d.example.width, height: d.example.height },
     usesTotal: d.uses.total,
     uses7d: uses7d(d.uses.byDay, now),
+    uses30d: usesInDays(d.uses.byDay, now, 30),
+    lastUsedDay: lastUsedDay(d.uses.byDay),
     createdAt: iso(d.createdAt),
     updatedAt: iso(d.updatedAt),
   };

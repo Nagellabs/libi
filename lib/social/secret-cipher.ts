@@ -17,6 +17,15 @@ import { serverLogger as logger } from "@/lib/logger";
  */
 export interface SecretCipher {
   label: "keychain";
+  /**
+   * Whether the OS can encrypt at all, asked LAZILY by the shell: on macOS the
+   * answer is a keychain read, which prompts for the login password whenever
+   * the item's access list doesn't name the running build. So nothing may ask
+   * it to answer "connected?" or to boot — only a write that is about to
+   * encrypt (electron/secret-cipher.ts). Optional: a 0.1.16 shell registered
+   * a cipher only after checking this itself.
+   */
+  available?(): boolean;
   encrypt(plain: string): Buffer;
   decrypt(blob: Buffer): string;
 }
@@ -45,4 +54,15 @@ export function registerSecretCipher(c: SecretCipher | null): void {
 
 export function getSecretCipher(): SecretCipher | null {
   return g.__libiSecretCipher ?? null;
+}
+
+/**
+ * The cipher to ENCRYPT with, or null when the next write stays a plain 0600
+ * file. Reads the keychain on a shell whose cipher is lazy — call it only
+ * where a grant is about to be written, never on a read or a status check.
+ */
+export function cipherForWrite(): SecretCipher | null {
+  const c = getSecretCipher();
+  if (!c) return null;
+  return !c.available || c.available() ? c : null;
 }

@@ -335,39 +335,52 @@ export const scriptAnalysisLogger = baseLogger.child({ tag: "script-analysis" })
 // guard lives on `globalThis` because that is the only thing the module
 // instances share; each evaluation re-points it at its own logger, so the
 // one pair of listeners always writes through the newest.
-const processHooks = globalThis as unknown as {
-  __libiLoggerProcessHooks?: { logger: typeof baseLogger };
+//
+// Self-healing: the two handler functions live on the global too, and every
+// evaluation re-attaches whichever of them is no longer in
+// `process.listeners(...)`. A sticky "registered" flag alone meant a pair that
+// something removed (a test's afterEach, a library's removeAllListeners)
+// stayed gone for the life of the process.
+type ProcessHooks = {
+  logger: typeof baseLogger;
+  onUncaughtException?: (err: Error) => void;
+  onUnhandledRejection?: (reason: unknown) => void;
 };
-if (processHooks.__libiLoggerProcessHooks) {
-  processHooks.__libiLoggerProcessHooks.logger = baseLogger;
-} else {
-  const hooks = { logger: baseLogger };
-  processHooks.__libiLoggerProcessHooks = hooks;
+const processHooks = globalThis as unknown as { __libiLoggerProcessHooks?: ProcessHooks };
+const hooks: ProcessHooks = processHooks.__libiLoggerProcessHooks ?? { logger: baseLogger };
+hooks.logger = baseLogger;
+processHooks.__libiLoggerProcessHooks = hooks;
 
-  process.on("uncaughtException", (err) => {
-    // Throwing from an uncaughtException handler is instantly fatal to the
-    // process (Node treats it as a double fault) — so a broken log
-    // destination must never escape this handler.
+hooks.onUncaughtException ??= (err) => {
+  // Throwing from an uncaughtException handler is instantly fatal to the
+  // process (Node treats it as a double fault) — so a broken log
+  // destination must never escape this handler.
+  try {
+    hooks.logger.fatal({ err }, "Uncaught exception (continuing)");
+  } catch {
     try {
-      hooks.logger.fatal({ err }, "Uncaught exception (continuing)");
+      process.stderr.write(`[libi-logger] uncaught exception (log write failed): ${err?.stack ?? err}\n`);
     } catch {
-      try {
-        process.stderr.write(`[libi-logger] uncaught exception (log write failed): ${err?.stack ?? err}\n`);
-      } catch {
-        /* nothing left to report to */
-      }
+      /* nothing left to report to */
     }
-  });
+  }
+};
 
-  process.on("unhandledRejection", (reason) => {
+hooks.onUnhandledRejection ??= (reason) => {
+  try {
+    hooks.logger.fatal({ reason: String(reason) }, "Unhandled rejection (continuing)");
+  } catch {
     try {
-      hooks.logger.fatal({ reason: String(reason) }, "Unhandled rejection (continuing)");
+      process.stderr.write(`[libi-logger] unhandled rejection (log write failed): ${String(reason)}\n`);
     } catch {
-      try {
-        process.stderr.write(`[libi-logger] unhandled rejection (log write failed): ${String(reason)}\n`);
-      } catch {
-        /* nothing left to report to */
-      }
+      /* nothing left to report to */
     }
-  });
+  }
+};
+
+if (!process.listeners("uncaughtException").includes(hooks.onUncaughtException)) {
+  process.on("uncaughtException", hooks.onUncaughtException);
+}
+if (!process.listeners("unhandledRejection").includes(hooks.onUnhandledRejection)) {
+  process.on("unhandledRejection", hooks.onUnhandledRejection);
 }

@@ -8,6 +8,8 @@ import type { FileRecord } from "@/lib/db/schema/types";
 import { probeMediaMetadata } from "@/lib/utils/media-probe";
 
 export const fileKeys = {
+  /** Every files query (per-piece, global, by id, location). */
+  all: ["files"] as const,
   forPiece: (pieceId: string) => ["files", pieceId] as const,
   global: () => ["files", "global"] as const,
   byId: (fileId: string) => ["files", "by-id", fileId] as const,

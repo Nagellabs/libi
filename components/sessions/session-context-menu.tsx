@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useState } from "react";
-import { Copy, LoaderCircle, RotateCcw } from "lucide-react";
+import { Copy, ListX, LoaderCircle, RotateCcw } from "lucide-react";
 
 export interface SessionContextMenuState {
   x: number;
@@ -17,12 +17,15 @@ interface SessionContextMenuProps {
   onRestart?: () => void;
   /** This chat's restart is already running: the item names the wait instead. */
   restarting?: boolean;
+  /** "Remove from list" — passed only for a chat whose history is gone (libi's chat index kept it
+   *  listed). Absent → no item. */
+  onRemove?: () => void;
 }
 
 const ITEM_CLASS =
   "cursor-pointer flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground transition-colors hover:bg-accent";
 
-export default function SessionContextMenu({ state, onCopyId, onRestart, restarting = false }: SessionContextMenuProps) {
+export default function SessionContextMenu({ state, onCopyId, onRestart, restarting = false, onRemove }: SessionContextMenuProps) {
   const ref = useRef<HTMLDivElement>(null);
   const [position, setPosition] = useState({ top: state.y, left: state.x });
 
@@ -59,6 +62,12 @@ export default function SessionContextMenu({ state, onCopyId, onRestart, restart
             <RotateCcw className="h-3.5 w-3.5" />
           )}
           {restarting ? "Restarting…" : "Restart session"}
+        </button>
+      )}
+      {onRemove && (
+        <button role="menuitem" onClick={onRemove} className={ITEM_CLASS}>
+          <ListX className="h-3.5 w-3.5" />
+          Remove from list
         </button>
       )}
     </div>

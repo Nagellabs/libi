@@ -57,6 +57,15 @@ export function isNetworkCause(text: string): boolean {
   return NETWORK_CAUSE_RE.test(text);
 }
 
+/** The words every "offline" sentence below carries, so a caller that is handed one back as an error's text
+ *  (a job error crossing to the MCP child) can still tell it was the network. */
+const OFFLINE_WORDS = "this computer appears to be offline";
+
+/** True when `text` holds one of `describeUvNetworkFailure`'s sentences. */
+export function isUvOfflineMessage(text: string): boolean {
+  return text.includes(OFFLINE_WORDS);
+}
+
 /**
  * The user-facing sentence for a uv run that failed because it could not
  * download what it needed, or null when `stderr` is anything else (then the
@@ -76,12 +85,12 @@ export function describeUvNetworkFailure(feature: string, stderr: string): strin
   if (UV_PYTHON_DOWNLOAD_RE.test(stderr)) {
     return (
       `libi needs a one-time download of its own Python (about ${MANAGED_PYTHON_DOWNLOAD_MB} MB) ` +
-      `for ${feature}, and this computer appears to be offline. Try again when you're online.`
+      `for ${feature}, and ${OFFLINE_WORDS}. Try again when you're online.`
     );
   }
   return (
     `libi needs to download the Python packages for ${feature} (a one-time step), ` +
-    "and this computer appears to be offline. Try again when you're online."
+    `and ${OFFLINE_WORDS}. Try again when you're online.`
   );
 }
 

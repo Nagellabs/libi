@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { AudioClip, Composition, Overlay, TextOverlay } from "@/lib/engine/types";
+import { PendingMusicNotice } from "./pending-music-notice";
 import TimelineAudioSection from "./timeline-audio-section";
 import { CoupledAudioStrip } from "./coupled-audio-strip";
 import { DetachedAudioTrack } from "./detached-audio-track";
@@ -58,6 +59,7 @@ import type { NewOverlayPayload, NewOverlayCtx } from "@/lib/overlays/new-overla
 import { LIBI_FILE_MIME, decodeFileDrag } from "@/lib/preview/drag-payload";
 import { resolveTimelineDropTarget, type TimelineDropZone } from "@/lib/preview/timeline-drop-target";
 import { useFilmstripStatuses } from "@/lib/queries/filmstrips";
+import { useCopyrightedFileIds } from "@/lib/queries/audio-rights";
 import { distributeTrackHeights, rowSizing } from "@/lib/preview/track-heights";
 import {
   buildMediaById,
@@ -227,6 +229,7 @@ function Timeline({
   const selectedId = useSelectedOverlay(selectionStore);
   const selectedIds = useSelectedOverlayIds(selectionStore);
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const copyrightedFileIds = useCopyrightedFileIds(pieceId);
 
   // Measure the VISIBLE (post-rail) viewport width of the horizontal scroll
   // container so we can compute the fit zoom. The content width is decoupled
@@ -1078,6 +1081,7 @@ function Timeline({
                     <div className="shrink-0" style={{ width: renderWidth }}>
                       <CoupledAudioStrip
                         clip={clip}
+                        copyrighted={!!clip && copyrightedFileIds.has(clip.fileId)}
                         ownerOverlayId={r.ownerOverlayId}
                         ownerStartSec={posStart}
                         ownerDurationSec={posDuration}
@@ -1121,6 +1125,7 @@ function Timeline({
                     <div className="shrink-0" style={{ width: renderWidth }}>
                       <DetachedAudioTrack
                         clip={clip}
+                        copyrighted={!!clip && copyrightedFileIds.has(clip.fileId)}
                         ownerOverlayId={r.ownerOverlayId}
                         order={r.order}
                         height={rowHeights[`track-${r.clipId}`] ?? TRACK_H_SHORT}
@@ -1149,6 +1154,7 @@ function Timeline({
                 <div key="audio" className="flex items-stretch">
                   <TrackRail icon={Volume2} label="Audio" tooltip="audio — standalone (not attached)" />
                   <div className="shrink-0" style={{ width: renderWidth }}>
+                    <PendingMusicNotice pieceId={pieceId} />
                     <TimelineAudioSection
                       height={rowHeights["audio"]}
                       trackWidth={renderWidth}
@@ -1164,6 +1170,7 @@ function Timeline({
                       onSelectClip={handleSelectAudioClip}
                       onToggleClipEnabled={onToggleClipEnabled ?? (() => {})}
                       onClipContextMenu={onClipContextMenu ?? (() => {})}
+                      copyrightedFileIds={copyrightedFileIds}
                     />
                   </div>
                 </div>

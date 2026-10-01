@@ -1,10 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { trackEvent } from "@/lib/analytics/client";
 import type { GraphicsQuality } from "@/lib/engine/types";
 import { DEFAULT_GRAPHICS_QUALITY } from "@/lib/export/quality";
-import type { DroppedOverlay } from "@/lib/export/dropped-overlays";
 
 export type ExportSource = "draft" | "snapshot";
 export type ExportQuality = "source" | "1080p" | "1440p" | "4k" | "custom";
@@ -16,95 +15,78 @@ export interface ExportStartParams {
   filename: string;
   format: ExportFormat;
   quality: ExportQuality;
-  /** Resolution text/code/3D overlays render at. Optional so callers that
-   *  never touch graphics (tests, older call sites) still compile; the
-   *  server falls back to the stored default ("4k") when omitted. */
+  /** Resolution text/code/3D overlays render at; the server falls back to the stored default. */
   graphicsQuality?: GraphicsQuality;
   customWidth?: number;
   customHeight?: number;
-  destFolder?: string;
+  /** What the export is for (spec §5.3) — decides the copyrighted-audio default. */
+  purpose?: "social" | "personal";
+  copyrightedAudio?: "exclude" | "include";
+  includeFileIds?: string[];
+  excludeFileIds?: string[];
 }
 
-export interface ExportProgress {
-  done: number;
-  total: number;
-  unit: string;
-  etaMs: number | null;
-}
+/** idle → starting → queued (it is the export's record's now) | failed. */
+export type ExportStatus = "idle" | "starting" | "queued" | "failed";
 
-export interface ExportSuccess {
-  filePath: string;
-  sizeBytes: number;
-  durationSeconds: number;
-  backend: string;
-  width: number;
-  height: number;
-  /** What the export went out without (the job result's own list) — the
-   *  success card and toast name any video clip in it (`droppedClipsNote`). */
-  droppedOverlays?: DroppedOverlay[];
+export interface QueuedExport {
+  exportId: string;
+  name: string;
+  pieceId: string;
 }
-
-export type ExportStatus =
-  | "idle"
-  | "starting"
-  | "running"
-  | "success"
-  | "failed"
-  | "cancelled";
 
 export interface UseExportFlowResult {
   status: ExportStatus;
-  progress: ExportProgress | null;
-  result: ExportSuccess | null;
+  /** The export the last Start queued. */
+  queued: QueuedExport | null;
   error: string | null;
-  jobId: string | null;
-  start: (params: ExportStartParams) => Promise<void>;
-  cancel: () => Promise<void>;
+  /** The server refused with `purpose_required`: not an error, the dialog asks what the export is for. */
+  purposeRequired: boolean;
+  /** The queued export, or null when nothing was queued (refused, failed, or a double click). */
+  start: (params: ExportStartParams) => Promise<QueuedExport | null>;
   reset: () => void;
 }
 
+export interface UseExportFlowOptions {
+  /** Called on a `purpose_required` refusal so the caller can refetch the piece's audio rights. */
+  onPurposeRequired?: (pieceId: string) => void;
+}
+
+/** A refusal body's human text: `message`, else `error`, else the raw text. */
+function refusalText(body: string, status: number): { text: string; code?: string } {
+  try {
+    const parsed = JSON.parse(body) as { error?: unknown; message?: unknown };
+    const code = typeof parsed.error === "string" ? parsed.error : undefined;
+    const text = typeof parsed.message === "string" ? parsed.message : code;
+    if (text) return { text, code };
+  } catch {
+    /* not JSON */
+  }
+  return { text: body || `HTTP ${status}` };
+}
+
 /**
- * Drives an export through the unified `/api/export` route + JobManager.
- *
- * Lifecycle:
- *   1. start({...}) POSTs the request → { jobId, destFolder, filename, settings }.
- *   2. Hook opens an SSE stream on /api/jobs/<jobId>/events.
- *   3. Progress events tick the `progress` field.
- *   4. completed/failed/cancelled events resolve the flow.
- *
- * Closing the dialog mid-export does NOT cancel — the SSE stream stays open
- * for the lifetime of the component using this hook. Explicit cancel() does
- * a DELETE on the job, which propagates through JobManager → ffmpeg SIGKILL
- * + partial-file unlink.
+ * Queue an export through `/api/export` (spec 2026-09-29 §B2). Only the
+ * enqueue is tracked here: the export's progress, its wait and its finish are
+ * on its `piece_exports` record — the Exports tab, the canvas bar
+ * (`useLatestRunningExport`) and the finish toast (`useExportFinishToasts`).
+ * Nothing blocks a second Start; only a double click on the same one is ignored.
  */
-export function useExportFlow(): UseExportFlowResult {
+export function useExportFlow(options: UseExportFlowOptions = {}): UseExportFlowResult {
+  const { onPurposeRequired } = options;
   const [status, setStatus] = useState<ExportStatus>("idle");
-  const [progress, setProgress] = useState<ExportProgress | null>(null);
-  const [result, setResult] = useState<ExportSuccess | null>(null);
+  const [queued, setQueued] = useState<QueuedExport | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
-
-  const cleanupStream = useCallback(() => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => () => cleanupStream(), [cleanupStream]);
+  const [purposeRequired, setPurposeRequired] = useState(false);
+  const starting = useRef(false);
 
   const start = useCallback(
     async (params: ExportStartParams) => {
-      if (status === "starting" || status === "running") return;
-      cleanupStream();
+      if (starting.current) return null;
+      starting.current = true;
       setStatus("starting");
-      setProgress(null);
-      setResult(null);
       setError(null);
-      setJobId(null);
-
-      let enq: { jobId: string };
+      setPurposeRequired(false);
       try {
         const resp = await fetch("/api/export", {
           method: "POST",
@@ -118,113 +100,51 @@ export function useExportFlow(): UseExportFlowResult {
             graphicsQuality: params.graphicsQuality,
             customWidth: params.customWidth,
             customHeight: params.customHeight,
-            destFolder: params.destFolder,
+            purpose: params.purpose,
+            copyrightedAudio: params.copyrightedAudio,
+            includeFileIds: params.includeFileIds,
+            excludeFileIds: params.excludeFileIds,
           }),
         });
         if (!resp.ok) {
-          const body = await resp.text();
+          const refusal = refusalText(await resp.text(), resp.status);
+          if (resp.status === 422 && refusal.code === "purpose_required") {
+            setStatus("idle");
+            setPurposeRequired(true);
+            onPurposeRequired?.(params.pieceId);
+            return null;
+          }
           setStatus("failed");
-          setError(body || `HTTP ${resp.status}`);
-          return;
+          setError(refusal.text);
+          return null;
         }
-        enq = (await resp.json()) as { jobId: string };
+        const enq = (await resp.json()) as { exportId: string; name: string };
+        const queuedExport: QueuedExport = { exportId: enq.exportId, name: enq.name, pieceId: params.pieceId };
+        setQueued(queuedExport);
+        setStatus("queued");
+        trackEvent("export_started", {
+          format: params.format,
+          quality: params.quality,
+          graphics_quality: params.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
+        });
+        return queuedExport;
       } catch (err) {
         setStatus("failed");
         setError(err instanceof Error ? err.message : String(err));
-        return;
+        return null;
+      } finally {
+        starting.current = false;
       }
-
-      setJobId(enq.jobId);
-      setStatus("running");
-      trackEvent("export_started", {
-        format: params.format,
-        quality: params.quality,
-        graphics_quality: params.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
-      });
-      const es = new EventSource(`/api/jobs/${enq.jobId}/events`);
-      eventSourceRef.current = es;
-
-      es.addEventListener("progress", (ev) => {
-        try {
-          const p = JSON.parse((ev as MessageEvent).data) as {
-            done: number;
-            total: number;
-            unit: string;
-            etaMs: number | null;
-          };
-          setProgress({ done: p.done, total: p.total, unit: p.unit, etaMs: p.etaMs });
-        } catch {
-          /* ignore */
-        }
-      });
-
-      es.addEventListener("completed", (ev) => {
-        try {
-          const data = JSON.parse((ev as MessageEvent).data) as {
-            result?: ExportSuccess;
-          };
-          if (data.result) setResult(data.result);
-          trackEvent("export_completed", {
-            backend: data.result?.backend ?? "unknown",
-            format: params.format,
-            quality: params.quality,
-          });
-          void fetch("/api/analytics/milestone", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: "export", event: "first_export" }),
-          }).catch(() => {});
-          setStatus("success");
-        } catch {
-          setStatus("success");
-        } finally {
-          cleanupStream();
-        }
-      });
-
-      es.addEventListener("failed", (ev) => {
-        try {
-          const data = JSON.parse((ev as MessageEvent).data) as { error?: string };
-          setError(data.error ?? "Export failed");
-        } catch {
-          setError("Export failed");
-        }
-        setStatus("failed");
-        cleanupStream();
-      });
-
-      es.addEventListener("cancelled", () => {
-        setStatus("cancelled");
-        cleanupStream();
-      });
-
-      es.onerror = () => {
-        // Browser fires onerror when the server closes the stream after
-        // emitting a terminal event — that's normal, not a failure. The
-        // terminal `completed`/`failed`/`cancelled` listeners run first
-        // and set the final status; no action needed here.
-      };
     },
-    [status, cleanupStream],
+    [onPurposeRequired],
   );
 
-  const cancel = useCallback(async () => {
-    if (!jobId) return;
-    try {
-      await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
-    } catch {
-      /* ignore — the SSE stream will surface the cancel/failure */
-    }
-  }, [jobId]);
-
   const reset = useCallback(() => {
-    cleanupStream();
     setStatus("idle");
-    setProgress(null);
-    setResult(null);
+    setQueued(null);
     setError(null);
-    setJobId(null);
-  }, [cleanupStream]);
+    setPurposeRequired(false);
+  }, []);
 
-  return { status, progress, result, error, jobId, start, cancel, reset };
+  return { status, queued, error, purposeRequired, start, reset };
 }

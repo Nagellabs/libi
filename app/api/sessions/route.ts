@@ -11,6 +11,12 @@ export async function GET() {
     title: s.title,
     updatedAt: s.updatedAt,
     active: s.active,
+    // The agent confirmed it has no transcript for it any more: the row opens into the chat's note
+    // and offers "Remove from list" instead of Restart.
+    historyMissing: s.historyMissing === true,
+    // libi's chat index knows it but the agent's listing left it out (SES-4). Opening it still
+    // tries the load; the row offers "Remove from list" as well.
+    unlisted: s.historyUnlisted === true,
   }));
 
   // The Terminal surface overrides what the selector shows as active;

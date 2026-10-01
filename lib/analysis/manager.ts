@@ -9,7 +9,16 @@ import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { probeMedia } from "@/lib/ffmpeg/probe";
 import { onFileTimeline } from "@/lib/export/export-base";
 import { TRANSCRIPT_AUDIO_TIMELINE } from "@/lib/analysis/retime-audio-lead";
-import { ensureAnalysisDirs, getAudioPath, getFramesDir, getAnalysisDir } from "./storage";
+import {
+  AUDIO_EXTRACT_TIMELINE,
+  ensureAnalysisDirs,
+  getAudioChunksDir,
+  getAudioPath,
+  getAudioTimelinePath,
+  getFramesDir,
+  getAnalysisDir,
+  isAudioExtractCurrent,
+} from "./storage";
 import { videoSummarySchema } from "./schemas";
 import type { VideoSummary, TranscriptWord } from "./schemas";
 import type {
@@ -24,7 +33,7 @@ import type { Anchor } from "@/lib/tracking/types";
 import { getCurrentPort } from "@/lib/libi-home";
 import {
   isWhisperModelInstalled,
-  resolveWhisperModel,
+  pickWhisperModel,
 } from "@/lib/whisper/models";
 import type { SttTranscription } from "./types";
 
@@ -165,6 +174,31 @@ async function captureSourceModifiedAt(pieceId: string | null, filename: string)
   }
 }
 
+/**
+ * `metadata` with the transcript's timeline stamp (`audioTimeline: "file"`)
+ * added: a JSON object gains the key, null becomes `{"audioTimeline":"file"}`,
+ * and anything that isn't a JSON object is kept as given.
+ */
+function withTimelineStamp(metadata: string | null): string | null {
+  if (metadata == null) return JSON.stringify({ audioTimeline: TRANSCRIPT_AUDIO_TIMELINE });
+  try {
+    const m = JSON.parse(metadata) as unknown;
+    if (m && typeof m === "object" && !Array.isArray(m)) return JSON.stringify({ ...m, audioTimeline: TRANSCRIPT_AUDIO_TIMELINE });
+  } catch {
+    // not JSON: kept as given
+  }
+  return metadata;
+}
+
+function hasTimelineStamp(metadata: string | null): boolean {
+  if (!metadata) return false;
+  try {
+    return (JSON.parse(metadata) as { audioTimeline?: unknown })?.audioTimeline === TRANSCRIPT_AUDIO_TIMELINE;
+  } catch {
+    return false;
+  }
+}
+
 async function upsertStep(params: {
   fileId: string;
   kind: AnalysisStepKind;
@@ -186,13 +220,22 @@ async function upsertStep(params: {
     .limit(1)
     .all();
 
+  // A transcript on the file's timeline stays stamped: chunkAudio's
+  // re-plan, a failed or partial aggregate and a retry write no metadata, and
+  // used to wipe the stamp, so the boot re-time could not tell such a step
+  // from a pre-fix one (review I1). A NEW transcript step is made by this
+  // version, whose extract is on the file's timeline: stamped at creation.
+  // A pre-fix (unstamped) step is left unstamped.
+  const transcript = params.kind === "transcript";
   if (existing) {
+    const metadata =
+      transcript && hasTimelineStamp(existing.metadata) ? withTimelineStamp(params.metadata ?? null) : params.metadata ?? null;
     const [updated] = await db
       .update(analysisSteps)
       .set({
         status: params.status,
         content: params.content ?? null,
-        metadata: params.metadata ?? null,
+        metadata,
         errorMessage: params.errorMessage ?? null,
         sourceModifiedAt,
         updatedAt: new Date(),
@@ -211,7 +254,7 @@ async function upsertStep(params: {
       kind: params.kind,
       status: params.status,
       content: params.content ?? null,
-      metadata: params.metadata ?? null,
+      metadata: transcript ? withTimelineStamp(params.metadata ?? null) : params.metadata ?? null,
       errorMessage: params.errorMessage ?? null,
       sourceModifiedAt,
     })
@@ -596,11 +639,16 @@ export async function extractAudio(params: {
   // and chunk times are source times (onFileTimeline). A file ffmpeg reads off
   // its timeline gets its probe's fix (ProbedMedia.audioRead).
   const read = (await probeMedia(inputPath)).audioRead;
+  // The sidecar goes first and comes back last: an extract cut short (a quit,
+  // an ffmpeg failure) is left without it, so it reads as stale, never as done.
+  const timelinePath = getAudioTimelinePath(file.pieceId, params.fileId);
+  fs.rmSync(timelinePath, { force: true });
   await runFfmpeg(
     ["-y", ...(read?.inputArgs ?? []), "-i", inputPath, "-vn", "-af", onFileTimeline(read?.ptsShift),
       "-ac", "1", "-ar", String(sr), "-f", "wav", audioPath],
     { op: "analysis_extract_audio", context: { fileId: params.fileId, pieceId: file.pieceId } },
   );
+  fs.writeFileSync(timelinePath, `${AUDIO_EXTRACT_TIMELINE}\n`);
   return { audioPath };
 }
 
@@ -859,9 +907,17 @@ export async function chunkAudio(params: {
 
   if (params.skipExtraction) return { chunks };
 
-  // Extract per-chunk audio via ffmpeg from the canonical audio.wav.
+  // Extract per-chunk audio via ffmpeg from the canonical audio.wav. One
+  // without its timeline sidecar predates the audio-lead fix (or was cut
+  // short): early by the audio's lead, so it is made again, and the chunk
+  // files cut from it go with it (review round 5, M1).
   const inputAudioPath = getAudioPath(file.pieceId, params.fileId);
-  if (!fs.existsSync(inputAudioPath)) {
+  if (!fs.existsSync(inputAudioPath) || !isAudioExtractCurrent(file.pieceId, params.fileId)) {
+    if (fs.existsSync(inputAudioPath)) {
+      log.info({ op: "stale_audio_extract_dropped", fileId: params.fileId }, "analysis.stale_audio_extract_dropped");
+    }
+    fs.rmSync(inputAudioPath, { force: true });
+    fs.rmSync(getAudioChunksDir(file.pieceId, params.fileId), { recursive: true, force: true });
     await extractAudio({ fileId: params.fileId });
   }
   ensureAnalysisDirs(file.pieceId, params.fileId);
@@ -904,6 +960,21 @@ export interface TranscribeAudioResult {
   provider?: "whisper";
   /** Set on needs_install. */
   hint?: string;
+  /** The Whisper model this call ran with (or, on needs_install, needed).
+   *  Omitting `model` picks `small` when installed, else the most accurate
+   *  installed model — so the caller is told which one it got. */
+  model?: string;
+}
+
+/** A chunk row's `words` is null, unparseable, or an empty list. */
+function readyChunkHasNoWords(chunk: { words: string | null }): boolean {
+  if (!chunk.words) return true;
+  try {
+    const parsed = JSON.parse(chunk.words) as unknown;
+    return !Array.isArray(parsed) || parsed.length === 0;
+  } catch {
+    return true;
+  }
 }
 
 export async function transcribeAudio(params: {
@@ -919,7 +990,7 @@ export async function transcribeAudio(params: {
   }>;
   model?: string;
 }): Promise<TranscribeAudioResult> {
-  const resolvedModel = resolveWhisperModel(params.model);
+  const resolvedModel = pickWhisperModel(params.model);
   // An injected sttFn supplies the transcription itself, so the local
   // whisper model is irrelevant — skip the install gate in that case.
   if (!params.sttFn && !isWhisperModelInstalled(resolvedModel)) {
@@ -932,6 +1003,7 @@ export async function transcribeAudio(params: {
       wordCount: 0,
       language: null,
       provider: "whisper",
+      model: resolvedModel,
       hint: `Whisper model "${resolvedModel}" not installed. Call libi.get_install_plan({ mcpId: "whisper" }) and follow it (it calls libi.whisper_download_model), then retry.`,
     };
   }
@@ -958,8 +1030,15 @@ export async function transcribeAudio(params: {
 
   let toProcess: typeof allRows;
   if (params.retry) {
-    // Retry only what hasn't successfully completed yet (failed + not_started).
-    toProcess = allRows.filter((c) => c.status !== "ready");
+    // Retry what hasn't successfully completed yet (failed + not_started),
+    // plus a `ready` chunk that came back with no words — an STT pass that
+    // heard nothing, or a flat-text save with no timings — whose window may
+    // still hold speech. Without this a file with such a chunk could never be
+    // captioned: every retry skipped it. The rule is "empty AND not silent";
+    // no per-chunk RMS is stored today, so every empty chunk counts as
+    // possibly-not-silent and is re-run (a genuinely silent one just comes
+    // back empty again).
+    toProcess = allRows.filter((c) => c.status !== "ready" || readyChunkHasNoWords(c));
   } else {
     toProcess = allRows.filter((c) => c.status === "not_started");
   }
@@ -1063,6 +1142,7 @@ export async function transcribeAudio(params: {
   return {
     status,
     provider: "whisper",
+    model: resolvedModel,
     totalChunks: finalRows.length,
     readyChunks: ready.length,
     failedChunks: allFailedChunks,

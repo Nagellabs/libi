@@ -282,6 +282,38 @@ describe("AppSidebar — the New chat button under an unusable agent", () => {
  * agent is `not-installed` — so the retired "restart libi" dead end must not
  * appear in any of them, and the positive case must say where to go instead.
  */
+describe("AppSidebar — an agent that refused its own config", () => {
+  const CONFIG_ERROR: AgentReadiness = {
+    state: "config-error",
+    agentId: "codex",
+    message: "Codex couldn't load its configuration, so it can't start or open a chat. Codex says: url is not supported for stdio in `mcp_servers.libi`.",
+  };
+
+  it("says why in the sidebar instead of 'Preparing…', with no Set up link (the fix is the config)", () => {
+    readiness = CONFIG_ERROR;
+    // The live repro: every standby fails, so the server never reports one ready.
+    canCreate = false;
+    renderSidebar();
+    expect(screen.getByTestId("agent-readiness-note")).toHaveTextContent(CONFIG_ERROR.message);
+    expect(document.body.textContent).not.toContain(PREPARING);
+    expect(setUpLink()).toBeNull();
+  });
+
+  it("keeps New chat enabled, and a click RETRIES a session rather than opening setup", async () => {
+    readiness = CONFIG_ERROR;
+    canCreate = false;
+    createSessionWithResult.mockResolvedValue({ sessionId: null, error: CONFIG_ERROR.message });
+    renderSidebar();
+    expect(newChatButton()).not.toBeDisabled();
+
+    fireEvent.click(newChatButton());
+
+    await waitFor(() => expect(createSessionWithResult).toHaveBeenCalledTimes(1));
+    expect(routerPush).not.toHaveBeenCalledWith(expect.stringContaining("/agents"));
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith(CONFIG_ERROR.message));
+  });
+});
+
 describe("AppSidebar — a not-installed active agent points at Agents", () => {
   it("never renders 'restart libi' when the active agent's readiness is not-installed", () => {
     readiness = {

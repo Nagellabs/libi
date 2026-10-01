@@ -32,6 +32,7 @@ function makeFile(overrides: Partial<FileRecord> = {}): FileRecord {
     filmstripFrames: null,
     filmstripHeight: null,
     aiGeneration: null,
+    audioRights: null,
     notes: null,
     createdAt: new Date(),
     ...overrides,

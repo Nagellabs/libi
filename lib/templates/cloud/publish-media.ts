@@ -89,6 +89,12 @@ export interface ExamplePass {
   trimSec: number;
   /** Cap the bitrate too (the size retry). */
   capBitrate?: boolean;
+  /**
+   * Leave the audio out entirely (`-an`). The example is public: its caller
+   * sets this when the source may carry a copyrighted song
+   * (`template_publish_prepare`, social-music spec §7).
+   */
+  dropAudio?: boolean;
 }
 
 export function buildExampleArgs(input: string, output: string, pass: ExamplePass, alpha?: AlphaDecodeOpts): string[] {
@@ -101,7 +107,7 @@ export function buildExampleArgs(input: string, output: string, pass: ExamplePas
     "-c:v", "libx264", "-preset", "medium", "-crf", String(pass.crf), "-pix_fmt", "yuv420p",
     ...(pass.capBitrate ? RETRY_MAXRATE : []),
     "-movflags", "+faststart",
-    "-c:a", "aac", "-b:a", "96k", "-ac", "2",
+    ...(pass.dropAudio ? ["-an"] : ["-c:a", "aac", "-b:a", "96k", "-ac", "2"]),
     "-f", "mp4", output,
   ];
 }
@@ -172,7 +178,7 @@ function checkedExample(output: string, out: ProbedMedia): ExampleResult {
 export async function transcodeExample(
   input: string,
   output: string,
-  opts: { signal?: AbortSignal; onProgress?: (ratio: number) => void } = {},
+  opts: { signal?: AbortSignal; onProgress?: (ratio: number) => void; dropAudio?: boolean } = {},
 ): Promise<ExampleResult> {
   assertAbsolute(input, output);
   const probe = await probeSource(input);
@@ -185,9 +191,9 @@ export async function transcodeExample(
   });
 
   const encode = async (crf: number, capBitrate: boolean): Promise<ProbedMedia> => {
-    await runFfmpeg(buildExampleArgs(input, output, { crf, trimSec, capBitrate }, probe), {
+    await runFfmpeg(buildExampleArgs(input, output, { crf, trimSec, capBitrate, dropAudio: opts.dropAudio === true }, probe), {
       op: EXAMPLE_OP,
-      context: { crf, trimSec, hasAlpha: probe.hasAlpha === true },
+      context: { crf, trimSec, hasAlpha: probe.hasAlpha === true, dropAudio: opts.dropAudio === true },
       totalDurationSeconds: Math.min(probe.duration ?? trimSec, trimSec),
       onProgress,
       signal: opts.signal,

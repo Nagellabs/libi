@@ -66,7 +66,9 @@ downloaded yet. Do this once:
   provider?, hint? }
 ```
 
-On `ready` — done. On `partial`/`failed` — retry only failed chunks:
+On `ready` — done. On `partial`/`failed`, retry: it re-runs failed chunks AND
+`ready` chunks that came back with no words, through local Whisper — a word-less
+chunk from a paid provider is then re-labelled `whisper`:
 `libi.analysis_transcribe_audio({ fileId, retry: true })`. Inspect with
 `libi.analysis_get_audio_chunks({ fileId })` if failures persist.
 

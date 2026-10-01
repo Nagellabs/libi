@@ -67,6 +67,11 @@ test.afterAll(async ({ playwright }) => {
     for (const t of await localTemplates(request)) await request.delete(`/api/templates/${t.id}`);
     // A fresh key has published nothing, so "Your templates" lists no catalog-only row.
     await request.put("/api/templates/cloud/key", { data: { key: randomBytes(32).toString("base64url"), replace: true }, headers: asThePage() });
+    // The last test ends with the fixture index answering 500, which puts the studio's
+    // catalog in its 2 min failure backoff: leave neither behind. The next spec
+    // (templates-publish-review.spec.ts) waits 30 s for its publish to be listed.
+    expect((await request.post(`${FIXTURE}/_faults`, { data: { clear: true } })).ok()).toBe(true);
+    expect((await request.delete("/api/test-mode/catalog-cache")).ok()).toBe(true);
   } finally {
     await request.dispose();
   }

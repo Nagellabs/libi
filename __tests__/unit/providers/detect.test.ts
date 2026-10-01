@@ -131,6 +131,36 @@ describe("detectProviders — Claude", () => {
     expect("scope" in out.find((r) => r.name === "c-srv")!).toBe(false);
   });
 
+  describe("a skill-eval session (test mode + LIBI_AGENT_SKIP_USER_SETTINGS) never loads the user scope", () => {
+    afterEach(() => vi.unstubAllEnvs());
+    const writeScopes = () => {
+      fs.writeFileSync(claudeConfigPath, JSON.stringify({
+        mcpServers: { zernio: { type: "http", url: "https://mcp.zernio.com/mcp" } },
+        projects: { [agentDir]: { mcpServers: { "l-srv": { type: "http", url: "http://127.0.0.1:9/l" } } } },
+      }));
+      fs.writeFileSync(path.join(agentDir, ".mcp.json"), JSON.stringify({ mcpServers: { "p-srv": { command: "node", args: ["x.js"] } } }));
+    };
+
+    it("so detection skips it too: the host's own servers are not reported as connected", async () => {
+      // Seen in skill-eval: suggest_provider answered `none` from the HOST's
+      // zernio while the session had no zernio tools at all.
+      vi.stubEnv("LIBI_TEST_MODE", "1");
+      vi.stubEnv("LIBI_AGENT_SKIP_USER_SETTINGS", "1");
+      writeScopes();
+      const out = await detectRows({ claudeConfigPath, agentDir, codexExec: noCodex });
+      expect(Object.fromEntries(out.map((r) => [r.name, r.scope]))).toEqual({ "l-srv": "local", "p-srv": "project" });
+    });
+
+    it("either flag alone changes nothing", async () => {
+      writeScopes();
+      vi.stubEnv("LIBI_AGENT_SKIP_USER_SETTINGS", "1");
+      expect((await detectRows({ claudeConfigPath, agentDir, codexExec: noCodex })).map((r) => r.name)).toContain("zernio");
+      vi.unstubAllEnvs();
+      vi.stubEnv("LIBI_TEST_MODE", "1");
+      expect((await detectRows({ claudeConfigPath, agentDir, codexExec: noCodex })).map((r) => r.name)).toContain("zernio");
+    });
+  });
+
   it("returns an unmatched server with providerId null", async () => {
     fs.writeFileSync(claudeConfigPath, JSON.stringify({
       mcpServers: { "my-thing": { command: "node", args: ["s.js"] } },
@@ -424,11 +454,29 @@ describe("detectProviders — a local server whose launcher is missing", () => {
     ]) });
     const rows = (agentPathDirs: DetectDeps["agentPathDirs"]) => detectRows({ claudeConfigPath, agentDir, codexExec, launcher: posix(), agentPathDirs });
     expect(await rows(() => ["/usr/bin"])).toEqual([
-      { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected", launcherAfterStart: true },
+      { agent: "codex", name: "elevenlabs", providerId: "elevenlabs", transport: "stdio", status: "connected", launcherAfterStart: true, launcher: "uvx" },
     ]);
     // The process has the folder, or none runs (the next one gets the login shell's PATH): as it always read.
     expect((await rows(() => [bin]))[0]).not.toHaveProperty("launcherAfterStart");
     expect((await rows(() => null))[0]).not.toHaveProperty("launcherAfterStart");
+  });
+
+  // Review I3: on Windows the fresh PATH is the registry's; a launcher only there reads launcherAfterStart for a
+  // Codex process started before it, so the idle-restart can fire there too.
+  it("Windows: a Codex entry whose launcher is only on the registry's fresh PATH reads launcherAfterStart", async () => {
+    const codexExec = async () => ({ ok: true as const, stdout: JSON.stringify([
+      { name: "elevenlabs", enabled: true, transport: { type: "stdio", command: "uvx", args: ["elevenlabs-mcp"], env: { ELEVENLABS_API_KEY: "k" } } },
+    ]) });
+    const files = new Set(["c:\\users\\u\\.local\\bin\\uvx.exe"]);
+    const launcher: LauncherDeps = {
+      platform: "win32",
+      pathExt: ".EXE",
+      loginShellDirs: () => ["C:\\Users\\u\\.local\\bin"],
+      processPathDirs: () => ["C:\\Windows"],
+      isExecutable: (p) => files.has(p.toLowerCase()),
+    };
+    const [row] = await detectRows({ claudeConfigPath, agentDir, codexExec, launcher, agentPathDirs: () => ["C:\\Windows"] });
+    expect(row).toMatchObject({ agent: "codex", status: "connected", launcherAfterStart: true, launcher: "uvx" });
   });
 
   it("a Claude Code local entry never reads launcherAfterStart: each new Claude chat gets the login shell's PATH", async () => {

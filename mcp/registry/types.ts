@@ -228,6 +228,11 @@ export interface DependencyStatus {
    *  so the chip offers Download / Re-download instead of "will start
    *  automatically". Present only when true. */
   manualInstall?: boolean;
+  /** This extension's tools never fetch the dep themselves (the def lists it
+   *  in `BundledMcpDef.buttonOnlyDeps`): only the chip's Download does, so the
+   *  chip must not promise "the first tool call that needs it". Present only
+   *  when true, and only beside `manualInstall`. */
+  buttonOnly?: boolean;
 }
 
 export interface BundledMcpDef {
@@ -336,4 +341,13 @@ export interface BundledMcpDef {
    * executed step-by-step by the agent.
    */
   installPlanPath?: string;
+  /**
+   * `manualInstall` deps that NO tool of this extension fetches on its own —
+   * its tools return `needs_install` and the install plan sends the user to
+   * the chip's Download instead (Whisper, Kokoro and ACE-Step's `uv`). The
+   * chip then says so rather than "downloaded by the first tool call that
+   * needs it", which is only true where a job `ensureDep`s the dep (video
+   * download, tracking). LM review M-1.
+   */
+  buttonOnlyDeps?: string[];
 }

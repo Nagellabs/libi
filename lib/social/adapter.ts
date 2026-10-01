@@ -1,4 +1,5 @@
-import type { SocialProviderId, KnownPlatform } from "./catalog";
+import type { SocialProviderId, KnownPlatform, SocialPlatform } from "./catalog";
+import type { AccountMusicFacts, CatalogTrack, MusicCatalogResult } from "./music-policy";
 import type {
   SocialAccount,
   SocialPost,
@@ -96,4 +97,16 @@ export interface SocialAdapter {
     platformAdId?: string;
     limit?: number;
   }): Promise<AdsRead<SocialAd>>;
+  /**
+   * The platform's music catalog for one account (spec §6.2): Instagram search
+   * (`query`) or trending (no query); TikTok's Commercial Music Library
+   * trending list (no search exists). An account that cannot use it is a
+   * normal answer (`unavailable`), never a thrown error — except a dead grant.
+   */
+  musicCatalog(accountId: string, q: { platform: SocialPlatform; query?: string; countryCode?: string }): Promise<MusicCatalogResult>;
+  /** Instagram only: re-validate a stored track before a scheduled publish. `null` = gone. */
+  getCatalogTrack?(accountId: string, trackId: string): Promise<CatalogTrack | null>;
+  /** The PROBE (D8): what `musicCatalog` says about this account. Storing it,
+   *  and never overwriting the user's choice, is `lib/social/music-facts.ts`. */
+  musicAccountFacts(accountId: string, platform: SocialPlatform): Promise<AccountMusicFacts>;
 }

@@ -10,6 +10,32 @@ import { invalidateMcpConfig } from "@/lib/mcp-config";
 import { regenerateAndRestart } from "@/mcp/workspace";
 import { serverLogger } from "@/lib/logger";
 import { clearRenderDiagnostics } from "@/lib/render/render-diagnostics-store";
+import { getSessionManager } from "@/lib/sessions/session-manager";
+import { randomUUID } from "node:crypto";
+
+/**
+ * The libi chat a "show" navigation came from (NAV-1): the MCP child sends the tool call it is
+ * running as `origin`, and the session manager finds the chat whose cache holds that call. Stamped
+ * as `fromSessionId` + a per-event `navId`, so only the tab showing that chat navigates
+ * (`hooks/sessions/tab-nav-gate.ts`). A call no libi chat holds — a CLI agent's — adds nothing, and
+ * every tab obeys as before.
+ */
+function navigationOriginStamp(origin: unknown): { fromSessionId: string; navId: string } | Record<string, never> {
+  if (!origin || typeof origin !== "object") return {};
+  const o = origin as Record<string, unknown>;
+  const lookup = {
+    ...(typeof o.toolCallId === "string" ? { toolCallId: o.toolCallId } : {}),
+    ...(typeof o.toolName === "string" ? { toolName: o.toolName } : {}),
+    ...("toolArgs" in o ? { toolArgs: o.toolArgs } : {}),
+  };
+  let fromSessionId: string | null = null;
+  try {
+    fromSessionId = getSessionManager().sessionForToolCall(lookup);
+  } catch (err) {
+    serverLogger.warn({ err, tag: "session-manager", op: "navigation_origin_failed" }, "Could not resolve a navigation's chat");
+  }
+  return fromSessionId ? { fromSessionId, navId: randomUUID() } : {};
+}
 
 export async function POST(request: Request): Promise<Response> {
   let body: Record<string, unknown>;
@@ -77,6 +103,7 @@ export async function POST(request: Request): Promise<Response> {
         tab,
         ...(typeof body.extensionId === "string" ? { extensionId: body.extensionId } : {}),
         ...(typeof body.provider === "string" ? { provider: body.provider } : {}),
+        ...navigationOriginStamp(body.origin),
       });
       break;
     }
@@ -84,6 +111,7 @@ export async function POST(request: Request): Promise<Response> {
     case "navigate_templates":
       navigationEmitter.emit("navigate_templates", {
         ...(typeof body.templateId === "string" ? { templateId: body.templateId } : {}),
+        ...navigationOriginStamp(body.origin),
       });
       break;
 

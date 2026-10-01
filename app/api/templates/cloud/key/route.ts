@@ -11,6 +11,7 @@ import {
 import { serverLogger as logger } from "@/lib/logger";
 import { browserOnlyRefusal, crossSiteSubresourceRefusal } from "@/lib/security/request-guard";
 import { CREATOR_KEY_PATTERN, NOT_A_CREATOR_KEY, maskCreatorKey, parseNickname } from "@/lib/templates/cloud/author-rules";
+import { catalogSource, withCatalogSource } from "@/lib/templates/cloud/catalog-source";
 import { fetchMine } from "@/lib/templates/cloud/client";
 import { creatorKeyInUse, publishedHere } from "@/lib/templates/cloud/key-usage";
 
@@ -73,7 +74,8 @@ export async function GET(req: Request): Promise<Response> {
 
 export async function POST(): Promise<Response> {
   try {
-    return answer(shape(getOrCreateTemplatesAuthor()));
+    // The nickname of the catalog this page is on: each keeps its own (review M4).
+    return answer(shape(getOrCreateTemplatesAuthor(catalogSource())));
   } catch (err) {
     if (err instanceof TemplatesAuthorChangedError) return answer({ error: CHANGED }, 409);
     if (err instanceof TemplatesAuthorWriteError) return answer({ error: NOT_SAVED(err) }, 500);
@@ -96,8 +98,10 @@ export async function PUT(req: Request): Promise<Response> {
   const { key: raw, replace } = typeof body === "object" && body !== null ? (body as { key?: unknown; replace?: unknown }) : {};
   if (typeof raw !== "string") return answer({ error: "key is required" }, 400);
   if (!CREATOR_KEY_PATTERN.test(raw.trim())) return answer({ error: NOT_A_CREATOR_KEY }, 400);
+  // The catalog this import asks for the key's nickname, held across the awaits: only its slot is written (review M4).
+  const source = catalogSource();
   // The key already in use: nothing to replace, and its nickname stays.
-  const current = getTemplatesAuthor();
+  const current = getTemplatesAuthor(source);
   if (current && current.key === raw.trim()) return answer(shape(current));
   // Ask only before replacing a key something was published under; the one made on first view goes silently.
   if (current && replace !== true && (await creatorKeyInUse(current.key))) return answer({ error: REPLACE_REQUIRED, code: "replace_required" }, 409);
@@ -117,19 +121,20 @@ export async function PUT(req: Request): Promise<Response> {
   // (another import may have landed while the site answered) and its nickname
   // still the default the import stored (the user may have set one meanwhile).
   // A key the site has no nickname for keeps that default.
-  const mine = await fetchMine(author.key);
+  const imported = author;
+  const mine = await withCatalogSource(source, () => fetchMine(imported.key));
   const parsed = mine.ok && mine.nickname ? parseNickname(mine.nickname) : null;
   if (parsed?.ok) {
     let wrote: boolean;
     try {
-      wrote = setTemplatesAuthorNickname(author.key, parsed.nickname, { expectedNickname: author.nickname });
+      wrote = setTemplatesAuthorNickname(author.key, parsed.nickname, { expectedNickname: author.nickname, source });
     } catch (err) {
       // The key itself is saved; only the cached nickname is not. "Your templates" re-reads it from the site.
       if (err instanceof TemplatesAuthorWriteError) return answer(shape(author));
       throw err;
     }
     if (!wrote) {
-      const now = getTemplatesAuthor();
+      const now = getTemplatesAuthor(source);
       // Same key, nickname set meanwhile: theirs stands. Any other change: the key moved.
       if (now?.key !== author.key) return answer({ error: CHANGED }, 409);
       return answer(shape(now));

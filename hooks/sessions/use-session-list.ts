@@ -12,6 +12,12 @@ export interface SessionListItem {
   title: string | null;
   updatedAt: string | null;
   active: boolean;
+  /** The agent has no transcript for this chat any more; libi's chat index kept it listed. It
+   *  opens into the chat's "history isn't on this computer" note and offers "Remove from list". */
+  historyMissing?: boolean;
+  /** libi's chat index kept it, but the agent's listing left it out. Not proof the history is
+   *  gone: opening it still tries the load. Offers "Remove from list" too. */
+  unlisted?: boolean;
 }
 
 export interface SessionGroup {

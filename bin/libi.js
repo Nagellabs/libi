@@ -107,6 +107,30 @@ const TSCONFIG = path.resolve(__dirname, "..", "tsconfig.json");
  * additionally gates `next dev` vs the production server — getting it wrong
  * spawns `next dev` inside the consumer's project. Keep the two in sync.
  */
+/**
+ * Mark the server's env as a dev checkout's (review N1): `LIBI_DEV_CHECKOUT_ROOT`
+ * names the checkout root, real-pathed, for the dev branch; an installed
+ * launch strips an inherited one (a terminal of a dev studio exports it). The
+ * server consults it only when it can't find its own code — inside a
+ * Turbopack-bundled Next, where `__dirname` is `/ROOT/…` — and then counts
+ * itself a dev build only if the marker is its own cwd and holds a `.git`
+ * (lib/templates/cloud/catalog-setting.ts#isMarkedDevCheckout). Returns `env`.
+ */
+function withDevCheckoutMarker(env, devCheckout, root) {
+  if (!devCheckout) {
+    delete env.LIBI_DEV_CHECKOUT_ROOT;
+    return env;
+  }
+  let real = root;
+  try {
+    real = fs.realpathSync(root);
+  } catch {
+    /* the server's own realpath of it then fails, and it reads as installed */
+  }
+  env.LIBI_DEV_CHECKOUT_ROOT = real;
+  return env;
+}
+
 function inDevCheckout() {
   let dir = __dirname;
   // An installed dependency always sits under a `node_modules` path segment.
@@ -120,6 +144,54 @@ function inDevCheckout() {
     dir = parent;
   }
   return false;
+}
+
+/**
+ * A dev checkout's own `node_modules`, checked before anything boots from it.
+ *
+ * A linked git worktree (its `.git` is a FILE) with no `node_modules` of its
+ * own resolves every import from the CANONICAL checkout's `node_modules` —
+ * Node walks up from `.claude/worktrees/<wt>/` — and those are whatever that
+ * checkout last installed. The 0.1.16 suites run found them weeks stale:
+ * `/editor` answered 500, "Export Logging doesn't exist in target module"
+ * (mediabunny 1.40 against 1.60 code). So a worktree without its own is
+ * refused — so is one whose install never finished (no
+ * `node_modules/.package-lock.json`). Any dev checkout whose `node_modules` predates `package-lock.json`
+ * gets a warning, not a refusal: it may still boot, and it may not.
+ *
+ * Dev only: an installed or packaged libi never runs this (no `.git`).
+ */
+function worktreeNodeModulesCheck(root) {
+  let gitIsFile = false;
+  try {
+    gitIsFile = fs.statSync(path.join(root, ".git")).isFile();
+  } catch {
+    /* no .git at the root: not a worktree root */
+  }
+  const nodeModules = path.join(root, "node_modules");
+  // npm writes `.package-lock.json` at the END of a successful install, so an
+  // interrupted `npm ci` or a stray empty dir counts as no install at all.
+  if (gitIsFile && !fs.existsSync(path.join(nodeModules, ".package-lock.json"))) {
+    return {
+      refuse:
+        "This worktree has no finished npm install of its own (node_modules/.package-lock.json " +
+        "is missing) — run `npm ci` here first.",
+    };
+  }
+  try {
+    const installed = fs.statSync(path.join(nodeModules, ".package-lock.json")).mtimeMs;
+    const locked = fs.statSync(path.join(root, "package-lock.json")).mtimeMs;
+    if (installed < locked) {
+      return {
+        warn:
+          "node_modules is older than package-lock.json — run `npm ci` here " +
+          "(then `node scripts/ensure-native-modules.js` and `node scripts/ensure-electron-binary.js`) if anything fails to load.",
+      };
+    }
+  } catch {
+    /* no install record to compare: nothing to say */
+  }
+  return {};
 }
 
 async function runBootstrap(originalCwd) {
@@ -561,6 +633,15 @@ if (require.main === module) void (async () => {
     } catch {
       /* best-effort */
     }
+    const modules = worktreeNodeModulesCheck(PKG_ROOT);
+    if (modules.refuse) {
+      process.stderr.write(`\n[libi] ${modules.refuse}\n` +
+        "[libi] Without them every import resolves from the main checkout's node_modules, which\n" +
+        "[libi] belong to whatever it last installed. Then `node scripts/ensure-native-modules.js`\n" +
+        "[libi] and `node scripts/ensure-electron-binary.js`.\n\n");
+      process.exit(1);
+    }
+    if (modules.warn) process.stderr.write(`[libi] ${modules.warn}\n`);
   }
   const result = await runBootstrap(originalCwd);
   const env = { ...process.env };
@@ -569,6 +650,10 @@ if (require.main === module) void (async () => {
   // ("connect the folder I ran libi from"). The CLI + spawned server read
   // this instead.
   env.LIBI_LAUNCH_CWD = originalCwd;
+  // The dev launcher's word that this is a dev checkout — the server needs it
+  // when it can't find its own code (Turbopack). Set after the chdir above, to
+  // the root it chdir'd to; stripped for an installed launch.
+  withDevCheckoutMarker(env, inDevCheckout(), PKG_ROOT);
   // The shell's own Node binary, so the dev branch of `lib/cli/studio.ts` can
   // spawn `next dev` under it instead of the libi-managed one — see
   // `resolveDevServerNodeCommand()` there. Only a dev checkout ever reads
@@ -668,6 +753,8 @@ if (require.main === module) void (async () => {
 })();
 
 module.exports = {
+  worktreeNodeModulesCheck,
+  withDevCheckoutMarker,
   superviseServer,
   exitCodeFor,
   forwardedSignal,

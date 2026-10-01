@@ -11,11 +11,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
-import path from "node:path";
 import { createTestDb, resetTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { resetStorage } from "@/lib/storage";
-import { getLibiStorageDir } from "@/lib/libi-home";
 import { getDb } from "@/lib/db/client";
 import type { Composition } from "@/lib/engine/types";
 import type { RenderPayload } from "@/lib/export/render-jobs";
@@ -64,12 +62,11 @@ function fakeCtx(params: ExportParams): JobContext<ExportParams> {
   };
 }
 
-function params(destFolder: string): ExportParams {
+function params(): ExportParams {
   return {
     pieceId: PIECE_ID,
     source: "draft",
     filename: "out",
-    destFolder,
     settings: {
       format: "mp4", codec: "avc", bitrate: 1_000_000,
       width: 320, height: 240, fps: 24,
@@ -97,7 +94,6 @@ async function seedManifest(extra: unknown[] = []): Promise<void> {
 }
 
 describe("export runner — droppedOverlays propagation (agent path)", () => {
-  let outDir: string;
 
   beforeEach(() => {
     captured.droppedOverlays = undefined;
@@ -107,7 +103,6 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     createTempStorageDir();
     resetStorage();
     seedPiece(getDb() as never, { id: PIECE_ID });
-    outDir = path.join(getLibiStorageDir(), "export-out");
   });
 
   afterEach(() => {
@@ -119,7 +114,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
   it("carries a non-empty droppedOverlays list from the backend into the runner's ExportResult", async () => {
     await seedManifest();
     captured.droppedOverlays = [{ id: "code-bg", message: "ctx is not defined" }];
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.backend).toBe("chromium-render");
     expect(result.droppedOverlays).toEqual([{ id: "code-bg", message: "ctx is not defined" }]);
     // The export still succeeded — a dropped overlay is informational, not fatal.
@@ -145,7 +140,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
       { id: "code-bg", message: "ctx is not defined" },
       { id: "vid-1", message },
     ];
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.droppedOverlays).toEqual([
       { id: "code-bg", message: "ctx is not defined" },
       { id: "vid-1", message, kind: "video", cause: "load", fileId: "file-beach", name: "Beach take" },
@@ -173,7 +168,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     const message = "its video could not be loaded for export (neither the original file nor its proxy): HTTP 404";
     captured.droppedOverlays = [{ id: "vid-1", message }];
     try {
-      const result = await exportRunner.run(fakeCtx(params(outDir)));
+      const result = await exportRunner.run(fakeCtx(params()));
       expect(fs.existsSync(result.filePath)).toBe(true);
       expect(result.droppedOverlays).toEqual([{ id: "vid-1", message, kind: "video", cause: "load", fileId: "file-beach" }]);
       expect(warnSpy).toHaveBeenCalledWith(
@@ -193,7 +188,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     const warnSpy = vi.spyOn(exportLogger, "warn").mockImplementation(() => exportLogger);
     await seedManifest();
     captured.droppedOverlays = [{ id: "code-bg", message: "ctx is not defined" }];
-    await exportRunner.run(fakeCtx(params(outDir)));
+    await exportRunner.run(fakeCtx(params()));
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({
         op: "overlay_dropped",
@@ -212,7 +207,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     const warnSpy = vi.spyOn(exportLogger, "warn").mockImplementation(() => exportLogger);
     await seedManifest();
     captured.unloadedFonts = [{ fontFileId: "font-impact", reason: "font load timed out" }];
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     const expected = [{ fontFileId: "font-impact", family: "libifont-font-impact", reason: "font load timed out" }];
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({ op: "font_load_failed", jobId: "job-test", pieceId: PIECE_ID, unloadedFonts: expected }),
@@ -227,13 +222,13 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
   it("bounds the unloadedFonts list in the result", async () => {
     await seedManifest();
     captured.unloadedFonts = Array.from({ length: 30 }, (_, i) => ({ fontFileId: `f${i}`, reason: "x" }));
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.unloadedFonts).toHaveLength(20);
   });
 
   it("omits unloadedFonts from the result when every font loaded", async () => {
     await seedManifest();
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.unloadedFonts).toBeUndefined();
   });
 
@@ -243,7 +238,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
     const warnSpy = vi.spyOn(exportLogger, "warn").mockImplementation(() => exportLogger);
     await seedManifest();
     captured.failWith = Object.assign(new Error("ffmpeg exited with code 234"), { graphFile: "/tmp/g/filter_complex.txt" });
-    await expect(exportRunner.run(fakeCtx(params(outDir)))).rejects.toThrow("234");
+    await expect(exportRunner.run(fakeCtx(params()))).rejects.toThrow("234");
     expect(warnSpy).toHaveBeenCalledWith(
       expect.objectContaining({ event: "fail", jobId: "job-test", graphFile: "/tmp/g/filter_complex.txt" }),
       "export.fail",
@@ -254,7 +249,7 @@ describe("export runner — droppedOverlays propagation (agent path)", () => {
   it("omits droppedOverlays from the runner's ExportResult when nothing was dropped", async () => {
     await seedManifest();
     captured.droppedOverlays = undefined;
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.droppedOverlays).toBeUndefined();
   });
 });

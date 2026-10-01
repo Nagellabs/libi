@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { renderAgentInstructions } from "@/mcp/workspace";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
+import { DEFAULT_ASPECT_RATIO_ID, dimensionsFor } from "@/lib/composition/aspect-ratio";
 import {
   ALL_SECTIONS_KEY,
   renderManualIndex,
@@ -187,6 +188,46 @@ describe("the rendered manual tells the truth about libi", () => {
     expect(stated, "the Version Check section states no version").not.toBeNull();
     expect(stated?.[1]).toBe(LIBI_SKILL_VERSION);
   });
+
+  /**
+   * MAN-1 (full-verification F11): the manual claimed a fresh piece's canvas
+   * defaults to 1920×1080 (Full HD) in three places, while
+   * `DEFAULT_ASPECT_RATIO_ID` (`lib/composition/aspect-ratio.ts`) has been
+   * `9:16` all along — most pieces are social/vertical video. An agent that
+   * believed the stale claim would "correct" a fresh vertical-default piece
+   * back to landscape, or tell the user the wrong starting shape.
+   *
+   * Derives the expected sentence from the same source of truth the app uses
+   * (`dimensionsFor`), so this can't itself drift the way the prose did: if
+   * the default ratio ever changes, this test's expectation changes with it.
+   */
+  it.each(DIALECTS)(
+    "states the real default canvas (9:16) and never claims 1920x1080 is the default (%s)",
+    (dialect) => {
+      const dims = dimensionsFor(DEFAULT_ASPECT_RATIO_ID);
+      expect(dims).not.toBeNull();
+      expect(dims).toEqual({ width: 1080, height: 1920 });
+
+      for (const [label, text] of everyRenderedView(dialect)) {
+        // The true default, stated verbatim at least once in the full manual.
+        if (label === `${dialect}: whole manual`) {
+          expect(text, `${label} never states the real default`).toContain(
+            `${dims!.width}×${dims!.height} (${DEFAULT_ASPECT_RATIO_ID})`,
+          );
+        }
+        // No line may call the old landscape shape "the default" or "Full HD" —
+        // 1920×1080 is still a legitimate example (16:9's pixels), just never
+        // the platform default.
+        for (const line of text.split("\n")) {
+          if (/1920[×x]1080/.test(line)) {
+            expect(line, `${label} still calls 1920x1080 the default: "${line.trim()}"`).not.toMatch(
+              /default|Full HD/i,
+            );
+          }
+        }
+      }
+    },
+  );
 
   it.each(DIALECTS)("teaches how libi is used from the user's own Claude Code or Codex (%s)", (dialect) => {
     const manual = renderAgentInstructions(dialect);

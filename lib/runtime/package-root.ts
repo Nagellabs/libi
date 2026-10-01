@@ -59,3 +59,12 @@ export function findPackageRoot(fromDir: string): string | null {
 export function packageRoot(fromDir: string = __dirname): string {
   return findPackageRoot(fromDir) ?? process.cwd();
 }
+
+/**
+ * Whether `packageRoot()` found libi's code, rather than falling back to the
+ * cwd. A caller for whom the cwd is not good enough — the dev-build decision
+ * (lib/templates/cloud/catalog-setting.ts#isDevBuildFrom) — asks this first.
+ */
+export function packageRootFound(fromDir: string = __dirname): boolean {
+  return findPackageRoot(fromDir) !== null;
+}

@@ -13,7 +13,13 @@ import { isAgentSpawnRefused } from "@/lib/agents/spawn-refused-error";
 import { isShellEnvLoaded, readShellEnvState } from "@/lib/runtime/shell-env-state";
 import { captureStandbyFreshness, staleStandbyReason, type StandbyFreshness } from "@/lib/sessions/standby-freshness";
 import { onSetupTerminalsSettled, setupActivity } from "@/lib/terminal/setup-activity";
-import type { SessionEntry, GlobalSessionEventListener, SystemEvent } from "./types";
+import type {
+  ApprovalNotAppliedReason,
+  ApprovalPushContext,
+  SessionEntry,
+  GlobalSessionEventListener,
+  SystemEvent,
+} from "./types";
 import { SessionEventHandler } from "@/lib/agents/session-event-handler";
 import { isSessionMidTurn, markPermissionResolvedInCache, MAX_ACTIVE_SESSIONS } from "./types";
 import { getLibiAgentDir } from "@/lib/libi-home";
@@ -21,8 +27,13 @@ import {
   getMcpServersForAcp,
   getMcpServersForAcpFallback,
   onMcpConfigInvalidated,
+  TEST_MODE_STDIO_FAKE_NAMES,
+  testModeFakesEnabled,
 } from "@/lib/mcp-config";
-import { isLibiMcpEntryConfigError } from "@/lib/mcp/agent-surface";
+import { agentConfigLoadErrorDetail, isLibiMcpEntryConfigError, LIBI_MCP_ENTRY_NAME, mcpEntryConfigErrorName } from "@/lib/mcp/agent-surface";
+import { existsSync } from "node:fs";
+import { join as joinPath } from "node:path";
+import { isTestMode } from "@/lib/test-mode";
 import { readLibiCodexEntryShape } from "@/lib/agents/libi-registration";
 import { resolveCodexHome } from "@/lib/codex-config/canonical";
 import { serverLogger as logger } from "@/lib/logger";
@@ -30,8 +41,9 @@ import { getProcessManager } from "@/lib/agents/process-manager";
 import { ACP_INIT_TIMEOUT_MS } from "@/lib/agents/managed-types";
 import { applyAttachmentParsing } from "@/lib/agents/parse-attachments";
 import { getApprovalMode } from "@/lib/approval/settings";
-import { acpModeFor } from "@/lib/sessions/approval-mode-map";
-import type { McpToolId } from "@/lib/agents/mcp-tool-id";
+import { acpModeFor, stableAcpModeCandidates } from "@/lib/sessions/approval-mode-map";
+import { APPROVAL_MODE_LABELS, type ApprovalMode } from "@/lib/approval/mode";
+import { makeMcpToolId, type McpToolId } from "@/lib/agents/mcp-tool-id";
 import { matchToolCall, type ToolCallCandidate } from "@/lib/sessions/tool-call-matcher";
 import {
   deriveModelSnapshot,
@@ -42,6 +54,9 @@ import {
 } from "@/lib/sessions/model-option";
 import { recordWindow } from "@/lib/sessions/model-window-cache";
 import { sessionMetaFor } from "@/lib/sessions/session-meta";
+import { agentChildPath, pathDelimiter, refreshFreshPathDirs } from "@/lib/agents/agent-path";
+import { lookupLauncher } from "@/lib/providers/launcher";
+
 import {
   promptErrorNote,
   type AuthNoteContext,
@@ -51,6 +66,7 @@ import { getSettings, updateSettings } from "@/lib/db/settings";
 import { trackServerEvent } from "@/lib/analytics/server";
 import { SessionRestartError, type SessionRestartResult } from "@/lib/sessions/restart-error";
 import { AgentHistoryMissingError, isAgentHistoryMissingError } from "@/lib/sessions/history-missing";
+import { fileSessionIndex, MISSING_WINDOW_MS, type SessionIndex, type SessionIndexEntry } from "@/lib/sessions/session-index";
 export { SessionRestartError, type SessionRestartFailureCode, type SessionRestartResult } from "@/lib/sessions/restart-error";
 import { toAgentEventId } from "@/lib/analytics/events";
 import type {
@@ -207,6 +223,87 @@ function summarizeMcpServers(servers: AcpMcpEntry[]): Array<
   });
 }
 
+/** What happens in each mode the user was promised, for the note of a chat that did not get it. */
+const APPROVAL_MODE_PROMISE: Record<ApprovalMode, string> = {
+  ask: "to be asked before each tool",
+  auto: "for extensions marked “requires approval” to ask first",
+  "auto-with-generations": "to use it",
+};
+
+/** The promise for `agentId`: libi's extension gate exists for Claude only, so a new Codex chat
+ *  can't promise that "requires approval" extensions ask first (lib/approval/extensions.ts). */
+function approvalModePromise(agentId: string, mode: ApprovalMode): string {
+  if (mode === "auto" && agentId !== "claude-code") return "to use it";
+  return APPROVAL_MODE_PROMISE[mode];
+}
+
+/**
+ * Whether a chat whose saved mode was NOT applied has its prompts held until it is. "Ask each
+ * time" and "Auto": the chat may be in the agent's own mode, which can run tools with no card.
+ * "Auto, no extension prompts" is sent anyway — nothing the chat can be left in is more permissive.
+ */
+export function approvalModeHoldsPrompts(mode: ApprovalMode): boolean {
+  return mode !== "auto-with-generations";
+}
+
+/** The chat note for a mode libi could not apply (`reportApprovalModeNotApplied`). It says which
+ *  way out applies: send again (a retry re-attempts the push), or pick another mode / new chat. */
+export function approvalModeNotAppliedNote(
+  agentId: string,
+  mode: ApprovalMode,
+  context: ApprovalPushContext,
+  reason: ApprovalNotAppliedReason,
+): string {
+  const label = APPROVAL_MODE_LABELS[mode];
+  const chat = context === "resume" ? "this resumed chat" : "this chat";
+  const promise = approvalModePromise(agentId, mode);
+  if (!approvalModeHoldsPrompts(mode)) {
+    return `libi couldn't apply '${label}' to ${chat} — start a new chat ${promise}.`;
+  }
+  if (reason === "unsupported_by_agent") {
+    return `The agent doesn't offer '${label}' in ${chat}, so libi won't send messages here — pick another approval mode, or start a new chat ${promise}.`;
+  }
+  if (reason === "modes_unknown") {
+    return `libi doesn't know which approval modes this agent offers, so it couldn't apply '${label}' to ${chat} and won't send messages here — start a new chat ${promise}.`;
+  }
+  if (reason === "set_timeout") {
+    // While the push hangs, sending again only waits again, and a new chat on the same hung agent
+    // hangs the same way: replacing the agent's process is what gets it answering.
+    return `libi couldn't apply '${label}' to ${chat} in time — the agent isn't answering, so libi won't send messages here until it does. Use Restart session on this chat, then send again.`;
+  }
+  return `libi couldn't apply '${label}' to ${chat}, so it won't send messages here until it can — send again to retry, or start a new chat ${promise}.`;
+}
+
+/** Whether sending again can fix a held chat: a retry re-attempts the push. Not when the agent
+ *  doesn't offer the mode, nor when its modes are unknown — only a new chat (whose `session/new`
+ *  advertises them) changes that. */
+function approvalModeRetryable(reason: ApprovalNotAppliedReason | undefined): boolean {
+  return reason !== "unsupported_by_agent" && reason !== "modes_unknown";
+}
+
+/** Why a held prompt was not sent — caller-neutral; the send route adds how to retry. */
+function approvalModeHeldError(mode: ApprovalMode, reason: ApprovalNotAppliedReason | undefined): string {
+  const label = APPROVAL_MODE_LABELS[mode];
+  if (reason === "unsupported_by_agent") {
+    return `The agent doesn't offer '${label}' in this chat, so the message wasn't sent — pick another approval mode, or start a new chat.`;
+  }
+  if (reason === "modes_unknown") {
+    return `libi doesn't know which approval modes this agent offers, so the message wasn't sent — start a new chat.`;
+  }
+  if (reason === "set_timeout") {
+    return `libi couldn't apply '${label}' to this chat in time, so the message wasn't sent — if it keeps happening, use Restart session.`;
+  }
+  return `libi couldn't apply '${label}' to this chat, so the message wasn't sent.`;
+}
+
+/** Why `restartIdleAgentForLauncher` kept the process. */
+export type LauncherRestartKept = "no_process" | "launcher_not_reached" | "standby_creating" | "active_sessions" | "opening_sessions";
+
+/** The gate's answer (`SessionManager.awaitApprovalMode`). */
+export type ApprovalGate =
+  | { ok: true }
+  | { ok: false; mode: ApprovalMode; error: string; retryable: boolean };
+
 export class SessionManager {
   /** sessionId -> SessionEntry */
   private sessions = new Map<string, SessionEntry>();
@@ -233,9 +330,31 @@ export class SessionManager {
         shellEnvLoaded: boolean;
         /** What its MCP servers were read from, just before it was created (`discardStaleStandby`). */
         freshness: StandbyFreshness;
+        /** Its approval-mode push, while still unanswered past the bound. The claim adopts it
+         *  (`adoptStandbyModePush`): landing after the claim's own push, it would leave the chat in
+         *  the mode saved when the standby was made. */
+        approvalModePush?: Promise<boolean>;
+        /** Its model push, while still unanswered past the bound — adopted by the claim the same
+         *  way (`adoptStandbyModelPush`), so the model chosen at claim is the one that stays. */
+        modelPush?: Promise<void>;
       }
     | null = null;
   private standbyCreating = false;
+  /** The agent whose last standby attempt failed — cleared when one is made. See `openNewSession`. */
+  private standbyFailedFor: string | null = null;
+
+  /**
+   * agentId -> the ACP mode ids its adapter last advertised (`session/new`, standby or
+   * `session/load`), for the life of this process. The last-but-one source of truth for
+   * `pushApprovalModeToSession`: a chat rebuilt from `listSessions` after a restart has no modes
+   * of its own until it is loaded, and the standby libi pre-creates at boot fills this before any
+   * resume. Full-verification F5.
+   */
+  private advertisedModesByAgent = new Map<string, { id: string }[]>();
+
+  /** Agents whose `session/load` response keys were logged once (debug) — what an adapter
+   *  returns there decides whether a resume can learn its modes from the load itself. */
+  private loadResponseShapeLogged = new Set<string>();
 
   /** The shell-environment seam watcher; null when not watching. */
   private shellEnvWatch: ReturnType<typeof setInterval> | null = null;
@@ -261,6 +380,9 @@ export class SessionManager {
    */
   private activatingSessions = new Map<string, Promise<AgentMessage[]>>();
 
+  /** How long a prompt waits for its chat's approval-mode push in flight (`settleApprovalModePush`). */
+  private approvalModePushWaitMs = 10_000;
+
   /** sessionId -> the user's restart of it in progress; a second request shares it. */
   private restartingSessions = new Map<string, Promise<SessionRestartResult>>();
 
@@ -283,6 +405,9 @@ export class SessionManager {
    *  start after a failed restart goes ahead only while this still holds the value that restart
    *  took, so it never acts on behalf of a restart or pick that has since superseded it. */
   private agentStartEpoch = 0;
+
+  /** Per agent, the last reason a launcher restart was declined, so a hint polled every few seconds logs once per change. */
+  private launcherRestartKeptLogged = new Map<string, string>();
 
   /** Monotonic counter for unique message IDs — shared with SessionEventHandler */
   private msgCounter = 0;
@@ -343,6 +468,143 @@ export class SessionManager {
     this.pm = pm;
   }
 
+  /** libi's own index of the chats it has shown (`lib/sessions/session-index.ts`). Null — a test
+   *  double, or before startup wires it — means no index: the list is the agent's listing alone. */
+  private sessionIndex: SessionIndex | null = null;
+
+  /** Inject the chat index. Called once during startup (`getSessionManager`). */
+  setSessionIndex(index: SessionIndex | null): void {
+    this.sessionIndex = index;
+  }
+
+  /** Run an index read or write. The index is a convenience over the agent's own listing: a file
+   *  that can't be read or written is logged and never breaks a list, a load or a new chat. */
+  private withSessionIndex<T>(op: string, fn: (index: SessionIndex) => T): T | undefined {
+    if (!this.sessionIndex) return undefined;
+    try {
+      return fn(this.sessionIndex);
+    } catch (err) {
+      logger.warn(
+        { tag: "session-manager", op: "session_index_failed", step: op, err },
+        `The chat index could not be ${op === "list" ? "read" : "written"} — the list is the agent's own`,
+      );
+      return undefined;
+    }
+  }
+
+  /** Record chats in the index. `hasTranscript`: the agent listed or loaded them — and then the chat
+   *  is not missing (`missingSince` cleared). */
+  private indexSessions(entries: SessionEntry[], hasTranscript: boolean): void {
+    if (entries.length === 0) return;
+    this.withSessionIndex("record", (index) =>
+      index.record(
+        entries.map((e) => ({
+          sessionId: e.sessionId,
+          agentId: e.agentId,
+          title: e.title,
+          updatedAt: e.updatedAt,
+          hasTranscript,
+          ...(hasTranscript ? { missingSince: null } : {}),
+        })),
+      ),
+    );
+  }
+
+  /**
+   * After a SUCCESSFUL, NON-EMPTY listing of `agentId`'s chats: every listed chat is recorded (it
+   * has a transcript), and every indexed chat of that agent the listing no longer has is kept in the
+   * list as an UNLISTED entry (`historyUnlisted`), instead of silently disappearing
+   * (full-verification F10). Unlisted is not "history missing": Codex's listing filters by model
+   * provider and leaves archived threads out, so opening the row still tries the load, and only the
+   * agent's own rejection sets `historyMissing` (review I1). An unlisted chat stays for
+   * `MISSING_WINDOW_MS` from when it first went unlisted, then its entry is dropped, so transcripts
+   * the agent cleans up don't pile up (review I2). An indexed chat that never had a transcript
+   * (created, never used) is pruned. A failed listing never comes here, and an empty one proves
+   * nothing — it is not read as "every chat is gone".
+   */
+  private mergeSessionIndex(agentId: string, listed: SessionInfo[]): void {
+    const listedEntries = listed.flatMap((s) => {
+      const e = this.sessions.get(s.sessionId);
+      return e ? [e] : [];
+    });
+    this.indexSessions(listedEntries, true);
+    if (listed.length === 0) return;
+
+    const indexed = this.withSessionIndex("list", (index) => index.list()) ?? [];
+    const listedIds = new Set(listed.map((s) => s.sessionId));
+    const now = Date.now();
+    const nowIso = new Date(now).toISOString();
+    const unlisted: SessionIndexEntry[] = [];
+    const firstMissed: SessionIndexEntry[] = [];
+    const drop: string[] = [];
+    for (const e of indexed) {
+      if (e.agentId !== agentId || listedIds.has(e.sessionId) || this.sessions.has(e.sessionId)) continue;
+      if (!e.hasTranscript) {
+        drop.push(e.sessionId);
+        continue;
+      }
+      const since = e.missingSince ? Date.parse(e.missingSince) : now;
+      if (Number.isFinite(since) && now - since > MISSING_WINDOW_MS) {
+        drop.push(e.sessionId);
+        continue;
+      }
+      unlisted.push(e);
+      if (!e.missingSince) firstMissed.push(e);
+    }
+    if (drop.length > 0) this.withSessionIndex("remove", (index) => index.remove(drop));
+    if (firstMissed.length > 0) {
+      this.withSessionIndex("record", (index) =>
+        index.record(firstMissed.map((e) => ({ ...e, missingSince: nowIso }))),
+      );
+    }
+    for (const e of unlisted) {
+      this.sessions.set(e.sessionId, {
+        sessionId: e.sessionId,
+        agentId,
+        title: e.title,
+        updatedAt: e.updatedAt,
+        active: false,
+        lastUsed: e.updatedAt ? new Date(e.updatedAt).getTime() : 0,
+        messageCache: [],
+        currentAgentMessage: null,
+        currentUserMessage: null,
+        promptsInFlight: 0,
+        listeners: new Set(),
+        pendingApprovals: new Map(),
+        configOptions: [],
+        latestUsage: null,
+        availableCommands: [],
+        historyUnlisted: true,
+      });
+    }
+    if (unlisted.length > 0 || drop.length > 0) {
+      logger.info(
+        { tag: "session-manager", op: "session_index_unlisted", agentId, count: unlisted.length, dropped: drop.length },
+        `${unlisted.length} chat(s) libi showed before are no longer listed by ${agentId} — kept until opening one says whether its history is there; ${drop.length} old or never-used entr(ies) dropped`,
+      );
+    }
+  }
+
+  /**
+   * "Remove from list" on a chat whose history is gone, or that the agent no longer lists: its index
+   * entry is deleted and it leaves the list. Refused for any other chat (the agent lists it again on
+   * the next start, so removing it would only be undone) and for an active one. A chat libi does not
+   * hold in memory is `not_found`: without its entry there is nothing to vouch that its history is
+   * gone, so its index entry is left alone (review M8a).
+   */
+  forgetSession(sessionId: string): "forgotten" | "refused" | "not_found" {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return "not_found";
+    if (entry.active || (entry.historyMissing !== true && entry.historyUnlisted !== true)) return "refused";
+    this.withSessionIndex("remove", (index) => index.remove([sessionId]));
+    this.sessions.delete(sessionId);
+    logger.info(
+      { tag: "session-manager", op: "session_forgotten", agentId: entry.agentId, sessionId },
+      `Removed chat ${sessionId} from the list (${entry.historyMissing ? "its history is gone" : "the agent no longer lists it"})`,
+    );
+    return "forgotten";
+  }
+
   /** Get the agent directory (lazily resolved). */
   getAgentDir(): string {
     if (!this.agentDir) {
@@ -372,6 +634,7 @@ export class SessionManager {
 
     const allSessions: SessionInfo[] = [];
     let cursor: string | undefined;
+    let listedAll = false;
 
     // Paginate through all sessions.
     //
@@ -395,6 +658,7 @@ export class SessionManager {
         allSessions.push(...result.sessions);
         cursor = result.nextCursor ?? undefined;
       } while (cursor);
+      listedAll = true;
     } catch (err) {
       this.markAgentAuthFailure(agentId, err);
       logger.warn(
@@ -427,6 +691,8 @@ export class SessionManager {
 
       this.sessions.set(info.sessionId, entry);
     }
+
+    if (listedAll) this.mergeSessionIndex(agentId, allSessions);
 
     logger.info(
       {
@@ -493,6 +759,8 @@ export class SessionManager {
         // Update metadata but preserve active state, cache, listeners
         existing.title = this.stripContextPrefix(info.title ?? null);
         existing.updatedAt = info.updatedAt ?? null;
+        // Listed again: not an unlisted row any more (the index write below clears `missingSince`).
+        if (existing.historyUnlisted) existing.historyUnlisted = false;
       } else {
         // New session discovered — add as inactive
         const entry: SessionEntry = {
@@ -518,6 +786,15 @@ export class SessionManager {
 
     // Note: we do NOT remove sessions that vanished from ACP — they may still
     // be active locally or have pending listeners.
+
+    // A title the agent gave a chat since (its rename) goes into libi's index too.
+    this.indexSessions(
+      allSessions.flatMap((s) => {
+        const e = this.sessions.get(s.sessionId);
+        return e ? [e] : [];
+      }),
+      true,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -563,6 +840,8 @@ export class SessionManager {
       shellEnvLoaded,
     };
     this.sessions.set(sessionId, entry);
+    // Indexed from the start; it counts as a chat with history once the agent lists or loads it.
+    this.indexSessions([entry], false);
     this.pm?.registerSessionId(agentId, sessionId);
     this.drainPendingListeners(sessionId);
     this.emitForSession(sessionId, {
@@ -609,13 +888,17 @@ export class SessionManager {
   private async newAcpSession(
     conn: ClientSideConnection,
     agentId: string,
-    reason: "fresh" | "standby",
+    reason: "fresh" | "standby" | "load",
   ): Promise<Awaited<ReturnType<ClientSideConnection["newSession"]>>> {
+    // Windows: the registry's PATH, read now (bounded), so a Claude chat gets a launcher installed since the adapter
+    // started (`lib/agents/agent-path.ts`). Elsewhere a no-op.
+    const pathRefresh = refreshFreshPathDirs();
+    if (pathRefresh) await pathRefresh;
     const params = { cwd: this.getAgentDir(), _meta: sessionMetaFor(agentId) };
     try {
       return await conn.newSession({ ...params, mcpServers: getMcpServersForAcp(agentId) });
     } catch (err) {
-      if (!isLibiMcpEntryConfigError(err)) throw err;
+      if (!isLibiMcpEntryConfigError(err)) throw this.testModeEntryCollision(agentId, reason, err) ?? this.agentConfigError(agentId, reason, err) ?? err;
       const mcpServers = getMcpServersForAcpFallback(agentId);
       logger.warn(
         {
@@ -641,9 +924,74 @@ export class SessionManager {
           },
           `Retry under a non-colliding MCP entry name also failed for ${agentId} — surfacing the original config error`,
         );
-        throw err;
+        throw this.agentConfigError(agentId, reason, err) ?? err;
       }
     }
+  }
+
+  /**
+   * The agent refused its OWN configuration — codex's "failed to load configuration", which
+   * codex-acp hands back as a bare `-32603 Internal error` with the diagnosis in `data`. Reached
+   * when libi's one-shot entry rename could not help (the retry failed too), or for a config
+   * error that never named libi's entry. Every session/new and session/load then fails the same
+   * way, so it is recorded as readiness (`config-error`: the sidebar and the chat say it, and New
+   * chat retries instead of waiting on a standby that will never come) and thrown in words the
+   * user can act on. Null for anything else.
+   *
+   * The one shape named specifically is the one found in the wild (2026-09-29): libi's agent
+   * folder still holding a PROJECT `.codex/config.toml` written by libi ≤ 0.1.13, whose stdio
+   * `[mcp_servers.libi]` codex merges with the url entry `libi connect` / `codex mcp add` puts in
+   * the user's own config. Only the file's EXISTENCE is checked — nothing here parses the user's
+   * TOML — and libi does not touch it: removing a section from an agent's config is the user's.
+   */
+  private agentConfigError(agentId: string, reason: "fresh" | "standby" | "load", err: unknown): Error | null {
+    const detail = agentConfigLoadErrorDetail(err);
+    if (!detail) return null;
+    const setup = getAgentSetup(agentId);
+    const name = setup?.name ?? agentId;
+    const files = setup?.configFiles;
+    const projectConfig = files ? joinPath(this.getAgentDir(), files.project) : null;
+    const legacyProjectConfig = !!projectConfig && isLibiMcpEntryConfigError(err) && existsSync(projectConfig);
+    const message =
+      `${name} couldn't load its configuration, so it can't start or open a chat. ${name} says: ${detail}.` +
+      (legacyProjectConfig && files
+        ? ` libi's agent folder still has a ${name} config written by an older libi version (${projectConfig}), and ${name} reads it on top of ${files.user}. Remove the [mcp_servers.${LIBI_MCP_ENTRY_NAME}] section from that older file (the entry in ${files.user} is the current one), then start a new chat.`
+        : files
+          ? ` Fix it in ${files.user} (or a project ${files.project}), then start a new chat.`
+          : " Fix the agent's config, then start a new chat.");
+    logger.error(
+      { tag: "session-manager", op: "agent_config_error", agentId, reason, legacyProjectConfig, err },
+      `${agentId} refused its own configuration — no session can start or load until it is fixed`,
+    );
+    this.setReadiness(agentId, { state: "config-error", agentId, message });
+    return new Error(message, { cause: err });
+  }
+
+  /**
+   * Test mode on Codex: libi hands Codex its stdio fakes under the names the real servers are added under
+   * (`TEST_MODE_STDIO_FAKE_NAMES`), and codex MERGES a session entry into a config entry of the same name field by
+   * field. A real HTTP entry the user added under one of those names themselves (`codex mcp add` in their own
+   * terminal — the Providers tab refuses to) merges into a table with both `url` and `command`, and codex refuses
+   * its whole config, so no chat starts. That rejection is named here — which entry, and what to do — instead of
+   * codex's bare "Internal error": logged as `test_mode_entry_collision`, and the error the chat shows. Null for
+   * anything else, and always outside test mode, where libi attaches no fakes. Nothing is retried: without the fake
+   * the real, paid server would answer.
+   */
+  private testModeEntryCollision(agentId: string, reason: "fresh" | "standby" | "load", err: unknown): Error | null {
+    if (agentId !== "codex" || !isTestMode() || !testModeFakesEnabled()) return null;
+    const entry = mcpEntryConfigErrorName(err, TEST_MODE_STDIO_FAKE_NAMES);
+    if (!entry) return null;
+    logger.error(
+      { tag: "session-manager", op: "test_mode_entry_collision", agentId, reason, entry, err },
+      `Codex refused its config in test mode: the user's own "${entry}" MCP entry collides with libi's test-mode fake of that name`,
+    );
+    const outcome = reason === "load" ? "this chat can't be opened" : "this chat can't start";
+    return new Error(
+      `Test mode: Codex's config has its own "${entry}" MCP server, and libi gives Codex a fake under that same name, ` +
+        `so Codex refused its whole config and ${outcome}. Remove that "${entry}" entry ` +
+        "(Agents → Providers), or run libi outside test mode.",
+      { cause: err },
+    );
   }
 
   /**
@@ -665,7 +1013,7 @@ export class SessionManager {
     try {
       return await conn.loadSession({ ...params, mcpServers });
     } catch (err) {
-      if (!isLibiMcpEntryConfigError(err)) throw err;
+      if (!isLibiMcpEntryConfigError(err)) throw this.testModeEntryCollision(agentId, "load", err) ?? this.agentConfigError(agentId, "load", err) ?? err;
       const fallback = getMcpServersForAcpFallback(agentId);
       logger.warn(
         {
@@ -692,7 +1040,7 @@ export class SessionManager {
           { tag: "session-manager", op: "mcp_entry_collision_retry_failed", agentId, sessionId, reason: "load", err: retryErr },
           `Retry under a non-colliding MCP entry name also failed for ${agentId} — surfacing the original config error`,
         );
-        throw err;
+        throw this.agentConfigError(agentId, "load", err) ?? err;
       }
     }
   }
@@ -789,6 +1137,8 @@ export class SessionManager {
     const standbyModes = this.standbySession?.availableModes;
     // A claimed chat keeps the standby's spawn-time answer.
     const standbyShellEnvLoaded = this.standbySession?.shellEnvLoaded ?? true;
+    const standbyModePush = this.standbySession?.approvalModePush;
+    const standbyModelPush = this.standbySession?.modelPush;
     const standbyId = this.claimStandbySession(agentId);
     if (standbyId) {
       const claimedEntry = this.registerActiveSession(
@@ -805,8 +1155,10 @@ export class SessionManager {
       // The standby was created earlier with whatever mode was saved at
       // standby-creation time. Re-push the current mode so it reflects any
       // changes the user made between standby creation and claim.
-      await this.pushApprovalModeToSession(standbyId, agentId, standbyModes);
-      await this.pushModelToSession(standbyId, agentId, standbyConfigOptions);
+      if (standbyModePush) this.adoptStandbyModePush(claimedEntry, standbyModePush);
+      await this.pushApprovalModeBounded(standbyId, agentId, standbyModes, "new");
+      if (standbyModelPush) this.adoptStandbyModelPush(claimedEntry, standbyModelPush);
+      await this.pushModelBounded(standbyId, agentId, standbyConfigOptions);
       return standbyId;
     }
 
@@ -876,17 +1228,19 @@ export class SessionManager {
     // have no fresh newSession response) never push an unadvertised ACP mode id
     // blind — the codex -32602 bug.
     freshEntry.availableModes = result.modes?.availableModes;
-    await this.pushApprovalModeToSession(
+    this.rememberAdvertisedModes(agentId, result.modes?.availableModes);
+    await this.pushApprovalModeBounded(
       result.sessionId,
       agentId,
       result.modes?.availableModes,
+      "new",
     );
-    await this.pushModelToSession(
-      result.sessionId,
-      agentId,
-      result.configOptions ?? [],
-    );
-    if (warmed) this.createStandbySession().catch(() => {});
+    await this.pushModelBounded(result.sessionId, agentId, result.configOptions ?? []);
+    // The standby comes back when this chat warmed the process, or when the last standby for this
+    // agent FAILED (a config the agent refused, since fixed): this session is the proof the agent
+    // works again, and nothing else would make one — New chat stayed on "Preparing…" for good after
+    // recovering (found 2026-09-29). A no-op while one exists or is being made.
+    if (warmed || this.standbyFailedFor === agentId) this.createStandbySession().catch(() => {});
     return result.sessionId;
   }
 
@@ -1062,6 +1416,16 @@ export class SessionManager {
       if (resumedEntry && loadResult?.configOptions) {
         resumedEntry.configOptions = loadResult.configOptions;
       }
+      this.logLoadResponseShape(agentId, loadResult);
+      // Both adapters answer `session/load` with the session's `modes` (claude-agent-acp
+      // `getOrCreateSession`, codex-acp `loadSession`). An entry rebuilt from `listSessions` after
+      // a restart has no other source for them — without this the resume push below was skipped
+      // and the chat ran in the agent's own mode (full-verification F5).
+      const loadedModes = loadResult?.modes?.availableModes;
+      if (loadedModes) {
+        if (resumedEntry) resumedEntry.availableModes = loadedModes;
+        this.rememberAdvertisedModes(agentId, loadedModes);
+      }
       logger.info(
         {
           tag: "session-manager",
@@ -1080,6 +1444,8 @@ export class SessionManager {
         // chat note ("Resource not found: <id>"); the chat renders its own explanation instead.
         entry.historyMissing = true;
         entry.messageCache = [];
+        // An unlisted row the agent has now confirmed gone: the sidebar offers Remove, not Restart.
+        if (entry.historyUnlisted) this.emitForSession(sessionId, { type: "sessions-changed" });
         logger.info(
           {
             tag: "session-manager",
@@ -1129,19 +1495,29 @@ export class SessionManager {
     entry.currentAgentMessage = null;
     entry.currentUserMessage = null;
 
+    // The agent loaded it, so it has a transcript and is not missing: indexed as such, and an
+    // unlisted row (Codex filtered it out of its listing) is an ordinary chat again. Before `active`
+    // flips, never between it and the approval-mode push below (review M7).
+    this.indexSessions([entry], true);
+    if (entry.historyUnlisted) {
+      entry.historyUnlisted = false;
+      this.emitForSession(sessionId, { type: "sessions-changed" });
+    }
+
     // Only flip `active` true AFTER the replay has populated the cache. This
     // ensures every other API route that observes `active === true` also sees
     // a populated messageCache — no partial-cache windows.
     entry.active = true;
 
     // Re-push the saved approval mode now that the session is reattached.
-    // Without this, an LRU-evicted-then-reactivated session would resume with
-    // the agent's default mode rather than the user's saved policy.
-    // `loadSession` doesn't re-advertise modes; pass undefined so the push
-    // reads the cached `entry.availableModes` (captured at newSession/standby)
-    // and never pushes an unadvertised id blind.
-    await this.pushApprovalModeToSession(sessionId, agentId, undefined);
-    await this.pushModelToSession(sessionId, agentId, entry.configOptions);
+    // Without this, a resumed session (after an LRU eviction, or a libi
+    // restart) runs in the agent's OWN mode — for Claude the user's
+    // `permissions.defaultMode` — rather than the user's saved policy.
+    // Pass undefined so the push resolves the advertised set itself: the
+    // entry's (captured from the load response above, or at newSession /
+    // standby), then the agent's, then — for Claude only — its stable ids.
+    await this.pushApprovalModeBounded(sessionId, agentId, undefined, "resume");
+    await this.pushModelBounded(sessionId, agentId, entry.configOptions);
 
     // The event that un-sticks the model picker for a restored session: its
     // GET raced this activation, cached {supported:false, pending:true}, and
@@ -1443,7 +1819,30 @@ export class SessionManager {
    * Builds user + agent messages in cache. Calls conn.prompt().
    * Syncs sessions after completion.
    */
+  /** The user sent (or tried to send) something in this chat (`SessionEntry.userSent`). */
+  markUserSent(sessionId: string): void {
+    const entry = this.sessions.get(sessionId);
+    if (entry) entry.userSent = true;
+  }
+
   async sendMessage(sessionId: string, text: string): Promise<void> {
+    this.markUserSent(sessionId);
+    // A resumed chat reads active before its approval-mode push has landed — so the prompt waits
+    // for the push, never overtaking the mode — and a chat whose mode could not be applied is held
+    // (Ask / Auto). The send route runs the same gate first so it can fail the send retryably; this
+    // covers every other caller.
+    const pending = this.sessions.get(sessionId);
+    if (pending?.approvalModePush || pending?.approvalModeNotApplied !== undefined) {
+      const gate = await this.awaitApprovalMode(sessionId);
+      if (!gate.ok) {
+        this.emitForSession(sessionId, {
+          type: "agent-status",
+          status: "error",
+          error: gate.error,
+        });
+        return;
+      }
+    }
     const entry = this.sessions.get(sessionId);
     if (!entry || !entry.active) {
       this.emitForSession(sessionId, {
@@ -1643,58 +2042,624 @@ export class SessionManager {
    * yields ACP -32602 `approval.mode.set_failed`. `acpModeFor` maps + gates on
    * the advertised set, returning `null` when the target isn't advertised.
    *
-   * `availableModes` is the array from `result.modes?.availableModes` on the
-   * fresh `newSession` response. On the broadcast / standby-claim / resume call
-   * sites (which don't have a fresh response), pass `undefined`; we then read
-   * the CACHED `entry.availableModes` so we never push an unverified id blind.
-   * When neither is known (`null` from `acpModeFor`) we skip + warn rather than
-   * push an unadvertised id.
+   * The advertised set, first known wins:
+   *   1. `availableModes` — the fresh `newSession` / standby response;
+   *   2. the entry's cached set (newSession, standby claim, or the
+   *      `session/load` response of a resume);
+   *   3. the set this agent last advertised in this process
+   *      (`advertisedModesByAgent` — the boot standby fills it before any resume);
+   *   4. nothing known: Claude's ids are stable, so its mapped id is pushed
+   *      anyway (`stableAcpModeFor`) and a refusal is a failure. Codex's are
+   *      not, and a blind push to it was the -32602 bug, so nothing is pushed.
    *
-   * Best-effort: errors are logged and swallowed so a flaky agent never breaks
-   * session creation.
+   * Best-effort toward the SESSION: errors are logged and swallowed so a flaky
+   * agent never breaks session creation or a resume. Never silent toward the
+   * USER: a mode a chat could not be given is logged at error level
+   * (`approval_mode_not_applied`) and the chat carries a note saying so
+   * (`reportApprovalModeNotApplied`). The one quiet skip is "Auto, no
+   * extension prompts" against a KNOWN set that lacks every candidate id —
+   * the documented degrade in approval-mode-map.ts, quiet because no mode the
+   * chat is left in is more permissive than the one asked for. Any other mode
+   * is never dropped quietly: a resumed chat that silently ran in Claude's own
+   * `auto` was full-verification F5, and a dropped `auto` loses the extension
+   * gate the picker promises.
+   *
+   * The push in flight is kept on the entry (`approvalModePush`) so a prompt
+   * sent meanwhile waits for it — a resumed chat reads active before its push
+   * lands (`settleApprovalModePush`).
+   *
+   * Returns whether the mode was applied.
    */
-  private async pushApprovalModeToSession(
+  private pushApprovalModeToSession(
     sessionId: string,
     agentId: string,
     availableModes: { id: string }[] | undefined,
-  ): Promise<void> {
-    const mode = getApprovalMode(agentId);
-    // Prefer the freshly-supplied advertised set; otherwise fall back to the
-    // set cached on the entry at fresh-newSession time. Never push blind.
-    const modes =
-      availableModes ?? this.sessions.get(sessionId)?.availableModes;
-    const target = acpModeFor(agentId, mode, modes);
-    if (target === null) {
-      logger.warn(
-        {
-          tag: "session-manager",
-          op: "approval_mode_unsupported_by_agent",
-          agentId,
-          mode,
-          availableModes: modes?.map((m) => m.id),
-        },
-        "approval.mode.unsupported_by_agent",
+    context: ApprovalPushContext,
+  ): Promise<boolean> {
+    const entry = this.sessions.get(sessionId);
+    const generation = entry ? (entry.approvalModePushGeneration ?? 0) + 1 : 0;
+    if (entry) entry.approvalModePushGeneration = generation;
+    const promise = this.applyApprovalMode(sessionId, agentId, availableModes, context, generation);
+    if (entry) {
+      const ownSettle = promise.then(
+        () => {},
+        () => {},
       );
-      return;
+      const prev = entry.approvalModePush;
+      const all = prev ? Promise.all([prev.all, ownSettle]).then(() => {}) : ownSettle;
+      const push = { promise, context, all };
+      entry.approvalModePush = push;
+      void all.then(() => {
+        if (entry.approvalModePush === push) entry.approvalModePush = undefined;
+      });
     }
-    if (!this.pm) return;
-    const conn = this.pm.getConnection(agentId);
-    if (!conn) return;
-    try {
-      await conn.setSessionMode({ sessionId, modeId: target });
-    } catch (err) {
+    return promise;
+  }
+
+  /**
+   * The gate before a prompt: is this chat's saved approval mode in force?
+   *
+   * 1. A push in flight is waited for (bounded, `approvalModePushWaitMs`) — with every push still
+   *    in flight before it, a waived one included. Only under "Auto, no extension prompts" is a push
+   *    the gate already waived skipped (`approvalModePushTimedOut`).
+   * 2. `{ ok: true }` when the chat's mode is applied, or when its mode is "Auto, no extension
+   *    prompts" (`approvalModeHoldsPrompts`) — nothing the chat can be left in exceeds it.
+   * 3. Under "Ask each time" and "Auto", a chat whose mode is NOT applied — the push timed out,
+   *    failed, or found nothing to push — is held: `{ ok: false }`, and the caller must not send.
+   *    The chat may be in the agent's own mode (for Claude the user's `permissions.defaultMode`,
+   *    possibly `auto`), where tools run with no card — F5. Unless it just waited on a push, the
+   *    gate first RE-ATTEMPTS the push, so Retry is a real retry: a push that now lands clears
+   *    the state and the prompt goes out. The send route answers non-OK so the message offers
+   *    Retry (`retryable`), or names the way out when a retry can't help (a mode the agent doesn't
+   *    offer).
+   *
+   * Every not-applied outcome is reported by `reportApprovalModeNotApplied` (error line + note).
+   */
+  async awaitApprovalMode(sessionId: string): Promise<ApprovalGate> {
+    const entry = this.sessions.get(sessionId);
+    if (!entry) return { ok: true };
+    let waited = false;
+    if (
+      entry.approvalModePush?.waived &&
+      !approvalModeHoldsPrompts(getApprovalMode(entry.agentId))
+    ) {
+      // Still the never-prompt mode, and its push was already waived: nothing to wait for.
+      return { ok: true };
+    }
+    if (entry.approvalModePush) {
+      waited = true;
+      const outcome = await this.settleApprovalModePush(entry);
+      if (!outcome.settled) return this.approvalModePushTimedOut(entry, outcome);
+    }
+    if (entry.approvalModeNotApplied === undefined) return { ok: true };
+    const mode = getApprovalMode(entry.agentId);
+    if (!approvalModeHoldsPrompts(mode)) return { ok: true };
+    if (!waited) {
+      void this.pushApprovalModeToSession(sessionId, entry.agentId, undefined, "retry");
+      const again = await this.settleApprovalModePush(entry);
+      if (!again.settled) return this.approvalModePushTimedOut(entry, again);
+      if (entry.approvalModeNotApplied === undefined) return { ok: true };
+    }
+    const reason = entry.approvalModeNotAppliedReason;
+    return {
+      ok: false,
+      mode,
+      error: approvalModeHeldError(mode, reason),
+      retryable: approvalModeRetryable(reason),
+    };
+  }
+
+  /** The gate's bound ran out with the push still unanswered. */
+  private approvalModePushTimedOut(
+    entry: SessionEntry,
+    outcome: { push: NonNullable<SessionEntry["approvalModePush"]>; waitedMs: number },
+  ): ApprovalGate {
+    const mode = getApprovalMode(entry.agentId);
+    if (!approvalModeHoldsPrompts(mode)) {
       logger.warn(
         {
           tag: "session-manager",
-          op: "approval_mode_set_failed",
-          err,
+          op: "approval_mode_push_wait_timeout",
+          agentId: entry.agentId,
+          sessionId: entry.sessionId,
+          mode,
+          waitedMs: outcome.waitedMs,
+        },
+        `Sending to ${entry.sessionId} before its approval-mode push answered (never-prompt mode)`,
+      );
+      // Waived for this push: a second never-prompt gate on it (the route's, then sendMessage's)
+      // must not sit out the bound again. It stays in the chain, though: a later push chains on it,
+      // so a stricter mode picked meanwhile can't pass its gate while this looser push is still
+      // outstanding and could land after it (NQ-7 review).
+      if (entry.approvalModePush === outcome.push) outcome.push.waived = true;
+      return { ok: true };
+    }
+    this.reportApprovalModeNotApplied(entry, mode, outcome.push.context, {
+      reason: "set_timeout",
+      waitedMs: outcome.waitedMs,
+    });
+    return {
+      ok: false,
+      mode,
+      error: approvalModeHeldError(mode, "set_timeout"),
+      retryable: true,
+    };
+  }
+
+  /**
+   * An approval-mode push settled that no longer speaks for the chat: a newer push started after
+   * it, or the saved mode moved on. Nothing here may clear (or set) the not-applied state — the
+   * older push may have LANDED OVER a newer mode (two concurrent `set_mode` calls answered out of
+   * order), which for Codex could leave `agent` running under "Ask each time" with no card.
+   *
+   * - It failed and a newer push exists: that push decides; this one changed nothing.
+   * - Otherwise (it landed, so it may have overwritten whatever came after it; or the mode moved
+   *   on with no push of its own): push the CURRENT mode again. That push is the latest, so its
+   *   outcome decides — and a still-newer one supersedes it the same way, so this converges.
+   */
+  private supersededApprovalPush(
+    entry: SessionEntry,
+    mode: ApprovalMode,
+    target: string,
+    landed: boolean,
+    context: ApprovalPushContext,
+    generation: number,
+  ): Promise<boolean> {
+    const newer = entry.approvalModePushGeneration !== generation;
+    logger.info(
+      {
+        tag: "session-manager",
+        op: "approval_mode_push_superseded",
+        agentId: entry.agentId,
+        sessionId: entry.sessionId,
+        mode,
+        target,
+        landed,
+        newer,
+        current: getApprovalMode(entry.agentId),
+        context,
+      },
+      `A superseded approval-mode push (${target}) ${landed ? "landed" : "failed"} on ${entry.sessionId}`,
+    );
+    if (!landed && newer) return Promise.resolve(false);
+    // A chat that isn't loaded has no ACP session to push to (its process may be gone): its next
+    // activation pushes the current mode itself, and a push now would only fail and note it.
+    if (!entry.active) return Promise.resolve(false);
+    return this.pushApprovalModeToSession(entry.sessionId, entry.agentId, undefined, context);
+  }
+
+  /** Race `work` against `ms`; true when the bound ran out first. `work` carries on either way. */
+  private async outlasts(work: Promise<unknown>, ms: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const slow = await Promise.race([
+      work.then(
+        () => false,
+        () => false,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), ms);
+      }),
+    ]);
+    clearTimeout(timer);
+    return slow;
+  }
+
+  /**
+   * `pushModelToSession`, bounded like `pushApprovalModeBounded`: `session/set_config_option` has
+   * no SDK timeout either, and one that never answers must not hang activation or a new chat. The
+   * push carries on; when it lands late, the session's model snapshot is published again so the
+   * picker shows the re-applied model. Returns `{ slow }` when it outlasted the bound.
+   */
+  private async pushModelBounded(
+    sessionId: string,
+    agentId: string,
+    configOptions: SessionConfigOption[],
+  ): Promise<{ slow: Promise<void> } | undefined> {
+    const started = Date.now();
+    const push = this.pushModelToSession(sessionId, agentId, configOptions);
+    if (!(await this.outlasts(push, this.approvalModePushWaitMs))) return undefined;
+    logger.warn(
+      {
+        tag: "session-manager",
+        op: "push_model_slow",
+        agentId,
+        sessionId,
+        waitedMs: Date.now() - started,
+      },
+      `${agentId} hasn't answered set_config_option(model) for ${sessionId} — going on`,
+    );
+    push.then(
+      () => {
+        const entry = this.sessions.get(sessionId);
+        if (entry?.active) this.emitTerminalModelSnapshot(sessionId, entry.configOptions);
+      },
+      () => {},
+    );
+    return { slow: push };
+  }
+
+  /**
+   * A claimed standby whose own approval-mode push is still unanswered (`createStandbySession`
+   * went on after the bound). That push knows nothing of the chat — it started before there was an
+   * entry — so it can't be superseded the usual way (`supersededApprovalPush`), yet it can land
+   * AFTER the claim's push and leave the chat in the mode saved when the standby was made, which may
+   * be looser than the current one. So it is tracked as the chat's push in flight — the claim's
+   * push chains after it and the prompt gate waits for both — and once it lands the current mode is
+   * pushed again, before the gate can see the chain settle. One that fails changed nothing.
+   */
+  private adoptStandbyModePush(entry: SessionEntry, standbyPush: Promise<boolean>): void {
+    const all = standbyPush.then(
+      (landed) => {
+        if (!landed || this.sessions.get(entry.sessionId) !== entry) return;
+        logger.info(
+          {
+            tag: "session-manager",
+            op: "approval_mode_standby_push_landed_late",
+            agentId: entry.agentId,
+            sessionId: entry.sessionId,
+            mode: getApprovalMode(entry.agentId),
+          },
+          `The standby's approval-mode push landed after ${entry.sessionId} was claimed — pushing the current mode again`,
+        );
+        void this.pushApprovalModeToSession(entry.sessionId, entry.agentId, undefined, "new");
+      },
+      () => {},
+    );
+    const push = { promise: standbyPush, context: "standby" as const, all };
+    entry.approvalModePush = push;
+    void all.then(() => {
+      if (entry.approvalModePush === push) entry.approvalModePush = undefined;
+    });
+  }
+
+  /**
+   * A claimed standby whose model push is still unanswered. Landing after the claim's own push, it
+   * would leave the chat on the model saved when the standby was made — so once it settles, the
+   * model saved NOW is pushed again (a no-op when the chat already has it). Latest intent wins.
+   */
+  private adoptStandbyModelPush(entry: SessionEntry, standbyPush: Promise<void>): void {
+    void standbyPush.then(() => {
+      if (this.sessions.get(entry.sessionId) !== entry) return;
+      void this.pushModelBounded(entry.sessionId, entry.agentId, entry.configOptions);
+    });
+  }
+
+  /**
+   * Push the saved approval mode, but let the caller (activation, a new chat) go on after
+   * `approvalModePushWaitMs`: the ACP SDK puts no timeout on `set_mode`, and one that never
+   * answers must not hang activation — every later history GET joins that activation. The push
+   * carries on in the background, tracked on the entry, and the prompt gate (`awaitApprovalMode`)
+   * is what enforces the mode. Returns `{ slow }`, that push, when it outlasted the bound (a standby
+   * has no entry to track it on, so it keeps it itself); undefined when it settled in time.
+   */
+  private async pushApprovalModeBounded(
+    sessionId: string,
+    agentId: string,
+    availableModes: { id: string }[] | undefined,
+    context: ApprovalPushContext,
+  ): Promise<{ slow: Promise<boolean> } | undefined> {
+    const started = Date.now();
+    const push = this.pushApprovalModeToSession(sessionId, agentId, availableModes, context);
+    if (!(await this.outlasts(push, this.approvalModePushWaitMs))) return undefined;
+    logger.warn(
+      {
+        tag: "session-manager",
+        op: "approval_mode_push_slow",
+        agentId,
+        sessionId,
+        context,
+        waitedMs: Date.now() - started,
+      },
+      `${agentId} hasn't answered set_mode for ${sessionId} — going on; its prompts wait for it`,
+    );
+    // Wrapped: an async function returning the bare promise would wait for it.
+    return { slow: push };
+  }
+
+  /**
+   * Wait until `entry`'s approval-mode push in flight has settled, so `session/prompt` never runs
+   * ahead of the mode it must run under — and so a push that fails has posted its note before the
+   * user's message. Follows a newer push that replaced it (the picker changed meanwhile). Bounded
+   * by `approvalModePushWaitMs`, shared across the loop; what a timeout means is decided by
+   * `awaitApprovalMode`.
+   */
+  private async settleApprovalModePush(
+    entry: SessionEntry,
+  ): Promise<
+    | { settled: true }
+    | { settled: false; push: NonNullable<SessionEntry["approvalModePush"]>; waitedMs: number }
+  > {
+    const started = Date.now();
+    let push = entry.approvalModePush;
+    while (push) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = await Promise.race([
+        push.all.then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(
+            () => resolve(true),
+            Math.max(0, started + this.approvalModePushWaitMs - Date.now()),
+          );
+        }),
+      ]);
+      clearTimeout(timer);
+      if (timedOut) return { settled: false, push, waitedMs: Date.now() - started };
+      push = entry.approvalModePush === push ? undefined : entry.approvalModePush;
+    }
+    return { settled: true };
+  }
+
+  private async applyApprovalMode(
+    sessionId: string,
+    agentId: string,
+    availableModes: { id: string }[] | undefined,
+    context: ApprovalPushContext,
+    generation: number,
+  ): Promise<boolean> {
+    const mode = getApprovalMode(agentId);
+    const entry = this.sessions.get(sessionId);
+    const modes =
+      availableModes ??
+      entry?.availableModes ??
+      this.advertisedModesByAgent.get(agentId);
+    const known = acpModeFor(agentId, mode, modes);
+    const unverified = known === null && !modes;
+    // Blind (nothing known): Claude's stable candidates in order, so a root refusal of
+    // `bypassPermissions` falls through to `default` exactly as a known set would.
+    const targets: readonly string[] =
+      known !== null ? [known] : unverified ? stableAcpModeCandidates(agentId, mode) : [];
+    if (targets.length === 0) {
+      if (!entry || (modes && mode === "auto-with-generations")) {
+        // No chat to tell (a standby — its claim pushes again), or the documented degrade: the
+        // never-prompt mode against a known vocabulary that has none of its ids. Nothing the chat
+        // is left in is more permissive than what was asked for, so it is a warning, not a note.
+        logger.warn(
+          {
+            tag: "session-manager",
+            op: "approval_mode_unsupported_by_agent",
+            agentId,
+            sessionId,
+            mode,
+            context,
+            availableModes: modes?.map((m) => m.id),
+          },
+          "approval.mode.unsupported_by_agent",
+        );
+        return false;
+      }
+      this.reportApprovalModeNotApplied(entry, mode, context, {
+        reason: modes ? "unsupported_by_agent" : "modes_unknown",
+        availableModes: modes?.map((m) => m.id),
+      });
+      return false;
+    }
+    // No process to push to (FINAL #4: this used to return silently). Logged so a push that did
+    // nothing is visible next to whatever later push or gate decides the chat.
+    const conn = this.pm?.getConnection(agentId);
+    if (!conn) {
+      logger.debug(
+        {
+          tag: "session-manager",
+          op: "approval_mode_no_connection",
           agentId,
           sessionId,
-          target,
+          mode,
+          context,
+          hasPm: !!this.pm,
         },
-        "approval.mode.set_failed",
+        `No ${agentId} connection to push approval mode "${mode}" to ${sessionId}`,
+      );
+      // A chat whose mode could not be pushed is not in that mode: held under Ask / Auto like any
+      // failed push, and a later push that lands clears it. Only when this push still speaks for
+      // the chat — a newer push, or a mode that moved on, decides instead.
+      if (
+        entry &&
+        entry.approvalModePushGeneration === generation &&
+        getApprovalMode(agentId) === mode
+      ) {
+        this.reportApprovalModeNotApplied(entry, mode, context, { reason: "set_failed", target: targets[0] });
+      }
+      return false;
+    }
+    let target = targets[0];
+    let applied = false;
+    let err: unknown;
+    for (const candidate of targets) {
+      target = candidate;
+      try {
+        await conn.setSessionMode({ sessionId, modeId: candidate });
+        applied = true;
+        break;
+      } catch (e) {
+        err = e;
+        if (candidate !== targets[targets.length - 1]) {
+          logger.info(
+            {
+              tag: "session-manager",
+              op: "approval_mode_candidate_refused",
+              agentId,
+              sessionId,
+              mode,
+              target: candidate,
+              context,
+              err: e,
+            },
+            `${agentId} refused mode id "${candidate}" — trying the next candidate`,
+          );
+        }
+      }
+    }
+    // Settled after a newer push started on this chat, or after the saved mode moved on: this push
+    // must not decide the chat's state — see `supersededApprovalPush`.
+    if (
+      entry &&
+      (entry.approvalModePushGeneration !== generation || getApprovalMode(agentId) !== mode)
+    ) {
+      return this.supersededApprovalPush(entry, mode, target, applied, context, generation);
+    }
+    if (!applied) {
+      if (!entry) {
+        logger.warn(
+          {
+            tag: "session-manager",
+            op: "approval_mode_set_failed",
+            err,
+            agentId,
+            sessionId,
+            target,
+            context,
+          },
+          "approval.mode.set_failed",
+        );
+        return false;
+      }
+      this.reportApprovalModeNotApplied(entry, mode, context, {
+        reason: "set_failed",
+        target,
+        unverified,
+        err,
+      });
+      return false;
+    }
+    if (unverified) {
+      logger.info(
+        {
+          tag: "session-manager",
+          op: "approval_mode_pushed_unverified",
+          agentId,
+          sessionId,
+          mode,
+          target,
+          context,
+        },
+        `Pushed ${agentId}'s stable mode id "${target}" without an advertised mode set`,
       );
     }
+    if (entry && entry.approvalModeNotApplied !== undefined) {
+      entry.approvalModeNotApplied = undefined;
+      entry.approvalModeNotAppliedReason = undefined;
+      this.reportApprovalModeApplied(entry, mode);
+    }
+    return true;
+  }
+
+  /** Remember the mode ids `agentId`'s adapter advertised, for chats that have none of their own. */
+  private rememberAdvertisedModes(
+    agentId: string,
+    modes: { id: string }[] | undefined,
+  ): void {
+    if (modes && modes.length > 0) this.advertisedModesByAgent.set(agentId, modes);
+  }
+
+  /** Log, once per agent per process and at debug level, which keys its `session/load` answers with. */
+  private logLoadResponseShape(agentId: string, loadResult: unknown): void {
+    if (this.loadResponseShapeLogged.has(agentId)) return;
+    this.loadResponseShapeLogged.add(agentId);
+    const keys =
+      loadResult && typeof loadResult === "object" ? Object.keys(loadResult).sort() : [];
+    const modes = (loadResult as { modes?: { availableModes?: { id: string }[] } } | null)?.modes;
+    logger.debug(
+      {
+        tag: "session-manager",
+        op: "load_session_response_shape",
+        agentId,
+        keys,
+        modeIds: modes?.availableModes?.map((m) => m.id),
+      },
+      `${agentId} session/load answered with: ${keys.join(", ") || "(nothing)"}`,
+    );
+  }
+
+  /**
+   * A chat's saved approval mode could not be applied: say so, loudly and in the chat.
+   *
+   * The session keeps running in whatever mode the agent chose itself — for Claude the user's own
+   * `permissions.defaultMode`, which can be `auto` — while the picker still shows the saved one.
+   * That silent gap is full-verification F5, so it is logged at ERROR level and the chat gets a
+   * note, both in its history (a reload keeps it) and live. The note's id is stable per session,
+   * mode and note epoch, so a repeat never double-posts. Cleared from the entry by the next push
+   * that lands, which posts an "applied" note and starts a new epoch (`reportApprovalModeApplied`).
+   */
+  private reportApprovalModeNotApplied(
+    entry: SessionEntry,
+    mode: ApprovalMode,
+    context: ApprovalPushContext,
+    details: {
+      reason: ApprovalNotAppliedReason;
+      availableModes?: string[];
+      waitedMs?: number;
+      target?: string;
+      unverified?: boolean;
+      err?: unknown;
+    },
+  ): void {
+    const { sessionId, agentId } = entry;
+    logger.error(
+      {
+        tag: "session-manager",
+        op: "approval_mode_not_applied",
+        agentId,
+        sessionId,
+        mode,
+        context,
+        ...details,
+      },
+      `libi could not apply approval mode "${mode}" to ${agentId} session ${sessionId} (${details.reason}) — it runs in the agent's own mode`,
+    );
+    entry.approvalModeNotApplied = mode;
+    entry.approvalModeNotAppliedReason = details.reason;
+    const text = approvalModeNotAppliedNote(agentId, mode, context, details.reason);
+    // Epoch 0 keeps the original id; after an "applied" note, a new failure is a new note.
+    const epoch = entry.approvalModeNoteEpoch ?? 0;
+    const noteId = `note_approval_mode_${sessionId}_${mode}${epoch > 0 ? `_${epoch}` : ""}`;
+    this.postApprovalModeNote(entry, noteId, text);
+  }
+
+  /**
+   * A push landed on a chat that carried a not-applied note: retract it in the chat, so the user
+   * isn't left reading "libi won't send messages here" after it does. Bumps the chat's note epoch,
+   * so a later failure posts a fresh note rather than deduping into the first.
+   */
+  private reportApprovalModeApplied(entry: SessionEntry, mode: ApprovalMode): void {
+    const epoch = (entry.approvalModeNoteEpoch ?? 0) + 1;
+    entry.approvalModeNoteEpoch = epoch;
+    logger.info(
+      {
+        tag: "session-manager",
+        op: "approval_mode_applied_after_failure",
+        agentId: entry.agentId,
+        sessionId: entry.sessionId,
+        mode,
+        epoch,
+      },
+      `Approval mode "${mode}" now applied to ${entry.sessionId}`,
+    );
+    this.postApprovalModeNote(
+      entry,
+      `note_approval_mode_applied_${entry.sessionId}_${epoch}`,
+      `'${APPROVAL_MODE_LABELS[mode]}' is now applied to this chat.`,
+    );
+  }
+
+  /** Put an approval-mode note in the chat's history (once per id) and send it live. */
+  private postApprovalModeNote(entry: SessionEntry, noteId: string, text: string): void {
+    if (!entry.messageCache.some((m) => m.id === noteId)) {
+      const note: AgentMessage = {
+        id: noteId,
+        role: "agent",
+        parts: [{ type: "text", text }],
+        timestamp: Date.now(),
+      };
+      // Mid-turn (the picker changed while a reply streams), the note goes BEFORE the streaming
+      // reply: a history refetch adopts the last fetched agent message as the live one
+      // (`applyHistory`), and the rest of the reply would otherwise stream onto the note.
+      const streaming = entry.currentAgentMessage
+        ? entry.messageCache.indexOf(entry.currentAgentMessage)
+        : -1;
+      if (streaming >= 0) entry.messageCache.splice(streaming, 0, note);
+      else entry.messageCache.push(note);
+    }
+    this.emitForSession(entry.sessionId, { type: "chat-note", text, noteId });
   }
 
   /**
@@ -1703,7 +2668,11 @@ export class SessionManager {
    * mode for an agent so all currently-running sessions adopt the new policy
    * immediately. Inactive sessions get the new mode the next time they're
    * activated — `performActivation` re-pushes after `loadSession` succeeds.
-   * Pushes run in parallel; each is independent and error-swallowing.
+   * Pushes run in parallel; each is independent and error-swallowing, and each
+   * is bounded (`pushApprovalModeBounded`): a `set_mode` that never answers must
+   * not hold the PATCH (33.9 s in APR-1's live repro). A push still in flight
+   * past the bound carries on, tracked on its entry, and the prompt gate
+   * (`awaitApprovalMode`) holds that chat's prompts until it lands.
    */
   async applyApprovalModeToActiveSessions(agentId: string): Promise<void> {
     const targets: string[] = [];
@@ -1714,7 +2683,7 @@ export class SessionManager {
     }
     await Promise.all(
       targets.map((sessionId) =>
-        this.pushApprovalModeToSession(sessionId, agentId, undefined),
+        this.pushApprovalModeBounded(sessionId, agentId, undefined, "change"),
       ),
     );
   }
@@ -1902,6 +2871,10 @@ export class SessionManager {
     setImmediate(async () => {
       try {
         await this.deactivateSession(sessionId);
+        // The turn the deactivate retired is ended NOW, before the load's replay starts — not by
+        // the grace timer, which could otherwise fire in the middle of it. A prompt that answered
+        // the close already ended it with its own stop reason; a late answer adds nothing.
+        this.endOwedTurn(entry, "cancelled");
         await this.activateSession(sessionId);
       } catch (err) {
         logger.warn(
@@ -2074,7 +3047,12 @@ export class SessionManager {
     this.discardStaleStandby(agentId);
 
     try {
-      let stuck = await this.closeForRestart(entry);
+      let stuck: "close" | "load" | "mode_push" | null = await this.closeForRestart(entry);
+      checkpoint();
+      // Close answered, but the chat's approval-mode push still hasn't: a `set_mode` the adapter
+      // never answers keeps the chat held (and every later push chained behind it), and a load on
+      // the same process can't clear it. Only replacing the process lets go of it.
+      if (!stuck && (await this.modePushStillOutstanding(entry))) stuck = "mode_push";
       checkpoint();
       if (!stuck) {
         const loaded = await settleWithin(this.activateSession(sessionId), RESTART_LOAD_TIMEOUT_MS);
@@ -2213,7 +3191,7 @@ export class SessionManager {
    */
   private async replaceUnresponsiveProcess(
     entry: SessionEntry,
-    stage: "close" | "load",
+    stage: "close" | "load" | "mode_push",
   ): Promise<{ stale: Promise<AgentMessage[]> | undefined }> {
     const { agentId, sessionId } = entry;
     const pm = this.pm;
@@ -2253,6 +3231,7 @@ export class SessionManager {
     try {
       await pm.restartProcess(agentId);
     } catch (err) {
+      this.forgetModePushesOfOldProcess(agentId);
       // The old process is gone and no new one came up, so there is no standby either. A refusal is
       // an observed answer about the agent (readiness records it; installing or updating the CLI is
       // the user's to do), so nothing is started again. Any other failure says nothing about the
@@ -2267,8 +3246,47 @@ export class SessionManager {
         `The agent wasn't responding, and libi couldn't start it again${reason ? `: ${reason}` : "."}`,
       );
     }
+    this.forgetModePushesOfOldProcess(agentId);
     // Wrapped: an async function returning the promise itself would adopt it, awaiting the stale load.
     return { stale };
+  }
+
+  /**
+   * Whether `entry`'s approval-mode push chain is still unanswered after the close, given the same
+   * bound a prompt gate gives it (`approvalModePushWaitMs`) — a push merely slow gets its chance.
+   */
+  private async modePushStillOutstanding(entry: SessionEntry): Promise<boolean> {
+    const push = entry.approvalModePush;
+    if (!push) return false;
+    if ((await settleWithin(push.all, this.approvalModePushWaitMs)).kind !== "timed_out") return false;
+    logger.warn(
+      {
+        tag: "session-manager",
+        op: "session_restart_mode_push_stuck",
+        agentId: entry.agentId,
+        sessionId: entry.sessionId,
+        context: push.context,
+      },
+      `${entry.sessionId}'s approval-mode push is still unanswered at restart — the process must be replaced`,
+    );
+    return true;
+  }
+
+  /**
+   * The process of `agentId` was replaced or died (a Restart, a crash, a shell-environment or
+   * launcher restart — also when starting the new one failed): every approval-mode push still
+   * waiting on it was sent to
+   * a process that is gone, so none can change a session on the new one. Drop them from each chat's
+   * chain — otherwise the chat's next push chains behind one that may never settle, and its prompts
+   * stay held — and bump the push generation, so one that does settle late counts as superseded
+   * (it re-pushes the current mode at most; it never decides the chat's state).
+   */
+  private forgetModePushesOfOldProcess(agentId: string): void {
+    for (const entry of this.sessions.values()) {
+      if (entry.agentId !== agentId || !entry.approvalModePush) continue;
+      entry.approvalModePush = undefined;
+      entry.approvalModePushGeneration = (entry.approvalModePushGeneration ?? 0) + 1;
+    }
   }
 
   /**
@@ -2277,11 +3295,12 @@ export class SessionManager {
    * load that was stuck on it; until it lets go, a new load would only join it. A load that instead
    * ANSWERED at the last moment did so on the process that is gone — the entry is active on a
    * session the new process has never heard of, and the next activation would return that cache
-   * without loading — so it is let go the way the idle chats on the process were.
+   * without loading — so it is let go the way the idle chats on the process were. So is a chat
+   * active with no load to wait for: an activation that started AND finished on the old process
+   * while the restart waited (its stuck-push wait, NQ-7) is just as gone with that process.
    */
   private async dropStaleActivation(entry: SessionEntry, stale: Promise<unknown> | undefined): Promise<void> {
-    if (!stale) return;
-    if ((await settleWithin(stale, RESTART_STALE_SETTLE_MS)).kind === "timed_out") {
+    if (stale && (await settleWithin(stale, RESTART_STALE_SETTLE_MS)).kind === "timed_out") {
       throw new SessionRestartError(
         "agent_unresponsive",
         "The agent still isn't responding, even after libi restarted it. Quit and reopen libi, then try again.",
@@ -2353,22 +3372,47 @@ export class SessionManager {
         shellEnvLoaded,
         freshness,
       };
+      this.rememberAdvertisedModes(agentId, result.modes?.availableModes);
       // Route ACP notifications for the standby NOW — claude-agent-acp sends
       // available_commands_update right after newSession() returns, and the
       // createClient gate drops updates for unregistered sessionIds. Without
       // this, every standby-claimed chat has an empty command palette until
       // a later loadSession re-activation (QA 2026-07-04).
       this.pm.registerSessionId(agentId, result.sessionId);
-      await this.pushApprovalModeToSession(
+      // Bounded: a `set_mode` / `set_config_option` that never answers would leave
+      // `standbyCreating` set, and `restartIdleAgentForLauncher` would keep the hung process. The
+      // claim pushes both again (bounded) before the chat is handed out, and its prompts are gated.
+      const bounded = await this.pushApprovalModeBounded(
         result.sessionId,
         agentId,
         result.modes?.availableModes,
+        "standby",
       );
-      await this.pushModelToSession(
+      const slowModePush = bounded?.slow;
+      if (slowModePush && this.standbySession?.sessionId === result.sessionId) {
+        const standby = this.standbySession;
+        standby.approvalModePush = slowModePush;
+        void slowModePush.then(
+          () => {
+            if (standby.approvalModePush === slowModePush) standby.approvalModePush = undefined;
+          },
+          () => {},
+        );
+      }
+      const boundedModel = await this.pushModelBounded(
         result.sessionId,
         agentId,
         result.configOptions ?? [],
       );
+      const slowModelPush = boundedModel?.slow;
+      if (slowModelPush && this.standbySession?.sessionId === result.sessionId) {
+        const standby = this.standbySession;
+        standby.modelPush = slowModelPush;
+        void slowModelPush.then(() => {
+          if (standby.modelPush === slowModelPush) standby.modelPush = undefined;
+        });
+      }
+      this.standbyFailedFor = null;
       logger.info(
         {
           tag: "session-manager",
@@ -2381,6 +3425,7 @@ export class SessionManager {
         `Standby session ready: ${result.sessionId} (${Date.now() - start}ms)`,
       );
     } catch (err) {
+      this.standbyFailedFor = agentId;
       // For codex this is THE failure the user sees: it advertises
       // canListSessions:false, so the standby is the only session it would
       // ever get, and until now its death emitted nothing but
@@ -2518,6 +3563,7 @@ export class SessionManager {
     try {
       await this.pm.restartProcess(agentId);
     } catch (err) {
+      this.forgetModePushesOfOldProcess(agentId);
       // A typed refusal is an observed answer about the agent: readiness records it, and its remedy
       // (install or update the CLI) is the user's to act on, so nothing is started again. Any other
       // failure (an ACP initialize timeout, say) says nothing about the agent, so readiness is left
@@ -2530,12 +3576,92 @@ export class SessionManager {
       if (!isAgentSpawnRefused(err)) this.startAgainAfterFailedRestart(agentId, epoch);
       return;
     }
+    this.forgetModePushesOfOldProcess(agentId);
     await this.createStandbySession();
   }
 
   /**
+   * A launcher the user installed after `agentId`'s process started (detection's `launcherAfterStart`):
+   * Codex starts its MCP servers from one long-lived process, so a running one never gets the PATH
+   * that grew since (`lib/agents/agent-path.ts`). An IDLE process is replaced the way the
+   * shell-environment refresh replaces one: its unclaimed standby is discarded, the process restarted
+   * — spawned with the PATH as it is now — and, when it is the active agent, a standby made again.
+   *
+   * Never while a chat runs on the process or is being opened on it, nor while its standby is being
+   * created: the process is kept, and the Providers tab keeps its "restart libi" hint. Nor unless a new
+   * process would find one of `launchers` (the flagged rows' bare names) on the PATH it would get, read
+   * fresh (the registry's on Windows): a launcher found somewhere that PATH doesn't reach would otherwise
+   * restart the process on every detection pass.
+   *
+   * `restarting` (the hint can go) while the replacement is under way, a second call joining the one
+   * already running; it settles, never rejects, once the new process is up and its standby made, or the
+   * restart failed (then, as after the shell-environment restart, one background start follows).
+   */
+  async restartIdleAgentForLauncher(
+    agentId: string,
+    launchers: readonly string[],
+  ): Promise<{ restarting: Promise<void> } | { kept: LauncherRestartKept }> {
+    // The PATH a new process would get, read now (Windows: the registry; elsewhere a no-op).
+    const pathRefresh = refreshFreshPathDirs();
+    if (pathRefresh) await pathRefresh;
+    const pm = this.pm;
+    const kept = (reason: LauncherRestartKept) => {
+      if (this.launcherRestartKeptLogged.get(agentId) !== reason) {
+        this.launcherRestartKeptLogged.set(agentId, reason);
+        logger.info(
+          { tag: "session-manager", op: "launcher_restart_kept", agentId, reason },
+          "A launcher was installed after this agent's process started; keeping the process",
+        );
+      }
+      return { kept: reason } as const;
+    };
+    if (!pm?.restartProcess) return kept("no_process");
+    const pending = pm.pendingRestart?.(agentId);
+    if (pending) return { restarting: pending };
+    if (!pm.getConnection(agentId)) return kept("no_process");
+    const busy = this.chatOnProcess(agentId);
+    if (busy) return kept(busy);
+    if (this.standbyCreating && this._activeAgentId === agentId) return kept("standby_creating");
+    const next = (agentChildPath() ?? "").split(pathDelimiter()).filter(Boolean);
+    const reached = launchers.some((name) => lookupLauncher(name, { loginShellDirs: () => [], processPathDirs: () => next }) === "found");
+    if (!reached) return kept("launcher_not_reached");
+
+    this.launcherRestartKeptLogged.delete(agentId);
+    const standby = this.standbySession?.agentId === agentId ? this.standbySession : null;
+    if (standby) {
+      this.standbySession = null;
+      this.emitSystemEvent({ type: "standby-ready", ready: false });
+      pm.getConnection(agentId)?.closeSession({ sessionId: standby.sessionId }).catch(() => {});
+      pm.unregisterSessionId(agentId, standby.sessionId);
+    }
+    logger.info(
+      { tag: "session-manager", op: "launcher_restart", agentId, standbyDiscarded: standby !== null },
+      "A launcher was installed after this idle agent's process started; restarting it so its MCP servers can run it",
+    );
+    const epoch = ++this.agentStartEpoch;
+    const restartProcess = pm.restartProcess.bind(pm);
+    const restarting = (async (): Promise<void> => {
+      try {
+        await restartProcess(agentId);
+      } catch (err) {
+        this.forgetModePushesOfOldProcess(agentId);
+        this.markAgentSpawnRefused(agentId, err);
+        logger.warn(
+          { tag: "session-manager", op: "launcher_restart_failed", agentId, err },
+          "Could not restart the agent for its new launcher",
+        );
+        if (!isAgentSpawnRefused(err)) this.startAgainAfterFailedRestart(agentId, epoch);
+        return;
+      }
+      this.forgetModePushesOfOldProcess(agentId);
+      if (this._activeAgentId === agentId) await this.createStandbySession();
+    })().catch(() => {});
+    return { restarting };
+  }
+
+  /**
    * One background start of `agentId` after a restart of its process failed for a reason other
-   * than a refusal — the shell-environment restart, or a chat restart replacing an unresponsive
+   * than a refusal — the shell-environment restart, the new-launcher restart, or a chat restart replacing an unresponsive
    * process (`replaceUnresponsiveProcess`). That restart left no process and no standby, and nothing else starts one until
    * the user opens a chat or picks the agent again — meanwhile "New chat" stays disabled on
    * "Preparing a new chat session…", a state that would never finish.
@@ -3188,6 +4314,7 @@ export class SessionManager {
     if (this.standbySession?.agentId === agentId) {
       this.standbySession = null;
     }
+    this.forgetModePushesOfOldProcess(agentId);
   }
 
   // -------------------------------------------------------------------------
@@ -3283,6 +4410,24 @@ export class SessionManager {
       );
     }
     return this.eventHandler;
+  }
+
+  /**
+   * The chat a libi tool call belongs to, for a navigation that should move only the tab showing
+   * that chat (NAV-1): by the ACP toolCallId when the MCP child had one (Claude's toolUseId), else
+   * by the registered tool name + args against the chats' unresolved calls — the same two keys the
+   * job progress bridge uses. Null when no libi chat holds the call (a CLI agent's).
+   */
+  sessionForToolCall(call: { toolCallId?: string; toolName?: string; toolArgs?: unknown }): string | null {
+    if (call.toolCallId) {
+      const entry = this.findSessionByToolCallId(call.toolCallId);
+      if (entry) return entry.sessionId;
+    }
+    if (call.toolName?.startsWith("libi.")) {
+      const hit = this.findInProgressToolCall([makeMcpToolId(LIBI_MCP_ENTRY_NAME, call.toolName)], call.toolArgs);
+      if (hit) return hit.session.sessionId;
+    }
+    return null;
   }
 
   /** Walk every active session's message cache looking for a tool-call or
@@ -3437,7 +4582,10 @@ function isStalePrompt(entry: SessionEntry, ticket: PromptTicket): boolean {
   return (entry.promptEpoch ?? 0) !== ticket.epoch;
 }
 
-const SM_GLOBAL_KEY = "__sessionManager_v5";
+// v6 (week/2026-10-02): APR-1 `awaitApprovalMode`, SES-4 `forgetSession` + the chat index, NAV-1
+// `sessionForToolCall` — routes call each, and a hot-reloaded dev server kept a v5 instance without
+// them. Bumped once for the week.
+const SM_GLOBAL_KEY = "__sessionManager_v6";
 
 const globalForSM = globalThis as unknown as {
   [SM_GLOBAL_KEY]?: SessionManager;
@@ -3448,6 +4596,7 @@ export function getSessionManager(): SessionManager {
   if (!sm) {
     sm = new SessionManager();
     globalForSM[SM_GLOBAL_KEY] = sm;
+    sm.setSessionIndex(fileSessionIndex());
 
     // Register callback so mcp-config can refresh sessions without importing
     // us directly. We only refresh the standby — never disturb sessions

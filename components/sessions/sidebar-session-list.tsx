@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { LoaderCircle } from "lucide-react";
 import { isSetupAgentId } from "@/lib/agents/setup/registry";
 import { useRestartSession, useSessionRestarting } from "@/lib/queries/session-restart";
+import { useForgetSession } from "@/lib/queries/session-forget";
 import { getSessionIcon } from "@/lib/sessions/session-icons";
 import { useEditorState } from "@/lib/editor-state-context";
 import {
@@ -179,6 +180,22 @@ export default function SidebarSessionList() {
     isViewed: (sessionId) => highlightActive && sessionId === activeSessionId,
   });
   const menuRestarting = useSessionRestarting(contextMenu?.sessionId ?? null);
+  // "Remove from list" on a chat whose history is gone. Once removed, the list is fetched again;
+  // a removed chat that was on screen hands the editor to the most recent remaining one.
+  const forgetSession = useForgetSession({
+    onForgotten: (sessionId) => {
+      if (sessionId === sessionList.activeSessionId) {
+        const next = groups.flatMap((g) => g.sessions).find((s) => s.sessionId !== sessionId);
+        sessionList.setActiveSessionId(next?.sessionId ?? null);
+      }
+      sessionList.refresh();
+    },
+  });
+  const menuSession = contextMenu
+    ? groups.flatMap((g) => g.sessions).find((s) => s.sessionId === contextMenu.sessionId)
+    : undefined;
+  const menuHistoryMissing = menuSession?.historyMissing === true;
+  const menuRemovable = menuHistoryMissing || menuSession?.unlisted === true;
 
   const handleSwitch = (sessionId: string) => {
     // Navigate first so the user sees the editor (and its connecting skeleton)
@@ -225,6 +242,12 @@ export default function SidebarSessionList() {
     setContextMenu(null);
     restartSession.mutate(sessionId);
   };
+  const handleRemove = () => {
+    if (!contextMenu) return;
+    const { sessionId } = contextMenu;
+    setContextMenu(null);
+    forgetSession.mutate(sessionId);
+  };
 
   // Terminal surface: the sidebar shows live terminal sessions instead of
   // ACP chat sessions. Branch AFTER the hooks above so hook order is stable
@@ -266,7 +289,7 @@ export default function SidebarSessionList() {
     // app-sidebar.tsx) — so the list neither repeats the line nor says "No
     // sessions yet", an invitation to make a session the user can't make.
     const readiness = sessionList.readiness;
-    if (readiness?.state === "needs-auth" || readiness?.state === "not-installed") {
+    if (readiness?.state === "needs-auth" || readiness?.state === "not-installed" || readiness?.state === "config-error") {
       return null;
     }
 
@@ -311,8 +334,11 @@ export default function SidebarSessionList() {
         <SessionContextMenu
           state={contextMenu}
           onCopyId={handleCopyId}
-          onRestart={canRestart ? handleRestart : undefined}
+          // A chat whose history is gone can't be loaded again, so a restart can't help it; what
+          // it can do is leave the list.
+          onRestart={canRestart && !menuHistoryMissing ? handleRestart : undefined}
           restarting={menuRestarting}
+          onRemove={menuRemovable ? handleRemove : undefined}
         />
       )}
     </>

@@ -75,17 +75,19 @@ const GRAPHICS_OVERLAY_KINDS = new Set(["text", "code", "three"]);
  *  which decode or filter existing pixels. */
 const GRAPHICS_TRACKED_CONTENT_KINDS = new Set(["text", "code", "emoji"]);
 
-/** True when the composition has any overlay whose content is rendered as
- *  text/code/3D graphics — the signal that gates the `graphicsQuality` tier
- *  in `resolveOutputDimensions`. Pure; accepts an empty/undefined list.
- *  Structurally typed so both the live `Overlay` and the persisted manifest
- *  shape pass without a cast. Canvas `scenes` are not counted (they are
- *  almost always empty), and a hidden graphics overlay still counts. */
+/** True when the composition has any VISIBLE overlay whose content is
+ *  rendered as text/code/3D graphics — the signal that gates the
+ *  `graphicsQuality` tier in `resolveOutputDimensions`. Pure; accepts an
+ *  empty/undefined list. Structurally typed so both the live `Overlay` and
+ *  the persisted manifest shape pass without a cast. Canvas `scenes` are not
+ *  counted (they are almost always empty). A hidden one (`overlay.hidden`,
+ *  the eye toggle) does not: every export strips it (`lib/overlays/hidden.ts`). */
 export function hasGraphicsOverlays(
-  overlays: ReadonlyArray<{ kind: string; content?: unknown }> | undefined,
+  overlays: ReadonlyArray<{ kind: string; content?: unknown; hidden?: boolean }> | undefined,
 ): boolean {
   if (!overlays) return false;
   return overlays.some((overlay) => {
+    if (overlay.hidden === true) return false;
     if (GRAPHICS_OVERLAY_KINDS.has(overlay.kind)) return true;
     if (overlay.kind === "tracked") {
       // A text overlay's `content` is a string; only a tracked overlay's is
@@ -160,6 +162,15 @@ export function resolveAudioBitrate(format: ExportSettings["format"], requested?
 /** Resolve a partial ExportSettings + a source resolution into a fully-typed
  *  settings object with concrete width/height/bitrate. Pure. */
 export function resolveExportSettings(
+  partial: Parameters<typeof resolveExportSettingsWithTier>[0],
+): ExportSettings {
+  return resolveExportSettingsWithTier(partial).settings;
+}
+
+/** `resolveExportSettings`, plus which tier set the frame (`drivenBy`:
+ *  "graphics" when text/code/3D raised it above what `quality` alone gives —
+ *  the export route reports it so export_video can say so). Pure. */
+export function resolveExportSettingsWithTier(
   partial: Pick<ExportSettings, "format" | "codec" | "fps" | "quality" | "audioBitrate" | "graphicsQuality"> & {
     sourceWidth: number;
     sourceHeight: number;
@@ -170,7 +181,7 @@ export function resolveExportSettings(
      *  off `quality`, as before graphics resolution existed. */
     hasGraphics?: boolean;
   },
-): ExportSettings {
+): { settings: ExportSettings; drivenBy: "media" | "graphics" } {
   const quality: ExportQuality = partial.quality ?? "source";
   // Absent ⇒ "4k" (sharpest) — matches the stored-settings + MCP defaults so
   // an omitted graphicsQuality never silently downgrades a graphics-bearing
@@ -178,7 +189,7 @@ export function resolveExportSettings(
   const graphicsQuality: GraphicsQuality = partial.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY;
   const hasGraphics = partial.hasGraphics ?? false;
 
-  const { width, height } = resolveOutputDimensions({
+  const { width, height, drivenBy } = resolveOutputDimensions({
     quality,
     graphicsQuality,
     hasGraphics,
@@ -191,7 +202,7 @@ export function resolveExportSettings(
   const bitrate = bitrateForPixels(width * height);
   const audioBitrate = resolveAudioBitrate(partial.format, partial.audioBitrate);
 
-  return {
+  const settings: ExportSettings = {
     format: partial.format,
     codec: partial.codec,
     bitrate,
@@ -202,6 +213,7 @@ export function resolveExportSettings(
     quality,
     graphicsQuality,
   };
+  return { settings, drivenBy };
 }
 
 /** True when the target resolution is strictly larger than the source. UI

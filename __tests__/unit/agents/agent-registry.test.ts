@@ -720,3 +720,35 @@ describe("the unresolved-adapter warning says what is actually happening", () =>
     expect(message).toMatch(/Codex support isn't downloaded yet — set it up in Agents/);
   });
 });
+
+// A production Next build bundles the job runners and the API routes apart, so each
+// loads its own copy of this module. The agent_install job's refresh ran in one copy
+// and the status route read the other, which kept saying "missing" for a Codex
+// adapter already on disk — the wizard's "Couldn't download Codex support" (0.1.16).
+describe("the agent cache across module copies", () => {
+  beforeEach(() => {
+    mockResolveRepoLocalAdapterBin.mockReset();
+    mockResolveInstalledAdapterBin.mockReset();
+    clearAgentCache();
+  });
+
+  it("a refresh in one copy reaches a copy loaded separately", async () => {
+    resolveBins({ claude: { repoLocal: REPO_LOCAL_ADAPTER_BIN } });
+    vi.resetModules();
+    const route = await import("@/lib/agents/acp/agent-registry");
+    expect(route.getAgentConfig("codex")?.installed).toBe(false);
+
+    // The job finishes the download, then refreshes in ITS copy.
+    resolveBins({
+      claude: { repoLocal: REPO_LOCAL_ADAPTER_BIN },
+      codex: { installed: `${AGENT_INSTALL_ROOT}/node_modules/.bin/codex-acp` },
+    });
+    vi.resetModules();
+    const job = await import("@/lib/agents/acp/agent-registry");
+    expect(job).not.toBe(route);
+    job.refreshAgentCache();
+
+    expect(route.getAgentConfig("codex")?.installed).toBe(true);
+    route.clearAgentCache();
+  });
+});

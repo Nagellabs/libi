@@ -56,7 +56,7 @@ function rowFor(
   if (!cli) return { kind: "no-cli" };
   if (!cli.meetsMinimum) return { kind: "below-minimum" };
   if (!reg || reg.state === "unknown") return { kind: "unknown" };
-  const setupCli: SetupCli = { agentId, realPath: cli.realPath };
+  const setupCli: SetupCli = { agentId, realPath: cli.realPath, ...(cli.launch ? { launch: cli.launch } : {}) };
   const stale = reg.stale === true;
   if (reg.state === "not-connected") return { kind: "not-connected", cli: setupCli, stale };
   if (agentId === "claude-code") {

@@ -233,7 +233,13 @@ describe("SessionManager — a history replay is not broadcast as a live turn", 
         };
       }
       replay(REPLAY);
-      return {};
+      // codex-acp 1.10.0 answers `session/load` with the session's modes.
+      return {
+        modes: {
+          currentModeId: "agent",
+          availableModes: [{ id: "read-only" }, { id: "agent" }, { id: "agent-full-access" }],
+        },
+      };
     };
 
     const history = await sm.activateSession(SID);

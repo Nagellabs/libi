@@ -1,0 +1,7 @@
+{
+  "_source": "docs.zernio.com Reels with catalog audio example, 2026-09-27 — NOT live",
+  "audio": [
+    { "audioId": "482851939985510", "title": "Summer Nights", "audioType": "music", "durationInMs": 182000, "displayArtist": "The Example Band", "downloadUrl": "https://scontent.cdninstagram.com/o1/v/t2/f2/m86/482851939985510.mp4" },
+    { "audioId": "990000000000001", "title": "my original", "audioType": "original", "durationInMs": 15000, "igUsername": "someone" }
+  ]
+}

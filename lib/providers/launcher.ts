@@ -15,7 +15,10 @@
  * - A bare name is searched on the login-shell PATH libi already knows (the
  *   last one `resolveAgentCli`'s probe delivered, and the desktop shell's
  *   `shell-path-cache.json`), then this process's PATH. Windows honours PATHEXT
- *   and has no login shell, so this process's PATH is the answer there.
+ *   and has no login shell: there the fresh PATH is the registry's (the last
+ *   read of `lib/agents/cli/windows-registry-path.ts`, which a detection pass
+ *   refreshes first), the one a new agent process and a new chat get
+ *   (`lib/agents/agent-path.ts`), then this process's PATH.
  * - The CLI resolver's known install folders (`knownInstallDirs`: `~/.local/bin`
  *   and friends) are deliberately NOT searched. The agent that launches the
  *   server gets a PATH, not those folders: the in-app ACP child inherits this
@@ -35,13 +38,15 @@
 import fs from "node:fs";
 import path from "node:path";
 import { lastLoginShellPathDirs } from "@/lib/agents/cli/login-shell-path";
+import { lastWindowsRegistryPathDirs } from "@/lib/agents/cli/windows-registry-path";
 import { cachedShellPathDirs } from "@/lib/shell-path-cache";
 
 export type LauncherLookup = "found" | "missing" | "unknown";
 
 export interface LauncherDeps {
   platform?: NodeJS.Platform;
-  /** The user's login-shell PATH, or null while none is known. Ignored on Windows. */
+  /** The PATH a process started now would get: the user's login-shell PATH, or on Windows the registry's; null
+   *  while none is known. */
   loginShellDirs?: () => string[] | null;
   processPathDirs?: () => string[];
   isExecutable?: (p: string) => boolean;
@@ -63,8 +68,10 @@ export function launcherName(command: string, platform: NodeJS.Platform = proces
   return pathFor(platform).basename(command.trim());
 }
 
-/** Both login-shell sources libi already has, without spawning; null when neither has a PATH. */
-function defaultLoginShellDirs(): string[] | null {
+/** Both login-shell sources libi already has, without spawning; null when neither has a PATH. On Windows, the
+ *  registry's PATH as last read (never read here). */
+function defaultLoginShellDirs(platform: NodeJS.Platform): string[] | null {
+  if (platform === "win32") return lastWindowsRegistryPathDirs();
   const dirs = [...(lastLoginShellPathDirs() ?? []), ...cachedShellPathDirs()];
   return dirs.length > 0 ? dirs : null;
 }
@@ -100,7 +107,7 @@ function windowsSpellings(file: string, pathExt: string): string[] {
 export function launcherLookupForPass(deps: LauncherDeps = {}): (command: string) => LauncherLookup {
   let login: string[] | null | undefined;
   const loginShellDirs = (): string[] | null => {
-    if (login === undefined) login = (deps.loginShellDirs ?? defaultLoginShellDirs)();
+    if (login === undefined) login = deps.loginShellDirs ? deps.loginShellDirs() : defaultLoginShellDirs(deps.platform ?? process.platform);
     return login;
   };
   return (command) => lookupLauncher(command, { ...deps, loginShellDirs });
@@ -121,11 +128,11 @@ export function lookupLauncher(command: string, deps: LauncherDeps = {}): Launch
   // `bin/server`, `./server.sh`: relative to the agent's working folder, which libi doesn't know.
   if (cmd.includes("/") || (platform === "win32" && cmd.includes("\\"))) return "unknown";
 
-  const login = platform === "win32" ? [] : (deps.loginShellDirs ?? defaultLoginShellDirs)();
+  const login = deps.loginShellDirs ? deps.loginShellDirs() : defaultLoginShellDirs(platform);
   const own = (deps.processPathDirs ?? (() => (process.env.PATH ?? "").split(p.delimiter).filter(Boolean)))();
   for (const dir of [...(login ?? []), ...own]) {
     if (dir && exists(p.join(dir, cmd))) return "found";
   }
-  // Windows has no login shell: this process's PATH is the whole answer there.
+  // Windows: the registry and this process's PATH are the whole answer — nothing to wait for.
   return platform === "win32" || login !== null ? "missing" : "unknown";
 }

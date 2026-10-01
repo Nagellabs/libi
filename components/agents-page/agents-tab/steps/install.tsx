@@ -171,7 +171,7 @@ export function InstallStep({ agent, status, recheck, rechecking, statusReadStar
             onClick={() =>
               flavor &&
               openCommand(
-                updateCommand({ agentId: agent, realPath: belowMinimum.realPath }, flavor, {
+                updateCommand({ agentId: agent, realPath: belowMinimum.realPath, ...(belowMinimum.launch ? { launch: belowMinimum.launch } : {}) }, flavor, {
                   claudeUpdateExists: CLAUDE_UPDATE_SUBCOMMAND_EXISTS,
                 }),
                 explainSetupCommand({
@@ -244,7 +244,8 @@ function CliFinding({ name, cli }: { name: string; cli: AgentStatus["cli"] }) {
       <p className={cli.meetsMinimum ? "text-sm text-foreground" : "text-sm font-medium text-foreground"}>
         {cli.meetsMinimum ? `${name} ${cli.version} is installed.` : `${name} ${cli.version} is older than libi needs.`}
       </p>
-      <code className="block break-all font-mono text-xs text-muted-foreground">{cli.path}</code>
+      {/* Where it really lives, not the PATH hit: under fnm that is a per-shell shim folder that changes on every probe. */}
+      <code className="block break-all font-mono text-xs text-muted-foreground">{cli.realPath}</code>
     </div>
   );
 }

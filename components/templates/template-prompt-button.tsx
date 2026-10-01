@@ -59,7 +59,9 @@ export function TemplatePromptButton({
             >
               <Icon className="size-3.5" />
             </TooltipTrigger>
-            <TooltipContent>{label}</TooltipContent>
+            {/* Below, not the default top: on a template card the row above is the
+                visibility control, and a tooltip over "Hide" / "Show again" took its click. */}
+            <TooltipContent side="bottom">{label}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
       ) : (

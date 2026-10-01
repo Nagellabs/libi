@@ -43,6 +43,7 @@ import next from "next";
 
 import { ensureNextExternalSymlinks } from "@/lib/install/next-externals";
 import { isWindows } from "@/lib/platform";
+import { describeFarmBeforeBoot, inspectFarmBeforeBoot, logBootTiming } from "@/lib/server/lifecycle/boot-timing";
 
 export interface StartNextServerOptions {
   /**
@@ -89,9 +90,10 @@ export async function startNextServer(
   // since a user has no terminal to read them from.
   //
   // Importing it here is idempotent with the `register()` call (Node caches the
-  // module), and this function is the single chokepoint every production launch
-  // goes through — packaged Electron via `shell-api`, and `npx` via
-  // `lib/cli/studio.ts`. Failure is non-fatal for the same reason as in
+  // module). This is the packaged Electron launch (via `shell-api`); `npx` runs
+  // its own production server in `lib/cli/studio.ts#runProductionServer`, which
+  // makes the same early import (it did not until EL-5, and its server.log
+  // stayed empty). Failure is non-fatal for the same reason as in
   // `register()`: logging must never be what stops the server booting.
   try {
     await import("next-logger");
@@ -110,10 +112,11 @@ export async function startNextServer(
   // makes an installed runtime servable at all. Every failure mode in here
   // throws loudly on purpose — see lib/install/next-externals.ts.
   //
-  // For the two runtimes this function actually serves — the snapshot inside
-  // the .app and a fetched `<LIBI_HOME>/runtime/<v>/` — the farm was already
-  // materialised at bundle-build / install time, so this call is a pure
-  // verify and `created` MUST be 0. A non-zero `created` here means the
+  // On macOS, for the two runtimes this function actually serves — the
+  // snapshot inside the .app and a fetched `<LIBI_HOME>/runtime/<v>/` — the
+  // farm was already materialised at bundle-build / install time, so this call
+  // is a pure verify and `created` MUST be 0. Windows is the exception, below:
+  // its installer ships no farm at all. A non-zero `created` here means the
   // shipped farm was missing or wrong and we just wrote into the (signed,
   // possibly read-only) app bundle to repair it: worth seeing in the log
   // rather than discovering as a codesign failure later.
@@ -125,6 +128,8 @@ export async function startNextServer(
   // evidence of why. The throw is still fatal, and should be: a server that
   // cannot resolve its externals 500s every route. It just says so first.
   let externals: ReturnType<typeof ensureNextExternalSymlinks>;
+  const farmBefore = inspectFarmBeforeBoot(path.join(dir, ".next"));
+  const farmStarted = Date.now();
   try {
     externals = ensureNextExternalSymlinks(path.join(dir, ".next"));
   } catch (err) {
@@ -134,18 +139,25 @@ export async function startNextServer(
     );
     throw err;
   }
-  // A non-zero `created` is a WARNING on macOS and NORMAL on Windows, and the
-  // line says which so nobody re-investigates the Windows case. NSIS stores no
-  // reparse points, so the farm materialised into the bundle at build time
-  // never reaches the installed tree — every Windows boot legitimately builds
-  // one, into a per-user directory that is neither signed nor read-only.
+  const farmMs = Date.now() - farmStarted;
+  // A non-zero `created` is a WARNING on macOS and NORMAL on a Windows first
+  // boot, and the line says which so nobody re-investigates the Windows case.
+  // The Windows installer ships NO farm: electron-builder would copy the
+  // build-time junctions as dereferenced real directories (883 files on
+  // 0.1.16), which this call then had to delete one by one, so the afterPack
+  // hook (scripts/afterpack.js -> scripts/afterpack-windows-externals.js:38-40)
+  // strips `resources/libi-bundle/node_modules/@nagellabs/libi/.next/node_modules`
+  // (the runtime root, via `runtimeRootFor` in scripts/build-runtime-bundle.js)
+  // from the Windows payload. The first boot builds the farm as junctions into
+  // the per-user install, which is neither signed nor read-only; later boots
+  // only verify it.
   const expectedRepair = isWindows();
   log(
-    `startNextServer: externals created=${externals.created.length} verified=${externals.verified.length}` +
+    `startNextServer: externals created=${externals.created.length} verified=${externals.verified.length} in ${farmMs}ms ${describeFarmBeforeBoot(farmBefore)}` +
       (externals.created.length === 0
         ? ""
         : expectedRepair
-          ? ` — built ${externals.created.length} externals junction(s) at boot, as Windows always must (NSIS does not ship the farm)`
+          ? ` — built ${externals.created.length} externals junction(s) at boot, as a Windows first boot must (the installer ships no farm)`
           : ` — WARNING: repaired ${externals.created.length} externals symlink(s) at boot; a packaged runtime should ship this farm already built`),
   );
 
@@ -201,6 +213,7 @@ export async function startNextServer(
       resolve(typeof addr === "object" && addr ? addr.port : 3000);
     });
   });
+  const portAt = Date.now();
   // Both are read downstream: `writePortFileAndInstallSignals()` (Category B)
   // prefers PORT; `getCurrentPort()` falls back to LIBI_PORT when the port file
   // is missing. Set them together so neither can disagree with the bind.
@@ -208,7 +221,14 @@ export async function startNextServer(
   process.env.LIBI_PORT = String(port);
   log(`startNextServer: bound 127.0.0.1:${port}, preparing Next from ${dir}`);
 
-  const nextApp = next({ dev: false, dir });
+  // `port` and `hostname` are not bind options here — this server is already
+  // bound — they are what Next synthesizes every handler's `request.url` (and
+  // `nextUrl`, `x-forwarded-port`) from. Left out, Next falls back to
+  // `localhost:3000`, a port this app never serves: that is how Social's
+  // "Connect libi" sent Zernio's callback to `127.0.0.1:3000` (SOC-3). Routes
+  // still take the studio port from `getCurrentPort()`, never `request.url`;
+  // this only keeps the URL Next hands them honest.
+  const nextApp = next({ dev: false, dir, port, hostname: "127.0.0.1" });
   nextApp
     .prepare()
     .then(() => {
@@ -219,5 +239,14 @@ export async function startNextServer(
       rejectReady(err);
     });
   await ready;
+  logBootTiming({
+    surface: "electron",
+    farmMs,
+    farmCreated: externals.created.length,
+    farmVerified: externals.verified.length,
+    ...farmBefore,
+    portAt,
+    readyAt: Date.now(),
+  });
   return { port, server };
 }

@@ -1,0 +1,100 @@
+name: Install libi's ffmpeg 9.0
+description: >-
+  Installs BtbN's linux64-gpl ffmpeg/ffprobe from the n9.0 release line into
+  /usr/local/bin — the build libi itself installs on Linux — after checking it
+  against the release's checksums.sha256, and proves it carries drawtext.
+
+# ONE install for all three gates jobs: test.yml, release-npm.yml and
+# release-electron.yml. It lived inline in test.yml only, so on 0.1.16 the two
+# release gates ran with NO ffmpeg and every real-ffmpeg test in them skipped
+# through hasFfmpeg() (__tests__/helpers/media.ts) — green over coverage that
+# never ran. The workflows also set LIBI_REQUIRE_FFMPEG=1 on their Test step,
+# which turns a missing ffmpeg into a failure instead of a skip.
+#
+# Why THIS build and not apt's: the audio-timing tests pin what ffmpeg 9 does
+# with encoder delay, Matroska CodecDelay and late-starting streams; apt's 6.x
+# answers differently and failed 17 of them on the 0.1.16 candidate. Pinned to
+# the n9.0 line, not master, so a new ffmpeg can't turn CI red overnight.
+# drawtext (libfreetype) is checked because without it the caption burn-in and
+# text-overlay tests skip.
+#
+# This asset now sits on the RELEASE path, so three things are guarded:
+#   * BtbN's `latest` release is rebuilt daily and carries only the newest
+#     release lines (n8.1 and n9.0 in 2026-09). When a newer line appears, n9.0
+#     rotates OUT and this URL 404s in all three gates at once. The step then
+#     fails naming this file: move ASSET to the line libi installs on Linux
+#     (mcp/registry/bundled.ts), in the same change.
+#   * The daily re-upload briefly leaves assets missing; curl's plain --retry
+#     does NOT retry a 404, so --retry-all-errors does.
+#   * The bytes are checked against the release's own checksums.sha256 rather
+#     than trusted because tar happened to unpack them.
+#
+# SETUP_FFMPEG_WORK_DIR and SETUP_FFMPEG_INSTALL_DIR exist so the
+# release-pipeline unit test can run this exact script against a fake
+# registry; CI uses the defaults.
+
+runs:
+  using: composite
+  steps:
+    - name: Download, verify and install ffmpeg 9.0
+      shell: bash
+      env:
+        ASSET: ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz
+        BASE_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
+      run: |
+        set -euo pipefail
+        # Our OWN subdirectory of whatever parent we are given, and only it is
+        # ever deleted: SETUP_FFMPEG_WORK_DIR names a parent, never a target.
+        work="${SETUP_FFMPEG_WORK_DIR:-${RUNNER_TEMP:-/tmp}}/libi-setup-ffmpeg"
+        dest="${SETUP_FFMPEG_INSTALL_DIR:-/usr/local/bin}"
+        here=".github/actions/setup-ffmpeg/action.yml"
+        rm -rf "$work" && mkdir -p "$work/x"
+        fetch() { curl -fsSL --retry 5 --retry-all-errors --retry-delay 10 -o "$2" "$1"; }
+
+        # checksums.sha256 → the asset's line → the asset → sha256sum -c.
+        # Returns 0 verified, 1 mismatch; exits the step on anything else.
+        download_and_verify() {
+          if ! fetch "$BASE_URL/checksums.sha256" "$work/checksums.sha256"; then
+            echo "::error title=setup-ffmpeg::could not download $BASE_URL/checksums.sha256 after 5 retries."
+            exit 1
+          fi
+          line="$(awk -v a="$ASSET" '$2 == a || $2 == "*" a' "$work/checksums.sha256")"
+          if [ -z "$line" ]; then
+            echo "::error title=setup-ffmpeg::$ASSET is no longer in BtbN's latest release (its release line rotated out). Update ASSET in $here to the line libi installs on Linux."
+            echo "Assets the release lists now:"
+            awk '{print "  " $2}' "$work/checksums.sha256" | grep linux64-gpl || true
+            exit 1
+          fi
+          if ! fetch "$BASE_URL/$ASSET" "$work/$ASSET"; then
+            echo "::error title=setup-ffmpeg::$ASSET is listed in checksums.sha256 but could not be downloaded after 5 retries."
+            exit 1
+          fi
+          (cd "$work" && printf '%s\n' "$line" | sha256sum -c -)
+        }
+
+        # BtbN re-uploads `latest` daily, and the two fetches are a second
+        # apart: the checksums can describe one upload and the asset be the
+        # next. So a mismatch re-fetches BOTH once before it is believed.
+        if ! download_and_verify; then
+          echo "$ASSET did not match checksums.sha256; re-fetching both once (BtbN may be mid re-upload)…"
+          if ! download_and_verify; then
+            echo "::error title=setup-ffmpeg::$ASSET does not match BtbN's checksums.sha256, twice. This can happen during BtbN's daily re-upload of the latest release: re-run the job. If it repeats, suspect the asset itself. Not installing it."
+            exit 1
+          fi
+        fi
+
+        tar -xJf "$work/$ASSET" -C "$work/x" --strip-components=1
+        if [ -w "$dest" ]; then
+          install -m 0755 "$work/x/bin/ffmpeg" "$work/x/bin/ffprobe" "$dest/"
+        else
+          sudo install -m 0755 "$work/x/bin/ffmpeg" "$work/x/bin/ffprobe" "$dest/"
+        fi
+        # Capture first, then grep: `ffmpeg | grep -q` under pipefail can fail
+        # on SIGPIPE when grep exits before ffmpeg has finished writing.
+        version="$(ffmpeg -version)"
+        echo "${version%%$'\n'*}"
+        filters="$(ffmpeg -hide_banner -filters)"
+        if ! grep -q drawtext <<<"$filters"; then
+          echo "::error title=setup-ffmpeg::the installed ffmpeg has no drawtext filter; the caption and text-overlay tests would skip."
+          exit 1
+        fi

@@ -4,6 +4,7 @@ import { files } from "@/lib/db/schema";
 import { getStorage } from "@/lib/storage";
 import { removeReferencesToFile } from "@/lib/composition/persistence";
 import { dropProxyFile } from "@/lib/proxy/lifecycle";
+import { forgetRemovedTranscriptForFile } from "@/lib/analysis/removed-transcripts";
 import { dropFilmstripFile } from "@/lib/filmstrip/lifecycle";
 import { serverLogger as logger } from "@/lib/logger";
 import { listTracksByFile, deleteTrackRow } from "@/lib/tracking/repo";
@@ -39,6 +40,11 @@ export async function deleteFile(fileId: string): Promise<DeleteFileResult> {
 
   dropProxyFile(fileId, "delete");
   dropFilmstripFile(fileId, "delete");
+  try {
+    forgetRemovedTranscriptForFile(fileId);
+  } catch (err) {
+    logger.warn({ tag: "analysis", op: "removed_transcript_forget_failed", fileId, err: err instanceof Error ? err.message : String(err) }, "delete_file.removed_transcript_forget_failed");
+  }
 
   try {
     const storage = await getStorage();

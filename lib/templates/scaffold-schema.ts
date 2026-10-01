@@ -281,8 +281,16 @@ export interface TemplateSlot {
   required: boolean;
 }
 
-export type TemplateSource = { assetRef: string } | { slot: string };
+export type TemplateSource = { assetRef: string } | { slot: string } | { musicRef: string };
 export type TemplateText = { fixed: string } | { slot: string };
+
+/** A copyrighted song the template NAMES but never carries (social-music spec
+ *  §7): applying it leaves the song out; the agent fetches it on the user's yes. */
+export interface TemplateMusicLink {
+  ref: string;
+  track: { title: string; artist?: string };
+  sourceUrl?: string;
+}
 
 export interface TemplateAsset {
   ref: string;
@@ -322,7 +330,11 @@ function utf8Bytes(s: string): number {
 }
 
 const rectSchema = z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() });
-const sourceSchema = z.union([z.object({ assetRef: z.string() }).strict(), z.object({ slot: z.string() }).strict()]);
+const sourceSchema = z.union([
+  z.object({ assetRef: z.string() }).strict(),
+  z.object({ slot: z.string() }).strict(),
+  z.object({ musicRef: z.string() }).strict(),
+]);
 const textSchema = z.union([z.object({ fixed: z.string().max(5000) }).strict(), z.object({ slot: z.string() }).strict()]);
 
 const slotSchema = z.object({
@@ -367,6 +379,25 @@ const assetSchema = z
       }
       if (protocol && protocol !== "https:") ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "url must be https:" });
     }
+  });
+
+const musicLinkSchema = z
+  .object({
+    ref: z.string().regex(TEMPLATE_KEY_RE, "ref must match ^[a-z][a-z0-9-]{0,39}$"),
+    track: z.object({ title: z.string().min(1).max(120), artist: z.string().min(1).max(120).optional() }).strict(),
+    sourceUrl: z.string().optional(),
+  })
+  .strict()
+  .superRefine((m, ctx) => {
+    if (m.sourceUrl === undefined) return;
+    if (utf8Bytes(m.sourceUrl) > TEMPLATE_LIMITS.urlBytes) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceUrl"], message: "sourceUrl over 2 KB" });
+    let protocol = "";
+    try {
+      protocol = new URL(m.sourceUrl).protocol;
+    } catch {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceUrl"], message: "sourceUrl does not parse" });
+    }
+    if (protocol && protocol !== "https:") ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceUrl"], message: "sourceUrl must be https:" });
   });
 
 // Typed shapes for the per-kind fields the allowlist (OVERLAY_KEYS_BY_KIND)
@@ -524,6 +555,7 @@ export const templateScaffoldSchema = z
     overlays: z.array(overlaySchema).max(TEMPLATE_LIMITS.overlays),
     audioClips: z.array(clipSchema).max(TEMPLATE_LIMITS.clips),
     assets: z.array(assetSchema).max(TEMPLATE_LIMITS.assets),
+    musicLinks: z.array(musicLinkSchema).max(TEMPLATE_LIMITS.clips).optional(),
     fonts: z.array(z.object({ family: z.string().min(1).max(120), assetRef: z.string() })),
     // Caption styles are referenced by the same slug shape an overlay preset id
     // has — `isValidPresetSlug`, the one validator, never a second copy of it.
@@ -550,6 +582,11 @@ export const templateScaffoldSchema = z
       if (assetRefs.has(a.ref)) issue(["assets", i, "ref"], `duplicate ref "${a.ref}"`);
       assetRefs.add(a.ref);
     });
+    const musicRefs = new Set<string>();
+    (s.musicLinks ?? []).forEach((m, i) => {
+      if (assetRefs.has(m.ref) || musicRefs.has(m.ref)) issue(["musicLinks", i, "ref"], `duplicate ref "${m.ref}"`);
+      musicRefs.add(m.ref);
+    });
     const slots = new Map(s.slots.map((sl) => [sl.key, sl]));
     const assets = new Map(s.assets.map((a) => [a.ref, a]));
     const overlayKinds = new Map(s.overlays.map((o) => [o.key, o.kind]));
@@ -569,6 +606,11 @@ export const templateScaffoldSchema = z
       path: (string | number)[],
       alsoAllow?: TemplateAsset["kind"],
     ) => {
+      if ("musicRef" in src) {
+        if (want !== "audio") return issue(path, "a music link can only be an audio clip's source");
+        if (!musicRefs.has(src.musicRef)) issue(path, `music link "${src.musicRef}" does not exist`);
+        return;
+      }
       if ("slot" in src) {
         const sl = slots.get(src.slot);
         if (!sl) return issue(path, `slot "${src.slot}" does not exist`);
@@ -632,4 +674,4 @@ export type TemplateAudioClip = TemplateScaffold["audioClips"][number];
  *
  * Recompute with: node -e 'const s=require("fs").readFileSync("lib/templates/scaffold-schema.ts","utf8").replace(/SCAFFOLD_SCHEMA_SHA256 = "[0-9a-f]*"/,"SCAFFOLD_SCHEMA_SHA256 = \"\"");console.log(require("crypto").createHash("sha256").update(s).digest("hex"))'
  */
-export const SCAFFOLD_SCHEMA_SHA256 = "64ff1b4ec0564052e39ab2db293d676158d4fe7cacca671f5f07b5b869f5629c";
+export const SCAFFOLD_SCHEMA_SHA256 = "3536c190f79845bed09954686424721e2a38716e73ebb58420bd02a23b496870";

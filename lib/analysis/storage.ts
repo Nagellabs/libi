@@ -26,6 +26,29 @@ export function getAudioPath(pieceId: string | null, fileId: string): string {
   return path.join(getAnalysisDir(pieceId, fileId), AUDIO_FILENAME);
 }
 
+/**
+ * The timeline an `audio.wav` was extracted on, written beside it
+ * (`audio.wav.timeline`) once the extract has finished. `extractAudio` pads an
+ * audio track that starts after its file (d0e0594c), so an extract made since
+ * is on the FILE's timeline; one made before started at the audio's first
+ * sample, early by the lead. The sidecar is what tells them apart: an
+ * `audio.wav` without it predates it, or was cut short, and is stale.
+ */
+export const AUDIO_EXTRACT_TIMELINE = "file";
+
+export function getAudioTimelinePath(pieceId: string | null, fileId: string): string {
+  return `${getAudioPath(pieceId, fileId)}.timeline`;
+}
+
+/** Whether the file's `audio.wav` carries the sidecar that says it is on the file's timeline. */
+export function isAudioExtractCurrent(pieceId: string | null, fileId: string): boolean {
+  try {
+    return fs.readFileSync(getAudioTimelinePath(pieceId, fileId), "utf8").trim() === AUDIO_EXTRACT_TIMELINE;
+  } catch {
+    return false;
+  }
+}
+
 /** Idempotent recursive delete of the analysis directory. */
 export function removeAnalysisDir(pieceId: string | null, fileId: string): void {
   fs.rmSync(getAnalysisDir(pieceId, fileId), { recursive: true, force: true });

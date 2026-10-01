@@ -230,8 +230,13 @@ export function stripScopeChallenge(base: FetchLike): FetchLike {
  * `\b(4\d\d|5\d\d)\b` over prose is a liability: "caption exceeds the 429
  * character limit" became a rate limit (with an invented 60 s wait), and "must
  * be under 500 characters" became a retryable server error.
+ *
+ * A 400 is read too, though it stays `provider`: Zernio answers its generic
+ * refusals as `Error: [400] … (code: …)`, and the music catalog reads a 4xx
+ * `provider` error as "this connection cannot use it" (zernio/adapter.ts
+ * `musicUnavailableReason`) — which needs the status to survive.
  */
-const STATUS_IN_TEXT = /(?:\bHTTP\b|\bstatus\b|\bcode\b|^Error:)\D{0,12}(401|403|404|409|422|429|5\d\d)\b/i;
+const STATUS_IN_TEXT = /(?:\bHTTP\b|\bstatus\b|\bcode\b|^Error:)\D{0,12}(400|401|403|404|409|422|429|5\d\d)\b/i;
 
 /**
  * The provider reports failure three ways and this is the one funnel for all
@@ -254,19 +259,152 @@ export function toSocialError(err: unknown, retryAfterHeader?: string | null): S
   // provider wrote into a tool's error TEXT, where nothing structured exists.
   const fromTransport = err instanceof StreamableHTTPError && typeof err.code === "number" && err.code > 0 ? err.code : 0;
   const status = fromTransport || Number(STATUS_IN_TEXT.exec(msg)?.[1] ?? 0);
+  // Only a status the provider WROTE is its answer to the tool; a transport
+  // status (a 400 "No valid session ID") says nothing about the account.
+  const statusFromText = status > 0 && !fromTransport;
   // 401 and 403 are DIFFERENT answers and libi must not merge them. Per RFC
   // 6750 a token that is missing, expired or revoked is a 401; a 403 says the
   // token is understood and simply does not carry this permission. Merging
   // them is what turned one ads read into a sign-out: `unauthorized` is the
   // kind `withAdapter` escalates to `markUnauthorized()`. A 403 leaves the
   // grant and the connection exactly where they were.
-  if (status === 401) return new SocialError("unauthorized", msg, { status });
-  if (status === 403) return new SocialError("forbidden", msg, { status });
-  if (status === 429) return new SocialError("rate_limited", msg, { status, retryAt: retryAtFrom(msg, retryAfterHeader) });
-  if (status === 404) return new SocialError("not_found", msg, { status });
-  if (status === 409) return new SocialError("duplicate", msg, { status });
-  if (status === 422) return new SocialError("validation", msg, { status });
-  return new SocialError("provider", msg, { status: status || undefined });
+  if (status === 401) return new SocialError("unauthorized", msg, { status, statusFromText });
+  if (status === 403) return new SocialError("forbidden", msg, { status, statusFromText });
+  if (status === 429) return new SocialError("rate_limited", msg, { status, statusFromText, retryAt: retryAtFrom(msg, retryAfterHeader) });
+  if (status === 404) return new SocialError("not_found", msg, { status, statusFromText });
+  if (status === 409) return new SocialError("duplicate", msg, { status, statusFromText });
+  if (status === 422) return new SocialError("validation", msg, { status, statusFromText });
+  return new SocialError("provider", msg, { status: status || undefined, statusFromText });
+}
+
+/**
+ * A network failure REACHING the token endpoint (or the SECOND, unguarded
+ * discovery call `authInternal` makes for the authorization server's own
+ * metadata) during a refresh — never a rejection BY the provider. Node's
+ * `fetch` throws `TypeError("fetch failed")` for a connection-level failure
+ * (the real cause sits on `.cause`, an `ErrnoException` for the socket-level
+ * ones); an abort surfaces as a `DOMException` named `"AbortError"`, which is
+ * NOT an `Error` subclass, so the name is read without an `instanceof Error`
+ * guard.
+ *
+ * Two OAuth-shaped exceptions also count, because both genuinely escape
+ * `auth()` rather than being swallowed (confirmed against SDK 1.29 —
+ * `docs-local/…/probe.mjs`): a JSON `{"error":"temporarily_unavailable"}`
+ * response parses to a `TemporarilyUnavailableError`, which is an `OAuthError`
+ * but NOT a `ServerError`, so `authInternal`'s refresh `try/catch` rethrows it
+ * instead of swallowing it (only `ServerError` and non-`OAuthError`s are
+ * swallowed there); and a discovery URL that answers a genuine 5xx (not the
+ * 4xx/CORS shape the SDK tolerates by falling back) makes
+ * `discoverAuthorizationServerMetadata` throw a plain `Error` reading
+ * `"HTTP 5xx trying to load … metadata from …"`, uncaught by anything in
+ * `authInternal` for that SECOND discovery call (the FIRST, protected-resource
+ * one, is wrapped in a swallowing `try/catch` of the SDK's own and never
+ * reaches here — by design, RFC 9728 support is optional per server).
+ *
+ * A malformed OR 5xx TOKEN-ENDPOINT body (`errorCode: "server_error"`) is
+ * listed for completeness but is near-dead for a REFRESH specifically: SDK
+ * 1.29 swallows it inside `authInternal` before it can ever reach here (I1 —
+ * `observeTokenEndpointOutcome` below is what actually catches that case, by
+ * watching the RESPONSE rather than a throw). It stays listed because
+ * `registerClient`'s own `parseErrorResponse` call (client registration, not
+ * refresh) DOES let a `ServerError` it produces escape, and a stray call
+ * through this function on that error should still read as transient rather
+ * than as a hard failure.
+ *
+ * `invalid_grant` (a real "no") is none of these: it is an ordinary,
+ * non-throwing HTTP response the token endpoint answers, so nothing here ever
+ * matches it.
+ */
+function isTransientRefreshError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  if ((err as { name?: unknown }).name === "AbortError") return true;
+  if (err instanceof TypeError && err.message === "fetch failed") return true;
+  const code =
+    (err as NodeJS.ErrnoException).code ?? (err as { cause?: { code?: unknown } }).cause?.code;
+  if (typeof code === "string" && ["ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "EAI_AGAIN"].includes(code)) return true;
+  const errorCode = (err as { errorCode?: unknown }).errorCode;
+  if (errorCode === "server_error" || errorCode === "temporarily_unavailable") return true;
+  if (err instanceof Error && /^HTTP 5\d\d\b/.test(err.message)) return true;
+  return false;
+}
+
+/** A resolved (non-throwing) token-endpoint response that answered 5xx — the
+ *  shape `observeTokenEndpointOutcome` records for I1's swallowed-`ServerError`
+ *  case, where nothing ever throws anywhere this module can see. */
+interface TokenEndpointErrorResponse {
+  tokenEndpointStatus: number;
+}
+
+function isTransientTokenOutcome(outcome: unknown): outcome is TokenEndpointErrorResponse {
+  if (outcome && typeof outcome === "object" && "tokenEndpointStatus" in outcome) return true;
+  return isTransientRefreshError(outcome);
+}
+
+/**
+ * True for the OAuth token endpoint's own POST, and nothing else `auth()`
+ * touches. The token request is the one call in the whole flow with a fixed,
+ * spec-mandated body shape (`application/x-www-form-urlencoded` —
+ * `executeTokenRequest`, client/auth.js), which is what tells it apart from
+ * dynamic client registration (`application/json`, a DIFFERENT endpoint that
+ * a refresh does not normally reach anyway, since `clientInformation` is
+ * already cached) and from the MCP session's own JSON-RPC POSTs to
+ * `opts.url` (also `application/json`) — both of which this fetch ALSO
+ * carries, since it is the one `StreamableHTTPClientTransport` and `auth()`
+ * share. A bare `method === "POST"` check would wrongly tag either of those
+ * (M1's over-broad-scope finding).
+ */
+function isTokenEndpointRequest(init?: RequestInit): boolean {
+  if (init?.method !== "POST") return false;
+  const contentType = new Headers(init.headers).get("content-type") ?? "";
+  return contentType.includes("application/x-www-form-urlencoded");
+}
+
+/**
+ * Observes the outcome of fetch calls made specifically to the OAuth TOKEN
+ * endpoint during one `auth()` attempt (a connect-time refresh, or
+ * `runRefresh`'s own) — never a bare discovery GET, whose own transient
+ * failures the SDK already tolerates by design (`fetchWithCorsRetry`'s
+ * CORS-retry swallow) and whose own escaping 5xx `isTransientRefreshError`
+ * reads directly off the exception instead, since THAT one genuinely throws
+ * all the way out (see the classifier's doc comment).
+ *
+ * Two things `authInternal`'s own refresh `try/catch` swallows without a
+ * trace, confirmed live against SDK 1.29 (docs-local/…/probe.mjs): a
+ * network-level THROW (this module's original TypeError case — still needed,
+ * since a raw `TypeError` is not an `OAuthError` and so is swallowed too), and
+ * an ORDINARY non-throwing 5xx/malformed-body Response (I1) — because
+ * `executeTokenRequest` turns a bad token response into a `ServerError` INSIDE
+ * its own `try`, so it never becomes something the fetch call itself threw.
+ * Both must be read from the fetch, not from `auth()`'s return value or a
+ * caught exception, because neither survives to either place.
+ *
+ * Scoped to the token request ONLY (M1 — the previous version recorded the
+ * last throw from ANY fetch in the whole `auth()` run, including a discovery
+ * hiccup that resolved fine before an UNRELATED later `invalid_grant`, which
+ * could misreport a real sign-out as `unavailable`). A resolved response that
+ * is NOT ≥500 clears any earlier note for the SAME attempt, so only the most
+ * recent token-endpoint outcome is ever read.
+ */
+function observeTokenEndpointOutcome(base: FetchLike): { fetch: FetchLike; take(): unknown } {
+  let last: unknown;
+  return {
+    fetch: async (url, init) => {
+      if (!isTokenEndpointRequest(init)) return base(url, init);
+      try {
+        const res = await base(url, init);
+        last = res.status >= 500 ? ({ tokenEndpointStatus: res.status } satisfies TokenEndpointErrorResponse) : undefined;
+        return res;
+      } catch (err) {
+        last = err;
+        throw err;
+      }
+    },
+    take() {
+      const held = last;
+      last = undefined;
+      return held;
+    },
+  };
 }
 
 interface RawToolResult {
@@ -365,16 +503,33 @@ export async function connectProviderMcp(opts: ConnectOpts): Promise<ProviderMcp
   // Only the HTTP transport has a fetch to observe; a test transport has none,
   // and `take()` then simply always answers null.
   const retryAfter = observeRetryAfter(stripScopeChallenge(opts.fetch ?? ((url, init) => fetch(url, init))));
+  // I2: a `connect()` carrying a stale token gets a real HTTP 401, and
+  // `StreamableHTTPClientTransport` then runs its OWN internal `auth()` with
+  // this same fetch (`_authThenStart`, streamableHttp.js) — a transient
+  // token-endpoint failure there is exactly as swallow-prone as one inside
+  // `runRefresh`'s own `auth()` call below, and without this wrapper it comes
+  // back as a bare `new UnauthorizedError()` carrying NOTHING to classify by,
+  // which `toSocialError` maps unconditionally to `unauthorized`.
+  const connectTokenOutcome = observeTokenEndpointOutcome(retryAfter.fetch);
   const transport =
     opts.transport ??
     new StreamableHTTPClientTransport(new URL(opts.url), {
       authProvider: opts.authProvider,
       requestInit: opts.bearer ? { headers: { Authorization: `Bearer ${opts.bearer}` } } : undefined,
-      fetch: retryAfter.fetch,
+      fetch: connectTokenOutcome.fetch,
     });
   try {
     await client.connect(transport);
   } catch (err) {
+    const tokenOutcome = connectTokenOutcome.take();
+    if (isTransientTokenOutcome(tokenOutcome) || isTransientRefreshError(err)) {
+      logger.warn(
+        { tag: "social", op: "mcp.connect_refresh_unavailable", ...errShape(tokenOutcome ?? err) },
+        "the token endpoint was unreachable establishing this connection; treating it as retryable rather than a sign-out",
+      );
+      await client.close().catch(() => {});
+      throw new SocialError("unavailable", "libi could not reach the sign-in provider to establish this connection. Try again shortly.");
+    }
     const e = toSocialError(err, retryAfter.take());
     logger.warn({ tag: "social", op: "mcp.connect_failed", kind: e.kind, status: e.status, ...errShape(err) }, "provider MCP connect failed");
     // The transport owns a fetch/SSE stream even when connect throws partway.
@@ -447,27 +602,59 @@ export async function connectProviderMcp(opts: ConnectOpts): Promise<ProviderMcp
   let refreshing: Promise<boolean> | null = null;
 
   const runRefresh = async (provider: OAuthClientProvider): Promise<boolean> => {
+    // Wraps `retryAfter.fetch` (itself the 403-stripped, Retry-After-observing
+    // fetch the transport uses) so a token-endpoint failure survives even
+    // though `auth()`'s own refresh handling swallows it internally — see
+    // `observeTokenEndpointOutcome` above (I1: this now covers a resolved 5xx
+    // response too, not only a thrown network error).
+    const tokenOutcome = observeTokenEndpointOutcome(retryAfter.fetch);
+    let result: Awaited<ReturnType<typeof auth>>;
     try {
       // No `scope`: `authInternal` falls back to `provider.clientMetadata.scope`,
       // which is what libi asked for in the first place. Passing a wider one
       // here is how a refresh turns into the upscope that deletes a grant.
-      //
-      // `fetchFn` is the transport's own fetch, exactly as the SDK passes it
-      // to the `auth()` it runs itself: the same 403-challenge stripping and
-      // the same `Retry-After` observation apply to discovery and to the token
-      // endpoint, and a test can inject one place instead of two.
-      const result = await auth(provider, { serverUrl: opts.url, fetchFn: retryAfter.fetch });
-      if (result !== "AUTHORIZED") {
-        logger.warn({ tag: "social", op: "mcp.refresh_exhausted" }, "the stored grant could not be refreshed; a sign-in is required");
-        return false;
-      }
-      refreshes += 1;
-      logger.info({ tag: "social", op: "mcp.refreshed" }, "refreshed libi's own grant after the provider rejected it");
-      return true;
+      result = await auth(provider, { serverUrl: opts.url, fetchFn: tokenOutcome.fetch });
     } catch (err) {
+      // A TRANSIENT failure REACHING the token endpoint (network blip, DNS,
+      // an abort, a `temporarily_unavailable` body, or a discovery 5xx) is
+      // not the provider saying no. Rethrowing this as `unauthorized` (the
+      // caller's original 401) is what used to latch "reconnect" on a blip:
+      // `withAdapter` escalates THAT kind alone to `markUnauthorized()`, so a
+      // caller who sees this exception instead of a plain `false` never
+      // reaches that branch, and the stored grant is never touched.
+      if (isTransientRefreshError(err)) {
+        logger.warn(
+          { tag: "social", op: "mcp.refresh_unavailable", ...errShape(err) },
+          "the token endpoint was unreachable; treating the 401 as retryable rather than a sign-out",
+        );
+        throw new SocialError("unavailable", "libi could not reach the sign-in provider to refresh your connection. Try again shortly.");
+      }
       logger.warn({ tag: "social", op: "mcp.refresh_failed", ...errShape(err) }, "refreshing libi's own grant failed");
       return false;
     }
+    if (result !== "AUTHORIZED") {
+      // `auth()` reports NO detail beyond this bare string — a dead refresh
+      // token (`invalid_grant`) and a refresh that never reached the network
+      // (or got a 5xx / malformed body from it) both collapse to `'REDIRECT'`
+      // from the outside. `tokenOutcome.take()` is what tells them apart: it
+      // is populated only when the TOKEN endpoint's own fetch threw or
+      // answered ≥500, never for an ordinary rejecting response, so
+      // `invalid_grant` — a normal 400 the token endpoint answers — leaves it
+      // empty and keeps today's path exactly as before.
+      const outcome = tokenOutcome.take();
+      if (isTransientTokenOutcome(outcome)) {
+        logger.warn(
+          { tag: "social", op: "mcp.refresh_unavailable", ...errShape(outcome) },
+          "the token endpoint was unreachable; treating the 401 as retryable rather than a sign-out",
+        );
+        throw new SocialError("unavailable", "libi could not reach the sign-in provider to refresh your connection. Try again shortly.");
+      }
+      logger.warn({ tag: "social", op: "mcp.refresh_exhausted" }, "the stored grant could not be refreshed; a sign-in is required");
+      return false;
+    }
+    refreshes += 1;
+    logger.info({ tag: "social", op: "mcp.refreshed" }, "refreshed libi's own grant after the provider rejected it");
+    return true;
   };
 
   /**

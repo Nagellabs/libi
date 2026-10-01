@@ -242,6 +242,103 @@ describe("buildCsp", () => {
   });
 });
 
+/**
+ * SOC-2 (full-verification F9, PARTIAL So4): test mode's fake Zernio serves
+ * media from its own loopback origin (`mcp/dev/fake-zernio/http.ts`), never
+ * `https://media.zernio.com` — so without this, every test-mode post preview
+ * fails the same silent way the real `media-src 'self'` gap did in
+ * production (QA 2026-09-21, finding 2). The fix must be TEST-MODE ONLY: it
+ * must never widen the production CSP.
+ *
+ * I3/M5 (2026-10-02 review): `csp.ts` reads `LIBI_SOCIAL_MCP_URL` directly —
+ * it must NOT import `lib/social/test-fake`, which would pull `fs`, the pino
+ * logger and the fake HTTP server's own module graph into `proxy.ts`'s
+ * per-request import chain. These tests exercise that env read directly
+ * (`vi.stubEnv`), never by mocking `test-fake.ts` — mocking the mechanism away
+ * would prove nothing about what `csp.ts` itself actually reads.
+ */
+describe("buildCsp — test-mode fake Zernio thumbnails (SOC-2)", () => {
+  const FAKE_ORIGIN = "http://127.0.0.1:54219";
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function buildCspWithFake(opts: { testMode: boolean; url: string | null }): Promise<string> {
+    vi.resetModules();
+    if (opts.testMode) vi.stubEnv("LIBI_TEST_MODE", "1");
+    if (opts.url !== null) vi.stubEnv("LIBI_SOCIAL_MCP_URL", opts.url);
+    const { buildCsp } = await import("@/lib/security/csp");
+    return buildCsp();
+  }
+
+  it("in test mode with the fake running, both img-src and media-src carry its exact origin", async () => {
+    const csp = await buildCspWithFake({ testMode: true, url: `${FAKE_ORIGIN}/mcp` });
+    const dir = (name: string) =>
+      csp.split(";").map((d) => d.trim()).find((d) => d.startsWith(name)) ?? "";
+    expect(dir("img-src")).toContain(FAKE_ORIGIN);
+    expect(dir("media-src")).toContain(FAKE_ORIGIN);
+    // The origin only — no path (`/mcp` must not leak into the CSP source).
+    expect(dir("img-src")).not.toContain("/mcp");
+    // Untouched: a display sink, never a fetch target.
+    expect(dir("connect-src")).not.toContain(FAKE_ORIGIN);
+    expect(dir("script-src")).not.toContain(FAKE_ORIGIN);
+  });
+
+  it("outside test mode, the fake's origin never appears even if the env var is set", async () => {
+    const csp = await buildCspWithFake({ testMode: false, url: `${FAKE_ORIGIN}/mcp` });
+    expect(csp).not.toContain(FAKE_ORIGIN);
+  });
+
+  it("in test mode with no LIBI_SOCIAL_MCP_URL set, the CSP is unchanged (no empty source token)", async () => {
+    const csp = await buildCspWithFake({ testMode: true, url: null });
+    const dir = (name: string) =>
+      csp.split(";").map((d) => d.trim()).find((d) => d.startsWith(name)) ?? "";
+    expect(dir("img-src").trim().endsWith(" ")).toBe(false);
+    expect(csp).not.toMatch(/\s{2,}/);
+  });
+
+  it("never widens connect-src, in test mode or out of it", async () => {
+    const withFake = await buildCspWithFake({ testMode: true, url: `${FAKE_ORIGIN}/mcp` });
+    const without = await buildCspWithFake({ testMode: false, url: null });
+    const connectSrc = (csp: string) => csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("connect-src"));
+    expect(connectSrc(withFake)).toBe(connectSrc(without));
+  });
+
+  /** M4: the gate is "test mode AND loopback", not merely "test mode and non-empty". */
+  describe("M4: loopback hosts only", () => {
+    it.each(["http://127.0.0.1:54219/mcp", "http://localhost:54219/mcp", "http://[::1]:54219/mcp"])(
+      "admits a loopback origin: %s",
+      async (url) => {
+        const csp = await buildCspWithFake({ testMode: true, url });
+        const dir = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src")) ?? "";
+        expect(dir).toContain(new URL(url).origin);
+      },
+    );
+
+    it.each([
+      // A different PORT on an already-allowlisted host is still a different
+      // origin, and must not be waved through by a substring check.
+      "https://media.zernio.com:1337/mcp",
+      "http://evil.example.com:54219/mcp",
+      "http://169.254.169.254/mcp",
+    ])("never admits a non-loopback origin, even in test mode: %s", async (url) => {
+      const csp = await buildCspWithFake({ testMode: true, url });
+      expect(csp).not.toContain(new URL(url).origin);
+      // The rest of the CSP is otherwise unaffected — no empty/duplicated token.
+      const dir = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src")) ?? "";
+      expect(dir.trim().endsWith(" ")).toBe(false);
+    });
+
+    it("a malformed LIBI_SOCIAL_MCP_URL is ignored, not thrown", async () => {
+      const csp = await buildCspWithFake({ testMode: true, url: "not a url" });
+      const dir = csp.split(";").map((d) => d.trim()).find((d) => d.startsWith("img-src")) ?? "";
+      expect(dir.trim().endsWith(" ")).toBe(false);
+    });
+  });
+});
+
 describe("public templates catalog media", () => {
   /** Every source of one directive, as the browser tokenizes it. */
   const sources = (csp: string, name: string): string[] => {

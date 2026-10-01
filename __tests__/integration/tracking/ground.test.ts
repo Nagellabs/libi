@@ -53,4 +53,23 @@ describe("groundTarget", () => {
     expect(r.data.candidates).toHaveLength(2);
     expect(r.data.candidates[0].index).toBe(1);
   });
+
+  it("a missing engine comes back as a structured error the agent can act on", async () => {
+    const { trackingNotInstalledError } = await import("@/lib/tracking/not-installed");
+    vi.doMock("@/mcp/jobs-client", async (orig) => ({
+      ...(await (orig as any)() as object),
+      runJobViaServer: vi.fn().mockRejectedValue(new Error(JSON.stringify(trackingNotInstalledError()))),
+    }));
+    const { getDb } = await import("@/lib/db/client"); const db = getDb();
+    const { pieces, files } = await import("@/lib/db/schema/sqlite");
+    await db.insert(pieces).values({ id: "p", name: "P", createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(files).values({ id: "f", pieceId: "p", filename: "v.mp4", contentType: "video/mp4", createdAt: new Date(), mediaWidth: 100, mediaHeight: 100, mediaDuration: 5, name: "v", description: "", type: "video", storagePath: "p/v.mp4" } as any);
+    const { groundTarget } = await import("@/mcp/tools/tracking-tools");
+    const r: any = await groundTarget({ fileId: "f", time: 0.2 } as any);
+    expect(r).toMatchObject({
+      success: false,
+      error: "tracking_engine_not_installed",
+      data: { installPlanPath: "mcp/bundled-mcps/plans/libi-tracking.md" },
+    });
+  });
 });

@@ -535,12 +535,13 @@ describe("activation retries once under the fallback MCP entry name (Codex libi-
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ op: "mcp_entry_collision_retry", agentId: "codex", reason: "load", fallbackNames: ["libi-app"] }), expect.stringMatching(/twice/i));
   });
 
-  it("retries only that error, and only once — the original error propagates", async () => {
+  it("retries only that error, and only once — the original error is explained", async () => {
     const id = await openChat("codex", "fallback-twice");
     conn.current.loadSession.mockRejectedValue(collisionError());
     const err = await sm.restartSession(id).catch((e: unknown) => e);
     expect((err as SessionRestartError).code).toBe("load_failed");
-    expect((err as Error).message).toContain("failed to load configuration: url is not supported for stdio");
+    // Codex's own words, not its bare "Internal error".
+    expect((err as Error).message).toContain("Codex says: url is not supported for stdio in `mcp_servers.libi`");
     expect(conn.current.loadSession).toHaveBeenCalledTimes(2);
 
     conn.current.loadSession.mockReset().mockRejectedValue(new Error("thread not found"));
@@ -573,11 +574,40 @@ describe("a deactivation that retires an in-flight prompt ends its turn exactly 
     await vi.waitFor(() => expect(sm.hasActiveSession(chat)).toBe(true));
     await vi.waitFor(() => expect(conn.current.loadSession).toHaveBeenCalledWith(expect.objectContaining({ sessionId: chat })));
 
-    // The retired turn's end waits (up to RETIRED_TURN_GRACE_MS) for the prompt's own answer (C5).
-    expect(completes(events)).toEqual([]);
+    // A reload does not wait out the grace for the prompt's own answer: the turn is ended before
+    // the history replay starts (SES-2), and the prompt's late answer adds nothing.
+    expect(completes(events)).toEqual([{ type: "agent-complete", stopReason: "cancelled" }]);
     settle({ stopReason: "cancelled" });
     await sending;
     expect(completes(events)).toEqual([{ type: "agent-complete", stopReason: "cancelled" }]);
+  });
+
+  it("SES-2: a reload ends the owed turn BEFORE the replay starts, when the adapter never answers the prompt", async () => {
+    const chat = await openChat("claude-code", "reload-silent");
+    vi.useFakeTimers();
+    // An adapter that never answers the prompt — not even when its session is closed.
+    conn.current.prompt.mockReturnValueOnce(new Promise(() => {}));
+    void sm.sendMessage(chat, "long job");
+    await Promise.resolve();
+    const events = eventsOf(chat);
+    /** What the chat had been sent when the adapter's replay (session/load) began. */
+    let seenAtReplay: AgentEvent[] | null = null;
+    conn.current.loadSession.mockImplementationOnce(async () => {
+      seenAtReplay = [...events];
+      return {};
+    });
+
+    sm.scheduleSessionReload(chat);
+    await vi.waitFor(() => expect(seenAtReplay).not.toBeNull());
+    await vi.waitFor(() => expect(sm.hasActiveSession(chat)).toBe(true));
+
+    // Well inside RETIRED_TURN_GRACE_MS, so the grace timer is not what ended it.
+    expect(seenAtReplay).not.toBeNull();
+    expect(completes(seenAtReplay!)).toEqual([{ type: "agent-complete", stopReason: "cancelled" }]);
+    expect(completes(events)).toHaveLength(1);
+    // …and nothing more once the grace has passed.
+    await vi.advanceTimersByTimeAsync(RETIRED_TURN_GRACE_MS + 50);
+    expect(completes(events)).toHaveLength(1);
   });
 
   it("deactivateSession mid-turn (eviction, /api/agent/stop, agent switch)", async () => {

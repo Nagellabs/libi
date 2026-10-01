@@ -28,7 +28,8 @@ Before any download step, tell the user (paraphrase, don't paste verbatim):
 > - **Cost**: free, on-device. No API key. Generation is CPU-heavy
 >   though — ~3–5 minutes per 10 s of audio on a typical Mac.
 >
-> OK to proceed? Total disk hit is ~7–8 GB on first install."
+> OK to proceed? Total disk hit is ~10–11 GB on first install (the
+> ~8.3 GB model, ~2 GB of Python wheels, ~70 MB of Python)."
 
 Wait for explicit approval before any download step.
 

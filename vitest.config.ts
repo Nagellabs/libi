@@ -11,6 +11,9 @@ export default defineConfig({
     // resolve the agent dir from LIBI_HOME, so isolating the home is
     // sufficient — no separate workspace-dir env var exists.
     globalSetup: ["./__tests__/setup/isolate-libi-home.ts"],
+    // …and give every worker its own home under that run root, so no two test files running at once share an
+    // agent dir or an install lock.
+    setupFiles: ["./__tests__/setup/per-worker-libi-home.ts"],
     coverage: {
       provider: "v8",
       include: ["lib/**/*.ts"],

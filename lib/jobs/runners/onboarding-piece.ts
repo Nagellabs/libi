@@ -3,6 +3,7 @@ import { desc, eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { pieces } from "@/lib/db/schema/sqlite";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
+import { ownedByProvenance } from "@/lib/audio-rights/stamp";
 import { serverLogger as logger } from "@/lib/logger";
 import { CancelledError, type JobContext, type JobRunner } from "@/lib/jobs/types";
 import { createPiece } from "@/mcp/tools/piece-discovery-tools";
@@ -271,6 +272,8 @@ export const onboardingPieceRunner: JobRunner<OnboardingPieceParams, OnboardingP
             // onboarding sources are already ≤1080p, so the only gain is GOP
             // density for scrubbing, and this piece is watched, not scrubbed.
             skipProxyGeneration: true,
+            // libi's own pinned film (sha256-checked): not someone else's song.
+            audioRights: ownedByProvenance(),
           });
           // Key on the SLUG, never on `stored.filename`: `storeFile` dedupes
           // within a piece, so a re-run can land as "logo-mark (1).png".

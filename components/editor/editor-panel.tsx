@@ -7,13 +7,16 @@ import type { FileRecord } from "@/lib/db/schema/types";
 import { AssetExplorer } from "./asset-explorer";
 import { PieceObjectsTab } from "./piece-objects-tab";
 import { PostingTab } from "./posting-tab";
+import { ExportsTab } from "./exports-tab";
+import { useExports } from "@/lib/queries/exports";
+import { isActiveExport } from "@/lib/exports/types";
 import { StoryboardTab } from "@/components/storyboard/storyboard-tab";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { HeaderToggleButton } from "./header-toggle-button";
 import { SnapshotBanner } from "./snapshot-banner";
 import { SnapshotDraftSwitcher } from "./snapshot-draft-switcher";
 
-type PieceTab = "preview" | "storyboard" | "assets" | "objects" | "posting";
+export type PieceTab = "preview" | "storyboard" | "assets" | "objects" | "posting" | "exports";
 
 interface EditorPanelProps {
   activeTab: PieceTab;
@@ -27,6 +30,9 @@ interface EditorPanelProps {
   /** The whole preview area (canvas + timeline), owned by <PreviewSurface>. */
   previewArea: ReactNode;
   pieceId: string;
+  /** The export selected in the Exports tab — lifted so the resources panel can open "piece X, export Y". */
+  selectedExportId: string | null;
+  onSelectExport: (exportId: string | null) => void;
 }
 
 export default function EditorPanel({
@@ -40,10 +46,13 @@ export default function EditorPanel({
   onToggleResources,
   previewArea,
   pieceId,
+  selectedExportId,
+  onSelectExport,
 }: EditorPanelProps) {
   useReactRenderTelemetry("EditorPanel");
   const title = piece?.name ?? "Untitled";
   const subtitle = piece?.description ?? "";
+  const runningExports = (useExports(pieceId).data ?? []).filter(isActiveExport).length;
 
   return (
     <div data-testid="editor-panel" className="flex h-full flex-col bg-surface">
@@ -102,6 +111,14 @@ export default function EditorPanel({
             <TabsTrigger value="assets">Assets</TabsTrigger>
             <TabsTrigger value="objects">Objects</TabsTrigger>
             <TabsTrigger value="posting">Posting</TabsTrigger>
+            <TabsTrigger value="exports">
+              Exports
+              {runningExports > 0 && (
+                <span data-testid="exports-running-badge" className="ml-1.5 rounded-full bg-primary/20 px-1.5 text-[10px] font-semibold text-primary">
+                  {runningExports}
+                </span>
+              )}
+            </TabsTrigger>
           </TabsList>
         </div>
 
@@ -119,6 +136,9 @@ export default function EditorPanel({
         </TabsContent>
         <TabsContent value="posting" className="flex-1 min-h-0 overflow-auto m-0">
           <PostingTab pieceId={pieceId} />
+        </TabsContent>
+        <TabsContent value="exports" className="flex-1 min-h-0 overflow-hidden m-0">
+          <ExportsTab pieceId={pieceId} selectedExportId={selectedExportId} onSelectExport={onSelectExport} />
         </TabsContent>
       </Tabs>
     </div>

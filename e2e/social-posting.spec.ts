@@ -1,5 +1,5 @@
 import fs from "fs";
-import { execFileSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import type { APIRequestContext, Page } from "@playwright/test";
 import { test, expect, answerPersona, fixturePath } from "./helpers/app";
 
@@ -31,15 +31,40 @@ function probeDurationSeconds(filePath: string): number {
   );
 }
 
+/** Loudest sample in dB; -Infinity when the file has no audio stream at all. */
+function maxVolumeDb(filePath: string): number {
+  const streams = execFileSync("ffprobe", ["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0", filePath], { encoding: "utf8" }).trim();
+  if (!streams) return -Infinity;
+  const out = spawnSync("ffmpeg", ["-hide_banner", "-nostats", "-i", filePath, "-af", "volumedetect", "-f", "null", "-"], { encoding: "utf8" });
+  const m = /max_volume:\s*(-?[\d.]+|-inf) dB/.exec(out.stderr);
+  return !m || m[1] === "-inf" ? -Infinity : Number(m[1]);
+}
+
+async function exportResultPath(request: APIRequestContext, jobId?: string): Promise<string> {
+  if (jobId) {
+    for (let i = 0; i < 240; i++) {
+      const j = (await (await request.get(`/api/jobs/${jobId}`)).json()) as { status: string; resultJson: string | null };
+      if (j.status === "completed") return (JSON.parse(j.resultJson ?? "{}") as { filePath: string }).filePath;
+      if (j.status === "failed") throw new Error(`export ${jobId} failed`);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new Error(`export ${jobId} did not finish`);
+  }
+  const { jobs } = (await (await request.get("/api/jobs?kind=export&status=completed&limit=1")).json()) as { jobs: Array<{ resultJson: string | null }> };
+  return (JSON.parse(jobs[0].resultJson ?? "{}") as { filePath: string }).filePath;
+}
+
 /**
  * A piece whose EXPORT will actually fit Instagram Reel / TikTok's 9:16
- * requirement. The composition defaults to 1920×1080 landscape
- * (`lib/composition/build-composition.ts`) regardless of the source clip's
- * own resolution — the exported frame is the composition's size, not
- * `tiny.mp4`'s 320×240 — so the dimensions are set explicitly, on an
- * overlay-free piece, via the same route the empty-piece UI uses
- * (`PATCH /api/pieces/:id/composition/dimensions`). The video overlay is
- * then added with no `rect`, which defaults to the full new frame.
+ * requirement. `POST /api/pieces` already defaults a new piece to the user's
+ * aspect-ratio setting, itself defaulting to 9:16 / 1080×1920
+ * (`lib/composition/aspect-ratio.ts#DEFAULT_ASPECT_RATIO_ID`, applied by
+ * `lib/composition/new-piece-manifest.ts#initializePieceManifest`) — but
+ * regardless of whatever that setting is, the exported frame is the
+ * COMPOSITION's size, not `tiny.mp4`'s own 320×240, so the dimensions are set
+ * explicitly here rather than relied on, via the same route the empty-piece
+ * UI uses (`PATCH /api/pieces/:id/composition/dimensions`). The video overlay
+ * is then added with no `rect`, which defaults to the full new frame.
  */
 async function seedPortraitPiece(request: APIRequestContext): Promise<string> {
   const pRes = await request.post("/api/pieces");
@@ -105,8 +130,9 @@ async function openPiece(page: Page, pieceId: string): Promise<void> {
  * dialog, which lives inside the Timeline tab and opens itself in response
  * (`hooks/social/use-posting-intent.ts#useExportDialogRequest`) — so once
  * requested, the dialog is found already open rather than via its own
- * trigger. "Post…" on the success card then hands the export straight back
- * to the Posting tab (`export-dialog.tsx`'s `onPost`).
+ * trigger. Export then queues the render and returns straight to the Posting
+ * tab, which says the export is rendering and selects it once it finishes
+ * (`export-dialog.tsx`'s `returnToPost`, `media-step.tsx`).
  */
 async function exportViaPostingTab(page: Page): Promise<void> {
   await page.getByRole("tab", { name: "Posting" }).click();
@@ -116,10 +142,21 @@ async function exportViaPostingTab(page: Page): Promise<void> {
 
   const dialog = page.getByRole("dialog");
   await expect(dialog).toBeVisible({ timeout: 15_000 });
+  // Every export shows what it's for (Social preselected) and every track;
+  // tiny.mp4 was uploaded, so its sound is the user's own and on
+  // (components/export/export-audio-section.tsx).
+  await expect(dialog.getByTestId("export-purpose-social")).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByTestId("export-audio-list")).toBeVisible();
   await dialog.getByRole("button", { name: "Export", exact: true }).click();
-  await expect(page.getByTestId("export-post-button")).toBeVisible({ timeout: 120_000 });
-  await page.getByTestId("export-post-button").click();
-  await expect(page.getByTestId("posting-tab")).toBeVisible({ timeout: 15_000 });
+  await expectExportAdoptedByComposer(page);
+}
+
+/** After Start from the composer: back on Posting at once, then the finished export is selected. */
+async function expectExportAdoptedByComposer(page: Page): Promise<void> {
+  const tab = page.getByTestId("posting-tab");
+  await expect(tab).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(tab.getByTestId("export-line")).toBeVisible({ timeout: 120_000 });
 }
 
 test.describe("Social posting (fake Zernio)", () => {
@@ -170,6 +207,10 @@ test.describe("Social posting (fake Zernio)", () => {
     await expect(posting.getByTestId("targets-step")).toBeVisible();
     await posting.getByRole("checkbox", { name: /TikTok/ }).uncheck();
     await expect(posting.getByTestId("composer-next")).toBeEnabled();
+    await posting.getByTestId("composer-next").click();
+
+    // Music step: tiny.mp4's sound is the user's own — the card just says so.
+    await expect(posting.getByTestId("music-step")).toBeVisible();
     await posting.getByTestId("composer-next").click();
 
     // Caption step.
@@ -274,6 +315,10 @@ test.describe("Social posting (fake Zernio)", () => {
     await expect(tab.getByTestId("composer-next")).toBeEnabled();
     await tab.getByTestId("composer-next").click();
 
+    // Music step: tiny.mp4's sound is the user's own — the card just says so.
+    await expect(tab.getByTestId("music-step")).toBeVisible();
+    await tab.getByTestId("composer-next").click();
+
     await expect(tab.getByTestId("caption-step")).toBeVisible();
     await tab.getByTestId("caption-input").fill("Retry me");
     await tab.getByTestId("composer-next").click();
@@ -325,5 +370,69 @@ test.describe("Social posting (fake Zernio)", () => {
     await expect(page.getByLabel(/budget/i)).toHaveCount(0);
     await expect(page.getByText(/every ad change, including pausing, goes through your agent/i)).toBeVisible();
     await expect(page.getByTestId("ask-agent-ads")).toBeVisible();
+  });
+
+  test("a named song: matched on TikTok when added, shown in the Music step, and left out of a Social export", async ({ page }) => {
+    const request = page.request;
+    const pieceId = await seedPortraitPiece(request);
+    const up = await request.post(`/api/pieces/${pieceId}/upload`, {
+      multipart: { file: { name: "espresso.m4a", mimeType: "audio/mp4", buffer: fs.readFileSync(fixturePath("video/tone-5s.m4a")) }, mediaDuration: "5" },
+    });
+    expect(up.ok()).toBe(true);
+    const listed = await (await request.get(`/api/pieces/${pieceId}/files`)).json();
+    const all = (Array.isArray(listed) ? listed : listed.files) as Array<{ id: string; filename: string }>;
+    const songId = all.find((f) => f.filename === "espresso.m4a")!.id;
+    const videoId = all.find((f) => f.filename === "tiny.mp4")!.id;
+
+    // The agent's path: rights ride on the add, and the song is matched in the same call.
+    const add = await request.post("/api/e2e/run-tool", {
+      data: { tool: "libi.audio_add_clip", args: { pieceId, fileId: songId, kind: "standalone", startTime: 0, lengthPolicy: "trim", rights: { class: "copyrighted", track: { title: "Espresso", artist: "Sabrina Carpenter" } } } },
+    });
+    expect(add.ok()).toBe(true);
+    const added = JSON.stringify(await add.json());
+    expect(added).toContain('"status":"picked"'); // TikTok's trending list has it (Business lane)
+    expect(added).toContain("needs_facebook_login"); // Instagram can't attach on Instagram Login
+
+    await openPiece(page, pieceId);
+    await page.getByRole("tab", { name: "Posting" }).click();
+    const tab = page.getByTestId("posting-tab");
+    await tab.getByRole("button", { name: "Export & post" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByTestId("export-video-column")).toBeVisible();
+    await expect(dialog.getByTestId("export-audio-column")).toBeVisible();
+    await expect(dialog.getByTestId("export-purpose-social")).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByTestId(`export-audio-include-${songId}`)).not.toBeChecked();
+    await expect(dialog.getByTestId(`export-audio-platforms-${songId}`)).toContainText("TikTok attaches it at posting");
+    // Leave the video's own (non-copyrighted) sound out too: excludeFileIds.
+    await dialog.getByTestId(`export-audio-include-${videoId}`).click();
+    await expect(dialog.getByTestId("export-summary")).toContainText("0 of 2 audio tracks");
+    const enqueued = page.waitForResponse(
+      (resp) => new URL(resp.url()).pathname === "/api/export" && resp.request().method() === "POST",
+    );
+    await dialog.getByRole("button", { name: "Export", exact: true }).click();
+    const socialJobId = ((await (await enqueued).json()) as { jobId: string }).jobId;
+    await expectExportAdoptedByComposer(page);
+    // Nothing plays in the Social export: the song by default, the video's sound by its switch.
+    expect(maxVolumeDb(await exportResultPath(request, socialJobId))).toBeLessThanOrEqual(-60);
+
+    // Personal, video sound left out: the song is what you hear.
+    const personal = await request.post("/api/export", { data: { pieceId, purpose: "personal", excludeFileIds: [videoId] } });
+    expect(personal.ok()).toBe(true);
+    expect(maxVolumeDb(await exportResultPath(request, (await personal.json()).jobId))).toBeGreaterThan(-40);
+
+    // Still on Posting (the dialog returned there): the Music step shows TikTok's matched track and Instagram's reconnect.
+    await expect(tab).toBeVisible({ timeout: 15_000 });
+    await tab.getByTestId("composer-next").click(); // media -> targets
+    await expect(tab.getByTestId("targets-step")).toBeVisible();
+    await tab.getByTestId("tiktok-consent-preview").click();
+    await tab.getByTestId("tiktok-consent-express").click();
+    await expect(tab.getByTestId("composer-next")).toBeEnabled();
+    await tab.getByTestId("composer-next").click(); // targets -> music
+    await expect(tab.getByTestId("music-step")).toBeVisible();
+    const tiktokCard = tab.getByTestId(/^music-card-/).filter({ hasText: "TikTok" });
+    await expect(tiktokCard.getByTestId("track-picker-selected")).toContainText("Espresso", { timeout: 15_000 });
+    await expect(tiktokCard.getByTestId("track-picker-note")).toContainText("top 100 trending tracks");
+    await expect(tab.getByTestId(/^music-card-/).filter({ hasText: "Instagram" })).toContainText("Facebook Login");
   });
 });

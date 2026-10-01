@@ -17,12 +17,13 @@ describe("applyUsageUpdate", () => {
       cost: null,
       rateLimits: {},
       updatedAt: NOW,
+      maxSize: null,
     });
   });
 
   it("returns prev unchanged on malformed input (experimental-field drift)", () => {
     const prev: SessionUsageState = {
-      used: 1, size: 2, reportedSize: 2, cost: null, rateLimits: {}, updatedAt: 5,
+      used: 1, size: 2, reportedSize: 2, cost: null, rateLimits: {}, updatedAt: 5, maxSize: null,
     };
     expect(applyUsageUpdate(prev, null, NOW)).toBe(prev);
     expect(applyUsageUpdate(prev, "nope", NOW)).toBe(prev);
@@ -149,6 +150,41 @@ describe("applyUsageUpdate", () => {
     expect(corrected).toMatchObject({ size: 1_000_000, reportedSize: 200_000 });
     const faceValue = applyUsageUpdate(null, { used: 10, size: 100 }, 1000);
     expect(faceValue).toMatchObject({ size: 100, reportedSize: 100 });
+  });
+
+  describe("maxSize (CW-1: a Codex model's larger supported window)", () => {
+    it("is set when the max window is strictly greater than the effective size", () => {
+      const next = applyUsageUpdate(null, { used: 20_000, size: 258_400 }, 1000, null, 872_000);
+      expect(next).toMatchObject({ size: 258_400, maxSize: 872_000 });
+    });
+
+    it("is null when the max window is not strictly greater than the effective size", () => {
+      const equal = applyUsageUpdate(null, { used: 20_000, size: 272_000 }, 1000, null, 272_000);
+      expect(equal?.maxSize).toBeNull();
+      const smaller = applyUsageUpdate(null, { used: 20_000, size: 272_000 }, 1000, null, 200_000);
+      expect(smaller?.maxSize).toBeNull();
+    });
+
+    it("is null when no max window is passed (Claude, or an unknown Codex model)", () => {
+      const next = applyUsageUpdate(null, { used: 20_000, size: 200_000 }, 1000);
+      expect(next?.maxSize).toBeNull();
+    });
+
+    it("is measured against the EFFECTIVE size, not the raw reported size", () => {
+      // used > size recovers to the previous window (1_000_000) as the
+      // effective size — a max window between the reported size and the
+      // recovered effective size must NOT be treated as "greater".
+      const prev = applyUsageUpdate(null, { used: 300_000, size: 1_000_000 }, 1000);
+      const next = applyUsageUpdate(prev, { used: 310_000, size: 200_000 }, 2000, null, 500_000);
+      expect(next).toMatchObject({ size: 1_000_000 });
+      expect(next?.maxSize).toBeNull(); // 500_000 < the effective 1_000_000
+    });
+
+    it("does not persist across malformed updates that return prev unchanged", () => {
+      const prev = applyUsageUpdate(null, { used: 20_000, size: 258_400 }, 1000, null, 872_000);
+      const stillPrev = applyUsageUpdate(prev, "garbage", 2000, null, 872_000);
+      expect(stillPrev).toBe(prev);
+    });
   });
 });
 

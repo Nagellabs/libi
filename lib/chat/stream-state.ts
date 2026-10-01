@@ -58,6 +58,7 @@ import type {
 } from "@/lib/agents/message-types";
 import type { AgentEvent } from "@/lib/agents/types";
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
+import { isLessSpecificToolTitle } from "@/lib/agents/tool-title";
 import {
   isSubagentDispatch,
   parseSubagentDispatch,
@@ -73,6 +74,9 @@ import {
 export interface ChatMessage extends BaseAgentMessage {
   isStreaming?: boolean;
   sendFailed?: boolean;
+  /** A `chat-note` this page showed. Some (the manual-edit note, the client's own notes) exist
+   *  nowhere else, so a history refetch carries them over (`applyReconnectHistory`). */
+  isNote?: boolean;
 }
 
 export interface ChatStreamState {
@@ -179,19 +183,7 @@ export function applyHistory(
     // history and the client applying it) would vanish with the dropped live
     // message, and nothing re-sends it until the next reconnect. Carry it
     // into the adopted message — unless the history already has that card.
-    const inHistory = new Set(
-      fetched.flatMap((m) =>
-        m.parts.flatMap((p) => (p.type === "permission-request" ? [p.pendingId] : [])),
-      ),
-    );
-    const carried = dropped.flatMap((m) =>
-      m.parts.filter(
-        (p) =>
-          p.type === "permission-request" &&
-          p.status === "pending" &&
-          !inHistory.has(p.pendingId),
-      ),
-    );
+    const carried = pendingCardsMissingFrom(dropped, fetched);
     return {
       cached: fetched,
       live: [...live, { ...last, parts: [...last.parts, ...carried], isStreaming: true }],
@@ -199,6 +191,50 @@ export function applyHistory(
     };
   }
   return { ...state, cached: fetched };
+}
+
+/** Pending approval cards in `messages` that `fetched` does not have. */
+function pendingCardsMissingFrom(messages: ChatMessage[], fetched: ChatMessage[]): AgentMessagePart[] {
+  const inHistory = new Set(
+    fetched.flatMap((m) =>
+      m.parts.flatMap((p) => (p.type === "permission-request" ? [p.pendingId] : [])),
+    ),
+  );
+  return messages.flatMap((m) =>
+    m.parts.filter(
+      (p) => p.type === "permission-request" && p.status === "pending" && !inHistory.has(p.pendingId),
+    ),
+  );
+}
+
+/**
+ * Take the server's history again after the SSE connection came back (`sse-reconnected`, SES-1).
+ * Built on a FRESH state — `live` holds this page's own copies (client-minted ids) of messages the
+ * history also has — keeping only what the history cannot have:
+ *   - a pending approval card that reached the page after the history was serialized: carried into
+ *     the history's last agent message, which becomes the live (adopted) one, as `applyHistory`
+ *     does for a load (review I3);
+ *   - chat notes and failed prompt echoes that exist only on this page (review M3).
+ * A turn that is still going continues the history's last reply by adoption; one that ended while
+ * the connection was down simply shows whole.
+ */
+export function applyReconnectHistory(
+  state: ChatStreamState,
+  fetched: ChatMessage[],
+  deps: ChatStreamDeps = defaultChatStreamDeps,
+): ChatStreamState {
+  const fetchedIds = new Set(fetched.map((m) => m.id));
+  const localOnly = state.live.filter(
+    (m) => !fetchedIds.has(m.id) && (m.isNote === true || (m.role === "user" && m.sendFailed === true)),
+  );
+  const carried = pendingCardsMissingFrom(state.live, fetched);
+  if (carried.length === 0) return { cached: fetched, live: localOnly, currentAgentMessageId: null };
+  const last = fetched[fetched.length - 1];
+  const adopted: ChatMessage =
+    last && last.role === "agent"
+      ? { ...last, parts: [...last.parts, ...carried], isStreaming: true }
+      : { id: deps.mintId("agent"), role: "agent", parts: carried, timestamp: deps.now(), isStreaming: true };
+  return { cached: fetched, live: [...localOnly, adopted], currentAgentMessageId: adopted.id };
 }
 
 /** Optimistic local echo of the user's prompt (the server will hold its own
@@ -534,6 +570,7 @@ function appendChatNote(
     parts: [{ type: "text", text: event.text }],
     timestamp: deps.now(),
     isStreaming: false,
+    isNote: true,
   };
   return { ...state, live: [...state.live, msg] };
 }
@@ -674,7 +711,10 @@ function applyToolTitle(
       msg,
       (p) => p.type === "tool-call" && p.toolCallId === event.toolCallId,
       (p) =>
-        p.type === "tool-call" && p.toolId == null && p.rawTitle !== event.rawTitle
+        p.type === "tool-call" &&
+        p.toolId == null &&
+        p.rawTitle !== event.rawTitle &&
+        !isLessSpecificToolTitle(p.rawTitle, event.rawTitle)
           ? { ...p, rawTitle: event.rawTitle }
           : p,
     ),

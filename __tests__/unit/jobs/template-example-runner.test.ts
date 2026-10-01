@@ -4,7 +4,7 @@
 // made from the template's source piece: export (the shared export path the
 // publish prepare uses), transcode to the example caps, poster at 1.0 s, and
 // both files written into the template folder. ffmpeg and the export are
-// replaced; the store and the export lane are real.
+// replaced; the store and the export scheduler are real.
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -15,8 +15,10 @@ import { makeScaffold } from "@/__tests__/helpers/templates";
 
 vi.mock("@/lib/templates/cloud/publish-media", () => import("@/__tests__/helpers/publish-prepare").then((m) => m.fakePublishMedia()));
 const renderPieceForExample = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/templates/example-export", () => ({ renderPieceForExample }));
-// The export job's own slot, as the lane's `busy` probe reads it.
+// Default: not empty (undefined is falsy), so existing tests exercise the normal render path.
+const pieceHasNothingToExport = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/templates/example-export", () => ({ renderPieceForExample, pieceHasNothingToExport }));
+// The export job's own slot, as the scheduler's `busy` probe reads it.
 const exportJobs = vi.hoisted(() => ({ pending: 0 }));
 vi.mock("@/lib/jobs/manager", () => ({ getJobManager: () => ({ activeOrWaiting: (kind: string) => (kind === "export" ? exportJobs.pending : 0) }) }));
 const emitted = vi.hoisted(() => vi.fn());
@@ -25,12 +27,18 @@ vi.mock("@/lib/navigation-events", () => ({ navigationEmitter: { emit: emitted }
 import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { pieces } from "@/lib/db/schema/sqlite";
-import { getExportLane } from "@/lib/export/export-lane";
+import { BACKGROUND_EXAMPLE_ESTIMATE, getExportScheduler } from "@/lib/export/scheduler";
 import { __resetRunnerRegistryForTests, getJobKindToToolIdsMap, getRunner, registerBuiltinRunners } from "@/lib/jobs/runners/registry";
 import { SOURCE_PIECE_GONE, templateExampleRunner } from "@/lib/jobs/runners/template-example";
 import { CancelledError, type JobContext } from "@/lib/jobs/types";
 import { makePoster, transcodeExample } from "@/lib/templates/cloud/publish-media";
 import { createTemplate, templateDir } from "@/lib/templates/store";
+
+/** A user's export holding the machine, as the scheduler sees it. Returns its release. */
+async function holdUserExport(): Promise<() => void> {
+  const r = await getExportScheduler().acquire({ id: `user-${randomUUID()}`, priority: "foreground", estimate: BACKGROUND_EXAMPLE_ESTIMATE });
+  return () => r.release();
+}
 
 let home = "";
 let templateId = "";
@@ -75,9 +83,10 @@ beforeEach(async () => {
     fs.writeFileSync(out, "rendered piece");
     return out;
   });
+  pieceHasNothingToExport.mockReset().mockResolvedValue(false);
   emitted.mockReset();
   exportJobs.pending = 0;
-  delete (globalThis as { __libiExportLane?: unknown }).__libiExportLane;
+  delete (globalThis as { __libiExportScheduler?: unknown }).__libiExportScheduler;
 });
 afterEach(() => {
   resetTestDb();
@@ -103,7 +112,7 @@ describe("template_example — the render", () => {
   it("exports the source piece, writes example.mp4 + poster.jpg into the template folder, and says so", async () => {
     const c = ctx({ templateId });
     const r = await templateExampleRunner.run(c);
-    expect(renderPieceForExample).toHaveBeenCalledWith(expect.objectContaining({ jobId: c.jobId }), pieceId, expect.any(String), expect.any(AbortSignal), expect.any(Number), 60);
+    expect(renderPieceForExample).toHaveBeenCalledWith(expect.objectContaining({ jobId: c.jobId }), pieceId, expect.any(String), expect.any(AbortSignal), expect.any(Number), 60, expect.objectContaining({ reservation: expect.objectContaining({ release: expect.any(Function) }) }));
     expect(folderMedia()).toEqual(["example.mp4", "poster.jpg"]);
     expect(fs.readFileSync(path.join(templateDir(templateId), "example.mp4"), "utf8")).toBe("EXAMPLE:rendered piece");
     expect(fs.readFileSync(path.join(templateDir(templateId), "poster.jpg"), "utf8")).toBe("POSTER:rendered piece");
@@ -182,11 +191,38 @@ describe("template_example — the render", () => {
     await expect(templateExampleRunner.run(ctx({ templateId }))).rejects.toThrow(SOURCE_PIECE_GONE);
     expect(folderMedia()).toEqual([]);
   });
+
+  // TPL-3 Important-1: a piece non-empty at template-creation time (so `sourceEmpty` on
+  // the card is false, "Render preview" is shown) can be emptied afterwards. The runner
+  // must never let that reach renderPieceForExample/the classifier's "nothing to export" —
+  // that throws, and JobManager logs any thrown error at error level unconditionally.
+  it("a piece with nothing to export completes with no example written, never calling renderPieceForExample", async () => {
+    pieceHasNothingToExport.mockResolvedValue(true);
+    const c = ctx({ templateId });
+    const r = await templateExampleRunner.run(c);
+    expect(r).toEqual({ templateId, exampleBytes: 0, posterBytes: 0 });
+    expect(renderPieceForExample).not.toHaveBeenCalled();
+    expect(folderMedia()).toEqual([]);
+    expect(emitted).not.toHaveBeenCalled();
+  });
+
+  it("a piece emptied while queued behind a user's export is caught on the re-check, not the classifier", async () => {
+    const userExport = await holdUserExport();
+    pieceHasNothingToExport.mockResolvedValueOnce(false); // the pre-loop check: still fine
+    const run = templateExampleRunner.run(ctx({ templateId }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(renderPieceForExample).not.toHaveBeenCalled(); // waiting behind the user's export
+    pieceHasNothingToExport.mockResolvedValue(true); // emptied while it waited
+    userExport();
+    await expect(run).resolves.toEqual({ templateId, exampleBytes: 0, posterBytes: 0 });
+    expect(renderPieceForExample).not.toHaveBeenCalled();
+    expect(folderMedia()).toEqual([]);
+  });
 });
 
-describe("template_example — the export lane (D2–D4 review I2)", () => {
-  it("waits while a user's export holds the lane or is queued for the export slot, then renders", async () => {
-    const userExport = await getExportLane().foreground();
+describe("template_example — the export scheduler's background priority (D2–D4 review I2)", () => {
+  it("waits while a user's export holds the machine or is queued for the export slot, then renders", async () => {
+    const userExport = await holdUserExport();
     exportJobs.pending = 1;
     const run = templateExampleRunner.run(ctx({ templateId }));
     await new Promise((r) => setTimeout(r, 40));
@@ -222,7 +258,7 @@ describe("template_example — the export lane (D2–D4 review I2)", () => {
     const c = ctx({ templateId });
     const run = templateExampleRunner.run(c);
     await firstRunning;
-    const userExport = await getExportLane().foreground();
+    const userExport = await holdUserExport();
     events.push("user export starts");
     await new Promise((r) => setTimeout(r, 40));
     // The render waits for the user's export rather than run beside it.
@@ -236,8 +272,8 @@ describe("template_example — the export lane (D2–D4 review I2)", () => {
     expect(c.progress).toEqual([...c.progress].sort((a, b) => a - b));
   });
 
-  it("a cancel while it waits for the lane ends it, having rendered nothing", async () => {
-    const userExport = await getExportLane().foreground();
+  it("a cancel while it waits for the scheduler ends it, having rendered nothing", async () => {
+    const userExport = await holdUserExport();
     let cancelled = false;
     const run = templateExampleRunner.run(ctx({ templateId }, () => cancelled));
     await new Promise((r) => setTimeout(r, 20));

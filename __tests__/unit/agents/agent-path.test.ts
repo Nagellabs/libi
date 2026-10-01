@@ -31,6 +31,19 @@ describe("agentChildPath", () => {
   });
 });
 
+describe("agentChildPath on Windows", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  afterEach(() => Object.defineProperty(process, "platform", platform));
+
+  it("reads and extends the inherited `Path` key with `;`, comparing folders as Windows does (case, trailing slash)", () => {
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    expect(
+      agentChildPath({ Path: "C:\\Windows\\system32;C:\\Windows" }, ["c:\\windows\\", "C:\\Users\\me\\.local\\bin"]),
+    ).toBe("C:\\Windows\\system32;C:\\Windows;C:\\Users\\me\\.local\\bin");
+    expect(agentChildPath({ Path: "C:\\Windows" }, null)).toBe("C:\\Windows");
+  });
+});
+
 describe("the PATH each running agent process got", () => {
   it("is remembered per agent until its process goes", () => {
     expect(agentSpawnPathDirs("codex")).toBeNull();

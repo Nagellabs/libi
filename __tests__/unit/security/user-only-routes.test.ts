@@ -5,7 +5,7 @@
  * as the user, connecting or disconnecting the social accounts, and reporting
  * a catalog template — and the two settings that decide whether a card
  * appears at all: the approval mode and an extension's "Require approval" —
- * and the social settings (provider, and the defaults a new post is seeded from),
+ * and the social settings (provider, and the defaults a new post is seeded from, and a TikTok account's type),
  * and restarting a chat (it cancels the chat's running turn). A header-less loopback caller — an agent's own shell
  * running curl — gets `403 { code: "browser_only" }` from each; libi's own
  * page (a same-origin browser fetch) passes and lands in the mocks below.
@@ -62,6 +62,12 @@ const oauth = vi.hoisted(() => ({ startSignIn: vi.fn(), disconnect: vi.fn() }));
 vi.mock("@/lib/social/oauth/flow", () => oauth);
 const cloud = vi.hoisted(() => ({ reportTemplate: vi.fn() }));
 vi.mock("@/lib/templates/cloud/client", () => cloud);
+const musicFacts = vi.hoisted(() => ({ setUserTikTokKind: vi.fn(() => ({ tiktokKind: { value: "personal", source: "user", checkedAt: "t" } })), resolveAccountFacts: vi.fn() }));
+vi.mock("@/lib/social/music-facts", () => musicFacts);
+vi.mock("@/lib/audio-rights/write", () => ({
+  updateAudioRights: vi.fn(() => ({ ok: true, rights: { class: "owned" }, pieceId: null })),
+  OWNED_REFUSAL: "x",
+}));
 
 import { POST as permission } from "@/app/api/sessions/[sessionId]/permission/route";
 import { POST as createPost } from "@/app/api/social/posts/route";
@@ -74,6 +80,8 @@ import { PATCH as patchModes } from "@/app/api/sessions/permission-modes/route";
 import { POST as restartSession } from "@/app/api/sessions/[sessionId]/restart/route";
 import { PATCH as patchMcpServer } from "@/app/api/settings/mcp-servers/[id]/route";
 import { PUT as putSocialSettings } from "@/app/api/social/settings/route";
+import { PATCH as patchAudioRights } from "@/app/api/files/by-id/[fileId]/audio-rights/route";
+import { PUT as putMusicFacts } from "@/app/api/social/music/facts/route";
 
 /** What an agent's shell sends: a loopback Host, a JSON body, nothing a browser adds. */
 const CURL = { host: "127.0.0.1:3461", "content-type": "application/json" };
@@ -120,6 +128,8 @@ const ROUTES: Array<[string, string, Call, number?]> = [
   ["change the approval mode", "permission_modes_refused", (h) => patchModes(req("/api/sessions/permission-modes", "PATCH", { agentId: "claude-code", mode: "auto-with-generations" }, h))],
   ["change the social settings (provider, post defaults)", "settings.put_refused", (h) => putSocialSettings(req("/api/social/settings", "PUT", { providerId: "zernio", timezone: "UTC", defaults: { instagramType: "reel", aiLabel: false }, pollSeconds: 30 }, h))],
   ["switch an extension's approval off", "mcp_server_update_refused", (h) => patchMcpServer(req("/api/settings/mcp-servers/libi-tracking", "PATCH", { requireApproval: false }, h), params({ id: "libi-tracking" })), 404],
+  ["mark a track as the user's own", "owned_refused", (h) => patchAudioRights(req("/api/files/by-id/f1/audio-rights", "PATCH", { class: "owned" }, h), params({ fileId: "f1" }))],
+  ["set a TikTok account's type (a music setting)", "facts_put_refused", (h) => putMusicFacts(req("/api/social/music/facts", "PUT", { accountId: "tt", tiktokKind: "personal" }, h))],
 ];
 
 beforeEach(() => {
@@ -150,6 +160,7 @@ describe("user-only actions refuse a header-less loopback caller", () => {
     expect(cloud.reportTemplate).not.toHaveBeenCalled();
     expect(modes.setApprovalMode).not.toHaveBeenCalled();
     expect(socialSettings.setSocialSettings).not.toHaveBeenCalled();
+    expect(musicFacts.setUserTikTokKind).not.toHaveBeenCalled();
   });
 
   it.each(NOT_THE_PAGE)("near miss (%s) is refused on every route", async (_label, headers) => {

@@ -56,12 +56,13 @@ export function isUnsafeUrlParamName(name: string): boolean {
 
 /**
  * Names Windows reads as something other than a file in the piece folder, refused for a
- * URL-supplied name only: a `:` (an alternate data stream, `clip.mp4:secret`, or a
+ * URL-supplied name and for agent-written path segments (a storyboard card's `render.file`,
+ * lib/storyboard/repo.ts): a `:` (an alternate data stream, `clip.mp4:secret`, or a
  * drive-relative `C:x`), and a trailing `.` or space, which Windows strips — `clip.mp4.` would
  * open `clip.mp4`, and `....` the folder itself. No name libi writes has either shape, and a
  * DB-sourced name is still judged raw (it is the literal on-disk name).
  */
-function isWindowsHazard(name: string): boolean {
+export function isWindowsHazard(name: string): boolean {
   return name.includes(":") || name.endsWith(".") || name.endsWith(" ");
 }
 

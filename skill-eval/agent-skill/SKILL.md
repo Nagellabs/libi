@@ -26,7 +26,10 @@ these and did NOT run the relevant scenario, the behavioral change is unverified
    library blindly.
 2. **Run** each chosen scenario:
    `npm run skill:eval -- skill-eval/scenarios/<group>/<file>.md`
-   (add `--agent claude-code` to override; `--keep` to retain the temp LIBI_HOME).
+   (add `--agent claude-code` to override; `--keep` to retain the temp LIBI_HOME). An eval
+   builds into its own Next dir, so it may run beside a dev app from the same checkout —
+   but not beside another eval: two at once fight over that one dir and the second fails
+   fast, naming the first's PID/Dir.
 3. **Read the verdict.** The CLI prints per-run `HARD-PASS` / `NO-ASSERTIONS` /
    `FAIL` / `TIMEOUT`, the run's wall time and (when the adapter reports it) the
    agent's session cost, and a `JSON_SUMMARY` line. Hard invariants are mechanical —
@@ -51,7 +54,13 @@ frontmatter (`id`, `title`, `skills`, `mcps`, `agent`, `covers`, optional `runs`
 `timeoutSec`), a `## Prompt`, an optional `## Hard invariants` ```yaml assertions```
 block, and optional `## Behavioral expectations` bullets. Then regenerate the
 index: `npm run skill:eval:index`. Matchers support `tool`, `endpoint_id` (glob
-`*`), `where: "input.x == y"`, and `expect: present|absent` / `count: ">=1"`.
+`*`), `where: "input.x == y"`, and `expect: present|absent` / `count: ">=1"`. A `where`
+path may use `*` as a whole segment (not a glob fragment) to fan out over an array — e.g.
+`input.platforms.*.accountId == 123` reaches every element of `platforms` and holds when
+ANY of them satisfies the predicate, independent of the order the agent listed them in. A
+`*` segment on a non-array or an empty array reaches nothing, so the predicate is false
+there (use `input.x exists` for presence checks — see `evalWhere` in
+`scripts/skill-eval/assertions.ts` for why `!= null` doesn't mean "absent").
 
 These optional frontmatter keys change what the run itself can do:
 
@@ -176,8 +185,11 @@ trips it (a test enforces this for `left-out-fixture`).
   `settingSources: ["project", "local"]` (`lib/sessions/session-meta.ts`); the workspace's own
   `.claude/skills` still load. Auth is not a setting source, so no credential is read, copied
   or moved. `_meta/host-config-isolation.md` is the canary (~8 s, ~$0.12) — meaningful only on
-  a host that has a `~/.claude/CLAUDE.md`. Not verified either way: MCP servers the host added at user
-  scope in `~/.claude.json`.
+  a host that has a `~/.claude/CLAUDE.md`. MCP servers the host added at user scope in
+  `~/.claude.json` are not loaded either — verified on Claude Code 2.1.282 (`claude -p
+  --setting-sources project,local` mounts none of them) — and in that mode libi's provider
+  detection and the test-mode fakes' aliases skip the user scope too
+  (`lib/sessions/skip-user-settings.ts`), so `suggest_provider` sees what the session sees.
 - **Cost + time.** Each run boots a hermetic server (~18s) and drives a REAL
   inner-agent turn — image-only scenarios ~1.5 min, full UGC (image+video+assemble)
   ~3–5 min — spending real inner-agent (Claude Code) tokens. fal generation itself

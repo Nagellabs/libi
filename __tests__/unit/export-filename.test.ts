@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -6,6 +6,7 @@ import {
   sanitizeFilename,
   resolveExportPath,
   claimExportPath,
+  claimExportFile,
 } from "@/lib/export/filename";
 
 describe("sanitizeFilename", () => {
@@ -88,5 +89,57 @@ describe("claimExportPath", () => {
     expect(a).not.toBe(b);
     expect(fs.existsSync(a)).toBe(true);
     expect(fs.existsSync(b)).toBe(true);
+  });
+});
+
+describe("claimExportFile — a delete-pending name", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-export-claim-"));
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  /** The first create of the plain name answers `code` (Windows says so for a name unlinked under an open handle); `existsSync` still calls it free. */
+  function firstOpenRefuses(code: string) {
+    const real = fs.openSync;
+    let refused = false;
+    vi.spyOn(fs, "openSync").mockImplementation(((...a: Parameters<typeof fs.openSync>) => {
+      if (!refused) {
+        refused = true;
+        throw Object.assign(new Error(`${code}: operation not permitted, open`), { code });
+      }
+      return real(...a);
+    }) as typeof fs.openSync);
+  }
+
+  it.each(["EPERM", "EACCES"])("on win32 %s moves on to the next suffix", (code) => {
+    firstOpenRefuses(code);
+    const { path: p, fd } = claimExportFile(dir, "X", "mp4", "win32");
+    fs.closeSync(fd);
+    expect(p).toBe(path.join(dir, "X-1.mp4"));
+  });
+
+  it.each(["EPERM", "EACCES"])("on linux %s is fatal", (code) => {
+    firstOpenRefuses(code);
+    expect(() => claimExportFile(dir, "X", "mp4", "linux")).toThrow(code);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it("on win32 a folder that denies every create surfaces the original EPERM after a few tries, not '50 attempts'", () => {
+    const open = vi.spyOn(fs, "openSync").mockImplementation((() => {
+      throw Object.assign(new Error("EPERM: operation not permitted, open"), { code: "EPERM" });
+    }) as typeof fs.openSync);
+    expect(() => claimExportFile(dir, "X", "mp4", "win32")).toThrow(/EPERM/);
+    expect(open.mock.calls.length).toBeLessThanOrEqual(3);
+  });
+
+  it("on win32 an unrelated error still propagates", () => {
+    vi.spyOn(fs, "openSync").mockImplementation((() => {
+      throw Object.assign(new Error("ENOSPC"), { code: "ENOSPC" });
+    }) as typeof fs.openSync);
+    expect(() => claimExportFile(dir, "X", "mp4", "win32")).toThrow("ENOSPC");
   });
 });

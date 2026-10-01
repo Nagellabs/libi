@@ -96,6 +96,31 @@ export function isWhisperModelInstalled(model: string): boolean {
   }
 }
 
+/** Every catalogue model that is on disk, in catalogue order. */
+export function installedWhisperModels(): string[] {
+  return WHISPER_MODELS.filter((m) => isWhisperModelInstalled(m.id)).map((m) => m.id);
+}
+
+/**
+ * The model a transcription runs with.
+ *
+ * An explicit `requested` is honoured (and validated) as it always was — a
+ * caller who asks for `small` gets `small`, or `needs_install` for it.
+ *
+ * With none, the default when it is on disk, else the most accurate model that
+ * is (catalogue order runs small → large). The Whisper card counts ANY
+ * installed model as ready (0.1.16 F8), so a default call on a `tiny`-only
+ * machine must transcribe with `tiny` — not ask for a 480 MB `small` download
+ * the card says is not needed. With nothing installed it stays the default, so
+ * the install gate names the model the plan proposes.
+ */
+export function pickWhisperModel(requested?: string): string {
+  if (requested !== undefined) return resolveWhisperModel(requested);
+  if (isWhisperModelInstalled(DEFAULT_WHISPER_MODEL)) return DEFAULT_WHISPER_MODEL;
+  const installed = installedWhisperModels();
+  return installed.length > 0 ? installed[installed.length - 1] : DEFAULT_WHISPER_MODEL;
+}
+
 export interface WhisperModelStatus extends WhisperModelDef {
   installed: boolean;
   isDefault: boolean;

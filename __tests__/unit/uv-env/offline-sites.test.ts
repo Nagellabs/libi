@@ -115,6 +115,25 @@ describe.skipIf(process.platform === "win32")("offline uv, install paths (Settin
     expect(err.message).not.toContain("Caused by");
   });
 
+  // UV-1 (G2 report 10a / concern 6): the yt-dlp `uv tool install` passed uv's raw text through to the chip and
+  // the job. The sentence carries the raw text as `cause`, and the agent's needs_install text still reads it as the
+  // network.
+  it("the yt-dlp install says offline, keeps uv's text as its cause, and the agent is told it is the network", async () => {
+    fs.writeFileSync(path.join(home, "uv-stderr.txt"), PACKAGES_OFFLINE);
+    const { DependencyManager } = await import("@/mcp/registry/dependency-manager");
+    const { BUNDLED_MCP_SERVERS } = await import("@/mcp/registry/bundled");
+    const dep = BUNDLED_MCP_SERVERS.find((d) => d.id === "youtube-download")!.dependencies.find((d) => d.binary === "yt-dlp")!;
+    const dm = new DependencyManager() as unknown as { installYtDlpViaUv: (d: typeof dep, t: number) => Promise<void> };
+    const err = await failure(() => dm.installYtDlpViaUv(dep, 30_000));
+    expect(err.message).toBe(packages("video download"));
+    expect(err.cause).toBe(PACKAGES_OFFLINE);
+
+    const { needsInstallMessage } = await import("@/mcp/tools/video-download-tools");
+    const told = needsInstallMessage(`installing yt-dlp (needed to download videos) failed: ${err.message}`);
+    expect(told).toContain("This looks like a network problem");
+    expect(told).not.toContain("online..");
+  });
+
   it("a failure that is not the network keeps its own text", async () => {
     fs.writeFileSync(path.join(home, "uv-stderr.txt"), "error: No space left on device (os error 28)\n");
     const { whisperEnvVirtualDep } = await import("@/lib/mcp-virtual-deps/whisper-env-dep");
@@ -137,6 +156,7 @@ describe("every user-facing uv site routes failures through uvNetworkFailureMess
     ["lib/mcp-virtual-deps/tts-env-dep.ts", '"voiceover"'],
     ["lib/music/analyze-install.ts", '"music analysis"'],
     ["mcp/registry/installers/tracking-pyenv.ts", '"object tracking"'],
+    ["mcp/registry/dependency-manager.ts", '"video download"'],
   ])("%s", (file, feature) => {
     const src = fs.readFileSync(path.join(process.cwd(), file), "utf-8");
     expect(src).toContain(`uvNetworkFailureMessage(${feature}`);

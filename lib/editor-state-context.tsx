@@ -24,6 +24,7 @@ import { MCP_SCROLL_EVENT, setPendingMcpScroll } from "@/lib/mcp-scroll-intent";
 import { useRouter } from "next/navigation";
 import { useSessionList, type UseSessionList } from "@/hooks/sessions/use-session-list";
 import { subscribeBroadcast } from "@/hooks/sessions/use-agent-chat";
+import { getTabNavGate } from "@/hooks/sessions/tab-nav-gate";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
 
 // ── Agent provider types ───────────────────────────────────────────────
@@ -86,7 +87,7 @@ interface PersistedEditorState {
    * null when the referenced entity no longer exists at restore time.
    */
   lastPieceId: string | null;
-  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting";
+  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting" | "exports";
   lastAssetId: string | null;
   /** Last active tab inside the asset preview panel. */
   lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
@@ -267,7 +268,8 @@ function loadState(): PersistedEditorState {
           parsed.lastEditorTab === "storyboard" ||
           parsed.lastEditorTab === "assets" ||
           parsed.lastEditorTab === "objects" ||
-          parsed.lastEditorTab === "posting"
+          parsed.lastEditorTab === "posting" ||
+          parsed.lastEditorTab === "exports"
             ? parsed.lastEditorTab
             : DEFAULTS.lastEditorTab,
         lastAssetId:
@@ -415,8 +417,8 @@ interface EditorStateContextValue {
   // restore-on-load logic always has a fresh anchor.
   lastPieceId: string | null;
   setLastPieceId: (id: string | null) => void;
-  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting";
-  setLastEditorTab: (tab: "preview" | "storyboard" | "assets" | "objects" | "posting") => void;
+  lastEditorTab: "preview" | "storyboard" | "assets" | "objects" | "posting" | "exports";
+  setLastEditorTab: (tab: "preview" | "storyboard" | "assets" | "objects" | "posting" | "exports") => void;
   lastAssetId: string | null;
   setLastAssetId: (id: string | null) => void;
   lastAssetTab: "preview" | "summary" | "transcript" | "frames" | "generation" | "notes";
@@ -822,7 +824,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   );
 
   const setLastEditorTab = useCallback(
-    (tab: "preview" | "storyboard" | "assets" | "objects" | "posting") => {
+    (tab: "preview" | "storyboard" | "assets" | "objects" | "posting" | "exports") => {
       lastEditorTabRef.current = tab;
       setLastEditorTabState(tab);
       persist();
@@ -1008,6 +1010,9 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   const isAgentConnecting = pendingProviderId !== null;
 
   const sessionListRefresh = sessionList.refresh;
+  // The chat this tab has selected: the tab an agent's "show" navigation belongs to (NAV-1).
+  const activeSessionIdRef = useRef(sessionList.activeSessionId);
+  activeSessionIdRef.current = sessionList.activeSessionId;
   const selectAgent = useCallback(
     async (providerId: string): Promise<AgentReadiness | null> => {
       setPendingProviderId(providerId);
@@ -1082,43 +1087,50 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
   // socket forever and contribute to the Chrome 6-per-origin limit that hangs
   // in-dev navigation.
   useEffect(() => {
+    // Only the tab showing the chat whose agent asked navigates (NAV-1, `tab-nav-gate.ts`).
+    const gate = getTabNavGate((id) => activeSessionIdRef.current === id);
     return subscribeBroadcast((data) => {
       if (data.type !== "navigate_agents") return;
       if (typeof window === "undefined") return;
-      const tab = data.tab === "libi-mcp" || data.tab === "providers" ? data.tab : "agents";
-      const extensionId = typeof data.extensionId === "string" ? data.extensionId : undefined;
-      const provider = typeof data.provider === "string" ? data.provider : undefined;
-      // Park the scroll intent BEFORE navigating. The libi MCP tab's panel is
-      // UNMOUNTED whenever another tab is showing (base-ui's Tabs.Panel
-      // defaults to keepMounted:false, and Agents is the default tab), so the
-      // event below reaches no listener at all — McpServersView has to claim
-      // the id when it mounts instead.
-      if (tab === "libi-mcp") setPendingMcpScroll(extensionId);
-      const params = new URLSearchParams({ tab });
-      if (extensionId) params.set("extension", extensionId);
-      if (provider) params.set("provider", provider);
-      // "Already here" means the same tab AND the same extension/provider focus — a different
-      // provider on the Providers tab must still navigate.
-      const current = new URLSearchParams(window.location.search);
-      const here =
-        window.location.pathname === "/agents" &&
-        current.get("tab") === tab &&
-        (current.get("extension") ?? undefined) === extensionId &&
-        (current.get("provider") ?? undefined) === provider;
-      if (!here) router.push(`/agents?${params.toString()}`);
-      if (extensionId) window.dispatchEvent(new CustomEvent(MCP_SCROLL_EVENT, { detail: { mcpId: extensionId } }));
+      gate(data, () => {
+        const tab = data.tab === "libi-mcp" || data.tab === "providers" ? data.tab : "agents";
+        const extensionId = typeof data.extensionId === "string" ? data.extensionId : undefined;
+        const provider = typeof data.provider === "string" ? data.provider : undefined;
+        // Park the scroll intent BEFORE navigating. The libi MCP tab's panel is
+        // UNMOUNTED whenever another tab is showing (base-ui's Tabs.Panel
+        // defaults to keepMounted:false, and Agents is the default tab), so the
+        // event below reaches no listener at all — McpServersView has to claim
+        // the id when it mounts instead.
+        if (tab === "libi-mcp") setPendingMcpScroll(extensionId);
+        const params = new URLSearchParams({ tab });
+        if (extensionId) params.set("extension", extensionId);
+        if (provider) params.set("provider", provider);
+        // "Already here" means the same tab AND the same extension/provider focus — a different
+        // provider on the Providers tab must still navigate.
+        const current = new URLSearchParams(window.location.search);
+        const here =
+          window.location.pathname === "/agents" &&
+          current.get("tab") === tab &&
+          (current.get("extension") ?? undefined) === extensionId &&
+          (current.get("provider") ?? undefined) === provider;
+        if (!here) router.push(`/agents?${params.toString()}`);
+        if (extensionId) window.dispatchEvent(new CustomEvent(MCP_SCROLL_EVENT, { detail: { mcpId: extensionId } }));
+      });
     });
   }, [router]);
 
   // `navigate_templates` (libi.show_templates) — same shared singleton
   // EventSource, same reason as the effect above.
   useEffect(() => {
+    const gate = getTabNavGate((id) => activeSessionIdRef.current === id);
     return subscribeBroadcast((data) => {
       if (data.type !== "navigate_templates") return;
       if (typeof window === "undefined") return;
-      const params = new URLSearchParams({ tab: "mine" });
-      if (typeof data.templateId === "string") params.set("template", data.templateId);
-      router.push(`/templates?${params.toString()}`);
+      gate(data, () => {
+        const params = new URLSearchParams({ tab: "mine" });
+        if (typeof data.templateId === "string") params.set("template", data.templateId);
+        router.push(`/templates?${params.toString()}`);
+      });
     });
   }, [router]);
 

@@ -169,6 +169,34 @@ describe("lookupLauncher — Windows (PATHEXT)", () => {
     expect(lookupLauncher(path.join(tmp, "dir"), deps)).toBe("missing");
   });
 
+  // Review I3: a launcher installed after libi booted is on the registry's PATH, which a new agent process and a new
+  // chat get (PRV-1). Detection reads the same PATH, so the tab no longer says "can't start" for what the agent can run.
+  it("a launcher only on the registry's fresh PATH is found", () => {
+    const fresh = { loginShellDirs: () => ["C:\\Users\\u\\.local\\bin"] };
+    expect(lookupLauncher("uvx", win(["C:\\Users\\u\\.local\\bin\\uvx.exe"], fresh))).toBe("found");
+    expect(lookupLauncher("npx", win([], fresh))).toBe("missing");
+  });
+
+  it("by default reads the registry PATH last read (lib/agents/cli/windows-registry-path.ts), never reading it itself", async () => {
+    const reg = await import("@/lib/agents/cli/windows-registry-path");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      reg.__clearWindowsRegistryPathMemo();
+      const deps = win(["C:\\Users\\u\\.local\\bin\\uvx.exe"], { loginShellDirs: undefined });
+      expect(lookupLauncher("uvx", deps)).toBe("missing");
+      await reg.refreshWindowsRegistryPath({
+        runReg: async (args) => (args[1] === reg.USER_ENVIRONMENT_KEY ? "    Path    REG_SZ    C:\\Users\\u\\.local\\bin\r\n" : ""),
+        env: {},
+      });
+      expect(lookupLauncher("uvx", deps)).toBe("found");
+      expect(launcherLookupForPass(deps)("uvx")).toBe("found");
+    } finally {
+      reg.__clearWindowsRegistryPathMemo();
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+
   it("%VAR% in the command is unknown", () => {
     expect(lookupLauncher("%USERPROFILE%\\bin\\uvx.exe", win([]))).toBe("unknown");
   });

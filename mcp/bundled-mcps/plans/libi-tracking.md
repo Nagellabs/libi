@@ -109,7 +109,10 @@ the engine actually looks at; trust that over any path in this document.
   named input and call it again — the job resumes idempotently.
 - Run `libi.diagnose_mcp({ mcpId: "libi-tracking" })` — the `auxiliary` field
   shows the last error from the Python sidecar probe.
-- `uv` errors: ensure `<LIBI_HOME>/bin/uv` exists (libi installs it in Category A).
-  If missing, re-run `node bin/libi.js` to trigger the boot installer.
+- `uv` errors: the installer downloads `uv` itself when it is missing. If
+  that download failed, call `libi.show_extension({ extensionId: "libi-tracking" })`
+  and ask the user to press **Download** next to `uv` on that card, then re-run
+  step 3. Do not try to install `uv` yourself, and do not restart libi for it —
+  boot does not install `uv`.
 - ONNX model errors: see step 4 above (YOLOE acquisition).
 - After fixing: re-run step 3, then step 5 to confirm.

@@ -357,10 +357,14 @@ export function ensureNextExternalSymlinks(nextDir: string): EnsureResult {
     // token unless Developer Mode is on. A JUNCTION is the unprivileged
     // equivalent for directory targets and is what Windows gets instead.
     //
-    // This is not a hypothetical. NSIS does not store symlinks, so unlike the
-    // signed `.app` — where the farm survives packaging and boot only
-    // verifies it — the Windows install arrives with NO farm and MUST build
-    // one at first boot. On v0.1.8 that meant libi did not start at all for a
+    // This is not a hypothetical. Unlike the signed `.app` — where the farm
+    // survives packaging and boot only verifies it — the Windows install
+    // arrives with NO farm and MUST build one at first boot: the build-time
+    // junctions would reach NSIS only as dereferenced real directory copies
+    // (883 files on 0.1.16, each `rmSync`ed by the lstat check above
+    // before its junction could be made), so the afterPack hook strips
+    // `.next/node_modules` from the Windows payload
+    // (scripts/afterpack-windows-externals.js). On v0.1.8 that meant libi did not start at all for a
     // normal Windows user: `mkdirSync` succeeded, this line threw EPERM
     // ("Administrator privilege required"), and the shell died between
     // "about to startNextServer" and any further log line — a splash screen
@@ -373,8 +377,9 @@ export function ensureNextExternalSymlinks(nextDir: string): EnsureResult {
     // Junctions take an ABSOLUTE target (Node resolves the argument to one
     // regardless), which costs nothing here: the only Windows farm that is
     // ever USED is the one built in place at boot, in its final location.
-    // A farm baked at build time is stripped by NSIS before it can be moved
-    // anywhere, so there is no relocation for an absolute target to survive.
+    // A farm baked at build time is stripped from the Windows payload before
+    // it can be moved anywhere, so there is no relocation for an absolute
+    // target to survive.
     // `isWindows()` and not `process.platform === "win32"`: Turbopack folds
     // that comparison against the BUILD machine and drops the dead branch, so
     // a macOS-built runtime would ship a Windows shell that still takes the

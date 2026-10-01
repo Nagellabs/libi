@@ -1,6 +1,6 @@
 // __tests__/unit/templates/cloud/catalog-cache.test.ts
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 
 vi.mock("@/lib/templates/cloud/client", () => ({ fetchIndex: vi.fn() }));
@@ -25,6 +25,9 @@ import {
   OWN_CHANGE_WATCH_MS,
 } from "@/lib/templates/cloud/catalog-cache";
 import { searchTemplates, listTemplates } from "@/lib/templates/store";
+import { getDb } from "@/lib/db/client";
+import { catalogIndexMeta, settings } from "@/lib/db/schema/sqlite";
+import { catalogSource } from "@/lib/templates/cloud/catalog-source";
 
 const BASE = "https://storage.googleapis.com/libi-prod-templates/";
 const entry = (id: string, patch: Record<string, unknown> = {}) => ({
@@ -545,6 +548,25 @@ describe("a dev build switching between the production and a development catalog
     expect(listCatalogEntries().map((r) => r.cloudId).sort()).toEqual([A, B]);
     expect(isCatalogStale()).toBe(false);
     expect(vi.mocked(fetchIndex)).toHaveBeenCalledTimes(2);
+  });
+
+  // Review m1: the setting read is memoized for up to 1 s (CAT-3). The superseded check WRITES, so it reads
+  // the setting fresh — a switch another process (the studio, while this is the MCP child) made a moment
+  // ago counts, and the slow answer from the catalog left behind is dropped.
+  it("the superseded check reads the setting fresh: another process's switch a moment ago counts (review m1)", async () => {
+    use("development");
+    expect(catalogSource()).toBe(DEV);
+    let answer!: (v: Awaited<ReturnType<typeof fetchIndex>>) => void;
+    vi.mocked(fetchIndex).mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    const devRun = refreshCatalogIfStale();
+    // The other process switches to Production and lands Production's copy — neither is this process's write.
+    getDb().update(settings).set({ templatesCatalog: JSON.stringify({ choice: "production", devOrigin: DEV, bypassToken: null }) }).where(eq(settings.id, 1)).run();
+    replaceCatalog(index, '"p"', Date.now(), PROD);
+    // A pure read may still answer from the memo meanwhile.
+    expect(catalogSource()).toBe(DEV);
+    answer({ ok: true, notModified: false, etag: '"d"', index: devIndex });
+    expect(await devRun).toEqual({ refreshed: false, entries: 0 });
+    expect(getDb().select({ source: catalogIndexMeta.source }).from(catalogIndexMeta).get()?.source).toBe(PROD);
   });
 
   it("a refresh in flight for one catalog is not handed to the other", async () => {

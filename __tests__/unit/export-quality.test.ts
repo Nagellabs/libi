@@ -276,6 +276,14 @@ describe("hasGraphicsOverlays", () => {
     const o = tracked({ kind: "effect", op: "blur" });
     expect(hasGraphicsOverlays([o])).toBe(false);
   });
+
+  it("is false when the only graphics overlay is hidden (every export strips it)", () => {
+    expect(hasGraphicsOverlays([{ kind: "video" }, { kind: "text", hidden: true }])).toBe(false);
+  });
+
+  it("a hidden text beside a visible code overlay is still true", () => {
+    expect(hasGraphicsOverlays([{ kind: "text", hidden: true }, { kind: "code" }])).toBe(true);
+  });
 });
 
 describe("isUpscaling", () => {

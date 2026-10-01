@@ -112,7 +112,7 @@ interface ChipModel {
 
 function readyCli(agentId: SetupAgentId, status: AgentStatus | undefined): SetupCli | null {
   if (!status?.ready || !status.cli || !("realPath" in status.cli)) return null;
-  return { agentId, realPath: status.cli.realPath };
+  return { agentId, realPath: status.cli.realPath, ...(status.cli.launch ? { launch: status.cli.launch } : {}) };
 }
 
 function detectedEntry(agentId: SetupAgentId, detected: DetectedMcp): DetectedProviderEntry | null {

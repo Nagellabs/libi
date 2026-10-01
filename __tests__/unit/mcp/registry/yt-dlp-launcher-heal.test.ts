@@ -221,3 +221,103 @@ describe.skipIf(realPlatform === "win32")("yt-dlp launcher — canonical target,
     }
   });
 });
+
+// UV-2: a launcher-only repair needs no network. A broken launcher over an intact tool venv is rewritten without
+// `uv tool install --reinstall` (which needs PyPI); a fresh install, a token bump and a Settings Re-download over a
+// healthy launcher still go through uv.
+describe.skipIf(realPlatform === "win32")("yt-dlp launcher-only repair (offline)", () => {
+  /** A uv that fails every call, as offline, recording each. */
+  function offlineUv(): void {
+    fs.writeFileSync(
+      path.join(canonical, "bin", "uv"),
+      `#!/bin/bash\necho "$*" >> "${path.join(tmp, "uv-calls.txt")}"\necho "error: Request failed after 3 retries" >&2\nexit 2\n`,
+      { mode: 0o755 },
+    );
+  }
+
+  /** The tool venv uv left behind, with an entry point that answers --version. */
+  function intactVenv(): string {
+    const entry = path.join(canonical, "uv", "tools", "yt-dlp", "bin", "yt-dlp");
+    fs.mkdirSync(path.dirname(entry), { recursive: true });
+    fs.writeFileSync(entry, "#!/bin/sh\necho 2026.09.20\n", { mode: 0o755 });
+    return entry;
+  }
+
+  it("intact venv, missing launcher, uv failing: the repair succeeds with no uv call, and the launcher runs the venv's entry", async () => {
+    process.env.LIBI_HOME = canonical;
+    const { DependencyManager, installers, launcher } = await load();
+    offlineUv();
+    const entry = intactVenv();
+    const binDir = path.join(canonical, "bin");
+    fs.writeFileSync(installers.ytDlpTokenPath(binDir), installers.YT_DLP_UV_TOKEN);
+
+    const { serverLogger } = await import("@/lib/logger");
+    const info = vi.spyOn(serverLogger, "info");
+
+    await new DependencyManager().retryDep("youtube-download", "yt-dlp");
+
+    expect(uvCalls()).toEqual([]);
+    expect(launcher.checkYtDlpLauncher()).toMatchObject({ ok: true, target: fs.realpathSync(entry) });
+    expect(await installers.getCustomInstaller("yt-dlp-uv")!.verify()).toBe(path.join(binDir, "yt-dlp"));
+    // The success line names what actually ran (found on the Windows VM: it said "uv" here).
+    const ok = info.mock.calls.map((c) => c[0] as { op?: string; via?: string }).find((f) => f.op === "custom_installer_ok");
+    expect(ok?.via).toBe("launcher");
+    info.mockRestore();
+  });
+
+  it("a launcher that fails to start (the job's repair) over an intact venv is rewritten without uv too", async () => {
+    process.env.LIBI_HOME = canonical;
+    const { DependencyManager, installers, launcher } = await load();
+    offlineUv();
+    const entry = intactVenv();
+    const binDir = path.join(canonical, "bin");
+    // Passes the file checks, but lost its exec bit: exit 126 at spawn.
+    fs.writeFileSync(path.join(binDir, "yt-dlp"), `#!/bin/bash\nexec "${entry}" --no-playlist "$@"\n`, { mode: 0o644 });
+    fs.writeFileSync(installers.ytDlpTokenPath(binDir), installers.YT_DLP_UV_TOKEN);
+
+    const launcherOnly = vi.fn();
+    await new DependencyManager().retryDep("youtube-download", "yt-dlp", { launcherFailed: true, onLauncherOnlyRepair: launcherOnly });
+
+    expect(uvCalls()).toEqual([]);
+    expect(launcherOnly).toHaveBeenCalledTimes(1); // the job is told no reinstall ran (review M6)
+    expect(fs.statSync(path.join(binDir, "yt-dlp")).mode & 0o111).not.toBe(0);
+    expect(launcher.checkYtDlpLauncher().ok).toBe(true);
+  });
+
+  it("a Re-download over a HEALTHY launcher is still a real reinstall through uv (it is how yt-dlp gets updated)", async () => {
+    process.env.LIBI_HOME = canonical;
+    const { DependencyManager, installers } = await load();
+    const entry = intactVenv();
+    const binDir = path.join(canonical, "bin");
+    fs.writeFileSync(path.join(binDir, "yt-dlp"), `#!/bin/bash\nexec "${entry}" --no-playlist "$@"\n`, { mode: 0o755 });
+    fs.writeFileSync(installers.ytDlpTokenPath(binDir), installers.YT_DLP_UV_TOKEN);
+
+    const launcherOnly = vi.fn();
+    await new DependencyManager().retryDep("youtube-download", "yt-dlp", { onLauncherOnlyRepair: launcherOnly });
+
+    expect(uvCalls().some((c) => c.startsWith("tool install"))).toBe(true);
+    expect(launcherOnly).not.toHaveBeenCalled();
+  });
+
+  it("an old token (a YT_DLP_UV_TOKEN bump) goes through uv even with an intact venv, and fails offline in words", async () => {
+    process.env.LIBI_HOME = canonical;
+    const { DependencyManager, installers } = await load();
+    offlineUv();
+    intactVenv();
+    fs.writeFileSync(installers.ytDlpTokenPath(path.join(canonical, "bin")), "yt-dlp-uv@1999-01-01");
+
+    await expect(new DependencyManager().retryDep("youtube-download", "yt-dlp")).rejects.toThrow();
+    expect(uvCalls().some((c) => c.startsWith("tool install"))).toBe(true);
+  });
+
+  it("a venv entry that does not run is reinstalled through uv", async () => {
+    process.env.LIBI_HOME = canonical;
+    const { DependencyManager, installers } = await load();
+    const entry = intactVenv();
+    fs.writeFileSync(entry, "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+    fs.writeFileSync(installers.ytDlpTokenPath(path.join(canonical, "bin")), installers.YT_DLP_UV_TOKEN);
+
+    await new DependencyManager().retryDep("youtube-download", "yt-dlp");
+    expect(uvCalls().some((c) => c.startsWith("tool install"))).toBe(true);
+  });
+});

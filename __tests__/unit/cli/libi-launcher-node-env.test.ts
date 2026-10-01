@@ -67,6 +67,9 @@ function makeDevCheckoutLibi(): { binPath: string; outFile: string } {
   fs.copyFileSync(BIN_PATH, path.join(root, "bin", "libi.js"));
   fs.mkdirSync(path.join(root, "node_modules"));
   fs.symlinkSync(TSX_PACKAGE, path.join(root, "node_modules", "tsx"), "dir");
+  // A FINISHED install: bin/libi.js refuses a worktree (`.git` file) whose
+  // node_modules has no `.package-lock.json` (worktreeNodeModulesCheck).
+  fs.writeFileSync(path.join(root, "node_modules", ".package-lock.json"), "{}");
   fs.mkdirSync(path.join(root, "lib", "cli"), { recursive: true });
   const outFile = path.join(root, "server-env-node.txt");
   fs.writeFileSync(

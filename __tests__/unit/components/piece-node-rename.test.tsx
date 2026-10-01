@@ -1,10 +1,18 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 vi.mock("@/components/resources/piece-assets", () => ({
   default: () => <div data-testid="piece-assets" />,
+}));
+
+const active = vi.hoisted(() => ({ data: [] as { id: string; pieceId: string }[] }));
+vi.mock("@/lib/queries/exports", () => ({
+  useActiveExports: () => active,
+  useExports: () => ({ data: [] }),
+  useRenameExport: () => ({ mutateAsync: vi.fn() }),
+  useDeleteExport: () => ({ mutateAsync: vi.fn() }),
 }));
 
 import PieceNode from "@/components/resources/piece-node";
@@ -61,5 +69,33 @@ describe("PieceNode external rename trigger", () => {
   it("shows no input without a trigger", () => {
     renderNode(false);
     expect(screen.queryByDisplayValue("My piece")).not.toBeInTheDocument();
+  });
+});
+
+describe("PieceNode running-exports badge", () => {
+  beforeEach(() => {
+    active.data = [];
+  });
+
+  it("counts only this piece's queued/running exports", () => {
+    active.data = [
+      { id: "a", pieceId: "p1" },
+      { id: "b", pieceId: "p1" },
+      { id: "c", pieceId: "other" },
+    ];
+    renderNode(false);
+    const badge = screen.getByTestId("piece-exports-running");
+    expect(badge).toHaveTextContent("2");
+    expect(badge).toHaveAttribute("title", "2 exports running");
+  });
+
+  it("is singular for one, and absent for none", () => {
+    active.data = [{ id: "a", pieceId: "p1" }];
+    const { unmount } = renderNode(false);
+    expect(screen.getByTestId("piece-exports-running")).toHaveAttribute("title", "1 export running");
+    unmount();
+    active.data = [{ id: "c", pieceId: "other" }];
+    renderNode(false);
+    expect(screen.queryByTestId("piece-exports-running")).not.toBeInTheDocument();
   });
 });

@@ -438,6 +438,14 @@ export interface ExportSettings {
   /** Audio bitrate in bits/sec. Defaults per codec — 320k AAC (mp4), 256k
    *  Opus (webm, also its ceiling); see `resolveAudioBitrate`. */
   audioBitrate?: number;
+  /** What the export is for (spec §5). Decides the default for copyrighted audio. */
+  purpose?: "social" | "personal";
+  /** Copyrighted audio in or out. Default from purpose: social → exclude, personal → include. */
+  copyrightedAudio?: "exclude" | "include";
+  /** Copyrighted files kept in on top of an `exclude` (the export dialog's switches). */
+  includeFileIds?: string[];
+  /** Any files left out (the export dialog's Include switches). */
+  excludeFileIds?: string[];
 }
 
 /** Result of an export operation */

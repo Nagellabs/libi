@@ -48,6 +48,12 @@ vi.mock("@/lib/queries/overlay-presets", () => ({
   useDeletePreset: () => ({ mutate: vi.fn() }),
 }));
 
+// AudioRightsSection reads files via React Query (useFileById); it has its own
+// test, so stub it here to keep this panel renderable without a QueryClientProvider.
+vi.mock("@/components/preview/audio-rights-section", () => ({
+  AudioRightsSection: () => null,
+}));
+
 import LayersInspectorPanel from "@/components/preview/layers-inspector-panel";
 import { createSelectionStore } from "@/lib/preview/selection-store";
 import { createHighlightStore } from "@/lib/preview/highlight-store";

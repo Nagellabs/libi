@@ -55,6 +55,13 @@ export interface SessionUsageState {
   cost: { amount: number; currency: string } | null;
   rateLimits: Partial<Record<RateLimitWindowType, RateLimitSnapshot>>;
   updatedAt: number;
+  /** The model's supported MAXIMUM context window — what raising the agent's
+   *  own context-window setting could reach (Codex's `max_context_window`,
+   *  `lib/agents/codex-model-windows.ts`). Set ONLY when strictly greater than
+   *  `size` (never against `reportedSize`); null otherwise, and always null
+   *  for Claude. Display-only — the ring/percentage stay pinned to `size`,
+   *  see `components/chat/context-usage-chip.tsx`. */
+  maxSize: number | null;
 }
 
 export interface AvailableCommandInfo {
@@ -83,6 +90,10 @@ export function applyUsageUpdate(
   update: unknown,
   now: number = Date.now(),
   knownWindow: number | null = null,
+  /** Codex's `max_context_window` for the session's current model (CW-1); null
+   *  for Claude and for any model libi hasn't observed a max for. Pass-through
+   *  only — never used by this function's size-recovery logic. */
+  maxWindow: number | null = null,
 ): SessionUsageState | null {
   if (typeof update !== "object" || update === null) return prev;
   const u = update as {
@@ -170,6 +181,7 @@ export function applyUsageUpdate(
     cost,
     rateLimits,
     updatedAt: now,
+    maxSize: maxWindow !== null && maxWindow > effectiveSize ? maxWindow : null,
   };
 }
 

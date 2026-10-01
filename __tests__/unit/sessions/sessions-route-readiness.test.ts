@@ -43,6 +43,21 @@ describe("GET /api/sessions", () => {
     expect(body.readiness.message).toBeTruthy();
   });
 
+  it("says which chats' history is missing (SES-4), and nothing else changes shape", async () => {
+    sm.getAllSessions.mockReturnValueOnce([
+      { sessionId: "a", agentId: "claude-code", title: "A", updatedAt: null, active: false },
+      { sessionId: "b", agentId: "claude-code", title: "B", updatedAt: null, active: false, historyMissing: true },
+      { sessionId: "c", agentId: "codex", title: "C", updatedAt: null, active: false, historyUnlisted: true },
+    ] as never);
+    const body = await (await GET()).json();
+    expect(body.sessions).toEqual([
+      { sessionId: "a", agentId: "claude-code", title: "A", updatedAt: null, active: false, historyMissing: false, unlisted: false },
+      { sessionId: "b", agentId: "claude-code", title: "B", updatedAt: null, active: false, historyMissing: true, unlisted: false },
+      // Unlisted is not "history missing" (review I1): it only says the agent's listing left it out.
+      { sessionId: "c", agentId: "codex", title: "C", updatedAt: null, active: false, historyMissing: false, unlisted: true },
+    ]);
+  });
+
   it("asks about the surface it reports as active", async () => {
     terminalActive = true;
 

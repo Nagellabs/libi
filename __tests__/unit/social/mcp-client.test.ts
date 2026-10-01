@@ -332,10 +332,30 @@ describe("toSocialError", () => {
     expect(toSocialError(new Error('{"status": 422, "detail": "bad"}')).kind).toBe("validation");
   });
 
-  it("prefers the transport's real status over anything in the text", () => {
+  it("keeps a Zernio 400 a provider error, but records its status", () => {
+    // The live Instagram-Login audio refusal (2026-09-27). The music catalog
+    // reads a 4xx `provider` as "this connection cannot use it", so the
+    // status has to survive; the kind must not change, nothing else keys on it.
+    const e = toSocialError(new Error("Error: [400] The Instagram audio catalog requires an account connected via Facebook Login. (field: accountId; code: instagram_audio_requires_facebook_login)"));
+    expect(e.kind).toBe("provider");
+    expect(e.status).toBe(400);
+    expect(e.statusFromText).toBe(true);
+  });
+
+  it("prefers the transport's real status over anything in the text, and says the status is not text-borne", () => {
     const e = toSocialError(new StreamableHTTPError(404, "HTTP 500 says the body"));
     expect(e.kind).toBe("not_found");
     expect(e.status).toBe(404);
+    expect(e.statusFromText).toBe(false);
+    const session = toSocialError(new StreamableHTTPError(400, "Error POSTing to endpoint: Error: [403] No valid session ID provided"));
+    expect(session).toMatchObject({ kind: "provider", status: 400, statusFromText: false });
+  });
+
+  it("STATUS_IN_TEXT: the first introduced status in the text wins, and is flagged text-borne", () => {
+    expect(toSocialError(new Error("Error: [400] upstream later said HTTP 502"))).toMatchObject({ kind: "provider", status: 400, statusFromText: true });
+    expect(toSocialError(new Error("HTTP 404 then code 500"))).toMatchObject({ kind: "not_found", status: 404, statusFromText: true });
+    // No status anywhere: nothing is flagged.
+    expect(toSocialError(new Error("something broke")).statusFromText).toBe(false);
   });
 
   it("passes a SocialError through untouched", () => {
@@ -532,6 +552,9 @@ const EXPECTED_TOOL: Record<ZernioOp, string> = {
   "ads.accounts": "ad_accounts_list_ad_accounts",
   "ads.campaigns": "ad_campaigns_list_ad_campaigns",
   "ads.list": "ad_campaigns_list_ads",
+  "music.tiktokCommercial": "accounts_list_tik_tok_commercial_music",
+  "music.instagramSearch": "instagram_search_instagram_audio",
+  "music.instagramGet": "instagram_get_instagram_audio",
 };
 
 describe("resolveOps — tools/list never decides WHICH tool an op maps to", () => {
@@ -608,7 +631,7 @@ describe("callOp — dispatch by exact name", () => {
     // The unlisted ones are the point: they are reachable ONLY this way, and
     // the count is asserted so a tool quietly moving into the listed set (or a
     // new op forgetting `call_tool`) fails here rather than at runtime.
-    expect(calls.filter((c) => c.via === "call_tool").length).toBe(12);
+    expect(calls.filter((c) => c.via === "call_tool").length).toBe(15);
     await mcp.close();
   });
 
@@ -1331,5 +1354,289 @@ describe("a text-shaped 401 refreshes the grant and retries — the live expiry 
       expect(err.message).not.toContain(FRESH);
       expect(err.message).not.toContain("rt-secret");
     }, { answer: () => UNAUTHORIZED, refreshed: null });
+  });
+});
+
+/**
+ * SOC-1: a refresh that fails because the token endpoint could not be REACHED
+ * or ANSWERED must never be reported the same way as a refresh the provider
+ * genuinely REJECTED. Before this, `runRefresh`'s catch returned `false` for
+ * any failure and `call()` rethrew the ORIGINAL 401, which `withAdapter`
+ * escalates to `markUnauthorized()` regardless of cause — a transient blip
+ * latched "reconnect" exactly like a dead grant would.
+ *
+ * These run the real `StreamableHTTPClientTransport`, the real `auth()`, the
+ * real `LibiOAuthClientProvider` and a real `SocialTokenStore`, so the
+ * observed behaviour is the SDK's own. Probed live against SDK 1.29
+ * (`docs-local/…/probe.mjs`, the review's I1 table): a `fetchFn` that throws
+ * `TypeError("fetch failed")` on every call still makes `auth()` resolve to
+ * `'REDIRECT'`, never throw — `authInternal`'s own refresh `try/catch`
+ * swallows anything that isn't a specific `OAuthError` subclass, and a
+ * malformed/5xx token-endpoint BODY (no throw at all) is swallowed the same
+ * way. That is exactly why `runRefresh` cannot classify from `auth()`'s
+ * return value or a thrown exception alone, and must observe the fetch itself
+ * (`observeTokenEndpointOutcome`) — scoped to the TOKEN request only (M1), by
+ * its `application/x-www-form-urlencoded` content type.
+ */
+describe("SOC-1: a transient refresh failure doesn't latch reconnect", () => {
+  const STALE = "stale-access-token";
+  const FRESH = "fresh-access-token";
+  const UNAUTHORIZED = "Error: [401] Unauthorized";
+
+  type TokenAttempt =
+    | "fresh"
+    | "type-error"
+    | "abort"
+    | { causeCode: string }
+    | { status: number; body: string; contentType?: string };
+
+  /** The real MCP JSON-RPC responder shared by every fixture below: initialize /
+   *  notifications / tools-list / one tool call, keyed on the caller's bearer so a
+   *  test can tell the stale token's call from the refreshed one's. `null` means
+   *  "not a JSON-RPC body" (the caller falls through to token/register handling). */
+  function mcpJsonRpc(init?: RequestInit): Response | null {
+    let msg: { id?: number; method?: string; params?: { protocolVersion?: string } };
+    try {
+      msg = JSON.parse(String(init?.body)) as typeof msg;
+    } catch {
+      return null;
+    }
+    if (!msg.method) return null;
+    const json = (result: unknown) =>
+      new Response(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }), {
+        status: 200,
+        headers: { "content-type": "application/json", "mcp-session-id": "sess-1" },
+      });
+    if (msg.method === "initialize") {
+      return json({ protocolVersion: msg.params?.protocolVersion, capabilities: {}, serverInfo: { name: "fake-zernio", version: "1" } });
+    }
+    if (msg.method.startsWith("notifications/")) return new Response(null, { status: 202 });
+    if (msg.method === "tools/list") return json({ tools: [{ name: "accounts_get_account_health", inputSchema: { type: "object" } }] });
+    const bearer = new Headers(init?.headers).get("authorization") ?? "";
+    return json({ content: [{ type: "text", text: bearer === `Bearer ${FRESH}` ? JSON.stringify({ ok: true }) : UNAUTHORIZED }] });
+  }
+
+  /**
+   * `tokenAttempts` is consumed one entry per token-endpoint POST (the last
+   * entry repeats once exhausted); discovery GETs answer plainly (`discoveryStatus`,
+   * default 405 — the SDK tolerates that gracefully, same as every other fixture in
+   * this file) unless a test needs a discovery 5xx that genuinely escapes instead.
+   * The token request is told apart from registration/MCP JSON-RPC by CONTENT TYPE
+   * (`application/x-www-form-urlencoded`), exactly as `isTokenEndpointRequest` does.
+   */
+  function fetchForRefresh(opts: { tokenAttempts: TokenAttempt[]; discoveryStatus?: number }) {
+    let n = 0;
+    return async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method !== "POST") return new Response(null, { status: opts.discoveryStatus ?? 405 });
+      if (String(url).endsWith("/register")) {
+        return new Response(JSON.stringify({ client_id: "cid", redirect_uris: ["http://127.0.0.1:3000/api/social/oauth/callback"] }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const isToken = (new Headers(init.headers).get("content-type") ?? "").includes("application/x-www-form-urlencoded");
+      if (isToken) {
+        const outcome = opts.tokenAttempts[Math.min(n, opts.tokenAttempts.length - 1)];
+        n += 1;
+        if (outcome === "type-error") throw new TypeError("fetch failed");
+        if (outcome === "abort") {
+          const e = new Error("The operation was aborted.");
+          e.name = "AbortError";
+          throw e;
+        }
+        if (typeof outcome === "object" && "causeCode" in outcome) {
+          const e = new TypeError("fetch failed");
+          Object.assign(e, { cause: { code: outcome.causeCode } });
+          throw e;
+        }
+        if (typeof outcome === "object" && "status" in outcome) {
+          return new Response(outcome.body, { status: outcome.status, headers: outcome.contentType ? { "content-type": outcome.contentType } : {} });
+        }
+        return new Response(
+          JSON.stringify({ access_token: FRESH, token_type: "bearer", expires_in: 3600, refresh_token: "rt-rotated" }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return mcpJsonRpc(init) ?? new Response(null, { status: 404 });
+    };
+  }
+
+  /** Connects with a stale grant, makes one tool call, and asserts the failure is
+   *  `unavailable` with the grant left exactly as it was. Always cleans up its own
+   *  connection and temp home before returning or throwing. */
+  async function expectTransientRefresh(tokenAttempts: TokenAttempt[], opts: { discoveryStatus?: number } = {}): Promise<void> {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-social-transient-"));
+    const store = new SocialTokenStore("zernio", home);
+    store.write({
+      tokens: { access_token: STALE, refresh_token: "rt-secret", token_type: "bearer", expires_at: Date.now() - 1000 },
+      client: { client_id: "cid", redirect_uris: ["http://127.0.0.1:3000/api/social/oauth/callback"] },
+      connectedAt: "2026-09-21T04:23:43.000Z",
+      scopes: ["posts:read"],
+    });
+    const mcp = await connectProviderMcp({
+      url: "https://mcp.example/mcp",
+      authProvider: new LibiOAuthClientProvider({
+        providerId: "zernio",
+        store,
+        redirectUrl: "http://127.0.0.1:3000/api/social/oauth/callback",
+        scopes: ["posts:read"],
+        onRedirect: () => {},
+        interactive: false,
+      }),
+      fetch: fetchForRefresh({ tokenAttempts, discoveryStatus: opts.discoveryStatus }) as unknown as Parameters<typeof connectProviderMcp>[0]["fetch"],
+    });
+    try {
+      const err = await mcp.call("accounts_get_account_health", { account_id: "a1" }).catch((e: unknown) => e as SocialError);
+      expect(err).toBeInstanceOf(SocialError);
+      expect((err as SocialError).kind).toBe("unavailable");
+      expect(isRetryable(err as SocialError, { kind: "read" })).toBe(true);
+      // THE assertion: the stored grant is exactly as it was — nothing about a
+      // transient failure may look like a sign-out.
+      expect(store.readSecret()?.tokens.access_token).toBe(STALE);
+      expect(store.readSecret()?.tokens.refresh_token).toBe("rt-secret");
+      expect(store.status()).toMatchObject({ connected: true, revoked: false });
+    } finally {
+      await mcp.close();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  it("a network blip refreshing the grant rejects with kind unavailable, and the next call recovers", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-social-transient-"));
+    const store = new SocialTokenStore("zernio", home);
+    store.write({
+      tokens: { access_token: STALE, refresh_token: "rt-secret", token_type: "bearer", expires_at: Date.now() - 1000 },
+      client: { client_id: "cid", redirect_uris: ["http://127.0.0.1:3000/api/social/oauth/callback"] },
+      connectedAt: "2026-09-21T04:23:43.000Z",
+      scopes: ["posts:read"],
+    });
+    const mcp = await connectProviderMcp({
+      url: "https://mcp.example/mcp",
+      authProvider: new LibiOAuthClientProvider({
+        providerId: "zernio",
+        store,
+        redirectUrl: "http://127.0.0.1:3000/api/social/oauth/callback",
+        scopes: ["posts:read"],
+        onRedirect: () => {},
+        interactive: false,
+      }),
+      // Only the FIRST token attempt fails; the second (below) is healthy.
+      fetch: fetchForRefresh({ tokenAttempts: ["type-error", "fresh"] }) as unknown as Parameters<typeof connectProviderMcp>[0]["fetch"],
+    });
+    try {
+      const err = await mcp.call("accounts_get_account_health", { account_id: "a1" }).catch((e: unknown) => e as SocialError);
+      expect(err).toBeInstanceOf(SocialError);
+      expect((err as SocialError).kind).toBe("unavailable");
+      expect(isRetryable(err as SocialError, { kind: "read" })).toBe(true);
+      expect(store.readSecret()?.tokens.access_token).toBe(STALE);
+      expect(store.status()).toMatchObject({ connected: true, revoked: false });
+
+      // The next call, with the endpoint healthy, refreshes and succeeds —
+      // the blip cost nothing permanent.
+      await expect(mcp.call("accounts_get_account_health", { account_id: "a1" })).resolves.toEqual({ ok: true });
+      expect(store.readSecret()?.tokens.access_token).toBe(FRESH);
+    } finally {
+      await mcp.close();
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("I1: a 502 with an HTML body from the token endpoint is transient, not a rejection", async () => {
+    await expectTransientRefresh([{ status: 502, body: "<html>bad gateway</html>" }]);
+  });
+
+  it("I1: a 503 {\"error\":\"temporarily_unavailable\"} body from the token endpoint is transient", async () => {
+    await expectTransientRefresh([
+      { status: 503, body: JSON.stringify({ error: "temporarily_unavailable" }), contentType: "application/json" },
+    ]);
+  });
+
+  it("I1: a 5xx during discovery is transient (escapes as a plain Error before the token endpoint is ever reached)", async () => {
+    await expectTransientRefresh(["fresh"], { discoveryStatus: 500 });
+  });
+
+  it("M3: an AbortError refreshing the grant is transient", async () => {
+    await expectTransientRefresh(["abort"]);
+  });
+
+  it("M3: ENOTFOUND (DNS failure) refreshing the grant is transient", async () => {
+    await expectTransientRefresh([{ causeCode: "ENOTFOUND" }]);
+  });
+
+  it("M3: EAI_AGAIN (DNS failure) refreshing the grant is transient", async () => {
+    await expectTransientRefresh([{ causeCode: "EAI_AGAIN" }]);
+  });
+
+  // `invalid_grant` is unchanged by this fix: it is an ORDINARY (non-throwing)
+  // 400 response from the token endpoint, so `observeTokenEndpointOutcome`
+  // never records it (a non-5xx resolved response clears any earlier note),
+  // and the existing "a dead refresh token still clears the grant, marks it
+  // revoked, and reports unauthorized" test above (same describe block,
+  // `refreshed: null`) already covers that path continuing to clear the
+  // grant and report `unauthorized`.
+
+  /**
+   * I2: the SAME observer must cover the transport's OWN internal `auth()`,
+   * run from inside `send()` (streamableHttp.js) when the very first request
+   * (`initialize`) gets a real wire 401 — a stale token discovered at CONNECT
+   * time, before `runRefresh` ever runs. Without this, a transient
+   * token-endpoint failure there surfaces as a bare `new UnauthorizedError()`
+   * with nothing to classify by, which `toSocialError` maps unconditionally
+   * to `unauthorized`.
+   */
+  describe("I2: a transient failure establishing the connection (wire-shaped 401 on initialize)", () => {
+    it("rejects with kind unavailable, not unauthorized, and never touches the grant", async () => {
+      const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-social-connect-transient-"));
+      const store = new SocialTokenStore("zernio", home);
+      store.write({
+        tokens: { access_token: STALE, refresh_token: "rt-secret", token_type: "bearer", expires_at: Date.now() - 1000 },
+        client: { client_id: "cid", redirect_uris: ["http://127.0.0.1:3000/api/social/oauth/callback"] },
+        connectedAt: "2026-09-21T04:23:43.000Z",
+        scopes: ["posts:read"],
+      });
+      let tokenAttempts = 0;
+      const fetchImpl = async (url: string | URL, init?: RequestInit): Promise<Response> => {
+        if (init?.method !== "POST") return new Response(null, { status: 405 });
+        if (String(url).endsWith("/register")) {
+          return new Response(JSON.stringify({ client_id: "cid", redirect_uris: ["http://127.0.0.1:3000/api/social/oauth/callback"] }), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        const isToken = (new Headers(init.headers).get("content-type") ?? "").includes("application/x-www-form-urlencoded");
+        if (isToken) {
+          tokenAttempts += 1;
+          return new Response("<html>bad gateway</html>", { status: 502 });
+        }
+        // EVERY JSON-RPC call, including the very first `initialize`, gets a real
+        // wire 401 — a stale access token discovered establishing the session.
+        return new Response(JSON.stringify({ error: "invalid_token" }), {
+          status: 401,
+          headers: { "www-authenticate": 'Bearer error="invalid_token"', "content-type": "application/json" },
+        });
+      };
+      const err = await connectProviderMcp({
+        url: "https://mcp.example/mcp",
+        authProvider: new LibiOAuthClientProvider({
+          providerId: "zernio",
+          store,
+          redirectUrl: "http://127.0.0.1:3000/api/social/oauth/callback",
+          scopes: ["posts:read"],
+          onRedirect: () => {},
+          interactive: false,
+        }),
+        fetch: fetchImpl as unknown as Parameters<typeof connectProviderMcp>[0]["fetch"],
+      }).then(
+        (mcp) => mcp.close().then(() => undefined),
+        (e: unknown) => e as SocialError,
+      );
+      expect(err).toBeInstanceOf(SocialError);
+      expect((err as SocialError).kind).toBe("unavailable");
+      expect(tokenAttempts).toBeGreaterThan(0);
+      // THE assertion: the connect-time observer kept the grant untouched too.
+      expect(store.readSecret()?.tokens.access_token).toBe(STALE);
+      expect(store.status()).toMatchObject({ connected: true, revoked: false });
+      fs.rmSync(home, { recursive: true, force: true });
+    });
   });
 });

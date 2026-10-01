@@ -249,7 +249,8 @@ export function replaceCatalogUnlessSuperseded(index: CatalogIndex, etag: string
   // other process (the MCP child) can't land the active copy in between.
   return getDb().transaction(
     (tx) => {
-      const active = activeCatalogSource();
+      // Fresh, not the ≤ 1 s memo (review m1): a switch the other process made a moment ago counts.
+      const active = activeCatalogSource({ fresh: true });
       if (source !== active) {
         const held = tx.select({ source: catalogIndexMeta.source }).from(catalogIndexMeta).where(eq(catalogIndexMeta.id, 1)).get()?.source ?? null;
         if (held === active) return false;
@@ -305,6 +306,7 @@ function toSummary(row: CatalogRow, base: string): TemplateSummary {
     mediaRev: 0,
     canRenderExample: false,
     sourcePieceName: null,
+    sourceEmpty: false,
   };
 }
 

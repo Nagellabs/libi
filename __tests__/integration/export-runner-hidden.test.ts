@@ -63,12 +63,11 @@ function fakeCtx(params: ExportParams): JobContext<ExportParams> {
   };
 }
 
-function params(destFolder: string): ExportParams {
+function params(): ExportParams {
   return {
     pieceId: PIECE_ID,
     source: "draft",
     filename: "out",
-    destFolder,
     settings: {
       format: "mp4", codec: "avc", bitrate: 1_000_000,
       width: 320, height: 240, fps: 24,
@@ -113,7 +112,6 @@ async function seedManifest(opts: { hidden: boolean }): Promise<void> {
 }
 
 describe("export runner — hidden layers stripped before classify (agent path)", () => {
-  let outDir: string;
 
   beforeEach(() => {
     captured.runs = [];
@@ -130,7 +128,6 @@ describe("export runner — hidden layers stripped before classify (agent path)"
         contentType: "video/mp4", size: 1, mediaWidth: 320, mediaHeight: 240,
       },
     ]).run();
-    outDir = path.join(getLibiStorageDir(), "export-out");
   });
 
   afterEach(() => {
@@ -141,7 +138,7 @@ describe("export runner — hidden layers stripped before classify (agent path)"
 
   it("CONTROL: a visible overlay + its coupled clip reach the render payload", async () => {
     await seedManifest({ hidden: false });
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.backend).toBe("chromium-render");
     expect(captured.runs).toHaveLength(1);
     const { composition, payload } = captured.runs[0];
@@ -157,7 +154,7 @@ describe("export runner — hidden layers stripped before classify (agent path)"
 
   it("a manifest-hidden overlay + its coupled clip are absent from the classifier comp, render payload, and audio mux input", async () => {
     await seedManifest({ hidden: true });
-    const result = await exportRunner.run(fakeCtx(params(outDir)));
+    const result = await exportRunner.run(fakeCtx(params()));
     expect(result.backend).toBe("chromium-render");
     expect(captured.runs).toHaveLength(1);
     const { composition, payload } = captured.runs[0];

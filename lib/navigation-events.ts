@@ -17,12 +17,12 @@ if (!globalForNav.__navEmitter) {
 export const navigationEmitter = globalForNav.__navEmitter;
 
 export interface NavigateEvent {
-  target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+  target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting" | "exports";
   /** Required for piece/asset/preview/storyboard/folder/posting targets. */
   pieceId?: string;
   fileId?: string;
   /** Optional id for special targets — for `posting`, a provider post id to
-   *  open in the composer for review. */
+   *  open in the composer for review; for `exports`, the export to select. */
   id?: string;
 }
 
@@ -39,6 +39,10 @@ export interface RefreshQueryEvent {
   fileId?: string;
   /** Set when queryKey === "track": the track whose sidecar changed. */
   trackId?: string;
+  /** Set when queryKey === "exports": the export whose record changed. */
+  exportId?: string;
+  /** Set when queryKey === "exports": the record's status after the change, or "deleted" / "renamed". */
+  status?: string;
 }
 
 export interface InstructionsUpdatedEvent {
@@ -64,12 +68,21 @@ export interface NavigateAgentsEvent {
   extensionId?: string;
   /** Providers tab: the provider row to focus. */
   provider?: string;
+  /** The libi chat whose agent asked (NAV-1); only a tab showing it navigates. Absent for a call
+   *  that belongs to no libi chat (a CLI agent): every tab obeys, as before. Never `sessionId`,
+   *  which would route the event to per-session handlers instead of the broadcast. */
+  fromSessionId?: string;
+  /** Per-event id the tabs use to tell each other one of them took it. */
+  navId?: string;
 }
 
 /** Send the user to the Templates page (`libi.show_templates`). The client
  *  pushes `/templates?tab=mine` and, when given, `&template=<id>`. */
 export interface NavigateTemplatesEvent {
   templateId?: string;
+  /** As on `NavigateAgentsEvent`. */
+  fromSessionId?: string;
+  navId?: string;
 }
 
 /** Guided-edit highlight: flash an inspector field for an overlay (from the

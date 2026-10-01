@@ -21,6 +21,9 @@ const sm = {
   hasActiveSession: vi.fn<(id: string) => boolean>(),
   activateSession: vi.fn(async () => []),
   sendMessage: vi.fn(async () => {}),
+  markUserSent: vi.fn(),
+  // The route's approval-mode gate: nothing in flight in these tests.
+  awaitApprovalMode: vi.fn(async () => ({ ok: true as const })),
 };
 vi.mock("@/lib/sessions/session-manager", () => ({
   getSessionManager: () => sm,

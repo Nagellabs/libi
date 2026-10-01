@@ -17,29 +17,60 @@
  *     (`agentSpawnPathDirs`) and says when it can't see it (`lib/providers/detect.ts`).
  *
  * The login-shell folders go AFTER this process's own, so nothing that resolved before resolves differently.
- * Nothing here spawns a shell: the login-shell PATH is the last one the resolver's probe delivered, and there
- * is none on Windows, where nothing changes.
+ * Nothing here spawns a shell: the login-shell PATH is the last one the resolver's probe delivered.
+ *
+ * Windows has no login shell. There the fresh PATH is the registry's (`lib/agents/cli/windows-registry-path.ts`:
+ * the machine's `Path`, then the user's, `%VAR%` expanded), which an installer writes and a running process never
+ * sees. `refreshFreshPathDirs()` reads it (bounded 2 s) before an agent process is spawned and before a chat's
+ * session is created; everything else reads the last good read, never waiting. A read that fails or times out
+ * leaves the PATH as it was. The inherited key there is `Path`, so the PATH is read and written under the key the
+ * environment already has (`pathEnvKey`).
  */
-import path from "node:path";
 import { lastLoginShellPathDirs } from "@/lib/agents/cli/login-shell-path";
+import { lastWindowsRegistryPathDirs, refreshWindowsRegistryPath } from "@/lib/agents/cli/windows-registry-path";
+import { isWindows } from "@/lib/platform";
+
+/** The PATH folders a process started now would get that this one may lack: the login shell's, or on Windows the registry's. */
+export function freshPathDirs(): string[] | null {
+  return isWindows() ? lastWindowsRegistryPathDirs() : lastLoginShellPathDirs();
+}
+
+/** Re-read the fresh PATH where reading it has to be asked for: the registry on Windows (bounded, never rejects). Null
+ *  elsewhere — the login-shell PATH is refreshed by the CLI resolver's probe — so a caller awaits only when there is
+ *  something to wait on (`const r = refreshFreshPathDirs(); if (r) await r;`) and adds no turn off Windows. */
+export function refreshFreshPathDirs(): Promise<unknown> | null {
+  return isWindows() ? refreshWindowsRegistryPath() : null;
+}
+
+/** This platform's PATH separator, decided at call time (so a test that pins the platform reads Windows' `;`). */
+export function pathDelimiter(): string {
+  return isWindows() ? ";" : ":";
+}
+
+/** The key `env` holds its PATH under: on Windows whatever spelling it has (`Path`, usually), else `PATH`. */
+export function pathEnvKey(env: Readonly<Record<string, string | undefined>>): string {
+  if (!isWindows()) return "PATH";
+  return Object.keys(env).find((k) => k.toUpperCase() === "PATH") ?? "Path";
+}
 
 /**
- * `env.PATH` followed by each login-shell folder it doesn't already hold, in the login shell's order. `env.PATH`
- * as it is (possibly undefined) when there is no login-shell PATH or it adds nothing.
+ * `env`'s PATH followed by each fresh folder it doesn't already hold, in the fresh PATH's order. `env`'s PATH as it is
+ * (possibly undefined) when there is no fresh PATH or it adds nothing. Windows compares folders case-insensitively.
  */
 export function agentChildPath(
   env: Readonly<Record<string, string | undefined>> = process.env,
-  loginDirs: readonly string[] | null = lastLoginShellPathDirs(),
-  delimiter: string = path.delimiter,
+  loginDirs: readonly string[] | null = freshPathDirs(),
+  delimiter: string = pathDelimiter(),
 ): string | undefined {
-  const current = env.PATH;
+  const current = env[pathEnvKey(env)];
   if (!loginDirs || loginDirs.length === 0) return current;
   const own = (current ?? "").split(delimiter).filter(Boolean);
-  const seen = new Set(own);
+  const norm = isWindows() ? (d: string) => d.replace(/[\\/]+$/, "").toLowerCase() : (d: string) => d;
+  const seen = new Set(own.map(norm));
   const added: string[] = [];
   for (const dir of loginDirs) {
-    if (!dir || seen.has(dir)) continue;
-    seen.add(dir);
+    if (!dir || seen.has(norm(dir))) continue;
+    seen.add(norm(dir));
     added.push(dir);
   }
   return added.length === 0 ? current : [...own, ...added].join(delimiter);
@@ -53,7 +84,7 @@ function spawnPaths(): Map<string, string[]> {
 }
 
 /** The process manager started `agentId`'s current process with `pathValue`. */
-export function recordAgentSpawnPath(agentId: string, pathValue: string | undefined, delimiter: string = path.delimiter): void {
+export function recordAgentSpawnPath(agentId: string, pathValue: string | undefined, delimiter: string = pathDelimiter()): void {
   spawnPaths().set(agentId, (pathValue ?? "").split(delimiter).filter(Boolean));
 }
 

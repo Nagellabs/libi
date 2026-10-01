@@ -14,7 +14,7 @@ import {
   useSocialStatus,
   useUpdateSocialPost,
 } from "@/lib/queries/social";
-import type { CreatePostInput, SocialAccount, TikTokCreatorInfo } from "@/lib/social/types";
+import type { CreatePostInput, SocialAccount, TikTokCreatorInfo, TargetOptions } from "@/lib/social/types";
 import type { SocialPlatform } from "@/lib/social/catalog";
 import { toDatetimeLocal } from "@/lib/social/format";
 import { isComposablePlatform, platformLabel } from "@/lib/social/catalog";
@@ -26,12 +26,17 @@ import {
   writeComposerDraft,
 } from "@/hooks/social/use-composer-draft";
 import { AgentOnlyTargets } from "@/components/social/platform-support";
+import { usePieceAudioRights } from "@/lib/queries/audio-rights";
 
 /** An account the composer can actually build a post for — the narrowing the
  *  Targets step and `defaultOptions` both depend on. */
 type ComposableAccount = SocialAccount & { platform: SocialPlatform };
 import { CaptionStep, captionOverLimit } from "./caption-step";
+import { ExportAwait } from "./export-await";
 import { MediaStep } from "./media-step";
+import { MusicStep } from "./music-step";
+import { musicOfTarget } from "@/lib/social/post-music";
+import { isActiveExport, type ExportRecordView } from "@/lib/exports/types";
 import { ReviewStep } from "./review-step";
 import { TargetInstagram } from "./target-instagram";
 import { TargetTikTok } from "./target-tiktok";
@@ -40,11 +45,22 @@ import { WhenStep, type WhenDraft } from "./when-step";
 import {
   basename,
   defaultOptions,
+  exportChoiceLabel,
+  exportFitsVariant,
+  exportVariantOf,
+  newestMatchingExport,
+  MIXED_VARIANTS_REASON,
+  EXPORT_VARIANT_REASON,
+  exportVariantMismatchReason,
+  mixedVariants,
   postTypeOf,
   seedFromCreatorInfo,
   STEPS,
   STEP_LABEL,
+  withoutMusic,
+  withRestoredChoice,
   type ComposerIntent,
+  type ExportVariant,
   type LatestExport,
   type Step,
   type TargetDraft,
@@ -54,6 +70,18 @@ import {
 export interface ComposerProps {
   intent: ComposerIntent;
   latestExport: LatestExport | null;
+  /** Every completed export of this piece, newest first — so the music check
+   *  reads the recorded decision of the export actually being posted, not
+   *  only the latest one. */
+  exports?: LatestExport[];
+  /**
+   * The export this composer sent the user to make (the export dialog's Start,
+   * from here), in whatever state its record is in: rendering, failed,
+   * cancelled — or done, in which case it is selected and the user continues.
+   */
+  awaitedExport?: ExportRecordView | null;
+  /** The composer has taken the awaited export (selected it) or the user dismissed its failure: the caller stops handing it over. */
+  onAwaitedHandled?: () => void;
   onExportRequested: () => void;
   /** `null` when the post exists but libi never got its id — a 207 partial,
    *  whose body carries the per-target failures and no post. */
@@ -77,13 +105,23 @@ export interface ComposerProps {
  * that id plus the local intent row is the whole dedupe contract, which is
  * also why a PUBLISH NOW whose outcome is UNKNOWN never retries itself here.
  */
-export function Composer({ intent, latestExport, onExportRequested, onDone }: ComposerProps) {
+export function Composer({ intent, latestExport, exports, awaitedExport, onAwaitedHandled, onExportRequested, onDone }: ComposerProps) {
   const status = useSocialStatus();
   const accounts = useSocialAccounts();
   const existing = useSocialPost(intent.draftPostId ?? null);
   const create = useCreateSocialPost();
   const update = useUpdateSocialPost();
   const upload = useUploadJob();
+  const pieceAudio = usePieceAudioRights(intent.pieceId);
+  const hasCopyrighted = (pieceAudio.data?.copyrighted.length ?? 0) > 0;
+  const mainCopyrighted = pieceAudio.data?.copyrighted[0];
+  const mainSong = mainCopyrighted ? { fileId: mainCopyrighted.fileId, ...(mainCopyrighted.track ? { track: mainCopyrighted.track } : {}) } : undefined;
+  /** Per target: whether its music plan is decided (no needsChoice) — the Music step's rail mark ONLY. A fallback mode is still a decided plan, so this never gates Next. */
+  const [musicResolved, setMusicResolved] = useState<Record<string, boolean>>({});
+  /** Per target: attach is set but no track is picked yet — its music stays unreported (Next holds), and this names why. */
+  const [musicAwaiting, setMusicAwaiting] = useState<Record<string, boolean>>({});
+  /** Per target: whether its music PLAN REQUEST itself failed — picks the blocked-reason wording, nothing else. */
+  const [musicError, setMusicError] = useState<Record<string, boolean>>({});
 
   /**
    * The half-finished composer this machine last held for this piece, read
@@ -100,9 +138,9 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
   /**
    * Whether this composer already has the export it is going to post.
    *
-   * `latestExport` comes from `useAllJobs({ kind: "export" })` in the Posting
-   * tab, which is NOT prefetched: on a fresh mount it is `null` for as long as
-   * `GET /api/jobs?kind=export` is in flight, so seeding `exportPath` once in
+   * `latestExport` comes from `useExports(pieceId)` in the Posting tab, which
+   * is NOT prefetched: on a fresh mount it is `null` for as long as
+   * `GET /api/pieces/:id/exports` is in flight, so seeding `exportPath` once in
    * `useState` above left the Media step on "this piece has no export yet —
    * export it and come straight back", telling the user to re-render a piece
    * whose export the page was fetching at that moment (QA 2026-09-21,
@@ -126,11 +164,28 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
       setExportPath(latestExport.filePath);
     }
   }
-  /** The Media step's own picker. An explicit choice is final for this flow. */
-  const pickExport = useCallback((filePath: string) => {
-    exportDecided.current = true;
-    setExportPath(filePath);
-  }, []);
+  /**
+   * The user's own pick (the Media step's picker, a Post… hand-off that opened
+   * this composer on one export, or the export they waited for), remembered
+   * with the music variant it was made under: the composer never swaps it for
+   * another export while that variant stands, and explains the swap when the
+   * variant changes and the pick no longer fits. The variant is the plan's
+   * REAL one: until every target has reported its music there is only a
+   * default, so a pick is pinned (`pinNext`) the first time the plan is known.
+   */
+  const [pinnedVariant, setPinnedVariant] = useState<ExportVariant | null>(null);
+  const [pinNext, setPinNext] = useState(!!intent.exportPath);
+  /** One line about an export the composer chose for the user, shown on the step it was raised on (and, for a swap, only while its plan stands). */
+  const [notice, setNotice] = useState<{ text: string; step: Step; variant: ExportVariant | null } | null>(null);
+  const [adoptedAwait, setAdoptedAwait] = useState<string | null>(null);
+  // Once adopted, the caller must stop handing the same export to every
+  // composer that mounts later in this visit (it would override the user's
+  // pick and announce itself again).
+  useEffect(() => {
+    if (adoptedAwait) onAwaitedHandled?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [adoptedAwait]);
+  const [dismissedAwait, setDismissedAwait] = useState<string | null>(null);
   const [targets, setTargets] = useState<TargetDraft[]>([]);
   const [consents, setConsents] = useState<Record<string, TikTokConsent>>({});
   const [creatorInfo, setCreatorInfo] = useState<Record<string, TikTokCreatorInfo>>({});
@@ -213,7 +268,14 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
             // types below need without a cast.
             if (!isComposablePlatform(t.platform)) return [];
             const platform = t.platform;
-            if (t.options) return { platform, accountId: t.accountId, options: t.options };
+            if (t.options) {
+              // The provider echoes its own options back WITHOUT libi's music
+              // (Instagram's platformSpecificData has no such field): the
+              // user's music decision lives only in libi's stamp.
+              const music = t.options.music ?? musicOfTarget(post, post.targets.indexOf(t));
+              const options = (music ? { ...t.options, music } : t.options) as TargetOptions;
+              return withRestoredChoice({ platform, accountId: t.accountId, options });
+            }
             const restored = stored.find((o) => o.platform === platform);
             if (restored) {
               if (platform === "tiktok") {
@@ -222,7 +284,7 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
                 // defaults: creator info must not re-seed these switches.
                 interactionsSeeded.current.add(t.accountId);
               }
-              return { platform, accountId: t.accountId, options: restored };
+              return withRestoredChoice({ platform, accountId: t.accountId, options: restored });
             }
             return { platform, accountId: t.accountId, options: defaultOptions(platform, defaults) };
           }),
@@ -245,7 +307,7 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
     // dropped rather than carried as targets that cannot be posted to.
     const savedTargets = (saved?.targets ?? []).filter((t) => connected.some((a) => a.id === t.accountId));
     if (savedTargets.length) {
-      setTargets(savedTargets);
+      setTargets(savedTargets.map(withRestoredChoice));
       return;
     }
     setTargets(connected.map((a) => ({ platform: a.platform, accountId: a.id, options: defaultOptions(a.platform, defaults) })));
@@ -281,30 +343,58 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
   const fitOk = !!currentFit && currentFit.verdicts.length > 0 && currentFit.verdicts.every((v) => v.ok);
 
   /**
-   * What the Media step can offer, the SELECTED one always among them.
+   * Every finished export of this piece (newest first), the latest one always
+   * among them — what the picker offers and what the music plan can switch to.
+   */
+  const knownExports: LatestExport[] = useMemo(() => {
+    const out = [...(exports ?? [])];
+    if (latestExport && !out.some((e) => e.filePath === latestExport.filePath)) out.unshift(latestExport);
+    return out;
+  }, [exports, latestExport]);
+
+  /**
+   * What the Media step can offer: every finished export, the SELECTED one
+   * always among them.
    *
-   * It used to be `latestExport` plus `intent.exportPath`, which is the same
-   * list right up until the jobs query polls a NEWER export: the selected
-   * path then dropped out of `choices`, and `media-step.tsx` fell back to
-   * `latestExport` — so the step described a file the composer was not
-   * actually going to post, and the `<select>` had no option matching its own
-   * value. `currentFit.probe` is the probe OF `exportPath` (it is what
-   * `fitInput` asks about), so it is the right dimensions for this row.
+   * It used to be `latestExport` plus `intent.exportPath` — so a piece with
+   * eight exports offered no picker. It is `knownExports` now, and the
+   * selected path is still added when the jobs query has polled past it (the
+   * `<select>` must have an option matching its own value, and the step must
+   * describe the file the composer will actually post). `currentFit.probe` is
+   * the probe OF `exportPath` (it is what `fitInput` asks about), so it is the
+   * right dimensions for that row.
    */
   const exportChoices: LatestExport[] = useMemo(() => {
-    const out: LatestExport[] = [];
-    if (latestExport) out.push(latestExport);
+    const out = [...knownExports];
     if (exportPath && !out.some((e) => e.filePath === exportPath) && currentFit) {
       out.push({ filePath: exportPath, ...currentFit.probe });
     }
     return out;
-  }, [latestExport, exportPath, currentFit]);
+  }, [knownExports, exportPath, currentFit]);
 
   const probe = currentFit?.probe ?? (latestExport ? { width: latestExport.width, height: latestExport.height } : null);
 
   const tiktokTargets = targets.filter((t) => t.platform === "tiktok");
   const consentOf = (accountId: string): TikTokConsent => consents[accountId] ?? { preview: false, express: false };
   const duration = currentFit?.probe.durationSeconds;
+  const variant = targets[0] ? exportVariantOf(targets[0]) : "without-song";
+  const musicMixed = hasCopyrighted && mixedVariants(targets);
+  // The export being posted, when it is one libi made (a file that is not an
+  // export carries no recorded decision and is not judged).
+  const usedExport = exportPath === null ? null : (knownExports.find((e) => e.filePath === exportPath) ?? null);
+  const exportMismatch =
+    hasCopyrighted && targets.length > 0 && !musicMixed && usedExport !== null && !exportFitsVariant(usedExport, variant);
+  /** The newest finished export that already fits the music plan — the one to use instead of exporting again. */
+  const matchingExport = exportMismatch ? newestMatchingExport(knownExports, variant) : null;
+
+  /** The Media step's own picker. An explicit choice stands while the music variant it was made under does. */
+  const pickExport = (filePath: string) => {
+    exportDecided.current = true;
+    setExportPath(filePath);
+    setPinnedVariant(null);
+    setPinNext(true);
+    setNotice(null);
+  };
   const targetsReady =
     targets.length > 0 &&
     tiktokTargets.every(
@@ -318,10 +408,92 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
         !(duration !== undefined && duration > (creatorInfo[t.accountId]?.maxVideoSeconds ?? Infinity)) &&
         (t.options.platform !== "tiktok" || !!t.options.tiktok.privacyLevel),
     );
+  /**
+   * A target's music has been REPORTED once it carries a decided
+   * `options.music` — set by a live `MusicBlock` (any plan, including its
+   * fallback mode: `needsChoice` is a rail-mark nicety, never a gate here —
+   * except a plan awaiting the user's track, which reports nothing) OR
+   * already present on a restored draft, whose target may never mount a
+   * `MusicBlock` again this session. Only a piece with copyrighted audio has
+   * anything to decide, so a target that never gets there (still loading, or
+   * added back after Music was last visited) only blocks a copyrighted piece.
+   */
+  const accountLabel = (accountId: string): string => {
+    const a = connected.find((c) => c.id === accountId);
+    return a ? `@${a.username}` : accountId;
+  };
+  // Until the piece's audio has been read, "no copyrighted song" is not known:
+  // an unreported target blocks exactly as it would on a copyrighted piece.
+  const pieceAudioPending = pieceAudio.isLoading;
+  const pieceAudioFailed = pieceAudio.isError && !pieceAudio.data;
+  const mayHaveCopyrighted = hasCopyrighted || pieceAudioPending || pieceAudioFailed;
+  const unreportedTarget = mayHaveCopyrighted ? targets.find((t) => t.options.music === undefined) : undefined;
+  // The plan decides which export fits, and only once every target has
+  // reported its music is the plan known. An export that does not fit it is
+  // swapped for the newest one that does (a social export made without the
+  // song, say) rather than sending the user to export again — unless the user
+  // picked this one under this very plan.
+  const planKnown = targets.length > 0 && !unreportedTarget;
+  if (pinNext && planKnown) {
+    setPinNext(false);
+    setPinnedVariant(variant);
+  }
+  const effectivePin = pinNext && planKnown ? variant : pinnedVariant;
+  if (exportMismatch && matchingExport && planKnown && effectivePin !== variant) {
+    exportDecided.current = true;
+    setExportPath(matchingExport.filePath);
+    // The swap is the composer's choice, not the user's: a plan that changes
+    // back must be able to swap again.
+    setPinnedVariant(null);
+    setNotice({
+      text: `Switched to ${exportChoiceLabel(matchingExport)} — it ${variant === "with-song" ? "keeps" : "leaves out"} the song, which is what your music choice needs.`,
+      step,
+      variant,
+    });
+  }
+  // The export this composer sent the user to make, once it has finished.
+  const awaitedFinished =
+    awaitedExport?.status === "done" ? knownExports.find((e) => e.exportId === awaitedExport.id) : undefined;
+  if (awaitedExport && awaitedFinished && adoptedAwait !== awaitedExport.id) {
+    setAdoptedAwait(awaitedExport.id);
+    exportDecided.current = true;
+    setExportPath(awaitedFinished.filePath);
+    setPinnedVariant(null);
+    setPinNext(true);
+    setNotice({ text: `Your new export ${exportChoiceLabel(awaitedFinished)} is ready and selected — continue when you like.`, step, variant: null });
+  }
+  const awaiting = awaitedExport && isActiveExport(awaitedExport) ? awaitedExport : null;
+  // Failed or cancelled — or finished with no file the composer can read (no
+  // size or path on the record), which would otherwise just make the panel vanish.
+  const awaitedProblem =
+    awaitedExport &&
+    dismissedAwait !== awaitedExport.id &&
+    (awaitedExport.status === "failed" || awaitedExport.status === "cancelled" || (awaitedExport.status === "done" && !awaitedFinished))
+      ? awaitedExport
+      : null;
+  const musicReady = targets.length > 0 && !musicMixed && !exportMismatch && !unreportedTarget;
+  const musicBlockedReason = musicMixed
+    ? MIXED_VARIANTS_REASON
+    : exportMismatch
+      ? matchingExport
+        ? exportVariantMismatchReason(variant)
+        : EXPORT_VARIANT_REASON
+      : unreportedTarget
+        ? pieceAudioFailed
+          ? "Couldn't read the piece's music — try again"
+          : pieceAudioPending
+            ? "Checking the piece's music…"
+            : musicAwaiting[unreportedTarget.accountId]
+              ? `Pick a ${platformLabel(unreportedTarget.platform)} track for ${accountLabel(unreportedTarget.accountId)}, or choose another music option`
+              : musicError[unreportedTarget.accountId]
+              ? `Couldn't work out the music for ${accountLabel(unreportedTarget.accountId)} — try again on the Music step`
+              : `Working out the music for ${accountLabel(unreportedTarget.accountId)}…`
+        : null;
 
   const nextEnabled: Record<Step, boolean> = {
     media: !!exportPath && fitOk,
     targets: targetsReady,
+    music: musicReady,
     caption: !captionOverLimit(caption, targets),
     when: when.mode !== "schedule" || !!when.scheduledFor,
     review: false,
@@ -440,9 +612,10 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
     const i = STEPS.indexOf(step);
     const next = STEPS[i + 1];
     if (!next) return;
-    // Leaving Targets is where the bytes start moving: one upload per export
-    // path, cached with its expiry, so a second Next never re-uploads.
-    if (step === "targets" && exportPath) {
+    // Leaving Music is where the bytes start moving (the plan decides which
+    // export fits): one upload per export path, cached with its expiry, so a
+    // second Next never re-uploads.
+    if (step === "music" && exportPath) {
       void upload.start(exportPath, intent.pieceId).catch(() => {
         /* surfaced through `upload.error` */
       });
@@ -593,8 +766,13 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
     <div className="flex gap-6" data-testid="composer">
       <ol className="w-32 shrink-0 space-y-1">
         {STEPS.map((s) => {
-          const reachable = STEPS.indexOf(s) <= STEPS.indexOf(furthest);
-          const done = STEPS.indexOf(s) < STEPS.indexOf(step);
+          // Furthest-reached governs going BACK; going past an unresolved
+          // Music step is never allowed, even to a step visited earlier (a
+          // target added after Review was last reached must still gate it).
+          const reachable = STEPS.indexOf(s) <= STEPS.indexOf(furthest) && (STEPS.indexOf(s) <= STEPS.indexOf("music") || musicReady);
+          const passed = STEPS.indexOf(s) < STEPS.indexOf(step);
+          // Music is done only when every target's plan is decided.
+          const done = s === "music" ? passed && targets.length > 0 && targets.every((t) => musicResolved[t.accountId]) : passed;
           return (
             <li key={s}>
               <button
@@ -616,6 +794,22 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
       </ol>
 
       <div className="min-w-0 flex-1 space-y-4">
+        {(awaiting || awaitedProblem) && (
+          <ExportAwait
+            record={(awaiting ?? awaitedProblem) as ExportRecordView}
+            onTryAgain={onExportRequested}
+            onDismiss={() => {
+              if (!awaitedProblem) return;
+              setDismissedAwait(awaitedProblem.id);
+              onAwaitedHandled?.();
+            }}
+          />
+        )}
+        {notice && notice.step === step && (notice.variant === null || notice.variant === variant) && (
+          <p className="rounded-md bg-muted px-3 py-2 text-xs text-foreground" role="status" data-testid="export-notice">
+            {notice.text}
+          </p>
+        )}
         {step === "media" && (
           <MediaStep
             latestExport={latestExport}
@@ -626,6 +820,7 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
             fitPending={fitPending}
             fitFailed={fitFailed}
             hasTargets={targets.length > 0}
+            exportPending={!!awaiting}
             onExportRequested={onExportRequested}
             onChangeTargets={() => goto("targets")}
           />
@@ -663,7 +858,10 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
                       probe={probe}
                       onChange={(next) =>
                         setTargets((prev) =>
-                          prev.map((t) => (t.accountId === a.id ? { ...t, options: { platform: "instagram", instagram: next } } : t)),
+                          prev.map((t) =>
+                            // Safe: this account's target already is the Instagram variant (the spread only adds its `music`); TS can't narrow via the id.
+                            t.accountId === a.id ? { ...t, options: { ...t.options, platform: "instagram", instagram: next } as TargetOptions } : t,
+                          ),
                         )
                       }
                     />
@@ -677,7 +875,10 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
                       durationSeconds={currentFit?.probe.durationSeconds}
                       onChange={(next) =>
                         setTargets((prev) =>
-                          prev.map((t) => (t.accountId === a.id ? { ...t, options: { platform: "tiktok", tiktok: next } } : t)),
+                          prev.map((t) =>
+                            // Safe: this account's target already is the TikTok variant (the spread only adds its `music`); TS can't narrow via the id.
+                            t.accountId === a.id ? { ...t, options: { ...t.options, platform: "tiktok", tiktok: next } as TargetOptions } : t,
+                          ),
                         )
                       }
                       onConsentChange={(next) => setConsents((prev) => ({ ...prev, [a.id]: next }))}
@@ -712,6 +913,47 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
           </div>
         )}
 
+        {step === "music" && (
+          <MusicStep
+            pieceId={intent.pieceId}
+            targets={targets}
+            accounts={connected}
+            mainSong={mainSong}
+            mainSongLoading={pieceAudio.isLoading}
+            mainSongError={pieceAudio.isError}
+            onMusic={(accountId, music) =>
+              setTargets((prev) => {
+                let changed = false;
+                const next = prev.map((t) => {
+                  if (t.accountId !== accountId || JSON.stringify(t.options.music ?? null) === JSON.stringify(music ?? null)) return t;
+                  changed = true;
+                  return { ...t, options: (music ? { ...withoutMusic(t.options), music } : withoutMusic(t.options)) as TargetOptions };
+                });
+                return changed ? next : prev;
+              })
+            }
+            onChoice={(accountId, choice, expected) =>
+              setTargets((prev) => {
+                let changed = false;
+                const next = prev.map((t) => {
+                  if (t.accountId !== accountId) return t;
+                  // A settling pick clears only the override it set, never a newer one.
+                  if (expected && JSON.stringify(t.musicChoice ?? null) !== JSON.stringify(expected)) return t;
+                  if (JSON.stringify(t.musicChoice ?? null) === JSON.stringify(choice ?? null)) return t;
+                  changed = true;
+                  const rest = { ...t };
+                  delete rest.musicChoice;
+                  return choice ? { ...rest, musicChoice: choice } : rest;
+                });
+                return changed ? next : prev;
+              })
+            }
+            onResolved={(accountId, resolved) => setMusicResolved((prev) => (prev[accountId] === resolved ? prev : { ...prev, [accountId]: resolved }))}
+            onAwaitingPick={(accountId, awaiting) => setMusicAwaiting((prev) => (prev[accountId] === awaiting ? prev : { ...prev, [accountId]: awaiting }))}
+            onError={(accountId, hasError) => setMusicError((prev) => (prev[accountId] === hasError ? prev : { ...prev, [accountId]: hasError }))}
+          />
+        )}
+
         {step === "caption" && (
           <CaptionStep
             caption={caption}
@@ -735,7 +977,7 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
             uploadError={upload.error}
             submitting={submitting}
             lastError={lastError}
-            targetsReady={targetsReady}
+            targetsReady={targetsReady && musicReady}
             needsConfirmation={needsConfirmation}
             perTargetErrors={perTargetErrors}
             onSubmit={(confirmed) => void submit(confirmed)}
@@ -758,6 +1000,31 @@ export function Composer({ intent, latestExport, onExportRequested, onDone }: Co
             <span className="text-sm text-muted-foreground" data-testid="targets-blocked-reason">
               {targetsBlockedReason}
             </span>
+          )}
+          {step === "music" && musicBlockedReason && (
+            <span className="text-sm text-muted-foreground" data-testid="music-blocked-reason">
+              {musicBlockedReason}
+            </span>
+          )}
+          {step === "music" && unreportedTarget && pieceAudioFailed && (
+            <button type="button" data-testid="piece-audio-retry" onClick={() => void pieceAudio.refetch()} className="cursor-pointer text-sm underline">
+              Try again
+            </button>
+          )}
+          {step === "music" && exportMismatch && matchingExport && (
+            <button
+              type="button"
+              data-testid="use-matching-export"
+              onClick={() => pickExport(matchingExport.filePath)}
+              className="cursor-pointer text-sm underline"
+            >
+              Use {exportChoiceLabel(matchingExport)}
+            </button>
+          )}
+          {step === "music" && exportMismatch && !matchingExport && !awaiting && (
+            <button type="button" data-testid="export-for-social" onClick={onExportRequested} className="cursor-pointer text-sm underline">
+              Export for social
+            </button>
           )}
           {upload.status === "running" && (
             <span className="text-sm text-muted-foreground" data-testid="composer-upload-progress">

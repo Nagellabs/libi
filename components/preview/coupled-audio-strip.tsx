@@ -5,9 +5,12 @@ import { Unlink, Volume2, VolumeX } from "lucide-react";
 import type { AudioClip } from "@/lib/engine/types";
 import { Waveform } from "./waveform";
 import { dragToTiming } from "@/lib/preview/audio-clip-drag";
+import { CopyrightBadge } from "./copyright-badge";
 
 interface CoupledAudioStripProps {
   clip: AudioClip | undefined;
+  /** The clip's file is copyrighted (©). */
+  copyrighted?: boolean;
   /** The video overlay this audio belongs to. */
   ownerOverlayId: string;
   /** The OWNER VIDEO's current (optimistic) start/duration in seconds. The strip
@@ -58,6 +61,7 @@ const DRAG_THRESHOLD_PX = 3;
  */
 export function CoupledAudioStrip({
   clip,
+  copyrighted,
   ownerOverlayId,
   ownerStartSec,
   ownerDurationSec,
@@ -226,6 +230,7 @@ export function CoupledAudioStrip({
         >
           {enabled ? <Volume2 className="size-3" /> : <VolumeX className="size-3" />}
         </button>
+        {copyrighted && <CopyrightBadge />}
         <span className="relative z-10 truncate">{label}</span>
         <button
           type="button"

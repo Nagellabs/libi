@@ -6,7 +6,7 @@ import {
   VIDEO_DOWNLOAD_UI_PATH,
   YT_DLP_UNAVAILABLE,
 } from "@/lib/video-download/launcher";
-import { isNetworkCause } from "@/lib/uv-env/network-failure";
+import { isNetworkCause, isUvOfflineMessage } from "@/lib/uv-env/network-failure";
 import { mcpLogger as logger } from "@/lib/logger";
 import type { ToolResult } from "./types";
 import type { DownloadVideoParams } from "./schemas";
@@ -65,7 +65,10 @@ export function canonicalizeVideoUrl(raw: string): string {
  * this never asks the user to install anything by hand, never sends them to
  * Settings (the extension lives under Agents → Libi MCP), and forbids the
  * repair the owner's agent actually did on 2026-09-25 — `sed` on libi's
- * launcher. `cause` is the job's own error, marker stripped.
+ * launcher. `cause` is the job's own error, marker stripped. An offline
+ * `uv tool install` arrives already worded ("… this computer appears to be
+ * offline …", `uvNetworkFailureMessage`), which is classified as the network
+ * too — uv's raw text went to the log.
  */
 export function needsInstallMessage(cause: string): string {
   const where =
@@ -75,9 +78,9 @@ export function needsInstallMessage(cause: string): string {
     "Do NOT edit, create or delete anything under ~/.libi/bin or ~/.libi/uv, and do not fall back to " +
     "a system yt-dlp via Bash.";
   const head =
-    `libi could not install or repair its video downloader (uv + yt-dlp) on this machine: ${cause}. ` +
+    `libi could not install or repair its video downloader (uv + yt-dlp) on this machine: ${cause.replace(/\.\s*$/, "")}. ` +
     "libi installs and repairs Video download itself.";
-  if (isNetworkCause(cause)) {
+  if (isNetworkCause(cause) || isUvOfflineMessage(cause)) {
     return (
       `${head} This looks like a network problem (offline, or a network that blocks GitHub / PyPI). ` +
       "Tell the user that in plain words, ask them to check they are online, and retry this tool ONCE " +

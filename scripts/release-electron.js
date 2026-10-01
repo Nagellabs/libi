@@ -67,6 +67,7 @@ const {
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { assertReleaseWindow } = require("./lib/release-window");
+const { shouldLogAttempt } = require("./lib/release-verify");
 const {
   gatesPassedOnAncestor,
   gatesPassedOnHead,
@@ -280,8 +281,13 @@ if (publishRelease && spawnSync("gh", ["auth", "status"], { cwd: ROOT }).status 
 // Poll the PER-VERSION document rather than the packument: `npm view pkg@x.y.z`
 // is what `--from-registry` actually needs to resolve, it is authoritative, and
 // it updates first. The aggregated packument can lag it by minutes.
+//
+// And "minutes" can be most of an hour: 0.1.16 sat ~56 min in npm
+// "processing". 240 × 15 s = 60 min, the same wait release-electron.yml's
+// `resolve` job allows, so a local run or a race after `resolve` doesn't give
+// up earlier than the workflow would.
 const version = JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf-8")).version;
-const REGISTRY_ATTEMPTS = 20;
+const REGISTRY_ATTEMPTS = 240;
 const REGISTRY_DELAY_MS = 15_000;
 let served = null;
 for (let attempt = 1; attempt <= REGISTRY_ATTEMPTS; attempt++) {
@@ -289,18 +295,22 @@ for (let attempt = 1; attempt <= REGISTRY_ATTEMPTS; attempt++) {
   if (served === version) break;
   if (attempt === REGISTRY_ATTEMPTS) {
     console.error(
-      `❌ package.json says ${version} but after ${REGISTRY_ATTEMPTS} attempts the\n` +
+      `❌ package.json says ${version} but after ${REGISTRY_ATTEMPTS} attempts (~60 min) the\n` +
         `   registry still does not serve it (last answer: ${served ?? "(nothing)"}).\n` +
         "   The shell bundles a PUBLISHED runtime (--from-registry). Publish first\n" +
         "   (npm run release:npm), or check out the tag that produced the published\n" +
-        "   version.",
+        "   version. If npm DID accept it, it is not served yet: re-run later with\n" +
+        "   the same version.",
     );
     process.exit(1);
   }
-  console.log(
-    `  [${attempt}/${REGISTRY_ATTEMPTS}] registry does not serve ${version} yet ` +
-      "— waiting for the CDN…",
-  );
+  // ~once a minute, not 240 near-identical lines.
+  if (shouldLogAttempt(attempt, REGISTRY_ATTEMPTS, REGISTRY_DELAY_MS)) {
+    console.log(
+      `  [${attempt}/${REGISTRY_ATTEMPTS}] registry does not serve ${version} yet ` +
+        "— waiting for the CDN…",
+    );
+  }
   spawnSync(process.execPath, ["-e", `setTimeout(()=>{}, ${REGISTRY_DELAY_MS})`]);
 }
 console.log(`\n📦 building the shell around published @nagellabs/libi@${version}`);

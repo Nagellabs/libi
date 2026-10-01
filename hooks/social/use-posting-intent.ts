@@ -3,22 +3,27 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * A hand-off from somewhere else in the UI (the export dialog's "Post…", the
- * agent's `libi.show_piece`-style navigate with `target: "posting"`) into the
+ * A hand-off from somewhere else in the UI (the agent's `libi.show_piece`-style
+ * navigate with `target: "posting"`, the Social page's links) into the
  * editor's Posting tab. This is UI-LOCAL state — nothing here persists or
  * leaves the page, and it never substitutes for the server's own notion of a
  * post (see `lib/queries/social.ts`). `nonce` lets the same `pieceId` +
- * `exportPath`/`providerPostId` pair be re-delivered (e.g. exporting the same
- * piece twice) and still be treated as a fresh intent by a listener that only
- * reacts to change.
+ * `providerPostId` pair be re-delivered and still be treated as a fresh intent
+ * by a listener that only reacts to change.
  */
 export interface PostingIntent {
   pieceId: string;
-  exportPath?: string | null;
   providerPostId?: string | null;
   /** Not "post this" but "show me this one": the Social page's "Piece" link.
    *  The Posting tab opens on its list, narrowed to this post (or ad) id. */
   focusPostId?: string | null;
+  /** Start the composer on this export (an export's absolute file path): the
+   *  Exports tab's and the resources panel's "Post…". */
+  exportPath?: string | null;
+  /** The composer sent the user to the export dialog and this is the export
+   *  that Start queued: the composer waits for it on its Media step and picks
+   *  it when it finishes. */
+  awaitExportId?: string | null;
   nonce: number;
 }
 
@@ -29,8 +34,8 @@ const g = globalThis as unknown as {
 };
 const store = (g.__libiPostingIntent ??= { current: null, listeners: new Set(), nonce: 0 });
 
-/** Open the Posting tab for a piece, optionally pre-selecting an export or
- *  putting the composer into edit mode for an existing draft. */
+/** Open the Posting tab for a piece, optionally putting the composer into edit
+ *  mode for an existing draft or focusing one post. */
 export function openPostingTab(intent: Omit<PostingIntent, "nonce">): void {
   store.current = { ...intent, nonce: ++store.nonce };
   for (const listener of store.listeners) listener(store.current);
@@ -108,17 +113,72 @@ export function usePostingIntent(pieceId: string): PostingIntent | null {
 type ExportDialogListener = (pieceId: string) => void;
 
 const ge = globalThis as unknown as {
-  __libiExportDialogRequest?: { current: string | null; listeners: Set<ExportDialogListener> };
+  __libiExportDialogRequest?: {
+    current: string | null;
+    purpose: "social" | "personal" | null;
+    returnToPost: boolean;
+    returnDraftPostId: string | null;
+    forPost: Set<string>;
+    listeners: Set<ExportDialogListener>;
+  };
 };
-const exportDialogStore = (ge.__libiExportDialogRequest ??= { current: null, listeners: new Set() });
+const exportDialogStore = (ge.__libiExportDialogRequest ??= {
+  current: null,
+  purpose: null,
+  returnToPost: false,
+  returnDraftPostId: null,
+  forPost: new Set(),
+  listeners: new Set(),
+});
 
 /** Ask the export dialog for this piece to open — including switching the
  *  editor to the Timeline tab (`subscribeExportDialogRequest`, wired once at
  *  the page level) so `useExportDialogRequest` gets a chance to mount and
- *  see this even when nothing was listening at call time. */
-export function requestExportDialog(pieceId: string): void {
+ *  see this even when nothing was listening at call time. `opts.purpose`
+ *  preselects the dialog's "What's this export for?" question (e.g. the
+ *  Posting tab's "Export & post" opens it as social) — read once via
+ *  `takeExportDialogPurpose`. */
+export function requestExportDialog(
+  pieceId: string,
+  opts: { purpose?: "social" | "personal"; returnToPost?: boolean; draftPostId?: string | null } = {},
+): void {
   exportDialogStore.current = pieceId;
+  exportDialogStore.purpose = opts.purpose ?? null;
+  exportDialogStore.returnToPost = opts.returnToPost ?? false;
+  // The draft being edited, so the way back reopens IT and not a new post.
+  exportDialogStore.returnDraftPostId = opts.returnToPost ? (opts.draftPostId ?? null) : null;
   for (const listener of exportDialogStore.listeners) listener(pieceId);
+}
+
+/** The purpose the last request asked the dialog to open with — read once. */
+export function takeExportDialogPurpose(): "social" | "personal" | null {
+  const p = exportDialogStore.purpose;
+  exportDialogStore.purpose = null;
+  return p;
+}
+
+/** Whether the last request came from the composer, so Start should take the
+ *  user back to the post they were making — read once. */
+export function takeExportDialogReturnToPost(): boolean {
+  const r = exportDialogStore.returnToPost;
+  exportDialogStore.returnToPost = false;
+  return r;
+}
+
+/** The Zernio draft the composer was editing when it asked for the dialog — read once. */
+export function takeExportDialogDraftPostId(): string | null {
+  const d = exportDialogStore.returnDraftPostId;
+  exportDialogStore.returnDraftPostId = null;
+  return d;
+}
+
+/** An export the composer asked for: its finish toast offers "Continue post". */
+export function markExportForPost(exportId: string): void {
+  exportDialogStore.forPost.add(exportId);
+}
+
+export function isExportForPost(exportId: string): boolean {
+  return exportDialogStore.forPost.has(exportId);
 }
 
 /** Raw subscription for the editor page to switch tabs on a request — mirrors
@@ -135,8 +195,7 @@ export function subscribeExportDialogRequest(listener: ExportDialogListener): ()
 export function useExportDialogRequest(pieceId: string, onRequest: () => void): void {
   // Latest-callback ref, written in a deps-less effect (never during render)
   // so the listener always calls the current `onRequest` without
-  // re-subscribing — same pattern as `export-success-toast.tsx`'s dismiss
-  // timer.
+  // re-subscribing.
   const onRequestRef = useRef(onRequest);
   useEffect(() => {
     onRequestRef.current = onRequest;

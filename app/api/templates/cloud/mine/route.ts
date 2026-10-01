@@ -3,6 +3,7 @@ import { TemplatesAuthorWriteError, getTemplatesAuthor, getTemplatesAuthorForDis
 import { serverLogger as logger } from "@/lib/logger";
 import { parseNickname } from "@/lib/templates/cloud/author-rules";
 import { crossSiteSubresourceRefusal } from "@/lib/security/request-guard";
+import { catalogSource, withCatalogSource } from "@/lib/templates/cloud/catalog-source";
 import { fetchMine, type CloudFail } from "@/lib/templates/cloud/client";
 import type { MineErrorCode } from "@/lib/templates/types";
 
@@ -32,7 +33,9 @@ function mineError(r: CloudFail): MineErrorCode {
  * stale, and "Publishing as" must not invite the user to overwrite the public
  * name because of that — so a nickname read here is written back, while the
  * stored key AND nickname are still the ones read before asking (a nickname
- * the user set meanwhile wins). Only a nickname the site's own rule accepts
+ * the user set meanwhile wins). Each catalog keeps its own nickname, so it is
+ * written into the slot of the catalog that answered, never another's (review
+ * M4, lib/db/settings.ts#isMainNicknameSlot). Only a nickname the site's own rule accepts
  * (`parseNickname`) is stored or answered; for anything else the local one
  * is answered. When the write-back loses to a nickname set meanwhile, that
  * one is the answer.
@@ -48,10 +51,12 @@ export async function GET(req: Request): Promise<Response> {
     logger.warn({ tag: "templates-cloud", op: "mine_refused", reason: refused }, "refused a cross-site request for the published templates");
     return NextResponse.json({ error: "Your published templates are listed only on libi's own page.", code: "cross_site_read" }, { status: 403 });
   }
+  // The catalog asked, held across the await: a switch meanwhile never files its answer under the other one.
+  const source = catalogSource();
   // With its default nickname in place first, so the write-back below compares against what is stored.
-  const author = getTemplatesAuthorForDisplay();
+  const author = getTemplatesAuthorForDisplay(source);
   if (!author) return NextResponse.json({ nickname: null, templates: [] });
-  const r = await fetchMine(author.key);
+  const r = await withCatalogSource(source, () => fetchMine(author.key));
   if (!r.ok) return NextResponse.json({ nickname: null, templates: [], error: mineError(r) });
   const parsed = r.nickname === null ? null : parseNickname(r.nickname);
   // A value the rule refuses is not the site's word on anything: the valid local one stands.
@@ -59,7 +64,7 @@ export async function GET(req: Request): Promise<Response> {
   if (parsed?.ok && nickname !== author.nickname) {
     let wrote = false;
     try {
-      wrote = setTemplatesAuthorNickname(author.key, parsed.nickname, { expectedNickname: author.nickname });
+      wrote = setTemplatesAuthorNickname(author.key, parsed.nickname, { expectedNickname: author.nickname, source });
     } catch (err) {
       // Only a cache write-back: answer the site's nickname and try again on the next read.
       if (!(err instanceof TemplatesAuthorWriteError)) throw err;
@@ -67,7 +72,7 @@ export async function GET(req: Request): Promise<Response> {
       return NextResponse.json({ nickname, templates: r.templates, ...(r.dropped ? { dropped: r.dropped } : {}) });
     }
     // Lost the compare-and-set: answer the nickname that stands for this key, not the older one the site read.
-    const now = getTemplatesAuthor();
+    const now = getTemplatesAuthor(source);
     if (!wrote && now?.key === author.key) nickname = now.nickname;
   }
   return NextResponse.json({ nickname, templates: r.templates, ...(r.dropped ? { dropped: r.dropped } : {}) });

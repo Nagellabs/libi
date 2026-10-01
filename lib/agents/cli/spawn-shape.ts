@@ -1,4 +1,5 @@
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
@@ -42,6 +43,7 @@ export function spawnViaNodeIfScript(
   binPath: string,
   realpath: (p: string) => string = fs.realpathSync,
   readFile: (p: string) => string = (p) => fs.readFileSync(p, "utf-8"),
+  exists: (p: string) => boolean = fs.existsSync,
 ): ResolvedBin {
   let target = binPath;
   try {
@@ -54,9 +56,20 @@ export function spawnViaNodeIfScript(
   }
   if (/\.cmd$/i.test(target)) {
     const js = resolveCmdShimTarget(target, readFile);
-    if (js) return { command: resolveNodeCommand(), args: [js] };
+    if (js) return { command: nodeForCmdShim(target, exists), args: [js] };
   }
   return { command: binPath, args: [] };
+}
+
+/**
+ * npm's own JS shim probes `"%dp0%\node.exe"` (`%dp0%` is the shim's own directory) and only falls back to a bare
+ * `node` when that is absent — nvm-windows and Volta both place a `node.exe` beside a shim they manage. Always
+ * running libi's OWN managed node here instead skipped that sibling entirely, so the adapter/CLI launched under a
+ * Node version the shim itself would never have chosen.
+ */
+function nodeForCmdShim(cmdPath: string, exists: (p: string) => boolean): string {
+  const sibling = path.win32.join(path.win32.dirname(cmdPath), "node.exe");
+  return exists(sibling) ? sibling : resolveNodeCommand();
 }
 
 /**
@@ -101,4 +114,41 @@ export function resolveCmdShimNativeTarget(cmdPath: string, readFile: (p: string
   const m = /"%dp0%\\([^"]*\\[^"\\]+\.exe)"/i.exec(text);
   if (!m) return null;
   return path.win32.resolve(path.win32.dirname(cmdPath), m[1]);
+}
+
+/**
+ * How a Windows setup terminal runs the user's CLI without going through its npm
+ * `.cmd` shim, or null when there is no shim to skip (not Windows, not a `.cmd`,
+ * or a shim whose target can't be read).
+ *
+ * A PowerShell line that calls `claude.cmd` runs it in `cmd.exe`, and Ctrl-C
+ * there — a sign-in the user cancels — stops at cmd's own
+ * `Terminate batch job (Y/N)?` before anything else happens (2026-09-25 Windows
+ * run). Running what the shim runs instead has no batch file to ask about: its
+ * JS target through node (`spawnViaNodeIfScript`'s shape, same node), or its
+ * native `.exe` target directly (claude-code ≥ 2.1.267 ships one). The printed
+ * command still names a real file of the user's own install; nothing is written.
+ */
+export function terminalLaunchFor(
+  realPath: string,
+  deps: {
+    platform?: NodeJS.Platform;
+    readFile?: (p: string) => string;
+    nodeCommand?: () => string;
+    exists?: (p: string) => boolean;
+  } = {},
+): ResolvedBin | null {
+  // `os.platform()`, a call the Next build can't fold against the build machine (lib/platform.ts).
+  const platform = deps.platform ?? os.platform();
+  if (platform !== "win32" || !/\.cmd$/i.test(realPath)) return null;
+  const readFile = deps.readFile ?? ((p: string) => fs.readFileSync(p, "utf-8"));
+  const exists = deps.exists ?? fs.existsSync;
+  const js = resolveCmdShimTarget(realPath, readFile);
+  if (js) {
+    const sibling = path.win32.join(path.win32.dirname(realPath), "node.exe");
+    return { command: exists(sibling) ? sibling : (deps.nodeCommand ?? resolveNodeCommand)(), args: [js] };
+  }
+  const exe = resolveCmdShimNativeTarget(realPath, readFile);
+  if (exe) return { command: exe, args: [] };
+  return null;
 }

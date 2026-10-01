@@ -37,6 +37,8 @@ const CODEX: AgentSetup & { id: SetupAgentId } = {
     displayCommand: "codex login",
     rejectedAt: "session-new",
   },
+  // Codex layers a project `.codex/config.toml` (in the folder it runs in) over the user's own.
+  configFiles: { user: "~/.codex/config.toml", project: ".codex/config.toml" },
 };
 
 export const AGENT_SETUPS: readonly (AgentSetup & { id: SetupAgentId })[] = [CLAUDE_CODE, CODEX];

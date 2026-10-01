@@ -68,17 +68,32 @@ function shouldLogAttempt(attempt, totalAttempts, delayMs, logIntervalMs = 60_00
  * invite a re-dispatch — a re-run either double-bumps the version or dies on
  * "cannot publish over the previously published version".
  *
+ * And since 0.1.17 it does not FAIL either. 0.1.16 sat in npm "processing"
+ * for ~56 minutes, well past this ~25 min budget, and the run went red on a
+ * good publish. Running out of budget after npm accepted the package is now
+ * "accepted, not yet served": exit 0, a one-line GitHub `::warning::`
+ * annotation, and the exact local command (`npm run release:verify-live --
+ * <v>`, scripts/verify-npm-live.js) that finishes the check on a budget the
+ * job can't afford. The long wait moves to the maintainer's machine; the
+ * npm job's timeout does not grow. A tarball digest MISMATCH never comes
+ * through here — the caller exits 1 on it at once, because a completed GET
+ * with the wrong bytes is the one real corruption signal.
+ *
  * @param {{ pkgName: string, version: string, versionDocServed: boolean, attempts: number, delayMs: number, whatIsMissing: string }} state
  *   `attempts`/`delayMs` describe the CALLER's own budget (not necessarily
  *   VERIFY_ATTEMPTS/VERIFY_DELAY_MS); `whatIsMissing` is a clause completing
  *   "${pkgName}@${version} ${whatIsMissing} after ~N minutes" — only used
  *   when `versionDocServed` is false.
- * @returns {{ exitCode: 0 | 1, message: string }}
+ * @returns {{ exitCode: 0, kind: "served" | "accepted-not-served", message: string, annotation: string | null }}
+ *   `annotation` is null on the served path; otherwise ONE line to print as-is
+ *   (GitHub reads a workflow command only as a single line).
  */
 function describeVerifyTimeout({ pkgName, version, versionDocServed, attempts, delayMs, whatIsMissing }) {
   if (versionDocServed) {
     return {
       exitCode: 0,
+      kind: "served",
+      annotation: null,
       message:
         `\n✅ ${pkgName}@${version} IS published — registry.npmjs.org serves its\n` +
         "   version document. Only the aggregated packument is still catching up,\n" +
@@ -86,15 +101,80 @@ function describeVerifyTimeout({ pkgName, version, versionDocServed, attempts, d
     };
   }
   const minutes = Math.round((attempts * delayMs) / 60_000);
+  const command = liveCheckCommand(version);
   return {
-    exitCode: 1,
+    exitCode: 0,
+    kind: "accepted-not-served",
+    annotation:
+      // No comma or colon in the title: they delimit a workflow command's
+      // properties, and GitHub would cut the title there.
+      "::warning title=npm publish accepted - not served yet::" +
+      `${pkgName}@${version} ${whatIsMissing} after ~${minutes} min, but npm ACCEPTED ` +
+      `the publish. Not a failure - do NOT re-dispatch. Finish the check locally: ${command}`,
     message:
-      `\n❌ ${pkgName}@${version} ${whatIsMissing} after ~${minutes} minutes ` +
+      `\n⚠️  ${pkgName}@${version} ${whatIsMissing} after ~${minutes} minutes ` +
       `(${attempts} attempts × ${delayMs / 1000}s).\n` +
       "   npm ACCEPTED the publish — `published=true` is already recorded in\n" +
-      "   GITHUB_OUTPUT — so this is the CDN/network still lagging behind, not a\n" +
-      "   failed publish. Poll the registry yourself; do NOT re-dispatch the release.",
+      "   GITHUB_OUTPUT — so this is the registry still catching up, not a\n" +
+      "   failed publish (0.1.16 took ~56 min). This run stays green.\n" +
+      "   Do NOT re-dispatch the release. Finish the check from your machine,\n" +
+      "   which waits up to 90 min and verifies the tarball's integrity:\n" +
+      `     ${command}`,
   };
+}
+
+/** The local command that finishes a check the release run gave up on. */
+function liveCheckCommand(version) {
+  return `npm run release:verify-live -- ${version}`;
+}
+
+/** verify-npm-live.js's default budget: 0.1.16 took ~56 min to be served. */
+const LIVE_CHECK_DEFAULT_MINUTES = 90;
+
+/**
+ * The npm-style integrity (`<algo>-<base64 digest>`) of `bytes`, computed
+ * with the algorithm `expected` declares. null when `expected` names no
+ * algorithm this Node can compute — not knowable, never a mismatch.
+ *
+ * @param {Buffer | Uint8Array} bytes
+ * @param {string | null | undefined} expected  `dist.integrity`
+ * @returns {string | null}
+ */
+function computeIntegrity(bytes, expected) {
+  if (!expected || !expected.includes("-")) return null;
+  const [algo] = expected.split("-");
+  try {
+    return `${algo}-${require("node:crypto").createHash(algo).update(bytes).digest("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Numeric x.y.z comparison; prerelease suffixes are ignored. */
+function compareVersions(a, b) {
+  const pa = String(a).split("-")[0].split(".").map(Number);
+  const pb = String(b).split("-")[0].split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+/**
+ * Whether the aggregated packument serves `version`: it lists the version,
+ * and `dist-tags.latest` is that version — or a newer one, so a past release
+ * can be re-checked after the next has shipped instead of waiting forever for
+ * `latest` to point back at it. What `npx @nagellabs/libi` resolves hangs off
+ * `latest`, which is why the packument is checked at all.
+ *
+ * @param {{ "dist-tags"?: { latest?: string }, versions?: Record<string, unknown> } | null | undefined} packument
+ * @param {string} version
+ */
+function packumentServes(packument, version) {
+  const latest = packument?.["dist-tags"]?.latest;
+  if (!latest || !packument?.versions || !(version in packument.versions)) return false;
+  return compareVersions(latest, version) >= 0;
 }
 
 /**
@@ -170,4 +250,9 @@ module.exports = {
   tarballIntegrityMatches,
   classifyTarballAttempt,
   curlGetSucceeded,
+  liveCheckCommand,
+  LIVE_CHECK_DEFAULT_MINUTES,
+  computeIntegrity,
+  compareVersions,
+  packumentServes,
 };

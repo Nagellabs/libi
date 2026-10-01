@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { storeFile } from "@/mcp/tools/file-tools";
+import { uploadedStamp } from "@/lib/audio-rights/stamp";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { trackServerEvent } from "@/lib/analytics/server";
 import { assertSafePieceId } from "@/lib/security/pieceId";
@@ -44,6 +45,9 @@ export async function POST(
       mediaDuration: mediaDuration ? Number(mediaDuration) : undefined,
       mediaWidth: mediaWidth ? Number(mediaWidth) : undefined,
       mediaHeight: mediaHeight ? Number(mediaHeight) : undefined,
+      // The user's own file (owner decision 2026-09-28). storeFile writes it
+      // only when the file carries audio.
+      audioRights: uploadedStamp(),
     });
 
     void trackServerEvent("file_uploaded", {

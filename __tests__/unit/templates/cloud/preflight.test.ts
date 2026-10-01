@@ -390,6 +390,15 @@ describe("site parity — hosted urls (users' machines fetch them)", () => {
     }
     ok({ scaffold: hosted("https://cdn.example.com./x.mp4", "video") });
   });
+
+  it("a music link's source link is held to the same rules — the template names the song, never carries it", () => {
+    const clip = { key: "song", kind: "standalone" as const, startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true, source: { musicRef: "espresso" } };
+    const link = { ref: "espresso", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" };
+    ok({ scaffold: makeScaffold({ audioClips: [clip], musicLinks: [link] } as never) });
+    expect(fail({ scaffold: makeScaffold({ audioClips: [clip], musicLinks: [{ ...link, sourceUrl: "https://localhost/x" }] } as never) })).toContain(
+      'music "espresso" source link must name a public host.',
+    );
+  });
 });
 
 describe("site parity — file rules", () => {

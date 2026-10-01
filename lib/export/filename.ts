@@ -31,7 +31,7 @@ export function sanitizeFilename(stem: string): string {
 /** Given a folder, a base stem, and an extension, find the next available
  *  filename. Returns the absolute path. Does NOT touch the filesystem —
  *  use `claimExportPath` if you need race-safe behaviour. */
-export function resolveExportPath(folder: string, baseStem: string, extWithoutDot: string): string {
+export function resolveExportPath(folder: string, baseStem: string, extWithoutDot: string, skip?: ReadonlySet<string>): string {
   const ext = extWithoutDot.replace(/^\./, "");
   // An agent or user who types "clip.mp4" for an mp4 export means the stem
   // "clip", not "clip.mp4.mp4". Only the SAME extension is stripped — a
@@ -41,28 +41,64 @@ export function resolveExportPath(folder: string, baseStem: string, extWithoutDo
     : baseStem;
   const safe = sanitizeFilename(stem);
   const candidate = path.join(folder, `${safe}.${ext}`);
-  if (!fs.existsSync(candidate)) return candidate;
+  const taken = (p: string) => skip?.has(p) === true || fs.existsSync(p);
+  if (!taken(candidate)) return candidate;
   for (let n = 1; n < 1000; n++) {
     const next = path.join(folder, `${safe}-${n}.${ext}`);
-    if (!fs.existsSync(next)) return next;
+    if (!taken(next)) return next;
   }
   return path.join(folder, `${safe}-${Date.now()}.${ext}`);
 }
 
-/** Atomically claim a path by writing a zero-byte placeholder. Retries on
- *  EEXIST so two concurrent exports of the same piece never collide. */
-export function claimExportPath(folder: string, baseStem: string, extWithoutDot: string): string {
+/** How many permission refusals in a row mean a real denial rather than one delete-pending name. */
+const MAX_CONSECUTIVE_DENIALS = 3;
+
+/** Atomically claim a path by creating a zero-byte placeholder, and KEEP it open.
+ *  Retries on EEXIST so two concurrent exports of the same piece never collide.
+ *  The caller owns `fd` and must close it: while it is open the inode stays
+ *  allocated, so no other file can be handed the same device + inode number —
+ *  which is what makes that pair a sound identity for "is the path still the
+ *  file I created" (the export runner's FileClaim). */
+export function claimExportFile(
+  folder: string,
+  baseStem: string,
+  extWithoutDot: string,
+  platform: NodeJS.Platform = process.platform,
+): { path: string; fd: number } {
+  // Names that refused the claim without being visible to `existsSync`.
+  const refused = new Set<string>();
+  // Consecutive permission refusals: one delete-pending name blocks only that name, so the
+  // next suffix normally works. A run of them is a real denial (ACL, Controlled Folder
+  // Access, antivirus) and must surface as itself, not as "50 attempts".
+  let denials = 0;
   for (let attempt = 0; attempt < 50; attempt++) {
-    const candidate = resolveExportPath(folder, baseStem, extWithoutDot);
+    const candidate = resolveExportPath(folder, baseStem, extWithoutDot, refused);
     try {
-      const fd = fs.openSync(candidate, "wx");
-      fs.closeSync(fd);
-      return candidate;
+      return { path: candidate, fd: fs.openSync(candidate, "wx") };
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") continue;
+      if (code === "EEXIST") {
+        denials = 0;
+        continue;
+      }
+      // On Windows a name whose file was unlinked while a handle is still open (a cancelled
+      // export's runner holds its claim until it has cleaned up) is delete-pending: creating
+      // it answers EPERM/EACCES, not EEXIST, and `existsSync` may call it free. It frees
+      // itself the moment that handle closes, so this claim simply takes the next suffix.
+      if (platform === "win32" && (code === "EPERM" || code === "EACCES")) {
+        if (++denials >= MAX_CONSECUTIVE_DENIALS) throw err;
+        refused.add(candidate);
+        continue;
+      }
       throw err;
     }
   }
   throw new Error(`Could not claim an export path under ${folder} after 50 attempts`);
+}
+
+/** Atomically claim a path by writing a zero-byte placeholder; the descriptor is closed at once. */
+export function claimExportPath(folder: string, baseStem: string, extWithoutDot: string): string {
+  const { path: claimed, fd } = claimExportFile(folder, baseStem, extWithoutDot);
+  fs.closeSync(fd);
+  return claimed;
 }

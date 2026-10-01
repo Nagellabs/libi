@@ -1,4 +1,4 @@
-import type { ChildProcess } from "node:child_process";
+import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 
 /**
  * Ending a short-lived check's whole process group. The login-shell PATH probe and
@@ -7,6 +7,16 @@ import type { ChildProcess } from "node:child_process";
  * background job, a wrapper's child. Every wait here is an unref'd timer: a check
  * being killed never holds the server's event loop open, and no caller ever waits
  * on a kill.
+ *
+ * Windows has no process groups. There the whole TREE is ended instead:
+ * `taskkill /T /F /PID <pid>` walks the child's descendants, so a timed-out CLI
+ * takes what it started with it (a `.cmd` shim's node, the node's own children).
+ * It needs the child alive to find them — once a parent is gone its orphans can't
+ * be walked — so a check that already exited has nothing left to reach there,
+ * and is never tree-killed: its pid may already belong to another process.
+ * Even for a live child, `/T` finds descendants by their recorded parent pid, so
+ * it could also take orphans of an EARLIER process that had the same pid. A Job
+ * Object would be the robust alternative if that ever matters.
  *
  * PARALLEL IMPLEMENTATION, on purpose. `electron/path-bootstrap.ts` (`signalGroup`
  * and its kill sequence) does the same for the desktop probe, but runtime code may
@@ -114,13 +124,65 @@ async function waitForGroupGone(child: ChildProcess, watch: ExitWatch, platform?
   return true;
 }
 
+/** Ends a process and every process it started; resolves whether that was done. */
+export type TreeKill = (pid: number) => Promise<boolean>;
+
+/**
+ * `taskkill /T /F /PID <pid>`: the process and its whole tree, forcibly (Windows has
+ * no graceful signal to send a console program from here). Bounded at
+ * GROUP_EXIT_WAIT_MS and unref'd like every wait in this module; true only when
+ * taskkill exited 0.
+ */
+export function taskkillTree(pid: number, spawnFn: typeof nodeSpawn = nodeSpawn): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), GROUP_EXIT_WAIT_MS);
+    timer.unref();
+    let tk: ChildProcess;
+    try {
+      tk = spawnFn("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+    } catch {
+      done(false);
+      return;
+    }
+    tk.unref();
+    tk.on("error", () => done(false));
+    tk.on("exit", (code) => done(code === 0));
+  });
+}
+
+/**
+ * Windows: the child's whole tree via taskkill, falling back to the child alone; then at most GROUP_EXIT_WAIT_MS for
+ * its `exit`. A child that has already exited is never tree-killed: Node closed its handle, so Windows may already
+ * have given its pid to an unrelated process, and `taskkill /T /F` would end that process and everything under it.
+ */
+async function killTree(child: ChildProcess, watch: ExitWatch, treeKill: TreeKill): Promise<boolean> {
+  if (watch.exited()) return true;
+  const killed = child.pid !== undefined && (await treeKill(child.pid));
+  if (!killed) signalGroup(child, "SIGKILL", "win32");
+  return watch.waitForExit(GROUP_EXIT_WAIT_MS);
+}
+
 /**
  * A check that ran out of time: SIGTERM to the group → (grace) → SIGKILL to the
  * group, then at most GROUP_EXIT_WAIT_MS for the child's `exit` and its group to
  * empty; resolves whether both happened in time. SIGKILL always follows the grace,
  * even when the child already exited on SIGTERM — something it started can outlive it.
+ * Windows: its whole tree at once (`taskkillTree`), then the same exit wait.
  */
-export async function killGroup(child: ChildProcess, watch: ExitWatch, platform?: NodeJS.Platform): Promise<boolean> {
+export async function killGroup(
+  child: ChildProcess,
+  watch: ExitWatch,
+  platform: NodeJS.Platform = process.platform,
+  treeKill: TreeKill = taskkillTree,
+): Promise<boolean> {
+  if (platform === "win32") return killTree(child, watch, treeKill);
   signalGroup(child, "SIGTERM", platform);
   await sleepMs(GROUP_KILL_GRACE_MS);
   signalGroup(child, "SIGKILL", platform);
@@ -140,9 +202,15 @@ export async function endGroup(
   child: ChildProcess,
   watch: ExitWatch,
   exitChanceMs: number,
-  platform?: NodeJS.Platform,
+  platform: NodeJS.Platform = process.platform,
+  treeKill: TreeKill = taskkillTree,
 ): Promise<{ signalled: boolean; exited: boolean }> {
   if (exitChanceMs > 0) await watch.waitForExit(exitChanceMs);
+  if (platform === "win32") {
+    // Exited: its tree can't be walked any more, and there is nothing of its own left to end.
+    if (watch.exited()) return { signalled: false, exited: true };
+    return { signalled: true, exited: await killTree(child, watch, treeKill) };
+  }
   if (signalGroup(child, "SIGTERM", platform) === "gone") return { signalled: false, exited: true };
   await sleepMs(GROUP_KILL_GRACE_MS);
   signalGroup(child, "SIGKILL", platform);

@@ -31,6 +31,7 @@ import {
   listTemplatesTool,
 } from "@/mcp/tools/template-tools";
 import { publishTemplate } from "@/mcp/tools/template-cloud-tools";
+import { audioAddClip } from "@/mcp/tools/audio-clip-tools";
 import { uploadFont } from "@/mcp/tools/font-tools";
 import { getPieceStateTool } from "@/mcp/tools/snapshot-tools";
 import { addEffectTool, removeEffectTool } from "@/mcp/tools/effect-package-tools";
@@ -199,6 +200,16 @@ const DISPATCH: Record<RunToolName, DispatchEntry> = {
       publishTemplate(args as unknown as Parameters<typeof publishTemplate>[0]),
     refresh: (_args, result) =>
       (result as { success?: boolean }).success ? { queryKey: "templates" } : null,
+  },
+  "libi.audio_add_clip": {
+    handler: async (args) =>
+      audioAddClip({ pieceId: (args as { pieceId: string }).pieceId } as never, args as never),
+    refresh: (args, result) => {
+      const r = result as { success?: boolean };
+      if (!r.success) return null;
+      const pieceId = (args as { pieceId?: string }).pieceId;
+      return pieceId ? { queryKey: "composition", pieceId } : null;
+    },
   },
 };
 

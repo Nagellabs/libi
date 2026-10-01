@@ -35,6 +35,10 @@ assertions:
   # The gate fired, for the right kind.
   - { transcript_contains: "[tool-call mcp__libi__libi_suggest_provider]", expect: present }
   - { transcript_contains: '\"kind\":\"social\"', expect: present }
+  # …and it answered with the CARD. `kind` is echoed by every answer, `status: "none"` included
+  # (seen when detection read the host's user-scope zernio), so the needle above alone passed
+  # while this branch went untested.
+  - { transcript_contains: '\"status\":\"card\"', expect: present }
   # It stopped: no provider was reached, and nothing was posted or linked.
   - { provider: zernio, expect: absent }
   - { transcript_contains: "[tool-call mcp__libi__libi_post_piece]", expect: absent }

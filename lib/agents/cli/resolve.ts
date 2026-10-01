@@ -288,14 +288,30 @@ function defaultMtime(p: string): number | null {
  * memoized, so an install that lands between two status polls shows on the next
  * one — the login-shell probe's own 5 s memo bounds the spawn cost.
  */
-const memo = new Map<SetupAgentId, { at: number; value: Exclude<ResolvedAgentCli, null>; realPath: string; mtime: number | null }>();
+type MemoEntry = { at: number; value: Exclude<ResolvedAgentCli, null>; realPath: string; mtime: number | null };
+/**
+ * `memo`, `inflight` and `generation` are shared by every copy of this module in the
+ * process: a production Next build loads one copy for the job runners and another for
+ * the API routes, and an invalidate from the `agent_install` job or a closing setup
+ * terminal must reach the copy the status route reads (see agent-registry.ts's cache).
+ */
+const shared = ((globalThis as Record<symbol, unknown>)[Symbol.for("libi.agentCli.memo")] ??= {
+  memo: new Map<SetupAgentId, MemoEntry>(),
+  inflight: new Map<SetupAgentId, Promise<ResolvedAgentCli>>(),
+  generation: new Map<SetupAgentId, number>(),
+}) as {
+  memo: Map<SetupAgentId, MemoEntry>;
+  inflight: Map<SetupAgentId, Promise<ResolvedAgentCli>>;
+  generation: Map<SetupAgentId, number>;
+};
+const memo = shared.memo;
 /** One resolution per agent at a time — a cold status call, provider detection and a session start share it. */
-const inflight = new Map<SetupAgentId, Promise<ResolvedAgentCli>>();
+const inflight = shared.inflight;
 /**
  * Per agent, bumped by invalidate: a resolution that started before it must not write
  * its (stale) result back. Per agent, so invalidating one never discards the other's.
  */
-const generation = new Map<SetupAgentId, number>();
+const generation = shared.generation;
 const generationOf = (agentId: SetupAgentId): number => generation.get(agentId) ?? 0;
 
 /** Drops the memo (one agent, or all) and any in-flight result, so the next call resolves afresh. */

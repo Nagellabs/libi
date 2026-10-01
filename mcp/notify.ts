@@ -1,4 +1,5 @@
 import { getCurrentPort } from "@/lib/libi-home";
+import { getCurrentToolCall } from "@/mcp/tool-call-context";
 
 /**
  * Lightweight HTTP client for notifying the Next.js server about UI events.
@@ -43,14 +44,30 @@ async function send(payload: Record<string, unknown>): Promise<boolean> {
   }
 }
 
+/**
+ * The tool call a "show" navigation comes from, so the studio can name the chat that made it and
+ * only the tab showing that chat navigates (NAV-1). Nothing outside a tool call.
+ */
+function navigationOrigin(): { origin: { toolCallId?: string; toolName: string; toolArgs: unknown } } | Record<string, never> {
+  const call = getCurrentToolCall();
+  if (!call) return {};
+  return {
+    origin: {
+      ...(call.toolUseId ? { toolCallId: call.toolUseId } : {}),
+      toolName: call.toolName,
+      toolArgs: call.args,
+    },
+  };
+}
+
 export const notify = {
   navigate(event: {
-    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting" | "exports";
     /** Required for piece/asset/preview/storyboard/folder/posting targets. */
     pieceId?: string;
     fileId?: string;
     /** Optional id for special targets — for `posting`, a provider post id to
-     *  open in the composer for review. */
+     *  open in the composer for review; for `exports`, the export to select. */
     id?: string;
   }): void {
     send({ type: "navigate", ...event });
@@ -63,7 +80,7 @@ export const notify = {
    * true, the same reason `navigateAgents` hands its promise back.
    */
   navigateAwaited(event: {
-    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting";
+    target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting" | "exports";
     pieceId?: string;
     fileId?: string;
     id?: string;
@@ -94,11 +111,11 @@ export const notify = {
    *  hands its promise back: `libi.show_extension` and `libi.start_onboarding`
    *  report "navigated" only when the POST landed. */
   navigateAgents(event: { tab: "agents" | "libi-mcp" | "providers"; extensionId?: string; provider?: string }): Promise<boolean> {
-    return send({ type: "navigate_agents", ...event });
+    return send({ type: "navigate_agents", ...event, ...navigationOrigin() });
   },
   /** Send the user to the Templates page; resolves true only when the POST landed. */
   navigateTemplates(event: { templateId?: string }): Promise<boolean> {
-    return send({ type: "navigate_templates", ...event });
+    return send({ type: "navigate_templates", ...event, ...navigationOrigin() });
   },
   /** Flash an inspector field for an overlay (guided edit). */
   highlight(event: {

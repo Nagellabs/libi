@@ -1,0 +1,20 @@
+{
+  "tracks": [
+    {
+      "id": "7521888697513396241", "commercialMusicId": "7521887909633886224", "name": "Self Aware", "artist": "Mark Allan Wolfe",
+      "durationSec": 227, "genres": ["ROCK"],
+      "previewUrl": "https://sf16-ies-music-sg.tiktokcdn.com/obj/tos-alisg-ve-2774/oIgIHYW0BMtmIjxeB0iQousYmAP30DAIilwvWM",
+      "thumbnailUrl": "https://p16-sg.tiktokcdn.com/aweme/100x100/tos-alisg-v-2774/owAjHY8KBEBlsjw8BziAoVsvKAfE0AAEiIwvWM.jpeg",
+      "rank": 1,
+      "clip": { "id": "7521887675088865297", "durationSec": 60, "previewUrl": "https://sf16-ies-music-sg.tiktokcdn.com/obj/tiktok-obj/114335811567299677c6b569ec9b89a8.mp4" }
+    },
+    {
+      "id": "7584037896080902145", "commercialMusicId": "7584036660708460560", "name": "Sunset in Girona", "artist": "Noah Preminger & Max Light",
+      "durationSec": 281, "genres": ["JAZZ"],
+      "previewUrl": "https://sf16-ies-music-sg.tiktokcdn.com/obj/tos-alisg-ve-2774/ogfMAfMgrYkIWxeUpA8FmfrxpYcp691sKQGMqQ",
+      "thumbnailUrl": "https://p16-sg.tiktokcdn.com/aweme/100x100/tos-alisg-v-2774/oEUep9AQ3EATSAgkKEAZI6Iffq1B3FGAWDymfF.jpeg",
+      "rank": 2,
+      "clip": { "id": "7584037896080918529", "durationSec": 19, "previewUrl": "https://sf16-ies-music-sg.tiktokcdn.com/obj/tos-alisg-ve-2102/oAkfzoB0wG94FFjNgR2f2GIklmLeuAeJ9A3GPI" }
+    }
+  ]
+}

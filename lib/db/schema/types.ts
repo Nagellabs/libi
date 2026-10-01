@@ -1,5 +1,5 @@
 import type { InferSelectModel, InferInsertModel } from "drizzle-orm";
-import type { pieces, files, settings, mcpServers, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, skillInstalls, socialPostLinks, templates, templateUses, templatePublishRequests } from "./sqlite";
+import type { pieces, files, settings, mcpServers, skills, analysisSteps, analysisKeyframes, analysisAudioChunks, characters, items, characterAssets, itemAssets, tracks, jobs, assetFolders, folders, modelSchemas, skillInstalls, socialPostLinks, templates, templateUses, templatePublishRequests, pieceExports } from "./sqlite";
 
 export type Piece = InferSelectModel<typeof pieces>;
 export type NewPiece = InferInsertModel<typeof pieces>;
@@ -35,3 +35,4 @@ export type TemplateRow = InferSelectModel<typeof templates>;
 export type NewTemplateRow = InferInsertModel<typeof templates>;
 export type TemplateUseRow = InferSelectModel<typeof templateUses>;
 export type TemplatePublishRequestRow = InferSelectModel<typeof templatePublishRequests>;
+export type PieceExportRow = InferSelectModel<typeof pieceExports>;

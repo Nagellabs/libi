@@ -1,15 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod/v3";
-import {
-  getExportDefaults,
-  setExportDefaults,
-  resolveExportFolder,
-} from "@/lib/db/settings";
-import { defaultExportFolder } from "@/lib/export/folder";
+import { getExportDefaults, setExportDefaults } from "@/lib/db/settings";
 import { serverLogger as logger } from "@/lib/logger";
 
+// An older client may still send `folder`; zod strips it (exports are saved in the piece).
 const bodySchema = z.object({
-  folder: z.string().nullable(),
   format: z.enum(["mp4", "webm"]),
   quality: z.enum(["source", "1080p", "1440p", "4k"]),
   // Optional so an older client (or one that only edits the media field)
@@ -19,12 +14,7 @@ const bodySchema = z.object({
 
 export async function GET(): Promise<Response> {
   try {
-    const defaults = getExportDefaults();
-    return NextResponse.json({
-      ...defaults,
-      effectiveFolder: resolveExportFolder(),
-      osDefaultFolder: defaultExportFolder(),
-    });
+    return NextResponse.json(getExportDefaults());
   } catch (err) {
     logger.error(
       {
@@ -53,19 +43,12 @@ export async function PUT(req: Request): Promise<Response> {
     );
   }
   try {
-    // Normalize empty strings to null so "resolveExportFolder" uses the OS default.
-    const folder = parsed.data.folder?.trim() ? parsed.data.folder : null;
     // Missing graphicsQuality keeps whatever is already stored (falling back
     // to "4k" itself when nothing was ever stored) rather than resetting it.
     const graphicsQuality = parsed.data.graphicsQuality ?? getExportDefaults().graphicsQuality;
-    setExportDefaults({ ...parsed.data, folder, graphicsQuality });
-    return NextResponse.json({
-      ...parsed.data,
-      folder,
-      graphicsQuality,
-      effectiveFolder: resolveExportFolder(),
-      osDefaultFolder: defaultExportFolder(),
-    });
+    const next = { format: parsed.data.format, quality: parsed.data.quality, graphicsQuality };
+    setExportDefaults(next);
+    return NextResponse.json(next);
   } catch (err) {
     logger.error(
       {

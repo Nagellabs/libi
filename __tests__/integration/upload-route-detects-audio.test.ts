@@ -13,6 +13,7 @@ import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-s
 import { LocalFileStorage } from "@/lib/storage/local";
 import { files } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
+import { parseAudioRights } from "@/lib/audio-rights/types";
 
 // Stub proxy enqueue — we only care about DB metadata here, not
 // the proxy generation pipeline. After Task 5 the MCP-side caller
@@ -106,5 +107,23 @@ describe("upload routes set hasAudio from server-side ffprobe", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].pieceId).toBeNull();
     expect(rows[0].hasAudio).toBe(true);
+  });
+
+  // Owner decision 2026-09-28: an upload is the user's own. Both UI routes
+  // write that as an explicit stamp, so it survives any change to how an
+  // unstamped file is read.
+  it("both upload routes stamp the file owned, decided by provenance", async () => {
+    const pieceRes = await pieceUpload(
+      new Request(`http://localhost/api/pieces/${PIECE_ID}/upload`, { method: "POST", body: buildFormData("mine.mp4", "video/mp4") }),
+      { params: Promise.resolve({ pieceId: PIECE_ID }) },
+    );
+    const globalRes = await globalUpload(new Request("http://localhost/api/upload", { method: "POST", body: buildFormData("also-mine.mp4", "video/mp4") }));
+    expect(pieceRes.status).toBe(200);
+    expect(globalRes.status).toBe(200);
+    const rows = testDb.select().from(files).all();
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(parseAudioRights(row.audioRights)).toMatchObject({ class: "owned", decidedBy: "provenance" });
+    }
   });
 });

@@ -19,6 +19,7 @@ import {
 import {
   applyAgentEvent,
   applyHistory,
+  applyReconnectHistory,
   appendLocalUserMessage,
   markLocalUserMessageFailed,
   removeLocalUserMessage,
@@ -271,6 +272,8 @@ type RefreshQueryListener = (event: {
   sceneId?: string;
   fileId?: string;
   trackId?: string;
+  exportId?: string;
+  status?: string;
 }) => void;
 
 class RefreshQueryEmitter {
@@ -607,6 +610,8 @@ function _ensureGlobalSSE() {
         sceneId: data.sceneId as string | undefined,
         fileId: data.fileId as string | undefined,
         trackId: data.trackId as string | undefined,
+        exportId: data.exportId as string | undefined,
+        status: data.status as string | undefined,
       });
     }
 
@@ -1088,6 +1093,27 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
                 if (restartGenRef.current === gen) finishedByReconnectRef.current = false;
               }, RECONNECT_DONE_GRACE_MS);
             });
+          return;
+        }
+        // A chat that was mid-turn lost every chunk sent while the connection was down, and nothing
+        // re-sends them: take the server's history again, as a load does (`applyReconnectHistory`:
+        // a fresh state, keeping only an approval card, a note or a failed echo the history can't
+        // have). An idle chat missed nothing a reconnect can bring back.
+        const shownStatus = sessionId ? _cachedStatusMap.get(sessionId) : undefined;
+        if (!restartingRef.current && sessionId && (shownStatus === "thinking" || shownStatus === "streaming")) {
+          const forSession = sessionId;
+          const gen = restartGenRef.current;
+          void fetch(`/api/agent/messages?sessionId=${encodeURIComponent(forSession)}`)
+            // A failed fetch is not an empty history: what the chat shows stays.
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d: { messages?: AgentMessage[]; historyMissing?: boolean } | null) => {
+              if (!d || d.historyMissing) return;
+              // A switch of chat or a restart meanwhile owns the history now.
+              if (shownSessionRef.current !== forSession || restartingRef.current || restartGenRef.current !== gen) return;
+              stateRef.current = applyReconnectHistory(stateRef.current, d.messages ?? []);
+              publish();
+            })
+            .catch(() => {});
         }
         return;
       }
@@ -1239,6 +1265,9 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
       // the agent. Without the catch, the rejection is unhandled and status
       // stays "thinking" forever — the stuck-"generating" bug.
       let historyGone = false;
+      // Set when the server held the prompt back because the chat's approval mode had not landed —
+      // the server did receive it, so the generic "didn't receive it" would be untrue.
+      let serverReason: string | null = null;
       try {
         const res = await fetch("/api/agent/send", {
           method: "POST",
@@ -1249,11 +1278,16 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
           // 409 `historyMissing`: the agent has no transcript for this chat. The failed bubble and
           // the text backup below still apply; the chat then disables its composer rather than
           // offering a Retry that can only fail the same way.
-          const body = (await res.json().catch(() => null)) as { historyMissing?: boolean } | null;
+          const body = (await res.json().catch(() => null)) as {
+            historyMissing?: boolean;
+            approvalModeNotApplied?: string;
+            error?: string;
+          } | null;
           if (body?.historyMissing) {
             historyGone = true;
             setHistoryMissingFor(sessionId);
           }
+          if (body?.approvalModeNotApplied && body.error) serverReason = body.error;
           throw new Error(`send failed: HTTP ${res.status}`);
         }
         // A retry that succeeds must clear the backup its failure wrote —
@@ -1271,7 +1305,8 @@ export function useAgentChat(sessionId: string | null, options?: UseAgentChatOpt
         // The chat itself explains a missing history; "use the retry button" would be untrue there.
         if (!historyGone) {
           toast.error("Message failed to send", {
-            description: "The libi server didn't receive it. Use the retry button on the message.",
+            description:
+              serverReason ?? "The libi server didn't receive it. Use the retry button on the message.",
           });
         }
       }

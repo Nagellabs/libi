@@ -34,6 +34,7 @@ import {
   useComposeRequestId,
   isPartialPost,
 } from "@/lib/queries/social";
+import { useMusicPlan, type MusicPlanTarget } from "@/lib/queries/social-music";
 
 const fetchMock = vi.fn();
 
@@ -310,5 +311,25 @@ describe("the compose request id comes from the server", () => {
     setVisibility("visible");
     await act(async () => {});
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("a music plan's new key keeps the previous plan on screen", () => {
+  it("a changed override serves the last plan as placeholder until the new one answers — never a loading state", async () => {
+    let answer!: (r: Response) => void;
+    fetchMock.mockResolvedValueOnce(jsonOk({ targets: [{ plan: { mode: "attach" } }] }));
+    const { result, rerender } = renderHook(({ target }: { target: MusicPlanTarget }) => useMusicPlan("p", target), {
+      wrapper: wrap(),
+      initialProps: { target: { platform: "tiktok", accountId: "tt" } as MusicPlanTarget },
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    fetchMock.mockImplementationOnce(() => new Promise<Response>((r) => (answer = r)));
+    rerender({ target: { platform: "tiktok", accountId: "tt", music: { mode: "attach", trackId: "t2" } } });
+    expect(result.current.isLoading).toBe(false);
+    expect(result.current.isPlaceholderData).toBe(true);
+    expect(result.current.data).toEqual({ targets: [{ plan: { mode: "attach" } }] });
+    await act(async () => answer(jsonOk({ targets: [{ plan: { mode: "attach", track: { id: "t2" } } }] })));
+    await waitFor(() => expect(result.current.isPlaceholderData).toBe(false));
+    expect(result.current.data).toEqual({ targets: [{ plan: { mode: "attach", track: { id: "t2" } } }] });
   });
 });

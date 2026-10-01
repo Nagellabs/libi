@@ -64,19 +64,25 @@ export function planRenderChunks(
  *  - no usable env + `mode === "software"` → `min(4, max(1, cpuCount - 2))`
  *    (leave a couple cores for ffmpeg + the Next server).
  *  - no usable env + `mode === "gpu"` or `undefined` → `1` (single page).
+ *  - `held`: pages other renders already run. The answer is
+ *    `min(normal, cpuCount − 2 − held)`, at least 1 (spec 2026-09-29 §B1).
+ *    An explicit env override is a developer's choice and ignores it.
  */
 export function resolveChunkWorkers(
   env: string | undefined,
   mode: "gpu" | "software" | undefined,
   cpuCount: number,
+  /** Workers other renders running right now already hold (lib/export/scheduler.ts#leaseRenderWorkers). */
+  held = 0,
 ): number {
   if (env !== undefined && env !== "") {
     const n = Number.parseInt(env, 10);
     if (Number.isFinite(n)) return n <= 1 ? 1 : n;
     // Non-numeric override → ignore it, fall through to the mode default.
   }
-  if (mode === "software") return Math.min(4, Math.max(1, cpuCount - 2));
-  return 1;
+  const normal = mode === "software" ? Math.min(4, Math.max(1, cpuCount - 2)) : 1;
+  // Several renders share the machine: never more than the cores the others leave (spec §B1).
+  return Math.max(1, Math.min(normal, cpuCount - 2 - held));
 }
 
 /**

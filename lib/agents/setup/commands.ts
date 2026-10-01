@@ -29,6 +29,12 @@ export interface SetupCli {
   agentId: SetupAgentId;
   /** The resolved absolute path of the user's CLI — never a bare name. */
   realPath: string;
+  /**
+   * Windows only, from the server (`GET /api/agents/status`'s `cli.launch`): what an npm `.cmd` shim at `realPath`
+   * runs — node plus its script, or its native `.exe` — so PowerShell runs that instead of the batch file, and a
+   * Ctrl-C doesn't stop at cmd's "Terminate batch job (Y/N)?". Ignored on posix.
+   */
+  launch?: { command: string; args: string[] };
 }
 
 /**
@@ -62,11 +68,28 @@ export function libiEndpointUrl(port: number): string {
   return `http://127.0.0.1:${port}/mcp`;
 }
 
-/** The quoted CLI path, plus PowerShell's call operator so a quoted path runs as a command. */
-export function cliInvocation(realPath: string, flavor: ShellFlavor): string {
+/**
+ * The quoted CLI path, plus PowerShell's call operator so a quoted path runs as a command. On PowerShell a `launch`
+ * (an npm `.cmd` shim's own target, see `SetupCli.launch`) is run in the shim's place: `& '<node>' '<script>'`, or
+ * `& '<claude.exe>'`.
+ */
+export function cliInvocation(realPath: string, flavor: ShellFlavor, launch?: SetupCli["launch"]): string {
   const powershell = isPowerShell(flavor);
+  if (powershell && launch) return ["&", ...[launch.command, ...launch.args].map((w) => quoteForShell(w, flavor))].join(" ");
   const quoted = quoteForShell(realPath, flavor);
   return powershell ? `& ${quoted}` : quoted;
+}
+
+/**
+ * The `<cli>` a provider script is handed, and on PowerShell the `-CliScript` it runs with it: a `.cmd` shim's own
+ * target instead of the shim (`SetupCli.launch`) — its native `.exe` as `<cli>`, or node as `<cli>` with the JS file
+ * as `-CliScript` (the .ps1 scripts run `& $Cli @cliPre …`). A launch that is not one of those two shapes, or posix,
+ * keeps the realpath.
+ */
+function scriptCli(cli: SetupCli, flavor: ShellFlavor): { cli: string; cliScript?: string } {
+  const launch = isPowerShell(flavor) ? cli.launch : undefined;
+  if (!launch || launch.args.length > 1) return { cli: cli.realPath };
+  return launch.args.length === 1 ? { cli: launch.command, cliScript: launch.args[0] } : { cli: launch.command };
 }
 
 function q(arg: string, flavor: ShellFlavor): string {
@@ -75,7 +98,7 @@ function q(arg: string, flavor: ShellFlavor): string {
 
 /** `<cli> <args…>` with every arg quoted for the flavor. */
 function invoke(cli: SetupCli, flavor: ShellFlavor, args: string[]): string {
-  return [cliInvocation(cli.realPath, flavor), ...args.map((a) => q(a, flavor))].join(" ");
+  return [cliInvocation(cli.realPath, flavor, cli.launch), ...args.map((a) => q(a, flavor))].join(" ");
 }
 
 /**
@@ -213,7 +236,7 @@ function scriptCommand(
   scriptsDir: string,
   action: ProviderScriptAction,
   args: string[],
-  opts: { passZdotdir: boolean; trailing?: string[] },
+  opts: { passZdotdir: boolean; trailing?: string[]; cliScript?: string },
 ): string {
   const powershell = isPowerShell(flavor);
   const folder = scriptsFolder(scriptsDir, flavor);
@@ -224,12 +247,13 @@ function scriptCommand(
     const words = [...[script, ...args].map((a) => q(a, flavor)), ...trailing].join(" ");
     return opts.passZdotdir ? `ZDOTDIR="\${ZDOTDIR-}" sh ${words}` : `sh ${words}`;
   }
-  const doubleQuoted = [script, ...args].find((word) => word.includes('"'));
+  const doubleQuoted = [script, ...args, ...(opts.cliScript ? [opts.cliScript] : [])].find((word) => word.includes('"'));
   if (doubleQuoted !== undefined) {
     throw new Error(`refusing to build a PowerShell command for an argument containing a double quote: ${JSON.stringify(doubleQuoted)}`);
   }
   const words = args.map((a) => q(a, flavor));
   if (action === "provider-replace") words.push("-ScriptsDir", q(folder, flavor));
+  if (opts.cliScript) words.push("-CliScript", q(opts.cliScript, flavor));
   words.push(...trailing);
   const payload = `& ([scriptblock]::Create([IO.File]::ReadAllText(${q(script, flavor)}))) ${words.join(" ")}`;
   return `powershell -NoProfile -Command "${payload.replace(POWERSHELL_DOUBLE_QUOTED_SPECIAL, (c) => `\`${c}`)}"`;
@@ -262,8 +286,10 @@ function readsLoginProfiles(cli: SetupCli, flavor: ShellFlavor, def: ProviderDef
 export function providerAddCommand(cli: SetupCli, flavor: ShellFlavor, def: ProviderDef, scriptsDir: string): string | null {
   isPowerShell(flavor);
   if (!catalogCommandFor(cli, def)) return null;
-  return scriptCommand(flavor, scriptsDir, "provider-add", [def.id, scriptAgent(cli.agentId), cli.realPath], {
+  const run = scriptCli(cli, flavor);
+  return scriptCommand(flavor, scriptsDir, "provider-add", [def.id, scriptAgent(cli.agentId), run.cli], {
     passZdotdir: readsLoginProfiles(cli, flavor, def),
+    cliScript: run.cliScript,
   });
 }
 
@@ -315,9 +341,11 @@ export function providerRemoveCommand(
   // A LOCAL entry of a provider you sign in to (an older `uvx elevenlabs-mcp`, with a key) has no sign-in to clear.
   const noSignOut = def.auth === "oauth" && entry.transport === "stdio";
   const flag = noSignOut ? [isPowerShell(flavor) ? "-NoSignOut" : "--no-sign-out"] : [];
-  return scriptCommand(flavor, scriptsDir, "provider-remove", [def.id, scriptAgent(cli.agentId), cli.realPath, ...target], {
+  const run = scriptCli(cli, flavor);
+  return scriptCommand(flavor, scriptsDir, "provider-remove", [def.id, scriptAgent(cli.agentId), run.cli, ...target], {
     passZdotdir: readsLoginProfiles(cli, flavor, def),
     trailing: flag,
+    cliScript: run.cliScript,
   });
 }
 
@@ -337,8 +365,10 @@ export function providerReplaceCommand(
   isPowerShell(flavor);
   const target = entryArgs(cli, entry);
   if (!catalogCommandFor(cli, def)) return null;
-  return scriptCommand(flavor, scriptsDir, "provider-replace", [def.id, scriptAgent(cli.agentId), cli.realPath, ...target], {
+  const run = scriptCli(cli, flavor);
+  return scriptCommand(flavor, scriptsDir, "provider-replace", [def.id, scriptAgent(cli.agentId), run.cli, ...target], {
     passZdotdir: readsLoginProfiles(cli, flavor, def),
+    cliScript: run.cliScript,
   });
 }
 
@@ -361,7 +391,8 @@ export function providerSignInCommand(
   const [name] = entryArgs(cli, entry);
   const agent = scriptAgent(cli.agentId);
   if (def.auth !== "oauth" || !def.signInCommands?.[agent]) return null;
-  return scriptCommand(flavor, scriptsDir, "provider-sign-in", [def.id, agent, cli.realPath, name], { passZdotdir: false });
+  const run = scriptCli(cli, flavor);
+  return scriptCommand(flavor, scriptsDir, "provider-sign-in", [def.id, agent, run.cli, name], { passZdotdir: false, cliScript: run.cliScript });
 }
 
 /**

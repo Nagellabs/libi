@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { execSync } from "child_process";
+import { execSync, execFileSync } from "child_process";
+import { buildUvEnv } from "@/lib/uv-env/spawn-env";
 import { synthesizeSpeech, downloadModel } from "@/lib/tts/synthesize";
 import {
   downloadModel as whisperDownload,
@@ -62,6 +63,20 @@ if (!RUN)
   );
 
 describe.skipIf(!RUN)("real Kokoro TTS E2E (round-trip via Whisper)", () => {
+  // synthesize.py's short espeak-ng data path (0.1.16 F7). The helper is
+  // stdlib-only, so its pytest runs under the same uv without kokoro.
+  it("mcp/tts/test_espeak_path.py passes", () => {
+    const uv = path.join(process.env.LIBI_HOME as string, "bin", "uv");
+    const out = execFileSync(
+      uv,
+      ["run", "--python", "3.12", "--with", "pytest", "python", "-m", "pytest",
+        "-p", "no:cacheprovider", "-q", path.resolve("mcp/tts/test_espeak_path.py")],
+      { env: buildUvEnv({ PYTHONDONTWRITEBYTECODE: "1" }), encoding: "utf-8" },
+    );
+    expect(out).toMatch(/\d+ passed/);
+    expect(out).not.toMatch(/failed|error/i);
+  }, 600_000);
+
   it("synthesizes intelligible speech of the requested text", async () => {
     const expected = JSON.parse(
       fs.readFileSync(

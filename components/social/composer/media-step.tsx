@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { exportLine, targetLabel, type FitResponse, type LatestExport } from "./types";
+import { exportChoiceLabel, exportLine, exportSongNote, targetLabel, type FitResponse, type LatestExport } from "./types";
 
 /**
  * Step 1 — what is being posted. The fit check is local, offline and free
@@ -19,6 +19,7 @@ export function MediaStep({
   fitPending,
   fitFailed,
   hasTargets,
+  exportPending = false,
   onExportRequested,
   onChangeTargets,
 }: {
@@ -30,16 +31,25 @@ export function MediaStep({
   fitPending: boolean;
   fitFailed: boolean;
   hasTargets: boolean;
+  /** An export started from this composer is still rendering. */
+  exportPending?: boolean;
   onExportRequested: () => void;
   onChangeTargets: () => void;
 }) {
   const current = choices.find((c) => c.filePath === exportPath) ?? latestExport;
 
   if (!exportPath || !current) {
+    if (exportPending) {
+      return (
+        <div className="space-y-3" data-testid="media-step">
+          <p className="text-sm text-muted-foreground">Your export is rendering. It appears here, selected, as soon as it finishes.</p>
+        </div>
+      );
+    }
     return (
       <div className="space-y-3" data-testid="media-step">
         <p className="text-sm text-muted-foreground">
-          This piece has no export yet. Export it (1080×1920 MP4) and come straight back here.
+          This piece has no export yet. Export it as a 1080p MP4 and come straight back here.
         </p>
         <Button className="cursor-pointer" onClick={onExportRequested}>
           Export &amp; post
@@ -56,6 +66,11 @@ export function MediaStep({
         <p className="text-sm font-medium" data-testid="export-line">
           {exportLine(current)}
         </p>
+        {exportSongNote(current) && (
+          <p className="text-xs text-muted-foreground" data-testid="export-song-note">
+            This export is {exportSongNote(current)}.
+          </p>
+        )}
         {choices.length > 1 && (
           <label className="flex items-center gap-2 text-xs text-muted-foreground">
             Pick another export…
@@ -67,7 +82,7 @@ export function MediaStep({
             >
               {choices.map((c) => (
                 <option key={c.filePath} value={c.filePath}>
-                  {exportLine(c)}
+                  {exportChoiceLabel(c)}
                 </option>
               ))}
             </select>

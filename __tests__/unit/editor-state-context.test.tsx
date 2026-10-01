@@ -438,3 +438,36 @@ describe("navigate_agents — the named tab, not just the page", () => {
     expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=providers&provider=fal");
   });
 });
+
+/**
+ * NAV-1 review M1: which tab owns an agent's chat is the tab's own `activeSessionId` (kept by the
+ * always-mounted provider), not whether a chat panel is mounted — after a first `show_*` moved the
+ * chat's tab to /agents or /templates, no panel is mounted anywhere, and a second `show_*` in the
+ * same turn must still move only that tab.
+ */
+describe("an agent's show navigation is decided by this tab's active chat", () => {
+  it("a navigation from THIS tab's active chat is obeyed at once, with no chat panel mounted", () => {
+    window.history.replaceState({}, "", "/agents?tab=agents");
+    sessionListMock.current.activeSessionId = "chat-1";
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_templates", fromSessionId: "chat-1", navId: "m1-a" }));
+    expect(routerMock.push).toHaveBeenCalledWith("/templates?tab=mine");
+  });
+
+  it("one from another chat waits for that chat's tab to claim it, and is obeyed only if none does", async () => {
+    vi.useFakeTimers();
+    try {
+      window.history.replaceState({}, "", "/settings");
+      sessionListMock.current.activeSessionId = "chat-2";
+      captureCtx();
+      act(() => broadcast.emit({ type: "navigate_agents", tab: "libi-mcp", fromSessionId: "chat-1", navId: "m1-b" }));
+      expect(routerMock.push).not.toHaveBeenCalled();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      expect(routerMock.push).toHaveBeenCalledWith("/agents?tab=libi-mcp");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

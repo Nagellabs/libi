@@ -56,6 +56,8 @@ jobs:
   resolve:
     name: Resolve the version
     runs-on: ubuntu-latest
+    # Above the hour the step below may wait for npm to serve the version.
+    timeout-minutes: 75
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -72,8 +74,27 @@ jobs:
           # Ask for the PER-VERSION document. It is what `--from-registry` has
           # to resolve, and it becomes available before the aggregated
           # packument does.
-          if ! npm view "@nagellabs/libi@$v" version > /dev/null 2>&1; then
-            echo "::error::@nagellabs/libi@$v is not on npm. Publish it first (Release npm)."
+          #
+          # POLL it, for up to an hour. A single ask failed closed on npm's
+          # publish lag, and 0.1.16 sat ~56 min in npm "processing" after a
+          # good publish — Release npm now ends green-with-a-warning in that
+          # state, so this is where the wait has to happen. 240 × 15 s; the
+          # same bound as release-electron.js's REGISTRY_ATTEMPTS.
+          attempts=240
+          served=""
+          for i in $(seq 1 "$attempts"); do
+            if [ "$(npm view "@nagellabs/libi@$v" version --prefer-online 2>/dev/null)" = "$v" ]; then
+              served=1
+              break
+            fi
+            # ~once a minute, not 240 near-identical lines.
+            if [ "$i" -eq 1 ] || [ $((i % 4)) -eq 0 ]; then
+              echo "[$i/$attempts] @nagellabs/libi@$v not served yet — waiting for npm…"
+            fi
+            if [ "$i" -lt "$attempts" ]; then sleep 15; fi
+          done
+          if [ -z "$served" ]; then
+            echo "::error::@nagellabs/libi@$v is not on npm: not served yet after ~60 min; re-dispatch later with the same version. If it was never published, publish it first (Release npm)."
             exit 1
           fi
           echo "version=$v"  >> "$GITHUB_OUTPUT"
@@ -162,10 +183,20 @@ jobs:
       - name: Build native modules for this Node
         run: npm rebuild better-sqlite3 node-pty
 
+      # The same ffmpeg test.yml installs, through the same action. Without it
+      # every real-ffmpeg test here SKIPPED on 0.1.16 (hasFfmpeg() found
+      # nothing), so these gates were weaker than ordinary CI again — the exact
+      # drift the comment above warns about. LIBI_REQUIRE_FFMPEG on Test makes
+      # a missing ffmpeg fail the gates instead of thinning them.
+      - name: Install ffmpeg 9.0 (the build libi installs on Linux)
+        uses: ./.github/actions/setup-ffmpeg
+
       - name: Lint
         run: npm run lint
 
       - name: Test
+        env:
+          LIBI_REQUIRE_FFMPEG: "1"
         run: npm test
 
       - name: Licences
@@ -252,7 +283,13 @@ jobs:
           ulimit -n 262144 2>/dev/null || ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
           echo "kern.maxfilesperproc=$(sysctl -n kern.maxfilesperproc)  ulimit -n=$(ulimit -n)"
           export APPLE_API_KEY="$RUNNER_TEMP/notary/key.p8"
-          node scripts/release-electron.js --target=mac --ci --no-github-release --skip-checks
+          # Under `/usr/bin/time -l`, into a file (-o) so the build's own stderr
+          # stays in this log. It reports the peak RSS of the LARGEST single
+          # process it waited for — the `next build` worker, which is the one
+          # that ran out of heap twice on 0.1.16. A failed build stays a failed
+          # step (a signal-killed one exits 1 rather than its own status). The
+          # "Report build memory" step below reads the file.
+          /usr/bin/time -l -o "$RUNNER_TEMP/build-time.txt" node scripts/release-electron.js --target=mac --ci --no-github-release --skip-checks
 
       - name: Shred the key
         if: always()
@@ -267,6 +304,25 @@ jobs:
             release/Libi-*-arm64-mac.zip.blockmap
             release/latest-mac.yml
           if-no-files-found: error
+
+      # "peak RSS X GB of 7 GB runner; heap limit 5.0 GB; headroom Y GB (heap …,
+      # physical …)" in the job summary. Headroom is the SMALLER of the V8 heap
+      # limit − peak (0.1.16 died on the heap, not on RAM) and the runner's RAM
+      # − what macOS keeps − peak. Under 1.5 GB it warns; under 1 GB it errors.
+      #
+      # The error FAILS A DRY RUN — the point is to find the ceiling on a
+      # rehearsal (owner decision O8: a larger runner costs money). On a REAL
+      # run it is `continue-on-error`: the ::error:: annotation still shows, but
+      # a good, signed, notarized build is never withheld from the Release over
+      # a measurement that varies run to run — the only recovery would be
+      # another full build and notarization, which could trip again.
+      #
+      # After the upload, so a red report still leaves the artifacts to inspect;
+      # `always()` so a failed build still reports what it reached.
+      - name: Report build memory
+        if: always()
+        continue-on-error: ${{ !inputs.dry_run }}
+        run: node scripts/build-memory-report.js "$RUNNER_TEMP/build-time.txt"
 
   # ── Windows shell ────────────────────────────────────────────────────────
   windows:

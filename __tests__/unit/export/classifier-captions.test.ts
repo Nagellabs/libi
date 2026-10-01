@@ -76,7 +76,15 @@ describe("classifier — a maxEnd-clamped caption track stays off the outlivesBa
       startTime: 0, duration: 5,
       rect: { x: 0, y: 0, width: 1920, height: 1080 }, z: 0, opacity: 1,
     };
-    await saveManifest(pieceId, { width: 1920, height: 1080, fps: 30, overlays: [videoOverlay] });
+    // The video's sound is its coupled inline clip (a video without one is
+    // silent, and generate_captions makes no cues for it).
+    await saveManifest(pieceId, {
+      width: 1920, height: 1080, fps: 30, overlays: [videoOverlay],
+      audioClips: [{
+        id: "inl-vid-1", kind: "inline", fileId: "f1", linkedOverlayId: "vid-1",
+        startTime: 0, duration: 5, trimStart: 0, volume: 1, enabled: true,
+      }],
+    });
 
     const words = [w("Hello", 0, 0.4), w("world", 4.4, 4.8)];
     // "clean" style: no reveal, so the classifier's textNeedsBrowserRender
@@ -87,6 +95,7 @@ describe("classifier — a maxEnd-clamped caption track stays off the outlivesBa
       { readWords: async () => words },
     );
     expect(result.success).toBe(true);
+    expect(result.data!.cueCount as number).toBeGreaterThan(0);
 
     const manifest = await loadManifest(pieceId);
     const overlays = (manifest.overlays ?? []) as unknown as Overlay[];

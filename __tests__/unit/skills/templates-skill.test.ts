@@ -113,8 +113,8 @@ describe("the templates skill", () => {
     expect(parsed.fileId).toBe("f1");
   });
 
-  it("the manual has a templates section that names the tools, and the version moved to 1.21.2", () => {
-    expect(LIBI_SKILL_VERSION).toBe("1.21.2");
+  it("the manual has a templates section that names the tools, and the version is at least 1.21.4", () => {
+    expect(LIBI_SKILL_VERSION.localeCompare("1.21.4", undefined, { numeric: true })).toBeGreaterThanOrEqual(0);
     const lookup = resolveManualSection(renderAgentInstructions("claude"), "templates");
     expect(lookup.ok).toBe(true);
     const section = lookup.ok ? lookup.text : "";

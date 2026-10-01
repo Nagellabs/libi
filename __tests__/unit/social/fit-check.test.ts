@@ -84,22 +84,20 @@ describe("isAllowedExportPath / probeExport", () => {
     fs.mkdirSync(storageDir, { recursive: true });
     fs.mkdirSync(outsideDir, { recursive: true });
     process.env.LIBI_HOME = tmpRoot;
-    vi.doMock("@/lib/db/settings", () => ({ resolveExportFolder: () => exportFolder }));
   });
 
   afterEach(() => {
     delete process.env.LIBI_HOME;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
     vi.resetModules();
-    vi.doUnmock("@/lib/db/settings");
   });
 
-  it("allows a file under the export folder", async () => {
+  it("refuses a file in an old export folder outside libi's storage (exports live in the piece now)", async () => {
     vi.resetModules();
     const mod = await import("@/lib/social/fit-check");
     const file = path.join(exportFolder, "out.mp4");
     fs.writeFileSync(file, "x");
-    expect(mod.isAllowedExportPath(file)).toBe(true);
+    expect(mod.isAllowedExportPath(file)).toBe(false);
   });
 
   it("allows a file under libi storage", async () => {
@@ -116,10 +114,10 @@ describe("isAllowedExportPath / probeExport", () => {
     const file = path.join(outsideDir, "sneaky.mp4");
     fs.writeFileSync(file, "x");
     expect(mod.isAllowedExportPath(file)).toBe(false);
-    expect(mod.isAllowedExportPath(path.join(exportFolder, "..", "outside", "sneaky.mp4"))).toBe(false);
+    expect(mod.isAllowedExportPath(path.join(storageDir, "..", "outside", "sneaky.mp4"))).toBe(false);
   });
 
-  it("rejects a symlink inside the export folder that points outside it", async () => {
+  it("rejects a symlink inside libi's storage that points outside it", async () => {
     // The guard's whole job: a name under an allowed root is not the same as a FILE
     // under it. realpath is what separates the two, and nothing proved that until now
     // (the Task 11 review found this case claimed but missing).
@@ -127,32 +125,32 @@ describe("isAllowedExportPath / probeExport", () => {
     const mod = await import("@/lib/social/fit-check");
     const real = path.join(outsideDir, "real.mp4");
     fs.writeFileSync(real, "x");
-    const link = path.join(exportFolder, "looks-legit.mp4");
+    const link = path.join(storageDir, "looks-legit.mp4");
     fs.symlinkSync(real, link);
     expect(mod.isAllowedExportPath(link)).toBe(false);
   });
 
-  it("rejects a file whose PARENT directory is a symlink out of the export folder", async () => {
+  it("rejects a file whose PARENT directory is a symlink out of libi's storage", async () => {
     vi.resetModules();
     const mod = await import("@/lib/social/fit-check");
     const realDir = path.join(outsideDir, "elsewhere");
     fs.mkdirSync(realDir, { recursive: true });
     const file = path.join(realDir, "clip.mp4");
     fs.writeFileSync(file, "x");
-    fs.symlinkSync(realDir, path.join(exportFolder, "subdir"));
-    expect(mod.isAllowedExportPath(path.join(exportFolder, "subdir", "clip.mp4"))).toBe(false);
+    fs.symlinkSync(realDir, path.join(storageDir, "subdir"));
+    expect(mod.isAllowedExportPath(path.join(storageDir, "subdir", "clip.mp4"))).toBe(false);
   });
 
   it("rejects a path that does not exist", async () => {
     vi.resetModules();
     const mod = await import("@/lib/social/fit-check");
-    expect(mod.isAllowedExportPath(path.join(exportFolder, "does-not-exist.mp4"))).toBe(false);
+    expect(mod.isAllowedExportPath(path.join(storageDir, "does-not-exist.mp4"))).toBe(false);
   });
 
   it("probeExport throws a validation SocialError for a missing file, never a crash", async () => {
     vi.resetModules();
     const mod = await import("@/lib/social/fit-check");
-    const missing = path.join(exportFolder, "gone.mp4");
+    const missing = path.join(storageDir, "gone.mp4");
     await expect(mod.probeExport(missing)).rejects.toMatchObject({ name: "SocialError", kind: "validation" });
   });
 
@@ -168,7 +166,7 @@ describe("isAllowedExportPath / probeExport", () => {
     vi.resetModules();
     vi.doMock("@/lib/ffmpeg/probe", () => ({ probeMedia: vi.fn().mockResolvedValue({}) }));
     const mod = await import("@/lib/social/fit-check");
-    const file = path.join(exportFolder, "corrupt.mp4");
+    const file = path.join(storageDir, "corrupt.mp4");
     fs.writeFileSync(file, "not really a video");
     await expect(mod.probeExport(file)).rejects.toMatchObject({ kind: "validation" });
     vi.doUnmock("@/lib/ffmpeg/probe");
@@ -180,7 +178,7 @@ describe("isAllowedExportPath / probeExport", () => {
       probeMedia: vi.fn().mockResolvedValue({ duration: 12.5, width: 1080, height: 1920 }),
     }));
     const mod = await import("@/lib/social/fit-check");
-    const file = path.join(exportFolder, "good.mp4");
+    const file = path.join(storageDir, "good.mp4");
     fs.writeFileSync(file, Buffer.alloc(2048));
     const result = await mod.probeExport(file);
     expect(result).toEqual({ durationSeconds: 12.5, width: 1080, height: 1920, sizeBytes: 2048 });

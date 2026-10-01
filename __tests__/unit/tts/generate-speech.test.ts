@@ -71,4 +71,39 @@ describe("generateSpeech", () => {
     );
     expect(fs.existsSync(wav)).toBe(false); // temp cleaned up
   });
+
+  it("stamps the stored file as generated audio rights", async () => {
+    const fileTools = await import("@/mcp/tools/file-tools");
+    const fakeRecord = { id: "f1", filename: "speech.wav" };
+    const storeSpy = vi
+      .spyOn(fileTools, "storeFile")
+      .mockResolvedValue(fakeRecord as FileRecord);
+    const wav = path.join(tmp, "out.wav");
+    fs.writeFileSync(wav, Buffer.from("RIFFWAVE"));
+    const { generateSpeech } = await import("@/mcp/tools/tts-tools");
+    const r = await generateSpeech(
+      { text: "Welcome to Libi, your AI video studio", voice: "am_adam" },
+      undefined,
+      async () => ({
+        wavPath: wav,
+        voice: "am_adam",
+        sampleRate: 24000,
+        durationSeconds: 1.6,
+        words: [],
+        approximate: false,
+      }),
+    );
+    expect(r.success).toBe(true);
+    expect(storeSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        audioRights: expect.objectContaining({
+          class: "generated",
+          decidedBy: "provenance",
+          track: expect.objectContaining({
+            title: "Voiceover: Welcome to Libi, your AI video studio",
+          }),
+        }),
+      }),
+    );
+  });
 });

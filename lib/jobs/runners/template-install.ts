@@ -6,9 +6,12 @@
  * child reaches it over HTTP, never directly) and the Templates page's
  * `POST /api/templates/cloud/install`.
  *
- * Params are `{ cloudId, version? }` and nothing else, so two installs of the
- * same template — the agent's and the page's, or an agent's retry after its
- * client timed out — share one `(kind, paramsHash)`. Every caller enqueues
+ * Params are `{ cloudId, version?, source? }` and nothing else, so two installs
+ * of the same template on the same catalog — the agent's and the page's, or an
+ * agent's retry after its client timed out — share one `(kind, paramsHash)`.
+ * `source` is the catalog the caller read when it asked (stable, not a
+ * transient value): the job runs there, whatever the user switched to before
+ * it started (`catalogForQueuedJob`). Every caller enqueues
  * with `forceNew`: an install must never be answered from an earlier run's
  * cached row (the template may have been deleted since, or have a newer
  * version), and `exclusiveResource` turns `forceNew` into "attach" while a run
@@ -20,7 +23,7 @@ import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 import { CancelledError, type JobRunner } from "@/lib/jobs/types";
 import { CLOUD_ID_PATTERN } from "@/lib/templates/cloud/constants";
 import { installTemplate, type InstallErrorCode } from "@/lib/templates/cloud/install";
-import { catalogSource, withCatalogSource } from "@/lib/templates/cloud/catalog-source";
+import { catalogForQueuedJob, withCatalogSource } from "@/lib/templates/cloud/catalog-source";
 
 const CANCEL_POLL_MS = 500;
 
@@ -29,6 +32,8 @@ const paramsSchema = z
     cloudId: z.string().regex(CLOUD_ID_PATTERN, "not a catalog template id"),
     /** The version the caller's listing showed; omitted, the catalog's current one. */
     version: z.number().int().positive().optional(),
+    /** The catalog the caller asked on (`activeCatalogSource()` at enqueue). Absent on a job queued before it was a param. */
+    source: z.string().min(1).optional(),
   })
   .strict();
 export type TemplateInstallParams = z.infer<typeof paramsSchema>;
@@ -81,9 +86,11 @@ export const templateInstallRunner: JobRunner<TemplateInstallParams, TemplateIns
       if (ctx.shouldCancel()) ac.abort();
     }, CANCEL_POLL_MS);
     try {
+      // The catalog it was queued on: a switch in Settings (a dev build) before or during the run never splits one install across two.
+      const pinned = catalogForQueuedJob(ctx.params.source);
+      if (!pinned.ok) throw new TemplateInstallError(pinned.error, "catalog_changed");
       ctx.reportProgress(0, 100, "%");
-      // Pinned to the catalog it started under: a switch in Settings meanwhile (a dev build) never splits one install across two.
-      const r = await withCatalogSource(catalogSource(), () =>
+      const r = await withCatalogSource(pinned.source, () =>
         installTemplate(ctx.params.cloudId, {
           version: ctx.params.version,
           force: ctx.discardOutput === true,

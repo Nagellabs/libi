@@ -144,10 +144,23 @@ export function browserOnlyRefusal(req: Request): string | null {
  * the site for the document and downloads its template.json),
  * `/api/templates/cloud/asset-stream` (it fetches a public template's
  * link-only audio or video from the author's host),
+ * `/api/social/music/preview` (it fetches a catalog track's preview from the
+ * platform's CDN), `/api/social/music/catalog` and `/api/social/music/track`
+ * (they call Zernio on the user's grant), `/api/social/music/facts` (its GET
+ * probes each account through Zernio and stores the facts),
+ * `/api/files/by-id/[fileId]/music-match` (it matches a song against each
+ * connected platform's catalog through the adapter, on the user's grant),
  * `/api/templates/cloud/creator` (it asks the site for the creator key's
  * approval to publish, spending the key), and `/api/templates/cloud/author`
  * and `/api/templates/cloud/key` (their GET creates the creator identity on
- * first view).
+ * first view). `/api/providers` still answers a refused request; it only
+ * skips its one outside effect, restarting an idle Codex adapter for a
+ * launcher installed since it started; `/api/pieces/[pieceId]` likewise answers
+ * and skips re-making the open piece's evicted proxies; and
+ * `/api/templates/cloud/publish-requests/[id]/media/[name]` likewise answers
+ * (always a 404 for anything but the request's own two files) and skips only
+ * its one outside effect, the `publish_request_media_not_found` warn line
+ * (W1b diagnostic, for the studio's own page — not another site's guesses).
  *
  * Like browserOnlyRefusal, NOT authentication: a local process sends no
  * Sec-Fetch headers and passes. What it stops is a stranger's web page.

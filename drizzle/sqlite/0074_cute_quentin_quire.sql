@@ -1,0 +1,31 @@
+CREATE TABLE `piece_exports` (
+	`id` text PRIMARY KEY NOT NULL,
+	`piece_id` text NOT NULL,
+	`job_id` text,
+	`name` text NOT NULL,
+	`rel_path` text,
+	`status` text NOT NULL,
+	`error` text,
+	`queued_at` integer NOT NULL,
+	`started_at` integer,
+	`completed_at` integer,
+	`size_bytes` integer,
+	`duration_sec` real,
+	`width` integer,
+	`height` integer,
+	`aspect` text NOT NULL,
+	`container` text NOT NULL,
+	`codec` text NOT NULL,
+	`fps` integer NOT NULL,
+	`quality` text,
+	`graphics_quality` text,
+	`purpose` text,
+	`carries_copyrighted` integer DEFAULT false NOT NULL,
+	`excluded_file_ids` text DEFAULT '[]' NOT NULL,
+	`backend` text,
+	`dropped_overlays` text,
+	`source` text NOT NULL,
+	FOREIGN KEY (`piece_id`) REFERENCES `pieces`(`id`) ON UPDATE no action ON DELETE cascade
+);
+--> statement-breakpoint
+CREATE INDEX `idx_piece_exports_piece_queued` ON `piece_exports` (`piece_id`,`queued_at`);

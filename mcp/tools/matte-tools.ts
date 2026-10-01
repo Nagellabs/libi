@@ -11,6 +11,7 @@ import { CancelledError } from "@/lib/jobs/types";
 import {
   trackingEngineInstalled,
   trackingNotInstalledError,
+  parseTrackingNotInstalled,
 } from "@/lib/tracking/not-installed";
 import { mcpLogger as logger } from "@/lib/logger";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol";
@@ -150,15 +151,10 @@ export async function removeBackground(
     }
     // The runner throws the not-installed contract as stringified JSON —
     // surface it structurally so the agent can run the install plan.
-    const message = err instanceof Error ? err.message : String(err);
-    try {
-      const parsed = JSON.parse(message) as { error?: string; data?: Record<string, unknown> };
-      if (parsed.error === "tracking_engine_not_installed") {
-        return { success: false, error: parsed.error, data: parsed.data ?? {} };
-      }
-    } catch {
-      /* not JSON — fall through */
+    const notInstalled = parseTrackingNotInstalled(err);
+    if (notInstalled) {
+      return { success: false, error: notInstalled.error, data: notInstalled.data };
     }
-    return { success: false, error: message };
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

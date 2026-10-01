@@ -6,9 +6,12 @@ import type { AudioClip } from "@/lib/engine/types";
 import { Waveform } from "./waveform";
 import { useAudioClipPosition } from "@/hooks/preview/use-audio-clip-position";
 import { dragToTiming, type ClipTiming } from "@/lib/preview/audio-clip-drag";
+import { CopyrightBadge } from "./copyright-badge";
 
 interface DetachedAudioTrackProps {
   clip: AudioClip | undefined;
+  /** The clip's file is copyrighted (©). */
+  copyrighted?: boolean;
   /** The source video overlay this track was detached from (Re-attach target +
    *  "detached audio of video — X" label). */
   ownerOverlayId: string;
@@ -61,6 +64,7 @@ const DRAG_THRESHOLD_PX = 3;
  */
 export function DetachedAudioTrack({
   clip,
+  copyrighted,
   ownerOverlayId,
   height,
   fps,
@@ -229,6 +233,7 @@ export function DetachedAudioTrack({
         >
           {enabled ? <Volume2 className="size-3" /> : <VolumeX className="size-3" />}
         </button>
+        {copyrighted && <CopyrightBadge />}
         <span className="relative z-10 truncate">{label}</span>
         <button
           type="button"

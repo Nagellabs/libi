@@ -13,6 +13,10 @@
 #   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
+#   -CliScript  optional, Windows npm installs: the JS file the agent's `.cmd`
+#             shim runs. libi passes it with the node the shim would use as
+#             `cli`, so the agent runs without cmd.exe, whose Ctrl+C would stop
+#             at "Terminate batch job (Y/N)?". Without it, `cli` runs as is.
 #   entry     the name the provider's MCP server has in the agent's config
 #   scope     Claude Code only: the settings scope the entry is in
 #             (user, local or project)
@@ -36,7 +40,7 @@
 # The entry's name goes after `--`, so a name that starts with `-` is never
 # read as an option.
 
-param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)
+param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut, [string]$CliScript)
 
 # Provider details. A libi test keeps this table the same as libi's provider
 # catalog (lib/providers/catalog.ts).
@@ -54,9 +58,13 @@ switch -CaseSensitive ($Agent) {
   default  { [Console]::Error.WriteLine("remove-provider.ps1: unknown agent '$Agent'"); exit 2 }
 }
 if (-not $Cli -or -not $Entry -or ($Agent -ceq 'claude' -and -not $Scope)) {
-  [Console]::Error.WriteLine('usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut]')
+  [Console]::Error.WriteLine('usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut] [-CliScript <script>]')
   exit 2
 }
+
+# The agent's command: `cli`, or node running the agent's own script (-CliScript).
+$cliPre = @()
+if ($CliScript) { $cliPre = @($CliScript) }
 if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {
   [Console]::Error.WriteLine("remove-provider.ps1: unknown scope '$Scope' (user, local or project)")
   exit 2
@@ -68,7 +76,7 @@ if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {
 if ($auth -ceq 'oauth' -and -not $NoSignOut) {
   Write-Host "Signing out of $name first, so the sign-in isn't left stored."
   $logoutArgs = @('mcp', 'logout', '--', $Entry)
-  & $Cli @logoutArgs
+  & $Cli @cliPre @logoutArgs
   if (-not $?) { Write-Host "Couldn't sign out of $name; removing it anyway." }
 }
 
@@ -78,7 +86,7 @@ if ($auth -ceq 'oauth' -and -not $NoSignOut) {
 #    (its CLI is gone) never sets it, so that remove would exit with the
 #    sign-out's code instead of 1.
 $global:LASTEXITCODE = 0
-& $Cli @removeArgs
+& $Cli @cliPre @removeArgs
 if (-not $?) {
   if ($LASTEXITCODE) { exit $LASTEXITCODE }
   exit 1

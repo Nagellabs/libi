@@ -4,7 +4,7 @@
 // (the `template_example` job) in the background, once the template exists —
 // and never waits on it, nor fails because of it.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
+import { createTestDb, resetTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { cleanupTempDir, createTempStorageDir } from "@/__tests__/helpers/test-storage";
 import { LocalFileStorage } from "@/lib/storage/local";
 import { seedTemplateFixturePiece } from "@/__tests__/helpers/template-fixture-piece";
@@ -34,7 +34,7 @@ vi.mock("@/lib/templates/cloud/client", () => ({ fetchIndex: vi.fn(async () => (
 import { mcpLogger } from "@/lib/logger";
 import { notify } from "@/mcp/notify";
 import { createTemplateFromPiece } from "@/mcp/tools/template-tools";
-import { getTemplate } from "@/lib/templates/store";
+import { getTemplate, getTemplateSummary } from "@/lib/templates/store";
 
 let pieceId = "";
 beforeEach(async () => {
@@ -91,5 +91,30 @@ describe("create_template_from_piece — the example render", () => {
     enqueueJobOnServer.mockImplementation(() => new Promise(() => {}));
     const r = await create();
     expect(r.success).toBe(true);
+  });
+});
+
+// TPL-3: an empty source piece (no overlays, no audio) has nothing the export
+// renderer can read (lib/export/classifier.ts's "nothing to export"), so
+// starting `template_example` for it would only fail the job and log an
+// error-level `jobs.run.failed` for an expected, unremarkable case.
+describe("create_template_from_piece — an empty source piece", () => {
+  it("starts NO template_example job, and the summary says the piece is empty", async () => {
+    const emptyPieceId = seedPiece(testDb as never, { id: "tpl-empty" });
+    const r = await createTemplateFromPiece({ pieceId: emptyPieceId, name: "Blank card", description: "Nothing captured" });
+    expect(r.success).toBe(true);
+    expect(enqueueJobOnServer).not.toHaveBeenCalled();
+    expect(notify.refreshQuery).not.toHaveBeenCalled();
+    const templateId = (r.data as { templateId: string }).templateId;
+    expect(await getTemplateSummary(templateId)).toMatchObject({ sourceEmpty: true, canRenderExample: true, hasExample: false });
+  });
+
+  it("a non-empty piece still starts one", async () => {
+    enqueueJobOnServer.mockResolvedValue({ status: "new", jobId: "j", clientKey: "k" });
+    const r = await create();
+    expect(r.success).toBe(true);
+    expect(enqueueJobOnServer).toHaveBeenCalledTimes(1);
+    const templateId = (r.data as { templateId: string }).templateId;
+    expect(await getTemplateSummary(templateId)).toMatchObject({ sourceEmpty: false });
   });
 });

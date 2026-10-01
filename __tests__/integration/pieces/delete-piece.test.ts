@@ -4,13 +4,14 @@ import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTestDb, resetTestDb, seedPiece } from "../../helpers/test-db";
 import { getDb } from "@/lib/db/client";
-import { pieces } from "@/lib/db/schema/sqlite";
+import { files, pieces } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
 import { deletePieceCompletely } from "@/lib/pieces/delete-piece";
 import { getRenderDiagnostics, setRenderDiagnostics } from "@/lib/render/render-diagnostics-store";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { createTemplate, getTemplateSummary } from "@/lib/templates/store";
 import { makeScaffold } from "@/__tests__/helpers/templates";
+import { listEvictedProxies, recordEvictedProxy } from "@/lib/proxy/evicted";
 
 describe("deletePieceCompletely", () => {
   beforeEach(() => createTestDb());
@@ -32,6 +33,30 @@ describe("deletePieceCompletely", () => {
 
   it("returns false for a missing piece", async () => {
     expect(await deletePieceCompletely("nope")).toBe(false);
+  });
+
+  // FINAL m-B3: eviction records were only pruned lazily, by the next LRU pass.
+  it("deleting a piece forgets its files' eviction records", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-delete-piece-"));
+    process.env.LIBI_HOME = home;
+    try {
+      const db = getDb();
+      seedPiece(db as never, { id: "p1" });
+      seedPiece(db as never, { id: "p2" });
+      const video = (id: string, pieceId: string) => ({
+        id, pieceId, filename: `${id}.mp4`, name: id, description: "", type: "video" as const,
+        storagePath: `${pieceId}/${id}.mp4`, contentType: "video/mp4", size: 4,
+      });
+      db.insert(files).values([video("f1", "p1"), video("f2", "p1"), video("other", "p2")]).run();
+      recordEvictedProxy("f1", 10);
+      recordEvictedProxy("f2", 20);
+      recordEvictedProxy("other", 30);
+      await deletePieceCompletely("p1");
+      expect(Object.keys(listEvictedProxies())).toEqual(["other"]);
+    } finally {
+      delete process.env.LIBI_HOME;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 
   // D2–D4 review M3: a template's card offers "Render preview" only while its

@@ -22,7 +22,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { getCurrentPort } from "@/lib/libi-home";
 import { PRODUCTION_SITE_URL } from "@/lib/site-url";
 import { catalogHost } from "@/lib/templates/cloud/catalog-origin";
-import { activeCatalogSource } from "@/lib/templates/cloud/catalog-setting";
+import { activeCatalogSource, reachableCatalogSources } from "@/lib/templates/cloud/catalog-setting";
 import { TEST_MODE_SOURCE, catalogBucketBase } from "@/lib/templates/cloud/constants";
 
 export { TEST_MODE_SOURCE };
@@ -52,6 +52,25 @@ export function withCatalogSource<T>(source: string, fn: () => T): T {
  */
 export function catalogSource(): string {
   return scope.getStore() ?? activeCatalogSource();
+}
+
+/**
+ * The catalog a job QUEUED on `queued` runs on — the one it was queued on, not
+ * whatever the user switched to before it started (review M2): an install
+ * queued on Development and started after a switch to Production would ask
+ * Production for Development's id. `queued` is honoured only while this build
+ * can still reach it (`reachableCatalogSources()`: a packaged build, its own
+ * site only), so a job param can never steer libi at another address; a
+ * catalog it can no longer reach (the development address was replaced) is a
+ * refusal in libi's words. Undefined — a job queued before the catalog was a
+ * param — is the catalog this process reads, as before.
+ */
+export function catalogForQueuedJob(queued: string | undefined): { ok: true; source: string } | { ok: false; error: string } {
+  if (queued === undefined) return { ok: true, source: scope.getStore() ?? activeCatalogSource({ fresh: true }) };
+  // Fresh, not the ≤ 1 s memo: this decides where the job acts (review m2).
+  const active = activeCatalogSource({ fresh: true });
+  if (queued === active || reachableCatalogSources({ fresh: true }).includes(queued)) return { ok: true, source: queued };
+  return { ok: false, error: `The templates catalog changed since this was queued (was ${catalogHost(queued)}, now ${catalogHost(active)}). Ask again.` };
 }
 
 /** The catalog API base of `source` (test mode: the studio's fixture routes). Throws in test mode when the studio port is unreadable. */

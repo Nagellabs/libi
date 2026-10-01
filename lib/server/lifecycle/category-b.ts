@@ -13,6 +13,7 @@
 
 import { migrateDatabase as migrateDatabaseImpl } from "@/lib/db/client";
 import { recoverOrphanedJobs as recoverOrphanedJobsImpl } from "@/lib/jobs/scheduler";
+import { recoverOrphanedExports } from "@/lib/exports/store";
 import {
   ensureLibiDirs,
   getLibiAgentDir,
@@ -36,6 +37,7 @@ import { DependencyManager } from "@/mcp/registry/dependency-manager";
 import { invalidateMcpConfig } from "@/lib/mcp-config";
 import { pickDriver } from "@/lib/export/drivers";
 import { lifecycleEvents } from "./events";
+import { registerQuitShutdown, shellOwnsQuitSignals } from "./quit";
 import { startMcpHttpChild, type McpHttpChildHandle } from "./mcp-http-child";
 import { getMcpHttpChild as getMcpHttp, setMcpHttpChild as setMcpHttp } from "./mcp-http-handle";
 import { serverLogger } from "@/lib/logger";
@@ -64,7 +66,8 @@ export class BootPhaseError extends Error {
   }
 }
 
-let shuttingDown = false;
+/** The one shutdown run, shared by every signal and by a desktop quit (see `runShutdown`). */
+let shutdownRun: Promise<void> | null = null;
 
 /**
  * The aggregator's supervisor handle, for status and restart surfaces. The
@@ -138,55 +141,74 @@ export function writePortFileAndInstallSignals(): void {
       try { void c.stop(); } catch { /* ignore */ }
     }
   };
-  const cleanupSignal = async () => {
+  // The one orderly shutdown, shared by a signal (below) and, in the desktop
+  // app, Electron's quit (`shutdownForQuit`, lib/server/lifecycle/quit.ts).
+  // It never exits: the signal path exits after it, Electron after its quit.
+  const runShutdown = (trigger: string): Promise<void> => {
     // Retire every agent process before anything else runs, so their SIGINT/
     // SIGTERM exits are recognized as part of our own shutdown and never
     // reported as crashes in an open chat. This has to be the very first
     // statement, synchronous and unconditional, so it lands before the
-    // `shuttingDown` check and before any `await` below. If it threw, a bare
-    // call here would reject this async handler before `shuttingDown` is set
-    // and before `process.exit` runs, leaving Ctrl-C disarmed — so a throw is
-    // swallowed and the shutdown below still proceeds unconditionally.
+    // `shutdownRun` check and before any `await`. If it threw, a bare call
+    // here would stop the shutdown before it began, leaving Ctrl-C disarmed —
+    // so a throw is swallowed and the shutdown below still proceeds.
     try {
       getProcessManager().retireAllForExit();
     } catch {
-      // Swallow: the exit below must still run no matter what happened here.
+      // Swallow: the shutdown (and a signal's exit) must still run.
     }
     // The same stop routinely arrives more than once: a signal sent to a whole
     // process group also reaches this process through bin/libi.js passing it
-    // on, and `next dev` relays what it gets to its server. Every repeat must
-    // land here and change nothing.
-    if (shuttingDown) return;
-    shuttingDown = true;
-    // Two independent shutdowns: `pickDriver().shutdown()` closes the EXPORT
-    // driver (Chromium), and `mcpHttp.stop()` stops the aggregator child
-    // (which removes `mcp-port` itself — it has to happen before the port
-    // files go, or a child left running keeps its port bound past our exit).
-    // Neither may make Ctrl-C stop working, so they run CONCURRENTLY inside
-    // ONE deadline: in series a wedged browser spent the whole driver timeout
-    // and only THEN started the aggregator's 2s SIGTERM grace.
-    try {
-      await Promise.race([
-        Promise.all([
-          Promise.resolve()
-            .then(() => pickDriver().shutdown())
-            .catch((err: unknown) => serverLogger.warn({ err }, "driver shutdown failed during exit")),
-          Promise.resolve()
-            .then(() => getMcpHttp()?.stop())
-            .catch((err: unknown) =>
-              serverLogger.warn(
-                { tag: "mcp-http", op: "stop_failed", err },
-                "aggregator shutdown failed during exit",
+    // on, `next dev` relays what it gets to its server, and a quit can follow
+    // a signal. Every repeat lands here and gets the SAME run.
+    if (shutdownRun) return shutdownRun;
+    const started = Date.now();
+    serverLogger.info({ tag: "lifecycle", op: "shutdown_start", trigger }, `shutting down (${trigger})`);
+    shutdownRun = (async () => {
+      // Two independent shutdowns: `pickDriver().shutdown()` closes the EXPORT
+      // driver (Chromium), and `mcpHttp.stop()` stops the aggregator child
+      // (which removes `mcp-port` itself — it has to happen before the port
+      // files go, or a child left running keeps its port bound past our exit).
+      // Neither may make Ctrl-C stop working, so they run CONCURRENTLY inside
+      // ONE deadline: in series a wedged browser spent the whole driver timeout
+      // and only THEN started the aggregator's 2s SIGTERM grace.
+      try {
+        await Promise.race([
+          Promise.all([
+            Promise.resolve()
+              .then(() => pickDriver().shutdown())
+              .catch((err: unknown) => serverLogger.warn({ err }, "driver shutdown failed during exit")),
+            Promise.resolve()
+              .then(() => getMcpHttp()?.stop())
+              .catch((err: unknown) =>
+                serverLogger.warn(
+                  { tag: "mcp-http", op: "stop_failed", err },
+                  "aggregator shutdown failed during exit",
+                ),
               ),
-            ),
-        ]),
-        new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRIVER_TIMEOUT_MS).unref()),
-      ]);
-    } catch (err) {
-      serverLogger.warn({ err }, "shutdown failed during exit");
-    }
-    setMcpHttp(null);
-    cleanupPortFile();
+          ]),
+          new Promise((resolve) => setTimeout(resolve, SHUTDOWN_DRIVER_TIMEOUT_MS).unref()),
+        ]);
+      } catch (err) {
+        serverLogger.warn({ err }, "shutdown failed during exit");
+      }
+      setMcpHttp(null);
+      cleanupPortFile();
+      serverLogger.info(
+        { tag: "lifecycle", op: "shutdown_done", trigger, durationMs: Date.now() - started },
+        `shutdown done in ${Date.now() - started}ms`,
+      );
+    })();
+    return shutdownRun;
+  };
+  registerQuitShutdown(runShutdown);
+  let signalExitPending = false;
+  const cleanupSignal = async (signal?: NodeJS.Signals) => {
+    const run = runShutdown(typeof signal === "string" ? `signal:${signal}` : "signal");
+    // One signal handler exits; the repeats only retire (inside runShutdown).
+    if (signalExitPending) return;
+    signalExitPending = true;
+    await run;
     // Registering a signal handler REPLACES Node's default disposition, which
     // is to terminate. Without this explicit exit the process SURVIVES its own
     // shutdown, in the worst possible state: the port file is gone but the
@@ -220,7 +242,9 @@ export function writePortFileAndInstallSignals(): void {
  * by those ~5 s. That is why the MCP endpoint takes the default and ends at
  * once, and why its supervisor reads that exit as a closed console, not a crash.
  *
- * Not inside Electron's main process, where the packaged app runs this server.
+ * SIGHUP is never ours inside Electron's main process, where the packaged app
+ * runs this server — and SIGTERM/SIGINT are not either once the shell has
+ * claimed them (`claimQuitSignals`, EL-2); only an older shell leaves them here.
  * Electron quits the app on SIGHUP by itself (`before-quit`, `will-quit`,
  * Chromium's own teardown, then this module's `exit` cleanup), and a Node
  * listener added after `ready`, which is when this runs there, replaces that
@@ -229,8 +253,13 @@ export function writePortFileAndInstallSignals(): void {
  */
 export function shutdownSignals(
   versions: NodeJS.ProcessVersions = process.versions,
+  shellOwnsQuit: boolean = shellOwnsQuitSignals(),
 ): NodeJS.Signals[] {
-  return versions.electron ? ["SIGTERM", "SIGINT"] : ["SIGTERM", "SIGINT", "SIGHUP"];
+  if (!versions.electron) return ["SIGTERM", "SIGINT", "SIGHUP"];
+  // EL-2: a shell that claimed the quit signals (`claimQuitSignals`) runs this
+  // shutdown from `before-quit`, so SIGTERM and SIGINT are left to Electron
+  // too. A shell that predates the hook never claims and keeps these two.
+  return shellOwnsQuit ? [] : ["SIGTERM", "SIGINT"];
 }
 
 /**
@@ -288,7 +317,12 @@ export const defaultCategoryBDeps: CategoryBDeps = {
   // can enqueue a job before Next starts serving requests, which is strictly
   // after this boot step runs, so a cutoff that lands slightly late still
   // precedes every enqueue this process makes.
-  recoverOrphanedJobs: () => recoverOrphanedJobsImpl(Date.now() - process.uptime() * 1000),
+  recoverOrphanedJobs: async () => {
+    const startedAt = Date.now() - process.uptime() * 1000;
+    await recoverOrphanedJobsImpl(startedAt);
+    // An export record shadows its job: the boot that strands one strands both.
+    await recoverOrphanedExports(startedAt);
+  },
   writePortFile: writePortFileAndInstallSignals,
   startMcpHttp: async () => {
     const handle = await startMcpHttpChild({
@@ -528,6 +562,32 @@ export async function runCategoryB(
 
   void (async () => {
     try {
+      // First: transcripts made before extractAudio padded an audio lead
+      // (review round 4, M-f), and every audio.wav extracted before it. It
+      // waits on no job, so a transcription started in this window can't
+      // reuse a pre-fix audio.wav while a sweep below waits on regenerations
+      // (review round 5, M1).
+      const { sweepRetimeAudioLeadTranscripts } = await import("@/lib/analysis/retime-audio-lead");
+      await sweepRetimeAudioLeadTranscripts();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "analysis", op: "transcript_retime_phase_failed", err },
+        "transcript re-timing sweep threw; a transcript of a file whose audio starts late may stay early",
+      );
+    }
+    try {
+      // Proxies and analysis folders a file moved to another scope left behind
+      // (assign_file before lib/files/move-derived.ts): a "ready" proxy the
+      // route can't find played nothing in the asset view.
+      const { sweepMisplacedFileArtifacts } = await import("@/lib/proxy/repair-misplaced");
+      sweepMisplacedFileArtifacts();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "repair_misplaced_phase_failed", err },
+        "misplaced proxy/analysis repair threw; a file moved between scopes may keep a proxy the preview can't load",
+      );
+    }
+    try {
       const { sweepBackfillHasAlpha } = await import("@/lib/proxy/backfill-alpha");
       await sweepBackfillHasAlpha();
     } catch (err) {
@@ -537,7 +597,19 @@ export async function runCategoryB(
       );
     }
     try {
-      // First: proxies a quit left at `generating` (review round 4, M-b). The
+      // Proxies 0.1.16's LRU evicted without a record: recorded once, so the
+      // piece's next open re-makes them (review n2). After the alpha backfill,
+      // whose has_alpha it reads.
+      const { sweepBackfillEvictedProxies } = await import("@/lib/proxy/backfill-evicted");
+      await sweepBackfillEvictedProxies();
+    } catch (err) {
+      serverLogger.warn(
+        { tag: "proxy", op: "evicted_backfill_phase_failed", err },
+        "eviction-record backfill threw; a proxy evicted before this version may stay pending",
+      );
+    }
+    try {
+      // Proxies a quit left at `generating` (review round 4, M-b). The
       // sweeps below then share, never repeat, those regenerations.
       const { sweepStaleGeneratingProxies } = await import("@/lib/proxy/regen-once");
       await sweepStaleGeneratingProxies();
@@ -563,16 +635,6 @@ export async function runCategoryB(
       serverLogger.warn(
         { tag: "proxy", op: "sweep_regen_mkv_streams_phase_failed", err },
         "MKV stream-choice proxy regen sweep threw; some MKV proxies may carry a track the preview no longer plays",
-      );
-    }
-    try {
-      // Transcripts made before extractAudio padded an audio lead (review round 4, M-f).
-      const { sweepRetimeAudioLeadTranscripts } = await import("@/lib/analysis/retime-audio-lead");
-      await sweepRetimeAudioLeadTranscripts();
-    } catch (err) {
-      serverLogger.warn(
-        { tag: "analysis", op: "transcript_retime_phase_failed", err },
-        "transcript re-timing sweep threw; a transcript of a file whose audio starts late may stay early",
       );
     }
     try {

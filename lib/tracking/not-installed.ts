@@ -32,3 +32,32 @@ export function trackingNotInstalledError(): TrackingNotInstalled {
     },
   };
 }
+
+/** A job runner (e.g. `lib/jobs/runners/tracking.ts`, `matte-gen.ts`) throws
+ *  the not-installed contract as `JSON.stringify(trackingNotInstalledError())`
+ *  wrapped in an Error — that's the only way to cross the MCP-child /
+ *  Next-server job boundary (`runJobViaServer`) with structure intact. Every
+ *  generic MCP tool catch should run its caught error through this parser
+ *  before falling back to `err.message`, so the agent gets the structured
+ *  `tracking_engine_not_installed` contract instead of that JSON as a string. */
+export function parseTrackingNotInstalled(err: unknown): TrackingNotInstalled | null {
+  if (!(err instanceof Error)) return null;
+  const message = err.message.trimStart();
+  if (!message.startsWith("{")) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message);
+  } catch {
+    return null;
+  }
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    (parsed as { error?: unknown }).error === "tracking_engine_not_installed" &&
+    typeof (parsed as { data?: unknown }).data === "object" &&
+    (parsed as { data?: unknown }).data !== null
+  ) {
+    return parsed as TrackingNotInstalled;
+  }
+  return null;
+}

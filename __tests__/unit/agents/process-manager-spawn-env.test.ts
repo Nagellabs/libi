@@ -12,7 +12,19 @@ const spawnMock = vi.fn(() => ({
   kill: vi.fn(),
   pid: 12345,
 }));
-vi.mock("child_process", () => ({ spawn: spawnMock }));
+// `reg query` on Windows (lib/agents/cli/windows-registry-path.ts): per key, the stdout it prints, or "timeout" for
+// what execFile reports when its own bound kills it.
+let regAnswers: Record<string, string | "timeout"> = {};
+const execFileMock = vi.fn((_cmd: string, args: string[], _opts: unknown, cb: (err: Error | null, stdout: string, stderr: string) => void) => {
+  const answer = regAnswers[args[1]];
+  if (answer === undefined || answer === "timeout") {
+    queueMicrotask(() => cb(Object.assign(new Error("Command failed: reg"), { killed: true, signal: "SIGTERM" }), "", ""));
+  } else {
+    queueMicrotask(() => cb(null, answer, ""));
+  }
+});
+vi.mock("child_process", () => ({ spawn: spawnMock, execFile: execFileMock }));
+vi.mock("node:child_process", () => ({ spawn: spawnMock, execFile: execFileMock }));
 
 type Adapter = { installed: boolean; command?: string; args?: string[]; unavailableReason?: unknown } | undefined;
 const ADAPTER: Adapter = { installed: true, command: "/fake/claude-agent-acp", args: ["--mode", "stdio"] };
@@ -199,6 +211,63 @@ describe("AgentProcessManager spawn env", () => {
         fs.rmSync(root, { recursive: true, force: true });
       }
     });
+  });
+});
+
+// Windows has no login shell. A launcher installed after libi booted is on the registry's PATH, which a running process
+// never sees; the agent is spawned with it (PRV-1). The inherited key there is `Path`.
+describe("AgentProcessManager spawn env on Windows: the registry's PATH", () => {
+  const MACHINE = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
+  const USER = "HKCU\\Environment";
+  const reg = (type: string, value: string) => `\r\n${"HKEY"}\\whatever\r\n    Path    ${type}    ${value}\r\n\r\n`;
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  let savedPath: string | undefined;
+
+  beforeEach(async () => {
+    spawnMock.mockClear();
+    execFileMock.mockClear();
+    resolved = USABLE;
+    adapter = ADAPTER;
+    loginDirs = null;
+    regAnswers = {};
+    (await import("@/lib/agents/cli/windows-registry-path")).__clearWindowsRegistryPathMemo();
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    savedPath = process.env.PATH;
+    delete process.env.PATH;
+    process.env.Path = "C:\\Windows\\system32;C:\\Windows";
+    vi.stubEnv("USERPROFILE", "C:\\Users\\me");
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, "platform", platform);
+    delete process.env.Path;
+    if (savedPath !== undefined) process.env.PATH = savedPath;
+    vi.unstubAllEnvs();
+  });
+
+  it("a launcher installed after boot is on the agent's PATH: the registry's folders it lacks follow libi's own, under the one `Path` key", async () => {
+    regAnswers = {
+      [MACHINE]: reg("REG_EXPAND_SZ", "%SystemRoot%\\system32;C:\\Windows"),
+      [USER]: reg("REG_EXPAND_SZ", "%USERPROFILE%\\.local\\bin;"),
+    };
+    vi.stubEnv("SystemRoot", "C:\\Windows");
+    const env = await spawnEnv();
+    expect(env.Path).toBe("C:\\Windows\\system32;C:\\Windows;C:\\Users\\me\\.local\\bin");
+    expect(Object.keys(env).filter((k) => k.toUpperCase() === "PATH")).toEqual(["Path"]);
+    expect(execFileMock.mock.calls.map((c) => c[0])).toEqual(["reg", "reg", "reg", "reg"]);
+    expect(execFileMock.mock.calls.map((c) => c[1])).toEqual([
+      ["query", MACHINE, "/v", "Path"],
+      ["query", USER, "/v", "Path"],
+      ["query", MACHINE],
+      ["query", USER],
+    ]);
+  });
+
+  it("a `reg` that times out leaves the agent today's PATH", async () => {
+    regAnswers = { [MACHINE]: "timeout", [USER]: reg("REG_SZ", "C:\\new\\bin") };
+    const env = await spawnEnv();
+    expect(env.Path).toBe("C:\\Windows\\system32;C:\\Windows");
+    expect(Object.keys(env).filter((k) => k.toUpperCase() === "PATH")).toEqual(["Path"]);
   });
 });
 

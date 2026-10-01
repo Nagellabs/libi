@@ -386,6 +386,19 @@ export const templatePublishRunner: JobRunner<TemplatePublishParams, TemplatePub
   // No `mcpToolId`: no tool call runs this job — the user's confirm does.
   // Pinned to the catalog its request was prepared for (a dev build can switch
   // catalogs in Settings): every call, record and cache note below stays there.
+  //
+  // That pin comes from the REQUEST ROW, not from the active catalog, and it
+  // is safe only because of two things around it: the job is not resumable
+  // (above), and the only thing that starts it — the user's confirm — finds
+  // the request through `getPublishRequest`, which answers only a request of
+  // the ACTIVE catalog. So a non-dev build, whose one catalog is its own site,
+  // never reaches here with a row naming another. `resumable: true` would
+  // break that: a job resumed at boot runs with no confirm in front of it, on
+  // whatever source its row names — a database copied from a dev machine, or
+  // a dev build's since-replaced address — and sends the creator key there.
+  // That is the I1 redirection (docs-local/qa/2026-09-26-dev-catalog-switch-review.md)
+  // reopened. Making it resumable means checking the row's source against
+  // `reachableCatalogSources()` first, as `catalogForQueuedJob` does.
   async run(ctx) {
     return withCatalogSource(publishRequestSource(ctx.params.requestId) ?? catalogSource(), () => runPublish(ctx));
   },
@@ -419,7 +432,9 @@ async function runPublish(ctx: JobContext<TemplatePublishParams>): Promise<Templ
   await ctx.checkpoint({ step: "preflight" });
 
   // --- 2. Identity: the key is made on first publish, with a default nickname (lib/templates/cloud/default-nickname.ts) ---
-  let author = getOrCreateTemplatesAuthor();
+  // The catalog this publish goes to (pinned in `run`): its own nickname slot, never another catalog's (review M4).
+  const source = catalogSource();
+  let author = getOrCreateTemplatesAuthor(source);
   if (!author.nickname && !ctx.params.nickname) throw new Error(NICKNAME_FIRST);
   /**
    * A nickname passed with this publish renames EVERY template this install
@@ -435,7 +450,7 @@ async function runPublish(ctx: JobContext<TemplatePublishParams>): Promise<Templ
     const set = await setNickname(author.key, ctx.params.nickname);
     if (!set.ok) throw new Error(`could not set the nickname: ${set.error}`);
     // A key imported while the site answered must not receive this nickname.
-    if (!setTemplatesAuthorNickname(author.key, set.nickname)) throw new Error(IDENTITY_CHANGED);
+    if (!setTemplatesAuthorNickname(author.key, set.nickname, { source })) throw new Error(IDENTITY_CHANGED);
     author = { ...author, nickname: set.nickname };
     checkCancel(ctx);
   };
@@ -459,12 +474,12 @@ async function runPublish(ctx: JobContext<TemplatePublishParams>): Promise<Templ
     if (nicknameSent || storedNicknameSent) return false;
     storedNicknameSent = true;
     for (let attempt = 0; attempt < 2; attempt++) {
-      const now = getTemplatesAuthor();
+      const now = getTemplatesAuthor(source);
       if (now?.key !== author.key) throw new Error(IDENTITY_CHANGED);
       if (!now.nickname) return false;
       const set = await setNickname(author.key, now.nickname);
       if (!set.ok) throw new Error(`could not set the nickname: ${set.error}`);
-      if (setTemplatesAuthorNickname(author.key, set.nickname, { expectedNickname: now.nickname })) {
+      if (setTemplatesAuthorNickname(author.key, set.nickname, { expectedNickname: now.nickname, source })) {
         author = { ...author, nickname: set.nickname };
         logger.info({ tag: TAG, op: "stored_nickname_sent", templateId, attempt }, "the catalog had no nickname for this key; sent the stored one");
         checkCancel(ctx);

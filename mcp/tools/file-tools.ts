@@ -3,14 +3,19 @@
 import path from "path";
 import * as fs from "fs/promises";
 import { probeMedia } from "@/lib/ffmpeg/probe";
-import { audioProxyReason } from "@/lib/ffmpeg/audio-preview";
+import { audioProxyVerdict, mayNeedAudioPreviewProxy } from "@/lib/ffmpeg/audio-preview";
 import { alphaRecoverableInPreview } from "@/lib/ffmpeg/alpha";
 import { getStorage } from "@/lib/storage";
+import { moveDerivedArtifacts } from "@/lib/files/move-derived";
 import { getDb } from "@/lib/db/client";
 import { files, pieces } from "@/lib/db/schema";
 import { enqueueJobOnServer, logProxyGenEnqueueFailure } from "@/mcp/jobs-client";
 import { eq, isNull, desc } from "drizzle-orm";
 import { navigationEmitter } from "@/lib/navigation-events";
+import { parseAudioRights, serializeAudioRights, type AudioRights } from "@/lib/audio-rights/types";
+import { parseAiGenerationMeta } from "@/lib/ai-generation/types";
+import { fileCarriesAudio } from "@/lib/audio-rights/read";
+import { generatedStamp, uploadedStamp } from "@/lib/audio-rights/stamp";
 import type { ToolContext, ToolResult } from "./types";
 import type { ListFilesParams, DuplicateFileParams, UploadFileParams, SaveAssetParams } from "./schemas";
 import type { FileRecord } from "@/lib/db/schema/types";
@@ -197,6 +202,11 @@ export async function duplicateFile(params: DuplicateFileParams): Promise<ToolRe
     mediaHeight: source.mediaHeight ?? undefined,
     hasAudio: source.hasAudio ?? undefined,
     hasAlpha: source.hasAlpha ?? undefined,
+    // A copy is the same media: same rights, same provenance. An unstamped
+    // source stays unstamped and reads the same through the copied
+    // aiGeneration/description (generated, a legacy download, or owned).
+    aiGeneration: parseAiGenerationMeta(source.aiGeneration),
+    audioRights: parseAudioRights(source.audioRights),
   });
 
   return {
@@ -329,6 +339,12 @@ export interface StoreFileParams {
    *  masquerades as fal-ai. Surfaced in the Asset Preview Panel's "Generation"
    *  tab. See lib/ai-generation/types.ts. */
   aiGeneration?: import("@/lib/ai-generation/types").AiGenerationMeta | null;
+  /** Audio rights stamp (spec §4.2). Written only when the stored file carries
+   *  audio. Omitted: a file with `aiGeneration` is stamped `generated`; any
+   *  other file stays NULL, which `effectiveRights` reads by provenance (a
+   *  `Downloaded from` breadcrumb → copyrighted, else owned). Upload paths
+   *  pass `uploadedStamp()` explicitly. */
+  audioRights?: AudioRights | null;
   /** Place the new file inside this asset folder. Must match the file's scope
    *  (piece file → that piece's folder; global file → a global folder). */
   folderId?: string | null;
@@ -460,6 +476,14 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
   const { serializeAiGenerationMeta } = await import("@/lib/ai-generation/types");
   const aiGenerationRaw = serializeAiGenerationMeta(params.aiGeneration);
 
+  // Rights are written only for audio-bearing files (spec §4.2): an explicit
+  // caller stamp wins, a generation-tool file with audio is `generated`, and
+  // anything else stays NULL — read by provenance (`effectiveRights`).
+  const carriesAudio = fileCarriesAudio({ type: category, hasAudio: resolvedHasAudio ?? false, audioRights: null });
+  const audioRightsRaw = carriesAudio
+    ? serializeAudioRights(params.audioRights ?? (params.aiGeneration ? generatedStamp(params.aiGeneration.prompt) : null))
+    : null;
+
   const [record] = await db
     .insert(files)
     .values({
@@ -477,6 +501,7 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
       hasAudio: resolvedHasAudio ?? false,
       hasAlpha: resolvedHasAlpha ?? false,
       aiGeneration: aiGenerationRaw,
+      audioRights: audioRightsRaw,
     })
     .returning();
 
@@ -516,14 +541,16 @@ export async function storeFile(params: StoreFileParams): Promise<FileRecord> {
   }
 
   // An audio file the preview can't play itself (a chained Ogg, FLAC in Ogg,
-  // a codec WebCodecs doesn't decode) gets an AAC proxy, which the preview's
-  // audio engine plays instead (lib/ffmpeg/audio-preview.ts, review round 4).
-  // (An MP3, AAC or FLAC file holds only its own codec, which the preview
-  // plays: no probe for those.)
-  if (record.type === "audio" && !params.skipProxyGeneration && !/\.(mp3|aac|flac)$/i.test(sanitizedFilename)) {
+  // a codec WebCodecs doesn't decode, HE-AAC on a mono core) gets an AAC
+  // proxy, which the preview's audio engine plays instead
+  // (lib/ffmpeg/audio-preview.ts, review round 4). (An MP3 or FLAC file holds
+  // only its own codec, which the preview plays: no probe for those.)
+  if (record.type === "audio" && !params.skipProxyGeneration && mayNeedAudioPreviewProxy(sanitizedFilename)) {
     const localPath = storage.localPath(pieceId, sanitizedFilename);
-    const reason = await audioProxyReason(localPath, probedMedia ?? (await probeMedia(localPath)));
-    if (reason) {
+    // An undecided check (a probe that timed out) still makes the proxy: a
+    // spare one costs a transcode, a missing one is a silent preview (review I2).
+    const verdict = await audioProxyVerdict(localPath, probedMedia ?? (await probeMedia(localPath)));
+    if (verdict.reason || verdict.unknown) {
       void enqueueJobOnServer(
         "proxy_gen",
         { fileId: record.id },
@@ -624,6 +651,11 @@ export async function assignFile(params: AssignFileParams): Promise<ToolResult> 
     await storage.read(currentPieceId, file.filename),
   );
 
+  // The proxy, filmstrip and analysis folder live in the scope folder too, and
+  // every reader finds them through the row's pieceId: they move with the
+  // bytes or are dropped, never left behind under a row that says "ready".
+  const derived = moveDerivedArtifacts(file, targetPieceId, targetFilename);
+
   // Update DB record: new piece, new filename, new storage path. Asset
   // folders are scope-specific, so the old folder belongs to the old scope —
   // clear folderId so the file lands at the destination scope's root. The
@@ -631,7 +663,7 @@ export async function assignFile(params: AssignFileParams): Promise<ToolResult> 
   // the name that was never actually written is the same data-loss bug in a
   // different place.
   db.update(files)
-    .set({ pieceId: targetPieceId, filename: targetFilename, storagePath: newStoragePath, folderId: null })
+    .set({ pieceId: targetPieceId, filename: targetFilename, storagePath: newStoragePath, folderId: null, ...derived })
     .where(eq(files.id, fileId))
     .run();
 
@@ -694,6 +726,11 @@ export async function uploadFile(
     hasAudio: media.hasAudio,
     hasAlpha: media.hasAlpha,
     aiGeneration,
+    // A file from the user's disk is theirs (owner decision 2026-09-28); one
+    // that carries `aiGeneration` is left to storeFile, which stamps it
+    // generated. An agent that uploads a file it fetched from the web itself
+    // stamps it copyrighted (`libi.set_audio_rights`, social-music skill §1).
+    audioRights: aiGeneration ? undefined : uploadedStamp(),
     folderId,
   });
 

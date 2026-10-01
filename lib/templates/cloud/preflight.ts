@@ -410,6 +410,12 @@ export function preflightPublish(input: PreflightInput): PreflightResult {
     for (const overlay of scaffold.overlays) {
       if (overlay.codeFile !== undefined) declared.add(overlay.codeFile);
     }
+    // A music link carries no bytes; its source link is fetched on the
+    // applying user's yes, so it is held to the same rules as a hosted asset.
+    for (const m of scaffold.musicLinks ?? []) {
+      const problem = m.sourceUrl === undefined ? null : hostedUrlProblem(m.sourceUrl);
+      if (problem) fail(`music "${m.ref}" source link ${problem}.`);
+    }
   }
 
   // --- files ---

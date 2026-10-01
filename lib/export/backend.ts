@@ -19,6 +19,12 @@ export interface ExportContext {
    *  don't use this field. Compiled draw functions can't cross JSON boundaries,
    *  so the payload carries raw scene data + files instead of a hydrated Composition. */
   payload?: RenderPayload;
+  /** The scheduler admitted this export as software (every hardware session was taken): encode with libx264. */
+  forceSoftwareEncoder?: boolean;
+  /** Server backends: false once `outputPath` no longer names the file this run created
+   *  (the export was cancelled or deleted and another one took the name). A failed run
+   *  removes its partial output only while this is true or absent. */
+  ownsOutput?: () => boolean;
 }
 
 export interface ExportBackend {

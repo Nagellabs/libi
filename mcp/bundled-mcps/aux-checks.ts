@@ -6,6 +6,7 @@ import { isWindows } from "@/lib/platform";
 import {
   checkYtDlpLauncher,
   VIDEO_DOWNLOAD_UI_PATH,
+  YT_DLP_VERSION_TIMEOUT_MS,
   type YtDlpLauncherHealth,
 } from "@/lib/video-download/launcher";
 
@@ -84,10 +85,12 @@ function launcherProblem(health: Extract<YtDlpLauncherHealth, { ok: false }>): s
  * cannot run it without a shell, so it always said "not found on PATH". When
  * the launcher is healthy the entry point itself (a script with a shebang, or
  * the `.exe` trampoline on Windows — both run without a shell) answers
- * `--version`, bounded like `checkBinary`.
+ * `--version`, bounded at YT_DLP_VERSION_TIMEOUT_MS (10 s: a cold Windows first
+ * run can take several seconds on a healthy install).
  */
 export async function checkYtDlp(
   check: () => YtDlpLauncherHealth = checkYtDlpLauncher,
+  timeoutMs: number = YT_DLP_VERSION_TIMEOUT_MS,
 ): Promise<AuxResult> {
   const name = "yt-dlp";
   const health = check();
@@ -95,7 +98,7 @@ export async function checkYtDlp(
   const start = Date.now();
   try {
     const { stdout } = await execFileAsync(health.target, ["--version"], {
-      timeout: 3000,
+      timeout: timeoutMs,
       windowsHide: true,
     });
     const version = String(stdout).split("\n")[0].trim() || "ran ok";
@@ -107,7 +110,7 @@ export async function checkYtDlp(
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { signal?: string; killed?: boolean };
     if (e.signal === "SIGTERM" || e.killed) {
-      return { name, ok: false, detail: `${health.target} timed out after 3s — startup too slow` };
+      return { name, ok: false, detail: `${health.target} timed out after ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`} — startup too slow` };
     }
     return { name, ok: false, detail: `${health.target} failed to run: ${e.message}` };
   }

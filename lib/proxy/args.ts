@@ -32,6 +32,28 @@ export function proxyStreamsFor(probed: {
   };
 }
 
+/** A video proxy's audio bitrate, kbit/s: its `-b:a`. */
+export const PROXY_AUDIO_KBPS = 128;
+
+/**
+ * What a video proxy's VIDEO stream is estimated to take, kbit/s. The encoder
+ * has no target bitrate (CRF 23, preset ultrafast, ≤ 1080p, below), so this is
+ * a deliberately generous estimate: a busy synthetic 4K source (`testsrc2`)
+ * downscaled with exactly these args measured ~12.5 Mbit/s (2026-09-27), and
+ * ordinary camera or screen footage comes in lower. Used only where a proxy's
+ * size must be guessed without the proxy (`estimateProxyBytes`).
+ */
+export const PROXY_VIDEO_KBPS_ESTIMATE = 16_000;
+
+/**
+ * The estimated size of a video proxy of a `durationSec`-long source: the
+ * duration × the proxy's estimated video bitrate plus its audio bitrate.
+ * Callers cap it at the original's size (a proxy is not meant to outgrow it).
+ */
+export function estimateProxyBytes(durationSec: number): number {
+  return Math.ceil((durationSec * (PROXY_VIDEO_KBPS_ESTIMATE + PROXY_AUDIO_KBPS) * 1000) / 8);
+}
+
 /**
  * Build the ffmpeg args for generating a scrub-friendly preview proxy.
  *
@@ -90,7 +112,7 @@ export function buildProxyArgs(
     "-sc_threshold", "0",
     "-pix_fmt", "yuv420p",
     "-c:a", "aac",
-    "-b:a", "128k",
+    "-b:a", `${PROXY_AUDIO_KBPS}k`,
     "-movflags", "+faststart",
     outputPath,
   ];

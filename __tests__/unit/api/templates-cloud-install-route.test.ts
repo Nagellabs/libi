@@ -28,14 +28,15 @@ describe("POST /api/templates/cloud/install", () => {
     const ok = await post(JSON.stringify({ cloudId: ID }));
     expect(ok.status).toBe(200);
     expect(await ok.json()).toEqual({ ok: true, ...installed });
-    expect(jobManager.enqueue).toHaveBeenCalledWith("template_install", { cloudId: ID }, { forceNew: true, discardOutput: false });
+    // Keyed by the catalog the page is on now, too (review M2): the job installs from it even after a switch.
+    expect(jobManager.enqueue).toHaveBeenCalledWith("template_install", { cloudId: ID, source: "https://libi.nagellabs.com" }, { forceNew: true, discardOutput: false });
     expect(jobManager.runToCompletion).toHaveBeenCalledWith("job-1");
     expect(navigationEmitter.emit).toHaveBeenCalledWith("refresh_query", { queryKey: "templates" });
   });
 
   it("passes the version the page showed as a param, and force as discardOutput — never a param", async () => {
     await post(JSON.stringify({ cloudId: ID, version: 3, force: true }));
-    expect(jobManager.enqueue).toHaveBeenCalledWith("template_install", { cloudId: ID, version: 3 }, { forceNew: true, discardOutput: true });
+    expect(jobManager.enqueue).toHaveBeenCalledWith("template_install", { cloudId: ID, version: 3, source: "https://libi.nagellabs.com" }, { forceNew: true, discardOutput: true });
   });
 
   it("a forced call that found an install running waits for it, then runs its own re-download", async () => {
@@ -97,6 +98,8 @@ describe("POST /api/templates/cloud/install", () => {
       [new TemplateInstallError("SITE TEXT", "catalog_error"), "catalog_error", /couldn't send this template/],
       [new TemplateInstallError("version 4 SITE TEXT", "version_changed"), "version_changed", /Refresh the catalog/],
       [new TemplateInstallError("SITE TEXT", "rejected"), "rejected", /didn't pass libi's checks/],
+      // Review m5: the job's own words name hosts for the agent; the page says it in libi's.
+      [new TemplateInstallError("The templates catalog changed since this was queued (was SITE TEXT, now x). Ask again.", "catalog_changed"), "catalog_changed", /^The templates catalog changed before this install started\. Try again\.$/],
       [new Error("SITE TEXT unexpected"), undefined, /^Couldn't install the template\.$/],
     ];
     for (const [err, code, copy] of cases) {

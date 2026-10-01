@@ -114,6 +114,26 @@ export const LIBI_MCP_ENTRY_NAME = "libi";
 export const LIBI_MCP_FALLBACK_ENTRY_NAME = "libi-app";
 
 /**
+ * Every piece of text an ACP rejection carries: its `message`, and its `data` —
+ * which codex-acp 1.10.0 shapes differently per call. `session/new` sends the
+ * diagnosis as a STRING; `session/load` wraps the same text as
+ * `{ details: "…" }` (measured 2026-09-29 on a real install — the matchers
+ * below read only strings then, so a refused load never matched and its chat
+ * showed a bare "Internal error"). A `data.message` string is read too.
+ */
+export function rejectionText(err: unknown): string {
+  if (typeof err !== "object" || err === null) return "";
+  const { data, message } = err as { data?: unknown; message?: unknown };
+  const parts: unknown[] = [message];
+  if (typeof data === "string") parts.push(data);
+  else if (typeof data === "object" && data !== null) {
+    const d = data as { details?: unknown; message?: unknown };
+    parts.push(d.details, d.message);
+  }
+  return parts.filter((v): v is string => typeof v === "string").join("\n");
+}
+
+/**
  * Is this `newSession` rejection the Codex config collision — and ONLY that?
  *
  * Measured end to end on 2026-09-09 against the real binaries (codex-cli
@@ -161,19 +181,55 @@ export const LIBI_MCP_FALLBACK_ENTRY_NAME = "libi-app";
  * crashed adapter rejects with a transport error carrying neither string.
  */
 export function isLibiMcpEntryConfigError(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
   // The diagnosis lives in `data`; `message` is the generic wrapper. Read both
   // anyway — a future adapter that stops re-wrapping would surface the same
   // text as the message, and matching it there costs nothing.
-  const { data, message } = err as { data?: unknown; message?: unknown };
-  const text = [data, message]
-    .filter((v): v is string => typeof v === "string")
-    .join("\n");
+  const text = rejectionText(err);
   if (!text) return false;
   return (
     /failed to load configuration/i.test(text) &&
     text.includes(`mcp_servers.${LIBI_MCP_ENTRY_NAME}`)
   );
+}
+
+/**
+ * Which of `names` a codex config rejection names as the offending table, or null.
+ *
+ * The same two-part match as `isLibiMcpEntryConfigError` — codex's `failed to
+ * load configuration` AND the frame naming the table (``in `mcp_servers.<name>` ``),
+ * which only a merge of a session override into the config produces — for
+ * entries other than libi's own. Used for test mode's fakes, which ride into a
+ * Codex session under the names a real entry of the user's may already have
+ * (`TEST_MODE_STDIO_FAKE_NAMES` in lib/mcp-config.ts). A name must end where
+ * the frame's name ends, so `fal-ai` never matches `fal-ai-2`; a quoted TOML
+ * key (`mcp_servers."fal-ai"`) matches too.
+ */
+export function mcpEntryConfigErrorName(err: unknown, names: readonly string[]): string | null {
+  const text = rejectionText(err);
+  if (!text || !/failed to load configuration/i.test(text)) return null;
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`mcp_servers\\.(?:"${escaped}"|${escaped}(?![A-Za-z0-9_-]))`).test(text)) return name;
+  }
+  return null;
+}
+
+/**
+ * Codex's own diagnosis when it refused its configuration, or null.
+ *
+ * codex-acp wraps every "failed to load configuration" into `-32603 Internal
+ * error` and moves the real text into `data` (see `isLibiMcpEntryConfigError`),
+ * so without this a chat shows only "Internal error". Returns the first
+ * paragraph after `failed to load configuration:` — the part that names what
+ * is wrong — with whitespace collapsed; never the trailing "Check <dirs>"
+ * boilerplate, which the caller words itself.
+ */
+export function agentConfigLoadErrorDetail(err: unknown): string | null {
+  const text = rejectionText(err);
+  const m = /failed to load configuration:?\s*([\s\S]*?)(?:\n\s*\n|$)/i.exec(text);
+  if (!m) return null;
+  const detail = m[1].replace(/\s+/g, " ").trim();
+  return detail || "its config file could not be read";
 }
 
 /**

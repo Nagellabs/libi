@@ -23,7 +23,10 @@ vi.mock("@/lib/composition/persistence", async (importOriginal) => {
 
 import { exampleBytesFor } from "@/__tests__/helpers/publish-prepare";
 import { getDb } from "@/lib/db/client";
-import { files as filesTable, jobs, templatePublishRequests } from "@/lib/db/schema/sqlite";
+import { files as filesTable, jobs, pieceExports, pieces, templatePublishRequests } from "@/lib/db/schema/sqlite";
+import { generatedStamp } from "@/lib/audio-rights/stamp";
+import { serializeAudioRights } from "@/lib/audio-rights/types";
+import { serverLogger } from "@/lib/logger";
 import { getOrCreateTemplatesAuthor, setTemplatesAuthorNickname } from "@/lib/db/settings";
 import { __resetRunnerRegistryForTests, getJobKindToToolIdsMap, getRunner, registerBuiltinRunners } from "@/lib/jobs/runners/registry";
 import { templatePublishPrepareRunner } from "@/lib/jobs/runners/template-publish-prepare";
@@ -128,11 +131,11 @@ describe("template_publish_prepare — the example, made now", () => {
 
   it("a piece: rendered by the export renderer with NO export job recorded, its progress forwarded and the watchdog excused only for it", async () => {
     const pieceId = seedPiece(getDb() as never);
-    renderExport.mockImplementation(async (c: JobContext<{ destFolder: string }>) => {
+    renderExport.mockImplementation(async (c: JobContext<unknown>, target: { dir: string }) => {
       c.reportProgress(50, 100, "%");
-      fs.mkdirSync(c.params.destFolder, { recursive: true });
-      fs.writeFileSync(path.join(c.params.destFolder, "template-example.mp4"), "rendered");
-      return { filePath: path.join(c.params.destFolder, "template-example.mp4") };
+      fs.mkdirSync(target.dir, { recursive: true });
+      fs.writeFileSync(path.join(target.dir, "template-example.mp4"), "rendered");
+      return { filePath: path.join(target.dir, "template-example.mp4") };
     });
     const c = ctx({ templateId, exampleVideo: { exportPieceId: pieceId } });
     let held = 0;
@@ -193,5 +196,129 @@ describe("template_publish_prepare — the example, made now", () => {
     expect(leftovers()).toEqual([b.requestId]);
     expect(fs.existsSync(publishRequestDir(a.requestId))).toBe(false);
     expect(fs.readFileSync(path.join(publishRequestDir(b.requestId), "example.mp4"))).toEqual(exampleBytesFor(Buffer.from("a newer cut")));
+  });
+});
+
+// Social-music review (Task 20): a template example is public, so a copyrighted
+// song never reaches it — whatever the example's source is.
+describe("template_publish_prepare — the example never carries a copyrighted song", () => {
+  const songRights = serializeAudioRights({ class: "copyrighted", track: { title: "Espresso", artist: "Sabrina Carpenter" }, decidedBy: "agent", decidedAt: "2026-09-27T00:00:00Z" });
+  async function seedVideoFile(id: string, audioRights: string | null, description = ""): Promise<string> {
+    const db = getDb();
+    if (!db.select().from(pieces).all().some((p) => p.id === "piece-1")) seedPiece(db as never, { id: "piece-1" });
+    db.insert(filesTable).values({ id, pieceId: "piece-1", filename: `${id}.mp4`, name: `${id}.mp4`, description, type: "video", contentType: "video/mp4", storagePath: `piece-1/${id}.mp4`, size: 1, audioRights }).run();
+    const original = (await getStorage()).localPath("piece-1", `${id}.mp4`);
+    fs.mkdirSync(path.dirname(original), { recursive: true });
+    fs.writeFileSync(original, "original bytes");
+    return original;
+  }
+  /** An export file where exports live — `<storage>/piece-1/exports/<name>`. */
+  async function exportFile(name = "source.mp4"): Promise<string> {
+    const db = getDb();
+    if (!db.select().from(pieces).all().some((p) => p.id === "piece-1")) seedPiece(db as never, { id: "piece-1" });
+    const abs = (await getStorage()).localPath("piece-1", `exports/${name}`);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, "x");
+    return abs;
+  }
+  /** Its finished export record, as the export job leaves it. */
+  function recordExport(filePath: string, carriesCopyrighted: boolean, completedAt = new Date()): void {
+    getDb().insert(pieceExports).values({
+      id: `exp_${Math.random().toString(36).slice(2)}`,
+      pieceId: "piece-1",
+      name: path.basename(filePath, ".mp4"),
+      relPath: `exports/${path.basename(filePath)}`,
+      status: "done",
+      queuedAt: completedAt,
+      completedAt,
+      aspect: "9:16",
+      container: "mp4",
+      codec: "avc",
+      fps: 30,
+      source: "agent",
+      purpose: carriesCopyrighted ? "personal" : "social",
+      carriesCopyrighted,
+      excludedFileIds: JSON.stringify(carriesCopyrighted ? [] : ["song"]),
+    }).run();
+  }
+  const transcodeOpts = () => vi.mocked(transcodeExample).mock.calls[0][2] as { dropAudio?: boolean };
+  const dropLogs = () => vi.mocked(serverLogger.info).mock.calls.filter(([o]) => (o as { op?: string }).op === "template_example_audio_dropped");
+
+  beforeEach(() => {
+    vi.spyOn(serverLogger, "info");
+  });
+
+  it("a piece file whose audio is copyrighted: transcoded WITHOUT its audio, and the decision logged by file id", async () => {
+    await seedVideoFile("song-video", songRights);
+    await run({ exampleVideo: { fileId: "song-video" } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+    expect(dropLogs()).toEqual([[expect.objectContaining({ tag: "social-music", op: "template_example_audio_dropped", fileId: "song-video" }), expect.any(String)]]);
+  });
+
+  // Owner decision 2026-09-28: an unstamped file is the user's own upload.
+  it("an unstamped piece file is the user's own: it keeps its audio", async () => {
+    await seedVideoFile("upload", null);
+    await run({ exampleVideo: { fileId: "upload" } });
+    expect(transcodeOpts().dropAudio).toBe(false);
+    expect(dropLogs()).toEqual([]);
+  });
+
+  it("an unstamped legacy download (\"Downloaded from <url>\") reads as copyrighted: its audio is dropped", async () => {
+    await seedVideoFile("legacy-dl", null, "Downloaded from https://youtu.be/x");
+    await run({ exampleVideo: { fileId: "legacy-dl" } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+  });
+
+  it("a generated piece file keeps its audio", async () => {
+    await seedVideoFile("gen", serializeAudioRights(generatedStamp("lofi beat", new Date("2026-09-27T00:00:00Z"))));
+    await run({ exampleVideo: { fileId: "gen" } });
+    expect(transcodeOpts().dropAudio).toBe(false);
+    expect(dropLogs()).toEqual([]);
+  });
+
+  it("a path that is a with-song export: its audio is dropped, and only the basename is logged", async () => {
+    const file = await exportFile();
+    recordExport(file, true);
+    await run({ exampleVideo: { path: file } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+    const [[logged]] = dropLogs();
+    expect(logged).toMatchObject({ tag: "social-music", op: "template_example_audio_dropped", path: "source.mp4" });
+    expect(JSON.stringify(logged)).not.toContain(home);
+  });
+
+  it("a path that is a without-song export keeps its audio", async () => {
+    const file = await exportFile();
+    recordExport(file, false);
+    await run({ exampleVideo: { path: file } });
+    expect(transcodeOpts().dropAudio).toBe(false);
+  });
+
+  it("the NEWEST export to that path decides: a with-song re-export over a without-song one drops the audio", async () => {
+    const file = await exportFile();
+    recordExport(file, false, new Date("2026-09-27T10:00:00Z"));
+    recordExport(file, true, new Date("2026-09-27T11:00:00Z"));
+    await run({ exampleVideo: { path: file } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+  });
+
+  it("a path libi never exported — even one in a piece's exports folder: its audio is dropped", async () => {
+    await run({ exampleVideo: { path: src } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+    vi.mocked(transcodeExample).mockClear();
+    const unrecorded = await exportFile("unrecorded.mp4");
+    await run({ exampleVideo: { path: unrecorded } });
+    expect(transcodeOpts().dropAudio).toBe(true);
+  });
+
+  it("an exported piece keeps its audio: the example export is a social one, which already leaves the song out", async () => {
+    const pieceId = seedPiece(getDb() as never);
+    renderExport.mockImplementation(async (c: JobContext<unknown>, target: { dir: string }) => {
+      fs.mkdirSync(target.dir, { recursive: true });
+      fs.writeFileSync(path.join(target.dir, "template-example.mp4"), "rendered");
+      return { filePath: path.join(target.dir, "template-example.mp4") };
+    });
+    await run({ exampleVideo: { exportPieceId: pieceId } });
+    expect(transcodeOpts().dropAudio).toBe(false);
+    expect((renderExport.mock.calls[0][0] as JobContext<{ settings: { purpose?: string } }>).params.settings.purpose).toBe("social");
   });
 });

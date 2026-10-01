@@ -6,6 +6,7 @@ import {
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import { EXPORT_WAITING_MESSAGE, isExportWaiting } from "@/lib/export/export-waiting";
+import { isLessSpecificToolTitle } from "@/lib/agents/tool-title";
 import { randomUUID } from "node:crypto";
 import type { AgentEvent } from "./types";
 import type { AgentMessage, AgentMessagePart } from "./message-types";
@@ -48,6 +49,7 @@ import {
   extractModelOption,
 } from "@/lib/sessions/model-option";
 import { getKnownWindow } from "@/lib/sessions/model-window-cache";
+import { codexMaxWindowFor } from "@/lib/agents/codex-model-windows";
 
 /**
  * How Claude Code has reported an expired OAuth session: as reply TEXT inside a
@@ -1084,11 +1086,20 @@ export class SessionEventHandler {
           const known = model
             ? getKnownWindow(session.agentId, model.currentModelId)
             : null;
+          // CW-1: Codex's own model-list cache carries a larger MAXIMUM window
+          // than the one Codex actually uses (`known`/`size`) — surfaced beside
+          // it in the meter, never in place of it. Claude has no such cache and
+          // stays null.
+          const maxWindow =
+            session.agentId === "codex" && model
+              ? codexMaxWindowFor(model.currentModelId)
+              : null;
           const next = applyUsageUpdate(
             session.latestUsage,
             update,
             Date.now(),
             known,
+            maxWindow,
           );
           if (next !== session.latestUsage && next !== null) {
             session.latestUsage = next;
@@ -1417,7 +1428,8 @@ export class SessionEventHandler {
    * "Write <path>" on the `tool_call_update` that carries the input. Only the
    * input was ever adopted, so every Write row kept the placeholder — live and
    * in the history a refresh serves. The adapter builds each update's title
-   * from the input it has so far, so the latest non-empty one is the best.
+   * from the input it has so far, so the latest non-empty one is the best —
+   * unless it is LESS specific than the current one (`isLessSpecificToolTitle`).
    *
    * Built-in calls only (`toolId === null`): an MCP row is named by its
    * `toolId`, and its title is what `toolIdForCall` classified at ingest.
@@ -1437,6 +1449,8 @@ export class SessionEventHandler {
     if (idx === -1) return;
     const old = agentMsg.parts[idx] as Extract<AgentMessagePart, { type: "tool-call" }>;
     if (old.toolId != null || old.rawTitle === title) return;
+    // Titles only get more specific: a vaguer one ("Preparing file…" after "Write <path>") is ignored.
+    if (isLessSpecificToolTitle(old.rawTitle, title)) return;
     agentMsg.parts[idx] = { ...old, rawTitle: title };
     this.emit(sessionId, { type: "agent-tool-title", toolCallId, rawTitle: title });
   }

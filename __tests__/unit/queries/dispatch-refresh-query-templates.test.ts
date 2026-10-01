@@ -8,8 +8,8 @@ import { describe, it, expect, vi } from "vitest";
 import { QueryClient } from "@tanstack/react-query";
 import { dispatchRefreshQueryData } from "@/lib/queries/dispatch-refresh-query";
 import { templateKeys } from "@/lib/queries/templates";
-import { templatesCloudKeys } from "@/lib/queries/templates-cloud";
-import { CREATOR_STATUS_REFRESH_KEY } from "@/lib/templates/cloud/constants";
+import { __publicDetailBackoffUntilForTests, __resetPublicDetailBackoffForTests, __setPublicDetailBackoffForTests, templatesCloudKeys } from "@/lib/queries/templates-cloud";
+import { CREATOR_STATUS_REFRESH_KEY, TEMPLATES_CATALOG_REFRESH_KEY } from "@/lib/templates/cloud/constants";
 
 describe("refresh_query templates", () => {
   it("invalidates the templates prefix and reports handled", () => {
@@ -29,6 +29,31 @@ describe("refresh_query templates", () => {
     dispatchRefreshQueryData({ queryKey: "templates" }, qc);
     expect(observer.state.isInvalidated).toBe(false);
     expect(templatesCloudKeys.creator[0]).not.toBe(templateKeys.all[0]);
+  });
+});
+
+// Review M9: a dev build switched catalogs in ANOTHER window. The old site's
+// slow-down is its own: this window forgets it too, as the switching one does
+// (lib/queries/templates-catalog.ts), instead of answering "slow down" for up
+// to ten minutes against a catalog that never limited it.
+describe("refresh_query templates-catalog", () => {
+  it("re-reads which catalog is active and forgets the public detail backoff", () => {
+    __setPublicDetailBackoffForTests(Date.now() + 10 * 60_000);
+    expect(__publicDetailBackoffUntilForTests()).toBeGreaterThan(Date.now());
+    const qc = new QueryClient();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    expect(dispatchRefreshQueryData({ queryKey: TEMPLATES_CATALOG_REFRESH_KEY }, qc)).toBe(true);
+    expect(spy.mock.calls).toEqual([[{ queryKey: [TEMPLATES_CATALOG_REFRESH_KEY] }]]);
+    expect(__publicDetailBackoffUntilForTests()).toBe(0);
+    __resetPublicDetailBackoffForTests();
+  });
+
+  it("a plain templates refresh (an install, a write) keeps the backoff: the catalog is the same one", () => {
+    const until = Date.now() + 60_000;
+    __setPublicDetailBackoffForTests(until);
+    dispatchRefreshQueryData({ queryKey: "templates" }, new QueryClient());
+    expect(__publicDetailBackoffUntilForTests()).toBe(until);
+    __resetPublicDetailBackoffForTests();
   });
 });
 

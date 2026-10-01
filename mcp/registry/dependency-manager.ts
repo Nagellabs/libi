@@ -24,7 +24,7 @@ import {
   writeDepTransition as persistDepTransition,
 } from "./dep-transition";
 import { depInstallAcceptedAt, isDepInstalling } from "./dep-in-flight";
-import { acquireInstallLocks, pidIsAlive } from "./install-lock";
+import { acquireInstallLocks, InstallWaitAbortedError, pidIsAlive, untilAborted } from "./install-lock";
 import {
   CHROMIUM_DEP_BINARY,
   CHROMIUM_MCP_ID,
@@ -40,7 +40,9 @@ import type {
   InstallStatus,
 } from "./types";
 import { getLibiBinDir, getLibiModelsDir } from "@/lib/libi-home";
-import { buildUvEnv } from "@/lib/uv-env/spawn-env";
+import { buildUvEnv, uvToolDir } from "@/lib/uv-env/spawn-env";
+import { checkYtDlpLauncher, YT_DLP_VERSION_TIMEOUT_MS } from "@/lib/video-download/launcher";
+import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { serverLogger as logger } from "@/lib/logger";
 import {
   verifySha256,
@@ -157,6 +159,21 @@ export interface BinaryInstallProgress {
 }
 
 export type BinaryInstallProgressCallback = (p: BinaryInstallProgress) => void;
+
+/** What `retryDep` / `ensureDep` callers can pass. */
+export interface DepInstallOptions {
+  /** A job's cancellation: stops waiting on another install of this dep (see `retryDep`). */
+  signal?: AbortSignal;
+  /**
+   * The caller saw the dep's launcher fail to start (the `video_download` job's launch failure). An installer that
+   * can repair only its launcher when the tool behind it is intact may then do so even though the launcher passed
+   * its file checks (yt-dlp: `installYtDlpViaUv`).
+   */
+  launcherFailed?: boolean;
+  /** Told when the repair was the launcher-only one (no reinstall ran), so a caller that still can't start the dep
+   *  can say so truthfully and try a real reinstall. */
+  onLauncherOnlyRepair?: () => void;
+}
 
 interface ResolvedStatus {
   binary: string;
@@ -655,7 +672,10 @@ export class DependencyManager {
                 : status;
             // Only ever added, never `manualInstall: false` — the chip and
             // the persisted transitions treat absence as "Category A dep".
-            return dep.manualInstall ? { ...shown, manualInstall: true } : shown;
+            if (!dep.manualInstall) return shown;
+            return def.buttonOnlyDeps?.includes(dep.binary)
+              ? { ...shown, manualInstall: true, buttonOnly: true }
+              : { ...shown, manualInstall: true };
           }),
         )
       : [];
@@ -813,13 +833,13 @@ export class DependencyManager {
    * re-downloaded all 33 MB of MediaPipe assets on every tracker start and
    * made tracking fail offline with the assets sitting on disk.
    */
-  async ensureDep(mcpId: string, binary: string): Promise<void> {
+  async ensureDep(mcpId: string, binary: string, opts: DepInstallOptions = {}): Promise<void> {
     const dep = DependencyManager.findBundledDep(mcpId, binary);
     const installed = dep.files
       ? this.isMultiFileInstalled(dep)
       : (await this.resolveStatusAsync(dep, mcpId)).installed;
     if (installed) return;
-    await this.retryDep(mcpId, binary);
+    await this.retryDep(mcpId, binary, opts);
   }
 
   /**
@@ -827,8 +847,13 @@ export class DependencyManager {
    * transitions so the Settings UI's polling sees `installing → installed`
    * (or `installing → failed`) without waiting for the full `ensureAll`
    * sweep. Always installs — use `ensureDep` for "install only if missing".
+   *
+   * `opts.signal` (a job's cancellation) stops the WAITING — on another
+   * process's install lock, or on an install of this dep already running in
+   * this process — and rejects with `InstallWaitAbortedError`. An install this
+   * call is itself running is not interrupted by it.
    */
-  async retryDep(mcpId: string, binary: string): Promise<void> {
+  async retryDep(mcpId: string, binary: string, opts: DepInstallOptions = {}): Promise<void> {
     // Single-flight per dep: a caller that arrives while this dep is already
     // being installed JOINS that run instead of starting a second one. Two
     // `video_download` jobs (maxConcurrent 2) that both found yt-dlp missing
@@ -847,7 +872,7 @@ export class DependencyManager {
     const running = depInstallFlights().get(key);
     if (running) {
       logger.info(
-        { tag: "lifecycle", op: "dep_install_joined", mcpId, binary, key },
+        { tag: "deps", op: "dep_install_joined", mcpId, binary, key },
         "joining the install of this dependency that is already running",
       );
       // The flight writes transitions for the extension that STARTED it; this
@@ -856,11 +881,14 @@ export class DependencyManager {
       // not detected afterwards, so that check is made here: a caller that needs
       // the dep must fail naming it, not carry on and fail at a spawn.
       try {
-        await running;
+        await untilAborted(running, opts.signal);
         const fresh = await this.resolveStatusAsync(dep, mcpId);
         if (!fresh.installed) throw new Error(notDetectedAfterInstall(binary));
         this.writeDepTransition(mcpId, binary, fresh);
       } catch (err) {
+        // This caller stopped WAITING (its job was cancelled): the install it joined carries on and writes its own
+        // outcome, so nothing about the dep is recorded here.
+        if (err instanceof InstallWaitAbortedError) throw err;
         this.writeDepTransition(mcpId, binary, {
           runtimeStatus: "failed",
           error: err instanceof Error ? err.message : String(err),
@@ -869,7 +897,7 @@ export class DependencyManager {
       }
       return;
     }
-    const flight: Promise<void> = this.retryDepOnce(mcpId, binary).finally(() => {
+    const flight: Promise<void> = this.retryDepOnce(mcpId, binary, opts).finally(() => {
       if (depInstallFlights().get(key) === flight) depInstallFlights().delete(key);
     });
     depInstallFlights().set(key, flight);
@@ -923,12 +951,13 @@ export class DependencyManager {
     deps: BundledDependency[],
     mcpId: string,
     install: () => Promise<void>,
+    signal?: AbortSignal,
   ): Promise<void> {
-    const lock = await acquireInstallLocks(deps.map((d) => this.installLockPath(d)));
+    const lock = await acquireInstallLocks(deps.map((d) => this.installLockPath(d)), { signal });
     try {
       if (lock.waited && (await this.allInstalled(deps, mcpId))) {
         logger.info(
-          { tag: "lifecycle", op: "dep_install_served_elsewhere", mcpId, binaries: deps.map((d) => d.binary) },
+          { tag: "deps", op: "dep_install_served_elsewhere", mcpId, binaries: deps.map((d) => d.binary) },
           "another libi installed this dependency while we waited; not installing it again",
         );
         return;
@@ -962,7 +991,7 @@ export class DependencyManager {
       ];
       if (running.length === 0) break;
       logger.info(
-        { tag: "lifecycle", op: "dep_install_joined", mcpId, binaries: deps.map((d) => d.binary), keys },
+        { tag: "deps", op: "dep_install_joined", mcpId, binaries: deps.map((d) => d.binary), keys },
         "joining the install of this dependency that is already running",
       );
       await Promise.all(running);
@@ -975,7 +1004,7 @@ export class DependencyManager {
     await flight;
   }
 
-  private async retryDepOnce(mcpId: string, binary: string): Promise<void> {
+  private async retryDepOnce(mcpId: string, binary: string, opts: DepInstallOptions = {}): Promise<void> {
     const dep = DependencyManager.findBundledDep(mcpId, binary);
 
     this.ensureBinDir();
@@ -985,16 +1014,21 @@ export class DependencyManager {
       error: null,
     });
     try {
-      await this.installUnderLock([dep], mcpId, async () => {
-        if (dep.files) {
-          await this.installMultiFile(dep);
-        } else if (dep.customInstallerId) {
-          await this.runCustomInstaller(dep);
-        } else {
-          const url = DependencyManager.resolveDownloadUrl(dep);
-          await this.downloadGroup(url, [dep]);
-        }
-      });
+      await this.installUnderLock(
+        [dep],
+        mcpId,
+        async () => {
+          if (dep.files) {
+            await this.installMultiFile(dep);
+          } else if (dep.customInstallerId) {
+            await this.runCustomInstaller(dep, opts);
+          } else {
+            const url = DependencyManager.resolveDownloadUrl(dep);
+            await this.downloadGroup(url, [dep]);
+          }
+        },
+        opts.signal,
+      );
       const fresh = await this.resolveStatusAsync(dep, mcpId);
       if (!fresh.installed) {
         // An error, not a quiet return: a caller that needs the dep (the
@@ -1008,9 +1042,19 @@ export class DependencyManager {
       // made this the install path for everything but node and ffmpeg.
       trackServerEvent("dependency_installed", { extension: mcpId, dep: binary });
     } catch (err) {
+      if (err instanceof InstallWaitAbortedError) {
+        // Cancelled while waiting on another libi's install of this dep: nothing was installed or broken here, so the
+        // chip goes back to what is on disk (the other install writes its own outcome), never to "failed".
+        logger.info(
+          { tag: "deps", op: "retry_wait_aborted", mcpId, binary },
+          "stopped waiting on another install of this dependency: the caller was cancelled",
+        );
+        this.writeDepTransition(mcpId, binary, { ...(await this.resolveStatusAsync(dep, mcpId)), error: null });
+        throw err;
+      }
       const message = err instanceof Error ? err.message : String(err);
       logger.error(
-        { mcpId, binary, err: message },
+        { tag: "deps", op: "retry_failed", mcpId, binary, err: message },
         "retryDep failed",
       );
       this.writeDepTransition(mcpId, binary, {
@@ -1121,7 +1165,7 @@ export class DependencyManager {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         perBinErrors.push(`${dep.binary}: ${message}`);
-        logger.error({ binary: dep.binary, err: message }, "Multi-file installer failed");
+        logger.error({ tag: "deps", op: "multi_file_failed", binary: dep.binary, err: message }, "Multi-file installer failed");
         depFailures.set(dep.binary, message);
         this.writeDepTransition(mcpId, dep.binary, {
           runtimeStatus: "failed",
@@ -1172,7 +1216,7 @@ export class DependencyManager {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         perBinErrors.push(`${deps.map((d) => d.binary).join(", ")}: ${message}`);
-        logger.error({ binaries: deps.map((d) => d.binary), err: message },
+        logger.error({ tag: "deps", op: "download_group_failed", binaries: deps.map((d) => d.binary), err: message },
           "Failed to download dependency group");
         for (const dep of deps) {
           depFailures.set(dep.binary, message);
@@ -1201,7 +1245,7 @@ export class DependencyManager {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         perBinErrors.push(`${dep.binary}: ${message}`);
-        logger.error({ binary: dep.binary, err: message }, "Custom installer failed");
+        logger.error({ tag: "deps", op: "custom_installer_failed", binary: dep.binary, err: message }, "Custom installer failed");
         depFailures.set(dep.binary, message);
         this.writeDepTransition(mcpId, dep.binary, {
           runtimeStatus: "failed",
@@ -1393,7 +1437,7 @@ export class DependencyManager {
       const installer = getCustomInstaller(dep.customInstallerId);
       if (!installer) {
         logger.warn(
-          { binary: dep.binary, customInstallerId: dep.customInstallerId },
+          { tag: "deps", op: "custom_installer_unknown", binary: dep.binary, customInstallerId: dep.customInstallerId },
           "Unknown customInstallerId — no implementation registered",
         );
         return {
@@ -1437,7 +1481,7 @@ export class DependencyManager {
         }
       } catch (err) {
         logger.warn(
-          { binary: dep.binary, err: err instanceof Error ? err.message : String(err) },
+          { tag: "deps", op: "custom_verify_threw", binary: dep.binary, err: err instanceof Error ? err.message : String(err) },
           "customInstaller.verify threw",
         );
       }
@@ -1475,7 +1519,7 @@ export class DependencyManager {
       );
       if (!runnable) {
         logger.warn(
-          { binary: dep.binary, path: status.path, tag: "dep-runcheck" },
+          { binary: dep.binary, path: status.path, tag: "dep-runcheck", op: "runcheck_failed" },
           "installed binary failed its runCheck (likely wrong CPU arch) — marking for re-install",
         );
         return {
@@ -1505,6 +1549,7 @@ export class DependencyManager {
             path: status.path,
             missing,
             tag: "dep-capability",
+            op: "capability_missing",
           },
           `installed ${dep.binary} is missing required capabilities (${missing.join(", ")}) — marking for re-install`,
         );
@@ -1606,6 +1651,8 @@ export class DependencyManager {
           onRetry: ({ attempt, maxAttempts, delayMs, error, bytesDownloaded }: DownloadRetryInfo) => {
             logger.warn(
               {
+                tag: "deps",
+                op: "file_download_retry",
                 url: f.url,
                 binary: dep.binary,
                 relPath: f.relPath,
@@ -1654,7 +1701,7 @@ export class DependencyManager {
    * `__YT_DLP_UV_INSTALL__`) dispatch to the code that owns that install;
    * anything else is spawned as declared.
    */
-  private async runCustomInstaller(dep: BundledDependency): Promise<void> {
+  private async runCustomInstaller(dep: BundledDependency, opts: DepInstallOptions = {}): Promise<void> {
     if (!dep.customInstallerId) return;
     const installer = getCustomInstaller(dep.customInstallerId);
     if (!installer) {
@@ -1689,7 +1736,7 @@ export class DependencyManager {
         );
       }
       logger.info(
-        { binary: dep.binary, path: status, via: "ensure-chromium", force },
+        { tag: "deps", op: "custom_installer_ok", binary: dep.binary, path: status, via: "ensure-chromium", force },
         "Custom installer succeeded",
       );
       return;
@@ -1711,7 +1758,7 @@ export class DependencyManager {
         );
       }
       logger.info(
-        { binary: dep.binary, path: status, via: "tracking-pyenv" },
+        { tag: "deps", op: "custom_installer_ok", binary: dep.binary, path: status, via: "tracking-pyenv" },
         "Custom installer succeeded",
       );
       return;
@@ -1721,7 +1768,7 @@ export class DependencyManager {
     // (uv tool install + symlink the resulting entry point into ~/.libi/bin).
     // Special-casing it here keeps the awkwardness out of installers.ts.
     if (command === "__YT_DLP_UV_INSTALL__") {
-      await this.installYtDlpViaUv(dep, timeoutMs);
+      const via = await this.installYtDlpViaUv(dep, timeoutMs, opts);
       const status = await installer.verify();
       if (!status) {
         throw new Error(
@@ -1729,14 +1776,14 @@ export class DependencyManager {
         );
       }
       logger.info(
-        { binary: dep.binary, path: status, via: "uv" },
+        { tag: "deps", op: "custom_installer_ok", binary: dep.binary, path: status, via },
         "Custom installer succeeded",
       );
       return;
     }
 
     logger.info(
-      { binary: dep.binary, command, args },
+      { tag: "deps", op: "custom_installer_start", binary: dep.binary, command, args },
       "Running custom installer",
     );
     await execFileAsync(command, args, {
@@ -1752,7 +1799,7 @@ export class DependencyManager {
       );
     }
     installer.onInstalled?.(status);
-    logger.info({ binary: dep.binary, path: status }, "Custom installer succeeded");
+    logger.info({ tag: "deps", op: "custom_installer_ok", binary: dep.binary, path: status }, "Custom installer succeeded");
   }
 
   /**
@@ -1772,7 +1819,15 @@ export class DependencyManager {
   private async installYtDlpViaUv(
     dep: BundledDependency,
     timeoutMs: number | undefined,
-  ): Promise<void> {
+    opts: DepInstallOptions = {},
+  ): Promise<"launcher" | "uv"> {
+    // Offline-safe repair first: nothing below needs uv when only the launcher is broken.
+    // Says which ran, so custom_installer_ok never claims uv for a repair that didn't touch it.
+    if (await this.repairYtDlpLauncherOnly(dep, opts.launcherFailed === true)) {
+      opts.onLauncherOnlyRepair?.();
+      return "launcher";
+    }
+
     let uvBinary = this.getBinaryPath("uv");
     if (!fs.existsSync(uvBinary)) {
       // Fall back to PATH — Category A's resolveStatus marks uv "installed"
@@ -1797,7 +1852,10 @@ export class DependencyManager {
       }
     }
 
-    logger.info({ binary: dep.binary, uvBinary }, "Installing yt-dlp via uv tool install");
+    logger.info(
+      { tag: "deps", op: "install_start", binary: dep.binary, uvBinary },
+      "Installing yt-dlp via uv tool install",
+    );
     // --with certifi installs certifi alongside yt-dlp in the same venv.
     // We use it below to set SSL_CERT_FILE — without it, python-build-standalone
     // (uv's portable Python) has no compiled-in cert bundle and no
@@ -1810,24 +1868,35 @@ export class DependencyManager {
     // stay pinned to a stale binary forever. verify() gates this to run only
     // when YT_DLP_UV_TOKEN was bumped (or on a fresh install), so it's not
     // per-boot churn.
-    await execFileAsync(
-      uvBinary,
-      // The requirement carries the `[default]` extra — the yt-dlp-ejs
-      // JS-challenge solver. See `YT_DLP_UV_REQUIREMENT` for what happens
-      // without it (throttled, then 403 mid-download).
-      ytDlpUvInstallArgs(),
-      {
-        timeout: timeoutMs ?? 5 * 60_000,
-        windowsHide: true,
-        maxBuffer: 32 * 1024 * 1024,
-        // Pins UV_TOOL_DIR / UV_TOOL_BIN_DIR / UV_CACHE_DIR /
-        // UV_PYTHON_INSTALL_DIR under LIBI_HOME so the tool venv and the
-        // managed CPython it pulls land in libi's own tree rather than
-        // `~/.local/share/uv`. The `uv tool dir` probe below uses the same
-        // env, so entry-point discovery follows the relocation automatically.
-        env: buildUvEnv(),
-      },
-    );
+    try {
+      await execFileAsync(
+        uvBinary,
+        // The requirement carries the `[default]` extra — the yt-dlp-ejs
+        // JS-challenge solver. See `YT_DLP_UV_REQUIREMENT` for what happens
+        // without it (throttled, then 403 mid-download).
+        ytDlpUvInstallArgs(),
+        {
+          timeout: timeoutMs ?? 5 * 60_000,
+          windowsHide: true,
+          maxBuffer: 32 * 1024 * 1024,
+          // Pins UV_TOOL_DIR / UV_TOOL_BIN_DIR / UV_CACHE_DIR /
+          // UV_PYTHON_INSTALL_DIR under LIBI_HOME so the tool venv and the
+          // managed CPython it pulls land in libi's own tree rather than
+          // `~/.local/share/uv`. The `uv tool dir` probe below uses the same
+          // env, so entry-point discovery follows the relocation automatically.
+          env: buildUvEnv(),
+        },
+      );
+    } catch (e) {
+      // Offline, uv prints a wall of "Caused by:" lines. The chip and the job
+      // error say it in one sentence; the raw text goes to the log (uv-env /
+      // uv_offline) and rides along as `cause`. `needsInstallMessage` still
+      // reads that sentence as the network. Any other failure is uv's own.
+      const stderr = String((e as { stderr?: unknown }).stderr ?? "");
+      const offline = uvNetworkFailureMessage("video download", stderr);
+      if (offline) throw new Error(offline, { cause: stderr });
+      throw e;
+    }
 
     // Discover where uv put it. Strip ANSI color escape sequences — uv emits
     // them via its `colored` config even with stdio piped from Node, and they
@@ -1839,6 +1908,57 @@ export class DependencyManager {
     });
     // eslint-disable-next-line no-control-regex
     const toolDir = toolDirStdout.replace(/\[[0-9;]*m/g, "").trim();
+    await this.writeYtDlpLauncher(dep, toolDir, "uv tool install completed but expected entry point not found");
+    return "uv";
+  }
+
+  /**
+   * A yt-dlp repair that needs no network (UV-2): the launcher in `<LIBI_HOME>/bin` is broken but the uv tool venv
+   * behind it is intact, so only the launcher is rewritten — no `uv tool install --reinstall`, which needs PyPI.
+   *
+   * Only when all of these hold, else false and the caller installs through uv as before:
+   *   - the install token is current: a fresh install or a YT_DLP_UV_TOKEN bump is what `--reinstall` is FOR
+   *     (it lands the current upstream yt-dlp);
+   *   - the launcher is not usable (`checkYtDlpLauncher`), or the caller saw it fail to start
+   *     (`launcherFailed`): with a healthy launcher, a Settings Re-download stays a real reinstall;
+   *   - the canonical entry point (`<uv tool dir>/yt-dlp/<bin>/yt-dlp`) exists and answers `--version`
+   *     within YT_DLP_VERSION_TIMEOUT_MS.
+   */
+  private async repairYtDlpLauncherOnly(dep: BundledDependency, launcherFailed: boolean): Promise<boolean> {
+    let token = "";
+    try {
+      token = fs.readFileSync(ytDlpTokenPath(getLibiBinDir()), "utf-8").trim();
+    } catch {
+      token = "";
+    }
+    if (token !== YT_DLP_UV_TOKEN) return false;
+    if (!launcherFailed && checkYtDlpLauncher().ok) return false;
+    // `uv tool dir` answers UV_TOOL_DIR as given, and buildUvEnv pins that to uvToolDir().
+    const toolDir = uvToolDir();
+    const entry = path.join(toolDir, "yt-dlp", isWindows() ? "Scripts" : "bin", `yt-dlp${exeSuffix()}`);
+    if (!fs.existsSync(entry)) return false;
+    try {
+      await execFileAsync(entry, ["--version"], { timeout: YT_DLP_VERSION_TIMEOUT_MS, windowsHide: true });
+    } catch (err) {
+      logger.info(
+        { tag: "deps", op: "launcher_only_repair_skipped", binary: dep.binary, entry, err: (err as Error).message },
+        "yt-dlp's tool venv does not run; reinstalling it through uv",
+      );
+      return false;
+    }
+    logger.info(
+      { tag: "deps", op: "launcher_only_repair", binary: dep.binary, entry, launcherFailed },
+      "yt-dlp's tool venv is intact; rewriting only its launcher (no uv, no network)",
+    );
+    await this.writeYtDlpLauncher(dep, toolDir, "yt-dlp's entry point vanished during the launcher repair");
+    return true;
+  }
+
+  /**
+   * Write `<LIBI_HOME>/bin/yt-dlp` (or `yt-dlp.cmd`) for the tool venv under `toolDir`, with SSL_CERT_FILE from its
+   * certifi, then stamp the install token. `missingEntry` words the error when the venv has no entry point.
+   */
+  private async writeYtDlpLauncher(dep: BundledDependency, toolDir: string, missingEntry: string): Promise<void> {
     // A uv/PEP-405 venv puts entry points in `Scripts\` on Windows and `bin/`
     // everywhere else. Getting the FILENAME right (.exe) but not the DIRECTORY
     // meant this threw "expected entry point not found" on every Windows boot —
@@ -1852,9 +1972,7 @@ export class DependencyManager {
       `yt-dlp${exeSuffix()}`,
     );
     if (!fs.existsSync(ytDlpEntryAsListed)) {
-      throw new Error(
-        `uv tool install completed but expected entry point not found: ${ytDlpEntryAsListed}`,
-      );
+      throw new Error(`${missingEntry}: ${ytDlpEntryAsListed}`);
     }
     // Bake the CANONICAL path into the launcher, never the one uv reported.
     // `uv tool dir` answers with UV_TOOL_DIR as given — `<LIBI_HOME>/uv/tools`
@@ -1927,8 +2045,8 @@ export class DependencyManager {
         `)\r\n`;
       fs.writeFileSync(cmdPath, `@echo off\r\n${certLine}${guard}`);
       logger.info(
-        { binary: dep.binary, ytDlpEntry, wrapperPath: cmdPath, hasCertifi: !!certifiPath },
-        "Wrote yt-dlp.cmd wrapper into ~/.libi/bin",
+        { tag: "deps", op: "wrapper_written", binary: dep.binary, ytDlpEntry, wrapperPath: cmdPath, hasCertifi: !!certifiPath },
+        `Wrote yt-dlp.cmd wrapper into ${getLibiBinDir()}`,
       );
     } else {
       // Unix: shell wrapper that exports SSL_CERT_FILE then execs the real
@@ -1953,8 +2071,8 @@ export class DependencyManager {
         `exec "${ytDlpEntry}" --no-playlist "$@"\n`;
       fs.writeFileSync(wrapperPath, script, { mode: 0o755 });
       logger.info(
-        { binary: dep.binary, ytDlpEntry, wrapperPath, hasCertifi: !!certifiPath },
-        "Wrote yt-dlp wrapper into ~/.libi/bin with SSL_CERT_FILE from uv's certifi",
+        { tag: "deps", op: "wrapper_written", binary: dep.binary, ytDlpEntry, wrapperPath, hasCertifi: !!certifiPath },
+        `Wrote yt-dlp wrapper into ${getLibiBinDir()} with SSL_CERT_FILE from uv's certifi`,
       );
     }
 
@@ -2022,7 +2140,7 @@ export class DependencyManager {
       fs.writeFileSync(p, dep.pinnedInstallToken, "utf-8");
     } catch (err) {
       logger.warn(
-        { binary: dep.binary, err: err instanceof Error ? err.message : String(err) },
+        { tag: "deps", op: "install_token_write_failed", binary: dep.binary, err: err instanceof Error ? err.message : String(err) },
         "Failed to write install-token marker — re-installs will retrigger until fixed",
       );
     }
@@ -2058,7 +2176,7 @@ export class DependencyManager {
   ): Promise<void> {
     const binaries = deps.map((d) => d.binary);
     const label = binaries.join(", ");
-    logger.info({ url, binaries }, "Downloading dependency");
+    logger.info({ tag: "deps", op: "download_start", url, binaries }, "Downloading dependency");
     // Task #54: stall-guarded download. The transport is still
     // `fetchWithHttpsOnlyRedirects` (RC-E: manual redirects, HTTPS-only), but
     // wrapped with an IDLE deadline (re-armed on every chunk — a slow but
@@ -2074,6 +2192,8 @@ export class DependencyManager {
       onRetry: ({ attempt, maxAttempts, delayMs, error, bytesDownloaded, bytesTotal }: DownloadRetryInfo) => {
         logger.warn(
           {
+            tag: "deps",
+            op: "download_retry",
             url,
             binaries,
             attempt,
@@ -2104,7 +2224,7 @@ export class DependencyManager {
       const binPath = this.getBinaryPath(dep.binary);
       await this.placeBinary(dep, binPath, (tmp) => fs.writeFileSync(tmp, buffer));
       this.writeInstallToken(dep);
-      logger.info({ binary: dep.binary, path: binPath }, "Dependency installed");
+      logger.info({ tag: "deps", op: "installed", binary: dep.binary, path: binPath }, "Dependency installed");
       return;
     }
 
@@ -2128,7 +2248,7 @@ export class DependencyManager {
         const destPath = this.getBinaryPath(dep.binary);
         await this.placeBinary(dep, destPath, (tmp) => fs.copyFileSync(extracted, tmp));
         this.writeInstallToken(dep);
-        logger.info({ binary: dep.binary, path: destPath }, "Dependency installed");
+        logger.info({ tag: "deps", op: "installed", binary: dep.binary, path: destPath }, "Dependency installed");
       }
     } finally {
       try {

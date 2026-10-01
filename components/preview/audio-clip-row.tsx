@@ -6,6 +6,7 @@ import { Waveform } from "./waveform";
 import { useAudioClipPosition } from "@/hooks/preview/use-audio-clip-position";
 import { dragToTiming } from "@/lib/preview/audio-clip-drag";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
+import { CopyrightBadge } from "./copyright-badge";
 
 interface AudioClipRowProps {
   clip: AudioClip;
@@ -17,6 +18,8 @@ interface AudioClipRowProps {
   audible: boolean;
   /** Is this clip the current inspector selection? Adds a selected ring. */
   selected?: boolean;
+  /** The clip's file is copyrighted (©). */
+  copyrighted?: boolean;
   onToggleEnabled: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
   /** Click the bar (not the mute button) to select it in the inspector. */
@@ -34,6 +37,7 @@ export default function AudioClipRow({
   trackWidth = 0,
   audible,
   selected,
+  copyrighted,
   onToggleEnabled,
   onContextMenu,
   onSelect,
@@ -153,6 +157,7 @@ export default function AudioClipRow({
           </svg>
         )}
       </button>
+      {copyrighted && <CopyrightBadge />}
       <span className="relative z-10 truncate text-[10px] text-foreground/70">
         {displayLabel}
       </span>

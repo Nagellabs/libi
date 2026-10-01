@@ -12,6 +12,7 @@ import { recomputeTextOverlayRect } from "@/lib/captions/persist-rect";
 import { flattenCaption } from "@/lib/captions/flat-guard";
 import { approxLegacyMeasure, normalizeLegacyTextOverlay } from "@/lib/captions/legacy-normalize";
 import type { TextOverlay } from "@/lib/engine/types";
+import type { PendingMusic } from "@/lib/templates/pending-music";
 import { serverLogger as logger } from "@/lib/logger";
 import { unresolvedFamilies, familyFromFont } from "@/lib/fonts/resolve";
 import { sanitizeDuck } from "@/lib/audio/duck-params";
@@ -291,6 +292,8 @@ export interface CompositionManifest {
   fps: number;
   audioClips?: PersistedAudioClip[];
   overlays?: PersistedOverlay[];
+  /** Songs an applied template names but did not carry (lib/templates/pending-music.ts). */
+  pendingMusic?: PendingMusic[];
 }
 
 /** Zod schema for a Vec3 (`{ x, y, z }`) — reused by `transform3dSchema`. */
@@ -340,6 +343,10 @@ export async function hasManifest(pieceId: string): Promise<boolean> {
  * write below would re-create `<storage>/<pieceId>/snapshots/current.json` after the piece
  * DELETE removed the folder (final review P3). A DB that can't be reached (some test contexts)
  * answers false, so the write goes ahead exactly as before.
+ *
+ * This narrows the window, it is not a lock: a load that passes this check just before
+ * `deletePieceCompletely` removes the row and the folder can still land its one snapshot write
+ * after the folder is gone.
  */
 function pieceRowIsGone(pieceId: string): boolean {
   try {

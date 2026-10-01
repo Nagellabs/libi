@@ -94,8 +94,10 @@ try {
   /* best-effort */
 }
 
-function ensureCompiled() {
-  if (fs.existsSync(MAIN)) return;
+// Always recompile (esbuild, ~30 ms): a dev run must launch THIS checkout's current shell and
+// preload, not whatever dist-electron/ was left by an earlier build — a stale preload once hid a
+// new IPC API. Runs after the worktree forward above, so ROOT is the checkout being launched.
+function compileShell() {
   console.log("[dev-electron] Compiling Electron bundle…");
   execFileSync(process.execPath, [path.join(ROOT, "scripts", "build-electron.js")], {
     stdio: "inherit",
@@ -303,7 +305,7 @@ function startCdpBridge(fromPort, toPort) {
     return;
   }
 
-  ensureCompiled();
+  compileShell();
   const { env, port, cdpPort } = await resolveEnv();
   console.log(
     `[dev-electron] LIBI_PORT=${port}  LIBI_CDP_PORT=${cdpPort}  LIBI_HOME=${env.LIBI_HOME ?? "(default ~/.libi)"}`,

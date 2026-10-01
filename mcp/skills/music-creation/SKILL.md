@@ -186,6 +186,8 @@ chosen provider. It handles the approval card and cost disclosure.
 On success, attach the wav to the piece via `libi.audio_add_clip` so
 the user hears it under their visuals.
 
+Music libi's own generators make (`libi.generate_music`) is stamped *generated* and stays in social exports. A provider track you import with `libi.import_remote_files` lands as copyrighted — stamp it with `libi.set_audio_rights({ pieceId, fileId, class: "generated" })` (see the `social-music` skill §1). A song the user downloads or uploads is copyrighted and is handled differently on each platform — see the `social-music` skill.
+
 ## When the track is longer than the piece
 
 A piece has no length of its own — it ends where its last clip ends. So

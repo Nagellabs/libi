@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { JobRunner, JobContext } from "@/lib/jobs/types";
 import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
+import { downloadStamp, type YtDlpInfo } from "@/lib/audio-rights/stamp";
 import { assertPublicHttpUrl } from "@/lib/net/url-guard";
 import { MAX_BYTES } from "@/lib/net/fetch-and-store";
 import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
@@ -25,6 +26,8 @@ import {
 const YT_DLP_EXTENSION_ID = "youtube-download";
 const UV_DEP_BINARY = "uv";
 const YT_DLP_DEP_BINARY = "yt-dlp";
+/** How often a waiting install checks whether its job was cancelled. */
+const CANCEL_POLL_MS = 250;
 
 /** How long a cancelled child gets to honour SIGTERM before SIGKILL. yt-dlp
  *  normally exits on SIGTERM within milliseconds; the escalation exists for a
@@ -47,6 +50,11 @@ export const UNKNOWN_SIZE_REPORT_MS = 1_000;
  *  table with its `MiB`/`MB` spellings is a different parser, used for
  *  format filters, not for this option. */
 const MAX_FILESIZE_ARG = `${MAX_BYTES / (1024 * 1024)}M`;
+
+/** yt-dlp writes the download's metadata here (`-o infojson:<dir>/libi-meta`),
+ *  which is how the stored file gets its rights stamp (track, artist, page). */
+export const INFO_JSON_STEM = "libi-meta";
+const INFO_JSON_FILE = `${INFO_JSON_STEM}.info.json`;
 
 const videoDownloadParamsSchema = z.object({
   url: z.string(),
@@ -385,6 +393,10 @@ async function download(
     MAX_FILESIZE_ARG,
     ...ffmpegLocationArgs(),
     ...jsRuntimeArgs(),
+    "--write-info-json",
+    // Its own output template, BEFORE the media `-o`: the media template stays the last `-o`.
+    "-o",
+    `infojson:${path.join(outDir, INFO_JSON_STEM)}`,
     "-o",
     path.join(outDir, "%(title).150s.%(ext)s"),
     ...(audioOnly
@@ -481,7 +493,7 @@ async function download(
   }
   // A run that could not produce a finished file must FAIL, not register
   // whatever is lying in the temp dir. See `isPartialArtifact`.
-  const complete = entries.filter((e) => !isPartialArtifact(e));
+  const complete = entries.filter((e) => !isPartialArtifact(e) && e !== INFO_JSON_FILE);
   if (complete.length === 0) {
     logger.warn(
       { tag: "video-download", op: "no_complete_output", entries, capNotice },
@@ -511,6 +523,16 @@ async function download(
   }
   const buffer = await fsAsync.readFile(path.join(outDir, chosen.name));
 
+  // Spec §4.2: a download is someone else's work — copyrighted, with where it came from.
+  let info: YtDlpInfo | null = null;
+  if (entries.includes(INFO_JSON_FILE)) {
+    try {
+      info = JSON.parse(await fsAsync.readFile(path.join(outDir, INFO_JSON_FILE), "utf-8")) as YtDlpInfo;
+    } catch (err) {
+      logger.warn({ tag: "video-download", op: "info_json_unreadable", err: err instanceof Error ? err.message : String(err) }, "yt-dlp info json unreadable; stamping without track");
+    }
+  }
+
   // Registered as an asset the same way every other file-producing path does
   // — `storeFile` writes storage, ffprobes video/audio for duration and
   // dimensions, and inserts the `files` row.
@@ -521,6 +543,7 @@ async function download(
     buffer,
     contentType: mimeFromExtension(chosen.name),
     description: `Downloaded from ${url}`,
+    audioRights: downloadStamp(info, url),
   });
 
   // The terminal row is the stored file's real size — for a merged download
@@ -577,61 +600,116 @@ export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadRe
     // (a deleted worktree, a wiped uv dir) is reinstalled here, before any
     // spawn. uv first: yt-dlp's custom installer shells out to it.
     const dm = new DependencyManager();
-    for (const binary of [UV_DEP_BINARY, YT_DLP_DEP_BINARY]) {
-      try {
-        await dm.ensureDep(YT_DLP_EXTENSION_ID, binary);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(
-          `${YT_DLP_UNAVAILABLE} installing ${binary} (needed to download videos) failed: ${msg}`,
-          { cause: err },
-        );
-      }
-    }
-
-    // One temp dir per run, removed in `finally` whatever happens after this
-    // line — spawn error, non-zero exit, cancel, cap, or a `storeFile` throw.
-    const outDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "libi-ytdlp-"));
+    // A cancelled job stops WAITING on an install another libi (or another job
+    // here) is running — the install-lock wait used to be bounded only by its
+    // 35-min cap. JobManager cancels by flag, so the flag is polled into a signal.
+    const cancel = new AbortController();
+    const cancelPoll = setInterval(() => {
+      if (ctx.shouldCancel() && !cancel.signal.aborted) cancel.abort();
+    }, CANCEL_POLL_MS);
+    cancelPoll.unref?.();
+    const depOpts = { signal: cancel.signal };
     try {
+      for (const binary of [UV_DEP_BINARY, YT_DLP_DEP_BINARY]) {
+        try {
+          await dm.ensureDep(YT_DLP_EXTENSION_ID, binary, depOpts);
+        } catch (err) {
+          if (ctx.shouldCancel()) throw new Error("cancelled");
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(
+            `${YT_DLP_UNAVAILABLE} installing ${binary} (needed to download videos) failed: ${msg}`,
+            { cause: err },
+          );
+        }
+      }
+
+      // One temp dir per run, removed in `finally` whatever happens after this
+      // line — spawn error, non-zero exit, cancel, cap, or a `storeFile` throw.
+      const outDir = await fsAsync.mkdtemp(path.join(os.tmpdir(), "libi-ytdlp-"));
       try {
-        return await download(ctx, outDir);
-      } catch (err) {
-        if (!(err instanceof YtDlpLaunchError) || ctx.shouldCancel()) throw err;
-        // The launcher passed the file checks but still could not start
-        // yt-dlp. Repair ONCE — a forced reinstall rewrites the launcher, and
-        // with the uv tool already on disk that is seconds, not a download —
-        // then try ONCE more. Never a loop: a second launch failure is an
-        // install libi cannot fix from here, and says so.
-        logger.warn(
-          { tag: "video-download", op: "launcher_repair", err: err.message },
-          "yt-dlp could not be started; reinstalling it once and retrying",
-        );
         try {
-          await dm.retryDep(YT_DLP_EXTENSION_ID, YT_DLP_DEP_BINARY);
-        } catch (repairErr) {
-          const msg = repairErr instanceof Error ? repairErr.message : String(repairErr);
-          throw new Error(
-            `${YT_DLP_UNAVAILABLE} yt-dlp could not be started (${err.message}) and reinstalling it failed: ${msg}`,
-            { cause: repairErr },
+          return await download(ctx, outDir);
+        } catch (err) {
+          if (!(err instanceof YtDlpLaunchError) || ctx.shouldCancel()) throw err;
+          // The launcher passed the file checks but still could not start
+          // yt-dlp. Repair ONCE — with the uv tool venv intact only the launcher
+          // is rewritten, offline and in a moment (`launcherFailed`); otherwise a
+          // forced reinstall — then try ONCE more. When only the launcher was
+          // rewritten and that did not help, the real reinstall follows once, with
+          // one last try. Never a loop: what still fails after that is an install
+          // libi cannot fix from here, and the error says what was tried.
+          logger.warn(
+            { tag: "video-download", op: "launcher_repair", err: err.message },
+            "yt-dlp could not be started; repairing it once and retrying",
           );
+          let launcherOnly = false;
+          try {
+            await dm.retryDep(YT_DLP_EXTENSION_ID, YT_DLP_DEP_BINARY, {
+              ...depOpts,
+              launcherFailed: true,
+              onLauncherOnlyRepair: () => {
+                launcherOnly = true;
+              },
+            });
+          } catch (repairErr) {
+            if (ctx.shouldCancel()) throw new Error("cancelled");
+            const msg = repairErr instanceof Error ? repairErr.message : String(repairErr);
+            throw new Error(
+              `${YT_DLP_UNAVAILABLE} yt-dlp could not be started (${err.message}) and reinstalling it failed: ${msg}`,
+              { cause: repairErr },
+            );
+          }
+          let retryErr: unknown;
+          try {
+            const result = await download(ctx, outDir);
+            logger.info(
+              { tag: "video-download", op: "launcher_repaired", launcherOnly },
+              "yt-dlp launcher repaired; download succeeded on the retry",
+            );
+            return result;
+          } catch (e) {
+            if (!(e instanceof YtDlpLaunchError)) throw e;
+            retryErr = e;
+          }
+          if (!launcherOnly) {
+            throw new Error(
+              `${YT_DLP_UNAVAILABLE} yt-dlp still could not be started after libi reinstalled it: ${(retryErr as Error).message}`,
+              { cause: retryErr },
+            );
+          }
+          // Only the launcher was rewritten (the venv answered --version), and that was not enough: the one
+          // remaining fix is the real reinstall through uv — which needs the network — then ONE last try.
+          logger.warn(
+            { tag: "video-download", op: "launcher_only_repair_not_enough", err: (retryErr as Error).message },
+            "rewriting yt-dlp's launcher did not help; reinstalling it through uv once",
+          );
+          try {
+            await dm.retryDep(YT_DLP_EXTENSION_ID, YT_DLP_DEP_BINARY, depOpts);
+          } catch (reinstallErr) {
+            if (ctx.shouldCancel()) throw new Error("cancelled");
+            const msg = reinstallErr instanceof Error ? reinstallErr.message : String(reinstallErr);
+            throw new Error(
+              `${YT_DLP_UNAVAILABLE} yt-dlp could not be started (${(retryErr as Error).message}); rewriting its launcher did not help, and reinstalling it failed: ${msg}`,
+              { cause: reinstallErr },
+            );
+          }
+          try {
+            const result = await download(ctx, outDir);
+            logger.info({ tag: "video-download", op: "launcher_repaired", launcherOnly: false }, "yt-dlp reinstalled; download succeeded");
+            return result;
+          } catch (lastErr) {
+            if (!(lastErr instanceof YtDlpLaunchError)) throw lastErr;
+            throw new Error(
+              `${YT_DLP_UNAVAILABLE} yt-dlp still could not be started after libi rewrote its launcher and reinstalled it: ${lastErr.message}`,
+              { cause: lastErr },
+            );
+          }
         }
-        try {
-          const result = await download(ctx, outDir);
-          logger.info(
-            { tag: "video-download", op: "launcher_repaired" },
-            "yt-dlp launcher repaired; download succeeded on the retry",
-          );
-          return result;
-        } catch (retryErr) {
-          if (!(retryErr instanceof YtDlpLaunchError)) throw retryErr;
-          throw new Error(
-            `${YT_DLP_UNAVAILABLE} yt-dlp still could not be started after libi reinstalled it: ${retryErr.message}`,
-            { cause: retryErr },
-          );
-        }
+      } finally {
+        await rmQuiet(outDir);
       }
     } finally {
-      await rmQuiet(outDir);
+      clearInterval(cancelPoll);
     }
   },
 };

@@ -13,7 +13,7 @@ import { validateScaffold } from "@/lib/templates/scaffold";
 const ROOT = path.resolve(process.cwd(), "__tests__/helpers/fixtures/templates");
 
 describe("committed template fixtures", () => {
-  for (const name of ["lower-third", "injected", "hostile-media"]) {
+  for (const name of ["lower-third", "injected", "hostile-media", "music-link"]) {
     it(`${name}/template.json validates`, () => {
       const dir = path.join(ROOT, name);
       const v = validateScaffold(JSON.parse(fs.readFileSync(path.join(dir, "template.json"), "utf8")));

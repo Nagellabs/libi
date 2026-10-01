@@ -189,16 +189,62 @@ export async function newTmpExportDirsSince(before: string[]): Promise<string[]>
  * Consumers follow the fixture-guard pattern:
  *   if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
  *   describe.skipIf(!hasFfmpeg())(…)
+ *
+ * With `LIBI_REQUIRE_FFMPEG=1` (set by every CI gates job) a missing ffmpeg
+ * THROWS instead of returning false. A skip is right on a bare dev clone and
+ * wrong in CI: 0.1.16's release gates installed no ffmpeg, every real-ffmpeg
+ * test skipped through this guard, and the gates went green over coverage they
+ * never ran.
  */
 let ffmpegPresent: boolean | null = null;
+let ffmpegProbeFailure = "";
+
+/**
+ * The `ffmpeg -version` probe's bound. It was 2 s, which a loaded CI runner can
+ * miss while paging in a ~100 MB static binary — and every consumer file
+ * probes at collect time, in parallel. Harmless as a skip; as a failure under
+ * LIBI_REQUIRE_FFMPEG it would send someone debugging the install instead of
+ * the timeout. `LIBI_FFMPEG_PROBE_TIMEOUT_MS` overrides it (tests).
+ */
+function probeTimeoutMs(): number {
+  const n = Number(process.env.LIBI_FFMPEG_PROBE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 10_000;
+}
+
+/** Why the probe failed, in words that point at the right cause. */
+function describeProbeFailure(err: unknown, bin: string, timeoutMs: number): string {
+  const e = err as NodeJS.ErrnoException & { signal?: string | null; status?: number | null };
+  if (e?.code === "ETIMEDOUT") {
+    return `the probe \`${bin} -version\` TIMED OUT after ${timeoutMs} ms — ffmpeg was found but did not answer in time (a loaded machine?), so this is not a missing install`;
+  }
+  if (e?.code === "ENOENT") {
+    return `ffmpeg was not found (resolved to "${bin}" via <LIBI_HOME>/bin, then PATH)`;
+  }
+  if (typeof e?.status === "number") {
+    return `\`${bin} -version\` ran but exited with status ${e.status}`;
+  }
+  if (e?.signal) return `\`${bin} -version\` was killed by ${e.signal}`;
+  return `\`${bin} -version\` failed: ${e?.message ?? String(err)}`;
+}
 
 export function hasFfmpeg(): boolean {
-  if (ffmpegPresent !== null) return ffmpegPresent;
-  try {
-    execFileSync(resolveFfmpegPath(), ["-version"], { stdio: "ignore", timeout: 2000 });
-    ffmpegPresent = true;
-  } catch {
-    ffmpegPresent = false;
+  if (ffmpegPresent === null) {
+    const bin = resolveFfmpegPath();
+    const timeoutMs = probeTimeoutMs();
+    try {
+      execFileSync(bin, ["-version"], { stdio: "ignore", timeout: timeoutMs });
+      ffmpegPresent = true;
+    } catch (err) {
+      ffmpegPresent = false;
+      ffmpegProbeFailure = describeProbeFailure(err, bin, timeoutMs);
+    }
+  }
+  if (!ffmpegPresent && process.env.LIBI_REQUIRE_FFMPEG === "1") {
+    throw new Error(
+      `LIBI_REQUIRE_FFMPEG=1 but ${ffmpegProbeFailure}. This environment must run the ` +
+        "real-ffmpeg tests, not skip them. In CI the gates job's setup-ffmpeg step " +
+        "(.github/actions/setup-ffmpeg) installs ffmpeg into /usr/local/bin; read its log first.",
+    );
   }
   return ffmpegPresent;
 }

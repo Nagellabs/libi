@@ -12,6 +12,7 @@ import { getLibiStorageDir } from "@/lib/libi-home";
 import { buildAudioProxyArgs, buildProxyArgs, proxyStreamsFor } from "@/lib/proxy/args";
 import { evictProxiesIfOverBudget } from "@/lib/proxy/lru";
 import { navigationEmitter } from "@/lib/navigation-events";
+import { proxyNameFor } from "@/lib/files/move-derived";
 import type { JobContext, JobRunner } from "@/lib/jobs/types";
 
 const proxyGenParamsSchema = z.object({
@@ -93,8 +94,7 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       .where(eq(files.id, file.id))
       .run();
 
-    const baseName = path.basename(file.filename, path.extname(file.filename));
-    const proxyName = `${baseName}-proxy.${audioOnly ? "m4a" : "mp4"}`;
+    const proxyName = proxyNameFor(file.filename, audioOnly ? "m4a" : "mp4");
     const proxyPath = path.join(sourceDir, proxyName);
 
     try {
@@ -187,11 +187,31 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
         }
       }
 
+      // The file may have moved while ffmpeg ran (assign_file into a piece, a
+      // rename): the proxy belongs beside the file as it is NOW, under the
+      // name its current filename gives, or the proxy route 404s for good.
+      const [now] = db.select().from(files).where(eq(files.id, file.id)).limit(1).all();
+      if (!now) {
+        fs.rmSync(proxyPath, { force: true });
+        throw new Error(`file deleted while its proxy was made: ${file.id}`);
+      }
+      let finalName = proxyName;
+      if (now.pieceId !== file.pieceId || now.filename !== file.filename) {
+        finalName = proxyNameFor(now.filename, audioOnly ? "m4a" : "mp4");
+        const finalDir = path.join(getLibiStorageDir(), now.pieceId ?? "_global");
+        fs.mkdirSync(finalDir, { recursive: true });
+        fs.renameSync(proxyPath, path.join(finalDir, finalName));
+        proxyLogger.info(
+          { tag: "proxy", op: "proxy_followed_moved_file", fileId: file.id, fromPieceId: file.pieceId, toPieceId: now.pieceId },
+          "proxy.followed_moved_file",
+        );
+      }
+
       // Update files row — the URL picker reads from here.
       const generatedAt = new Date();
       db.update(files)
         .set({
-          proxyFilename: proxyName,
+          proxyFilename: finalName,
           proxyStatus: "ready",
           proxyGeneratedAt: generatedAt,
           proxyHeight,
@@ -202,10 +222,10 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
       // SSE: nudge the browser so useFiles() refetches and the preview
       // re-picks the now-ready proxy URL. Mirrors the old ProxyManager.
       try {
-        if (file.pieceId) {
+        if (now.pieceId) {
           navigationEmitter.emit("refresh_query", {
             queryKey: "piece",
-            pieceId: file.pieceId,
+            pieceId: now.pieceId,
           });
         } else {
           navigationEmitter.emit("refresh_query", { queryKey: "files" });
@@ -224,7 +244,7 @@ export const proxyGenRunner: JobRunner<ProxyGenParams, ProxyGenResult> = {
 
       return {
         fileId: file.id,
-        proxyFilename: proxyName,
+        proxyFilename: finalName,
         generatedAt: generatedAt.toISOString(),
       };
     } catch (err) {

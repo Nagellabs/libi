@@ -8,6 +8,8 @@ import { trackServerEvent } from "@/lib/analytics/server";
 import { socialRoute, jsonBody } from "@/lib/social/route-helpers";
 import { serverLogger as logger } from "@/lib/logger";
 import { browserOnlyRefusal } from "@/lib/security/request-guard";
+import { targetMusicSchema } from "@/lib/social/music-schema";
+import { goneCatalogTrack, goneTrackMessage } from "@/lib/social/music-validate";
 import type { PostListFilter } from "@/lib/social/types";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +46,7 @@ const targetOptions = z.discriminatedUnion("platform", [
       collaborators: z.array(z.string()).max(3).optional(),
       firstComment: z.string().optional(),
     }),
+    music: targetMusicSchema.optional(),
   }),
   z.object({
     platform: z.literal("tiktok"),
@@ -58,6 +61,7 @@ const targetOptions = z.discriminatedUnion("platform", [
       contentPreviewConfirmed: z.literal(true),
       expressConsentGiven: z.literal(true),
     }),
+    music: targetMusicSchema.optional(),
   }),
 ]);
 
@@ -129,6 +133,14 @@ export async function POST(req: Request): Promise<Response> {
         { status: 422 },
       );
     }
+    // A post that goes out — now, or later unattended — with a track its
+    // platform no longer offers (gone from Instagram's music, or off TikTok's
+    // trending list) would post without it, so it is refused first. A draft
+    // goes nowhere and is not checked.
+    if (input.when.mode !== "draft") {
+      const gone = await withAdapter((a) => goneCatalogTrack(a, input.targets));
+      if (gone) return NextResponse.json({ error: "validation", message: goneTrackMessage(gone) }, { status: 422 });
+    }
     const providerId = getSocialSettings().providerId!;
     const result = await withAdapter((a) => a.createPost(input));
     insertLink({ providerId, providerPostId: result.post.id, pieceId: input.libi.pieceId, exportPath: exportPath ?? null, requestId: input.requestId, createdBy });
@@ -140,6 +152,9 @@ export async function POST(req: Request): Promise<Response> {
       mode: input.when.mode,
       source: createdBy,
     });
+    for (const t of input.targets) {
+      if (t.options.music) trackServerEvent("social_music_plan", { platform: t.platform, mode: t.options.music.mode });
+    }
     return NextResponse.json(result);
   });
 }

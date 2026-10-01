@@ -41,8 +41,9 @@ import {
 } from "@/lib/overlays/keyframes";
 import { resolveOverlayTransform } from "@/lib/engine/overlay-transform";
 import { IDENTITY_TRANSFORM3D } from "@/lib/overlays/transform3d";
-import { readWordsFromAnalysis } from "@/mcp/tools/caption-tools";
-import { windowWordsToElementLocal } from "@/lib/captions/window";
+import { readWordsFromAnalysis, wordsOnTimeline } from "@/mcp/tools/caption-tools";
+import { windowWordsToElementLocal, wordsSaidByText } from "@/lib/captions/window";
+import type { CaptionGroupRef } from "@/lib/captions/types";
 import { EASING_PRESETS } from "@/lib/engine/easing-registry";
 import type { Overlay, OverlayRect, Transform3D, OverlayKeyframes } from "@/lib/engine/types";
 import type { ToolResult } from "./types";
@@ -602,6 +603,7 @@ export async function updateOverlay(params: UpdateOverlayParams): Promise<ToolRe
   // element-local snapshot is stored as `caption.words` so the body voice-syncs
   // via the injected helpers instead of embedding timings. `captionFromFileId` is
   // a directive, not a stored field — resolve it, then drop it from the patch.
+  let captionNote: string | undefined;
   if (typeof cleanPatch.captionFromFileId === "string") {
     const fileId = cleanPatch.captionFromFileId;
     delete cleanPatch.captionFromFileId;
@@ -611,22 +613,90 @@ export async function updateOverlay(params: UpdateOverlayParams): Promise<ToolRe
       | undefined;
     const startTime = (cleanPatch.startTime as number | undefined) ?? current?.startTime ?? 0;
     const duration = (cleanPatch.duration as number | undefined) ?? current?.duration ?? 0;
+    // Whisper's words are SOURCE-file seconds; the overlay's window is on the
+    // TIMELINE. Map them through where the file plays (its audio clip or video
+    // overlay, trim and position included) before windowing — else a clip at
+    // 2 s hands this overlay the words spoken 2 s later. A file with no window
+    // on the timeline keeps the source-time windowing.
     const abs = await readWordsFromAnalysis(fileId);
-    const words = windowWordsToElementLocal(abs, startTime, duration);
-    if (words.length === 0) {
-      return {
-        success: false,
-        error: "no_transcript_in_window",
-        data: {
-          hint: `No spoken words from file ${fileId} overlap this overlay's window (${startTime.toFixed(2)}s–${(startTime + duration).toFixed(2)}s). Transcribe the file first (audio-analysis) or check the overlay's timing.`,
-        },
-      };
+    const mapped = wordsOnTimeline(abs, manifest.overlays ?? [], manifest.audioClips ?? [], fileId);
+    // A TEXT cue owns a word by its start, half-open, and keeps only the words
+    // its text says (karaoke pairs caption.words[i] with the i-th token). A
+    // code/three caption keeps the inclusive overlap.
+    const content =
+      current?.kind === "text"
+        ? ((cleanPatch.content as string | undefined) ?? current.content)
+        : undefined;
+    const windowed = windowWordsToElementLocal(mapped ?? abs, startTime, duration, {
+      byStart: content !== undefined,
+    });
+    const range = `${startTime.toFixed(2)}s–${(startTime + duration).toFixed(2)}s`;
+    if (windowed.length === 0) {
+      const hint =
+        abs.length === 0
+          ? `File ${fileId} has no transcript yet. Transcribe it first (audio-analysis).`
+          : mapped !== null && mapped.length === 0
+            ? `File ${fileId} is muted everywhere it plays on the timeline (its clips are off or at zero volume, or its video is hidden), so no words are heard. Unmute it, or caption the file that IS heard.`
+            : mapped !== null
+              ? `No spoken words from file ${fileId} are heard during this overlay's window on the TIMELINE (${range}, mapped through where the file plays). Check the overlay's startTime/duration against the transcript.`
+              : `No spoken words from file ${fileId} overlap this overlay's window (${range}; the file is not on the timeline, so its source time is used). Check the overlay's timing.`;
+      return { success: false, error: "no_transcript_in_window", data: { hint } };
     }
-    cleanPatch.caption = {
-      groupId: `cap-${fileId}-custom`,
-      useTrackStyle: false,
-      words,
-    };
+    let words = windowed;
+    if (content !== undefined) {
+      const realigned = realignCaptionWords(wordsSaidByText(windowed, content), content);
+      words = realigned.words;
+      if (realigned.respread) captionNote = CAPTION_WINDOW_MISMATCH_NOTE;
+    }
+    // A cue of a generate_captions track (`cap-<fileId>`), or an existing
+    // custom caption, keeps its group, style and useTrackStyle — re-splitting
+    // a cue must not detach it from its track. A TEXT overlay with no caption
+    // yet (a cue added to split a line further) joins the file's track when
+    // one exists, taking the look of its nearest cue. Anything else joins the
+    // per-file custom group.
+    const prior = (current as { caption?: CaptionGroupRef } | undefined)?.caption;
+    const trackCue =
+      !prior && current?.kind === "text"
+        ? nearestTrackCue(manifest.overlays ?? [], fileId, overlayId, startTime)
+        : undefined;
+    if (prior && prior.groupId.startsWith(`cap-${fileId}`)) {
+      cleanPatch.caption = { ...prior, words };
+    } else if (trackCue) {
+      const src = trackCue as unknown as Record<string, unknown>;
+      for (const key of TRACK_LOOK_KEYS) {
+        if (key in cleanPatch) continue;
+        cleanPatch[key] = src[key] ?? null; // null clears a look the track doesn't have
+      }
+      const ref = trackCue.caption!;
+      cleanPatch.caption = {
+        groupId: ref.groupId,
+        ...(ref.styleRef ? { styleRef: ref.styleRef } : {}),
+        useTrackStyle: true,
+        words,
+      };
+    } else {
+      cleanPatch.caption = { groupId: `cap-${fileId}-custom`, useTrackStyle: false, words };
+    }
+  }
+
+  // A text edit on a caption that carries per-word timings (karaoke,
+  // word-by-word) must keep `caption.words` saying what the caption says, or
+  // the reveal highlights words that are gone. Skipped when this same patch
+  // sets the caption (captionFromFileId / an explicit caption).
+  if (typeof cleanPatch.content === "string" && cleanPatch.caption === undefined) {
+    const { manifest } = await loadComposition(pieceId);
+    const current = (manifest.overlays ?? []).find((o) => o.id === overlayId) as
+      | { content?: unknown; caption?: { words?: CaptionWord[] } & Record<string, unknown> }
+      | undefined;
+    const oldWords = current?.caption?.words;
+    // An unchanged text (the inline editor commits on blur) touches nothing:
+    // stored words whose count never matched their text keep their timings.
+    const changed = current?.content !== cleanPatch.content;
+    if (changed && current?.caption && oldWords && oldWords.length > 0) {
+      const realigned = realignCaptionWords(oldWords, cleanPatch.content);
+      cleanPatch.caption = { ...current.caption, words: realigned.words };
+      if (realigned.respread) captionNote = CAPTION_RESPREAD_NOTE;
+    }
   }
 
   const ok = await updateOverlayInManifest(pieceId, overlayId, cleanPatch as never);
@@ -660,10 +730,106 @@ export async function updateOverlay(params: UpdateOverlayParams): Promise<ToolRe
   }
 
   overlayLogger.info(
-    { event: "update", pieceId, overlayId, patchFields: Object.keys(cleanPatch) },
+    { op: "update", pieceId, overlayId, patchFields: Object.keys(cleanPatch), ...(captionNote ? { captionWordsRespread: true } : {}) },
     "overlay.update",
   );
-  return { success: true, data: { overlayId } };
+  return { success: true, data: { overlayId, ...(captionNote ? { note: captionNote } : {}) } };
+}
+
+type CaptionWord = { text: string; start: number; end: number };
+
+const CAPTION_WINDOW_MISMATCH_NOTE =
+  "The cue's text doesn't match the words heard in its window, so its word timings were spread over the cue to fit " +
+  "the text; the highlight may run off the speech. Check the cue's startTime/duration against the transcript.";
+
+/** The look + placement a cue shares with its caption track — what a text
+ *  overlay joining the track takes from its nearest cue. Never its text, timing,
+ *  id or effects. */
+const TRACK_LOOK_KEYS = [
+  "font", "fontFileId", "fontFamily", "fontSize", "fontWeight", "lineHeight", "color", "align",
+  "background", "stroke", "shadow", "reveal", "highlightColor", "anchor", "position", "maxWidthPct",
+] as const;
+
+/** The generate_captions cue of `fileId`'s track (still on the track style)
+ *  nearest `startTime`, excluding `overlayId`; undefined when there is no track. */
+function nearestTrackCue(
+  overlays: PersistedOverlay[],
+  fileId: string,
+  overlayId: string,
+  startTime: number,
+): (PersistedOverlay & { caption?: CaptionGroupRef }) | undefined {
+  let best: (PersistedOverlay & { caption?: CaptionGroupRef }) | undefined;
+  for (const o of overlays as Array<PersistedOverlay & { caption?: CaptionGroupRef }>) {
+    const gid = o.caption?.groupId;
+    if (o.id === overlayId || o.kind !== "text" || !gid || o.caption?.useTrackStyle === false) continue;
+    if (!gid.startsWith(`cap-${fileId}`) || gid === `cap-${fileId}-custom`) continue;
+    if (!best || Math.abs(o.startTime - startTime) < Math.abs(best.startTime - startTime)) best = o;
+  }
+  return best;
+}
+
+const CAPTION_RESPREAD_NOTE =
+  "The edited caption has different words, so its word timings were spread over the cue to fit them; " +
+  "the highlight may run slightly off the speech. The edit is kept (re-running generate_captions would replace it).";
+
+/** A token that is a spoken word: it holds a letter or a digit. Punctuation,
+ *  dashes and emoji standing alone are not (they have no timing of their own). */
+function isSpokenToken(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
+/**
+ * Re-key a caption's element-local word timings to its NEW text. The renderer
+ * matches `caption.words[i]` to the i-th whitespace token, so the result has
+ * one entry per token.
+ * - Same token count → each timing kept, each word replaced (a typo fix, a
+ *   reworded word, punctuation glued to a word).
+ * - Same count of SPOKEN tokens (only a standalone emoji, dash or punctuation
+ *   mark was added or removed) → every spoken word keeps its own timing, and a
+ *   non-spoken token rides its neighbour's (the one before it, else after).
+ * - A real word change (the spoken-word count differs) has no word-for-word
+ *   mapping, so the tokens are spread over the old span (first start → last
+ *   end) by length — close enough to read in step, not exact
+ *   (`respread: true`, which the result reports). Empty text → no words.
+ */
+function realignCaptionWords(
+  oldWords: CaptionWord[],
+  content: string,
+): { words: CaptionWord[]; respread: boolean } {
+  const tokens = content.split(/\s+/).filter((t) => t.length > 0);
+  if (tokens.length === oldWords.length) {
+    return { words: oldWords.map((w, i) => ({ ...w, text: tokens[i] })), respread: false };
+  }
+  if (tokens.length === 0) return { words: [], respread: true };
+  const oldSpoken = oldWords.filter((w) => isSpokenToken(w.text));
+  const newSpokenCount = tokens.filter(isSpokenToken).length;
+  if (newSpokenCount > 0 && newSpokenCount === oldSpoken.length) {
+    let k = 0;
+    const timed: Array<CaptionWord | null> = tokens.map((text) =>
+      isSpokenToken(text) ? { ...oldSpoken[k++], text } : null,
+    );
+    const words = timed.map((w, i) => {
+      if (w) return w;
+      const before = timed.slice(0, i).reverse().find((x) => x !== null);
+      const after = timed.slice(i + 1).find((x) => x !== null);
+      const ref = (before ?? after)!;
+      return { text: tokens[i], start: ref.start, end: ref.end };
+    });
+    return { words, respread: false };
+  }
+  const spanStart = Math.min(...oldWords.map((w) => w.start));
+  const spanEnd = Math.max(...oldWords.map((w) => w.end));
+  const span = Math.max(0, spanEnd - spanStart);
+  const total = tokens.reduce((n, t) => n + t.length, 0);
+  const round = (x: number) => Number(x.toFixed(3));
+  let cum = 0;
+  const words = tokens.map((text) => {
+    const start = spanStart + (span * cum) / total;
+    cum += text.length;
+    const end = spanStart + (span * cum) / total;
+    return { text, start: round(start), end: round(end) };
+  });
+  return { words, respread: true };
 }
 
 /**

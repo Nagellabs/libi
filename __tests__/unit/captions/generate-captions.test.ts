@@ -31,8 +31,20 @@ describe("generateCaptions — build a caption track from word timings", () => {
       height,
       fps: 30,
       overlays,
-      ...(audioClips ? { audioClips } : {}),
+      audioClips: audioClips ?? coupledClipsFor(overlays),
     });
+  }
+
+  /** A video's sound is its coupled inline clip, which add_overlay creates for
+   *  a file with audio (and a video without one is silent — AUD-1 review I1).
+   *  Seeds that pass no clips get one per video overlay, as a real piece has. */
+  function coupledClipsFor(overlays: Parameters<typeof import("@/lib/composition/persistence").saveManifest>[1]["overlays"] = []) {
+    return overlays
+      .filter((o): o is Extract<typeof o, { kind: "video" }> => o.kind === "video")
+      .map((v) => ({
+        id: `inl-${v.id}`, kind: "inline" as const, fileId: v.fileId, linkedOverlayId: v.id,
+        startTime: v.startTime, duration: v.duration, trimStart: v.trim?.start ?? 0, volume: 1, enabled: true,
+      }));
   }
 
   const words: SttWord[] = [
@@ -153,6 +165,25 @@ describe("generateCaptions — build a caption track from word timings", () => {
     }
     // Group id is stable across restyles (per-file, not per-cue-count).
     expect(second.data!.captionGroupId).toBe(first.data!.captionGroupId);
+  });
+
+  it("re-running keeps a custom code caption attached with captionFromFileId (cap-<fileId>-custom)", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    const custom = {
+      id: "my-code-caption", kind: "code" as const, rect: { x: 0, y: 0, width: 1920, height: 1080 },
+      startTime: 0, duration: 2, z: 60, opacity: 1,
+      caption: { groupId: "cap-f1-custom", useTrackStyle: false, words: [{ text: "Hello", start: 0, end: 0.4 }] },
+    };
+    await seedManifest(saveManifest, getLibiStorageDir, "pcustom", 1920, 1080, [custom as never]);
+    await generateCaptions({ pieceId: "pcustom", fileId: "f1" }, { readWords: async () => words });
+    await generateCaptions({ pieceId: "pcustom", fileId: "f1", style: "karaoke" }, { readWords: async () => words });
+    const overlays = (await loadManifest("pcustom")).overlays ?? [];
+    const kept = overlays.find((o) => o.id === "my-code-caption") as { caption?: { groupId: string } } | undefined;
+    expect(kept?.caption?.groupId).toBe("cap-f1-custom");
+    // The generated track itself is still replaced, not doubled.
+    expect(overlays.filter((o) => (o as { caption?: { groupId?: string } }).caption?.groupId === "cap-f1").length)
+      .toBeGreaterThanOrEqual(1);
+    expect(new Set(overlays.map((o) => o.id)).size).toBe(overlays.length);
   });
 
   it("stores real per-word timings (element-local) on each cue for voice-synced reveals", async () => {
@@ -597,6 +628,7 @@ describe("generateCaptions — build a caption track from word timings", () => {
       rect: { x: 0, y: 0, width: 1920, height: 1080 }, z: 0, opacity: 1,
     };
     await seedManifest(saveManifest, getLibiStorageDir, "pfree", 1920, 1080, [video], [
+      audioClip({ id: "inl-vid-1", kind: "inline", linkedOverlayId: "vid-1", startTime: 1, duration: 5 }),
       audioClip({ id: "aud-free", startTime: 1, duration: 5, trimStart: 0 }),
     ]);
     await generateCaptions({ pieceId: "pfree", fileId: "f1" }, { readWords: async () => words });
@@ -615,6 +647,7 @@ describe("generateCaptions — build a caption track from word timings", () => {
       rect: { x: 0, y: 0, width: 1920, height: 1080 }, z: 0, opacity: 1,
     };
     await seedManifest(saveManifest, getLibiStorageDir, "punion", 1920, 1080, [video], [
+      audioClip({ id: "inl-vid-1", kind: "inline", linkedOverlayId: "vid-1", startTime: 0, duration: 3 }),
       audioClip({ startTime: 2, duration: 4, trimStart: 2 }),
     ]);
     const w: SttWord[] = [
@@ -631,6 +664,102 @@ describe("generateCaptions — build a caption track from word timings", () => {
     expect(last.startTime + last.duration).toBeLessThanOrEqual(6 + 1e-6);
   });
 
+  // ── AUD-1: only what the viewer can hear ─────────────────────────────────
+  // A hidden video (the eye toggle) is not heard — its coupled audio is not
+  // scheduled — and a muted (enabled: false) or zero-volume clip is silent.
+  // Neither may produce cues; a visible, unmuted window still does.
+  const vid = (over: Partial<{ id: string; startTime: number; duration: number; hidden: boolean }> = {}) => ({
+    id: "vid-1", kind: "video" as const, fileId: "f1",
+    startTime: 0, duration: 5,
+    rect: { x: 0, y: 0, width: 1920, height: 1080 }, z: 0, opacity: 1,
+    ...over,
+  });
+
+  it("AUD-1: a hidden video and a muted clip give no cues; the visible, unmuted clip still does", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paud1", 1920, 1080, [vid({ hidden: true })], [
+      audioClip({ id: "inl", kind: "inline", linkedOverlayId: "vid-1", startTime: 0, duration: 5 }),
+      { ...audioClip({ id: "muted", startTime: 10, duration: 5 }), enabled: false },
+      audioClip({ id: "heard", startTime: 20, duration: 5 }),
+    ]);
+    const result = await generateCaptions({ pieceId: "paud1", fileId: "f1" }, { readWords: async () => words });
+    expect(result.success).toBe(true);
+    const cues = await textCues(loadManifest, "paud1");
+    expect(cues.map((c) => c.content).join(" ")).toBe("Hello there world");
+    for (const c of cues) expect(c.startTime).toBeGreaterThanOrEqual(20 - 1e-6);
+  });
+
+  it("AUD-1 (review I1): a video whose audio clip was REMOVED is silent; the one that kept it is captioned", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudrm", 1920, 1080, [vid(), vid({ id: "vid-2", startTime: 6 })], [
+      audioClip({ id: "inl-2", kind: "inline", linkedOverlayId: "vid-2", startTime: 6, duration: 5 }),
+    ]);
+    await generateCaptions({ pieceId: "paudrm", fileId: "f1" }, { readWords: async () => words });
+    const cues = await textCues(loadManifest, "paudrm");
+    expect(cues.map((c) => c.content).join(" ")).toBe("Hello there world");
+    for (const c of cues) expect(c.startTime).toBeGreaterThanOrEqual(6 - 1e-6);
+  });
+
+  it("AUD-1 (review I1): the file's only video has had its audio removed → no cues, the silent hint", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudrm0", 1920, 1080, [vid()], []);
+    const result = await generateCaptions({ pieceId: "paudrm0", fileId: "f1" }, { readWords: async () => words });
+    expect(result.data!.cueCount).toBe(0);
+    expect(result.data!.hint).toMatch(/has had its audio removed/);
+    expect(await textCues(loadManifest, "paudrm0")).toEqual([]);
+  });
+
+  it("AUD-1: a zero-volume clip is muted too", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudv0", 1920, 1080, [], [
+      { ...audioClip({ id: "silent", startTime: 0, duration: 5 }), volume: 0 },
+      audioClip({ id: "heard", startTime: 8, duration: 5 }),
+    ]);
+    await generateCaptions({ pieceId: "paudv0", fileId: "f1" }, { readWords: async () => words });
+    const cues = await textCues(loadManifest, "paudv0");
+    expect(cues.length).toBeGreaterThanOrEqual(1);
+    for (const c of cues) expect(c.startTime).toBeGreaterThanOrEqual(8 - 1e-6);
+  });
+
+  it("AUD-1: a visible video whose coupled audio is muted is not captioned", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudmv", 1920, 1080, [vid(), vid({ id: "vid-2", startTime: 6 })], [
+      { ...audioClip({ id: "inl-1", kind: "inline", linkedOverlayId: "vid-1", startTime: 0, duration: 5 }), enabled: false },
+      audioClip({ id: "inl-2", kind: "inline", linkedOverlayId: "vid-2", startTime: 6, duration: 5 }),
+    ]);
+    await generateCaptions({ pieceId: "paudmv", fileId: "f1" }, { readWords: async () => words });
+    const cues = await textCues(loadManifest, "paudmv");
+    expect(cues.map((c) => c.content).join(" ")).toBe("Hello there world");
+    for (const c of cues) expect(c.startTime).toBeGreaterThanOrEqual(6 - 1e-6);
+  });
+
+  it("AUD-1: a DETACHED clip of a hidden video is still heard, so it is still captioned", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudhd", 1920, 1080, [vid({ hidden: true })], [
+      audioClip({ kind: "standalone", linkedOverlayId: "vid-1", startTime: 3, duration: 5 }),
+    ]);
+    await generateCaptions({ pieceId: "paudhd", fileId: "f1" }, { readWords: async () => words });
+    const cues = await textCues(loadManifest, "paudhd");
+    expect(cues.map((c) => c.content).join(" ")).toBe("Hello there world");
+    expect(cues[0].startTime).toBeCloseTo(3, 5);
+  });
+
+  it("AUD-1: when every window is hidden or muted, no cues at raw source time — cueCount 0 and a hint saying why", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "paudnone", 1920, 1080, [vid({ hidden: true })], [
+      { ...audioClip({ id: "muted", startTime: 10, duration: 5 }), enabled: false },
+    ]);
+    const result = await generateCaptions({ pieceId: "paudnone", fileId: "f1" }, { readWords: async () => words });
+    expect(result.success).toBe(true);
+    expect(result.data!.cueCount).toBe(0);
+    expect(result.data!.hint).toBe(
+      "Every video overlay and audio clip for this file is hidden, muted or has had its audio removed, " +
+        "so nothing of it is heard; no captions were created. Caption the file that IS heard instead " +
+        "(e.g. a replacement voiceover: pass that audio clip's own fileId).",
+    );
+    expect(await textCues(loadManifest, "paudnone")).toEqual([]);
+  });
+
   it("returns no_transcript when there are no spoken words", async () => {
     const { generateCaptions, saveManifest, getLibiStorageDir } = await setup();
     const pieceId = "p2";
@@ -643,5 +772,22 @@ describe("generateCaptions — build a caption track from word timings", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBe("no_transcript");
+  });
+
+  it("a 9:16 piece never gets a cue longer than two canvas-sized lines", async () => {
+    const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
+    await seedManifest(saveManifest, getLibiStorageDir, "p916", 1080, 1920);
+    const long: SttWord[] = Array.from({ length: 24 }, (_, i) => ({
+      text: ["caption", "timing", "across", "narrow", "frames", "matters"][i % 6],
+      start: i * 0.4,
+      end: i * 0.4 + 0.35,
+      type: "word",
+    }));
+    const r = await generateCaptions({ pieceId: "p916", fileId: "f1" }, { readWords: async () => long });
+    expect(r.success).toBe(true);
+    const overlays = (await loadManifest("p916")).overlays ?? [];
+    expect(overlays.length).toBeGreaterThan(3); // 24 words no longer fit in two 64-char cues
+    // 16 chars/line at 90 px on a 1080-wide canvas; a cue may overrun by less than one word.
+    for (const o of overlays) expect((o as { content: string }).content.length).toBeLessThanOrEqual(2 * 16 + 7);
   });
 });

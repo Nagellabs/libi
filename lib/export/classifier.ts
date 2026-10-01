@@ -14,14 +14,37 @@ export type ExportShape =
   | { tag: "canvas-source" }
   | { tag: "error"; reason: string };
 
+/** The env flag that routes the fallback to the in-browser canvas-source export. */
+export const BROWSER_CANVAS_EXPORT_FLAG = "LIBI_EXPORT_USE_BROWSER_CANVAS";
+
+/**
+ * True when anything in the composition would be heard: an audio clip that is
+ * switched on at a non-zero volume — a standalone track, or a video's own
+ * audio (its inline clip). Pure; says nothing about whether the source file
+ * really has an audio stream, so it errs toward "audible".
+ */
+export function compHasAudibleAudio(comp: Composition): boolean {
+  return (comp.audioClips ?? []).some((c) => c.enabled !== false && !(c.volume <= 0));
+}
+
 /**
  * Default fallback for compositions the ffmpeg server backends can't render.
- * Routes to the new off-browser Chromium renderer by default; honors the
- * `LIBI_EXPORT_USE_BROWSER_CANVAS=1` emergency flag to fall back to the
- * original in-browser MediaBunny CanvasSource pipeline during rollout.
+ * Routes to the new off-browser Chromium renderer by default; the
+ * `LIBI_EXPORT_USE_BROWSER_CANVAS=1` flag below would fall back to the
+ * original in-browser MediaBunny CanvasSource pipeline instead — but never
+ * for a composition with sound: that pipeline encodes video only
+ * (lib/engine/export.ts has no audio track), so it would export the piece
+ * silent. Chromium-render muxes the audio.
+ *
+ * The flag is read via plain `process.env` (not `NEXT_PUBLIC_`-prefixed), so
+ * Next never inlines it into the client bundle: this is server-side
+ * classification only, and the browser router's own call to
+ * `classifyExportShape` (`lib/export/router.ts`) never sees it set. Today
+ * that makes the flag a no-op end to end — plumbing it through to the
+ * browser, or removing it, is a separate change.
  */
-function fallbackShape(): ExportShape {
-  return process.env.LIBI_EXPORT_USE_BROWSER_CANVAS === "1"
+function fallbackShape(comp: Composition): ExportShape {
+  return process.env[BROWSER_CANVAS_EXPORT_FLAG] === "1" && !compHasAudibleAudio(comp)
     ? { tag: "canvas-source" }
     : { tag: "chromium-render" };
 }
@@ -93,9 +116,12 @@ function outlivesBase(comp: Composition, baseDuration: number): boolean {
  *     can't render server-side: comps with no resolvable base, or comps
  *     containing a `code`-kind overlay in `comp.overlays[]`. Runs off-browser
  *     in headless Chromium.
- *   canvas-source    — emergency fallback (enabled via
- *     `LIBI_EXPORT_USE_BROWSER_CANVAS=1`). Runs in the user's browser
- *     tab via the existing MediaBunny CanvasSource loop.
+ *   canvas-source    — would run in the user's browser tab via the existing
+ *     MediaBunny CanvasSource loop, gated on `LIBI_EXPORT_USE_BROWSER_CANVAS=1`
+ *     (see `fallbackShape` above: server-side classification only, the
+ *     browser router never sees it, so this tag is currently unreachable in
+ *     practice). Would never be chosen for a composition with audible audio
+ *     (it can't encode sound).
  */
 export function classifyExportShape(comp: Composition): ExportShape {
   // Only a truly-empty piece has nothing to export. The base for the ffmpeg
@@ -180,7 +206,7 @@ export function classifyExportShape(comp: Composition): ExportShape {
     // Measure against the base's CLAMPED output length — the backends cut at
     // `min(trim.end, start + duration)`, so a trim shorter than the layer's
     // timeline duration moves the truncation boundary earlier.
-    if (outlivesBase(comp, baseTimeRange(base).duration)) return fallbackShape();
+    if (outlivesBase(comp, baseTimeRange(base).duration)) return fallbackShape(comp);
 
     // Overlays the ffmpeg graph cannot reproduce force the fallback. Checked
     // BEFORE the ffmpeg-overlay/stream-copy split because these apply to both:
@@ -196,7 +222,7 @@ export function classifyExportShape(comp: Composition): ExportShape {
       hasTrimmedAssetOverlay ||
       compHasVisualEffects(comp)
     )
-      return fallbackShape();
+      return fallbackShape(comp);
 
     // The base overlay itself is not "an overlay to composite" — it IS the base
     // input `[0:v]`. Only OTHER overlays require the filter graph, so a lone
@@ -211,11 +237,11 @@ export function classifyExportShape(comp: Composition): ExportShape {
     // interleaved in time get one per cue. Past the cap, the renderer is the
     // cheaper path (lib/export/text-runs.ts).
     const zOrdered = [...compositedOverlays].sort((a, b) => a.z - b.z);
-    if (shadowLayerCount(zOrdered) > MAX_SHADOW_LAYERS) return fallbackShape();
+    if (shadowLayerCount(zOrdered) > MAX_SHADOW_LAYERS) return fallbackShape(comp);
     if (compositedOverlays.length > 0 || hasAudioTracks) return { tag: "ffmpeg-overlay" };
     return streamCopyPreservesFraming(base, comp)
       ? { tag: "stream-copy-trim" }
       : { tag: "ffmpeg-overlay" };
   }
-  return fallbackShape();
+  return fallbackShape(comp);
 }

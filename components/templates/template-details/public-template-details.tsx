@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQueryClient } from "@tanstack/react-query";
 import { DetailsHeader, DetailsLayout, DetailsMessage, DetailsPlayer, DetailsRefreshNotice, useDetailsViewed } from "@/components/templates/template-details/details-layout";
 import { DetailsSkeleton } from "@/components/templates/template-details/details-skeleton";
+import { MusicLinks } from "@/components/templates/template-details/music-links";
 import { OverlaysList } from "@/components/templates/template-details/overlays-list";
 import { ResourcesList, STREAM_FAILED } from "@/components/templates/template-details/resources-list";
 import { UsagePanel } from "@/components/templates/template-details/usage-panel";
@@ -14,7 +15,7 @@ import { templatePageHref } from "@/components/templates/templates-page/template
 import { Button } from "@/components/ui/button";
 import { cachedTemplateCanvas } from "@/lib/queries/templates";
 import { CloudRouteError, PUBLIC_DETAIL_RATE_LIMITED, usePublicTemplateDetail } from "@/lib/queries/templates-cloud";
-import { assetStreamUrl, overlayRows, resourceRows } from "@/lib/templates/details";
+import { assetStreamUrl, musicLinkRows, overlayRows, resourceRows } from "@/lib/templates/details";
 
 const PUBLIC_TAB_HREF = "/templates?tab=public";
 export const PUBLIC_NOT_FOUND = "This template is no longer in the catalog.";
@@ -118,6 +119,7 @@ export function PublicTemplateDetails({ cloudId }: { cloudId: string }) {
       }
     >
       <OverlaysList rows={overlayRows(scaffold)} />
+      <MusicLinks rows={musicLinkRows(scaffold)} />
       <ResourcesList
         rows={resourceRows(
           scaffold,

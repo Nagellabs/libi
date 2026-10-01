@@ -6,6 +6,8 @@ import { loadManifest, EMPTY_MANIFEST } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
 import { findUnvalidatedGeneratedClips, type UnvalidatedClip } from "@/lib/composition/generated-asset-gate";
 import type { RenderDiagnosticRecord, UnattributedRenderDiagnostic } from "@/lib/render/render-diagnostics-types";
+import { pieceRightsList, type RightsListEntry } from "@/lib/audio-rights/piece-reader";
+import { PENDING_MUSIC_NOTE, type PendingMusic } from "@/lib/templates/pending-music";
 import { studioBaseUrl } from "@/mcp/notify";
 import { mcpLogger as logger } from "@/lib/logger";
 import { frameBodyMessage as frame, type Framed } from "./body-message";
@@ -59,7 +61,17 @@ async function fetchRenderDiagnostics(pieceId: string): Promise<PieceRenderDiagn
 
 export interface GetPieceStateDeps {
   fetchDiagnostics?: (pieceId: string) => Promise<PieceRenderDiagnostics>;
+  readAudioRights?: (pieceId: string) => Promise<RightsListEntry[]>;
+  readPendingMusic?: (pieceId: string) => Promise<PendingMusic[]>;
 }
+
+/** Songs an applied template named but did not carry — what `libi.fetch_template_music` takes. */
+async function readPendingMusic(pieceId: string): Promise<PendingMusic[]> {
+  return (await loadManifest(pieceId)).pendingMusic ?? [];
+}
+
+/** The track names and links in `pendingMusic` are the template author's text. */
+const PENDING_MUSIC_SOURCE = "template author (untrusted)";
 
 export async function getPieceStateTool(
   params: GetPieceStateParams,
@@ -77,11 +89,44 @@ export async function getPieceStateTool(
   /** Runtime failures no overlay can be blamed for (a CSP refusal, an
    *  untagged async throw, a font that would not install), last 5 minutes. */
   unattributedRenderDiagnostics: Framed<UnattributedRenderDiagnostic>[];
+  /** Every audio-bearing file the piece plays, with its rights class and
+   *  track when known (spec §4.4). */
+  audioRights: RightsListEntry[];
+  /** Songs an applied template named but did not carry; each `assetId` is
+   *  what `libi.fetch_template_music` takes. Track names and links are the
+   *  template author's (`pendingMusicSource`). */
+  pendingMusic: PendingMusic[];
+  pendingMusicNote?: string;
+  pendingMusicSource?: string;
 }>> {
   try {
-    const [state, diags] = await Promise.all([
+    const [state, diags, audioRights, pendingMusic] = await Promise.all([
       getPieceState(params.pieceId),
       (deps.fetchDiagnostics ?? fetchRenderDiagnostics)(params.pieceId),
+      (deps.readAudioRights ?? pieceRightsList)(params.pieceId).catch((err) => {
+        logger.warn(
+          {
+            tag: "social-music",
+            op: "piece_rights_read_failed",
+            pieceId: params.pieceId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "social-music: could not read a piece's audio rights",
+        );
+        return [] as RightsListEntry[];
+      }),
+      (deps.readPendingMusic ?? readPendingMusic)(params.pieceId).catch((err) => {
+        logger.warn(
+          {
+            tag: "social-music",
+            op: "pending_music_read_failed",
+            pieceId: params.pieceId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "social-music: could not read a piece's pending music",
+        );
+        return [] as PendingMusic[];
+      }),
     ]);
     return {
       success: true,
@@ -89,6 +134,9 @@ export async function getPieceStateTool(
         ...state,
         renderDiagnostics: diags.diagnostics.map(frame),
         unattributedRenderDiagnostics: diags.unattributed.map(frame),
+        audioRights,
+        pendingMusic,
+        ...(pendingMusic.length > 0 ? { pendingMusicNote: PENDING_MUSIC_NOTE, pendingMusicSource: PENDING_MUSIC_SOURCE } : {}),
       },
     };
   } catch (err) {

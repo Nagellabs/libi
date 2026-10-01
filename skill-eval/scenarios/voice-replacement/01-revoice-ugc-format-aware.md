@@ -37,6 +37,32 @@ covers: [voice-replacement, revoice, elevenlabs, text-to-speech, format-aware-pr
 > headline, so it is an ANY-OF on the rendered tool call (the fake runs as `elevenlabs`, the real entry's name).
 > Both default to four charged takes; the needles hold them to `generations_count: 1`.
 
+> **SKL-1 (2026-10-02): "Whisper first" is now pinned, not just inferred.**
+> `docs-local/qa/2026-09-25-elevenlabs-taskB-report.md` concern 3: "Under the harness's
+> pre-authorization, `voice-replacement/01` switched from uninstalled Whisper to paid
+> ElevenLabs transcription on its own... Worth watching; I did not change it." The
+> `expect: absent` needle below already forbids the paid transcription tool outright, which
+> is STRICTER than "only after Whisper or an explicit ask" — but nothing previously required
+> the agent to actually transcribe locally at all, so a run that silently skipped
+> transcription and re-voiced blind would still have passed. The new needle below is a
+> `transcript_contains` requiring a LOCAL transcript step to appear, and a SEPARATE
+> `transcript_matches` ordering regex requiring it to appear textually BEFORE the
+> ElevenLabs voice-generation call — a single-turn scenario, so the cross-turn `ordered`
+> matcher does not apply here; a `[\s\S]*?` sequencing regex is the established idiom for
+> "before" within one turn (see `code-overlays/01`).
+>
+> **I4 (review, 2026-10-02): "local transcript step" is any-of three tools, not just
+> `analysis_transcribe_audio`.** `voice-replacement` SKILL.md's own "Reuse first" line says
+> to call `libi.analysis_get({ fileId })` first and use an existing transcript rather than
+> re-transcribing. This scenario's first half (the UGC build) already runs Stage 7
+> captioning, whose `libi.generate_captions` transcribes the file with local Whisper and
+> STORES the analysis (`caption-tools.ts#readWordsFromAnalysis`) — so a run that captioned
+> the clip and then correctly REUSED that transcript via `analysis_get` for the re-voice
+> never calls `analysis_transcribe_audio` at all, despite never having paid for anything and
+> having transcribed locally first. Both needles are an ANY-OF across
+> `analysis_transcribe_audio` / `analysis_get` / `generate_captions` so the skill's own
+> preferred reuse path is a pass, not a false RED.
+
 ## Prompt
 First, generate ONE short ~8-second UGC talking-head clip of a woman reviewing a
 skincare serum — let it speak with its native generated voice. Once it's in the piece,
@@ -58,6 +84,18 @@ assertions:
   # Scribe because Whisper wasn't installed. The transcript is audio-analysis's job (Whisper),
   # and its paid path is only for a user who asked for it.
   - { provider: "elevenlabs", tool: "creative_transcribe_audio", expect: absent }
+  # SKL-1: "Whisper first" — a LOCAL transcript step is actually taken at all, not just
+  # "paid was never called" (a run that skipped transcription entirely would otherwise still
+  # pass). Any of the three tools counts (I4): a fresh transcribe, a reused one via
+  # analysis_get (the skill's own "Reuse first" line), or one captioning already produced
+  # earlier in this same run. Presence and success of the download/model are NOT required
+  # here — a hermetic home may hit needs_install on a fresh transcribe — only that the agent
+  # attempted or reused the free path.
+  - { transcript_contains: ["[tool-call mcp__libi__libi_analysis_transcribe_audio]", "[tool-call mcp__libi__libi_analysis_get]", "[tool-call mcp__libi__libi_generate_captions]"], expect: present }
+  # SKL-1: and specifically BEFORE re-voicing, so the replacement covers the actual spoken
+  # content rather than being generated blind. Non-greedy [\s\S]*? just needs ONE local
+  # transcript-step call to precede ONE generation call somewhere in the transcript.
+  - { transcript_matches: '\[tool-call mcp__libi__libi_(?:analysis_transcribe_audio|analysis_get|generate_captions)\][\s\S]*?\[tool-call mcp__elevenlabs__creative_generate_(?:speech|in_flow)\]', expect: present }
   # The fal lip-sync half of an earlier split was proven only by a human reading
   # trace.jsonl. Keyed on endpoint_id, never on tool: a tool-keyed assertion passes
   # on the WRONG model.
@@ -68,8 +106,11 @@ assertions:
 - Used the **`voice-replacement`** skill for the re-voice — recognized it as an
   EXISTING-footage voice change (its own trigger), NOT `voiceover-production` (which is
   generation-time only and no longer owns muting/VO).
-- **Transcribed** the clip (local Whisper / analysis) before generating the new voice,
-  so the replacement covers the actual spoken content (no under-fill).
+- **Transcribed (or reused an existing local transcript for)** the clip — via
+  `libi.analysis_transcribe_audio`, a reuse through `libi.analysis_get` (the skill's own
+  "Reuse first" line), or one `libi.generate_captions` already produced earlier in the
+  run — BEFORE generating the new voice, so the replacement covers the actual spoken
+  content (no under-fill) — pinned by the two SKL-1/I4 needles above, not just inferred.
 - **Routed the provider by FORMAT**: a UGC talking-head → a **hosted expressive voice
   provider**, which in this session is ElevenLabs, and SAID why; would have offered local
   **Kokoro** for a plain narration/explainer. Did not silently force the wrong provider

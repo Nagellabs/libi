@@ -134,10 +134,20 @@ jobs:
       - name: Build native modules for this Node
         run: npm rebuild better-sqlite3 node-pty
 
+      # The same ffmpeg test.yml installs, through the same action. Without it
+      # every real-ffmpeg test here SKIPPED on 0.1.16 (hasFfmpeg() found
+      # nothing), so these gates were weaker than ordinary CI again — the exact
+      # drift the comment above warns about. LIBI_REQUIRE_FFMPEG on Test makes
+      # a missing ffmpeg fail the gates instead of thinning them.
+      - name: Install ffmpeg 9.0 (the build libi installs on Linux)
+        uses: ./.github/actions/setup-ffmpeg
+
       - name: Lint
         run: npm run lint
 
       - name: Test
+        env:
+          LIBI_REQUIRE_FFMPEG: "1"
         run: npm test
 
       - name: Licences
@@ -211,10 +221,17 @@ jobs:
 
       # Pushing the tag is what makes it resolvable — release-electron.yml
       # checks it out by name.
-      # Runs even when the Publish step failed AFTER npm accepted the package
-      # (the registry verifier gives up on a slow CDN): the tag is then the only
-      # thing keeping the repo honest about a version that is already public.
-      # 0.1.14 lost its version commit and tag exactly that way.
+      # Runs even when the Publish step FAILED after npm accepted the package
+      # (a tarball digest mismatch, or any other non-zero exit once
+      # `published=true` is recorded): the tag is then the only thing keeping
+      # the repo honest about a version that is already public. 0.1.14 lost its
+      # version commit and tag exactly that way. It does NOT cover a runner that
+      # is lost or a job cancelled by `timeout-minutes`: no later step runs then,
+      # and this condition has no `always()`/`cancelled()`. That is what the
+      # job's timeout headroom over the verify budget is for. A slow
+      # registry no longer fails the step at all — since 0.1.17 it ends green
+      # with a ::warning:: and `npm run release:verify-live -- <v>`
+      # (scripts/lib/release-verify.js), because 0.1.16 took ~56 min to serve.
       - name: Push the version commit and tag
         if: ${{ !inputs.dry_run && (success() || steps.publish.outputs.published == 'true') }}
         run: git push --follow-tags origin HEAD:main

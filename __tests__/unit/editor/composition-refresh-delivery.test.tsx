@@ -24,6 +24,8 @@ const { useCompositionRefreshSubscription } = await import(
   "@/hooks/editor/use-composition-refresh-subscription"
 );
 const { pieceKeys } = await import("@/lib/queries/pieces");
+const { pieceAudioKeys } = await import("@/lib/queries/audio-rights");
+const { socialMusicKeys } = await import("@/lib/queries/social-music");
 
 function mount(qc: QueryClient, onComposition?: (event: unknown) => void) {
   return renderHook(() => useCompositionRefreshSubscription(onComposition), {
@@ -47,6 +49,21 @@ describe("useCompositionRefreshSubscription", () => {
     expect(spy).toHaveBeenCalledWith({
       queryKey: ["composition-snapshot", "abc"],
     });
+  });
+
+  it("a composition change also refreshes the piece's audio rights and its music plans (a song added or removed)", () => {
+    const qc = new QueryClient();
+    const spy = vi.spyOn(qc, "invalidateQueries");
+    mount(qc);
+
+    refreshQueryEmitter.emit({ queryKey: "composition", pieceId: "abc" });
+
+    expect(spy).toHaveBeenCalledWith({ queryKey: pieceAudioKeys.forPiece("abc") });
+    expect(spy).toHaveBeenCalledWith({ queryKey: socialMusicKeys.planForPiece("abc") });
+    // The plan prefix covers every per-target plan key of this piece, and no other piece's.
+    expect(socialMusicKeys.plan("abc", "{}").slice(0, socialMusicKeys.planForPiece("abc").length)).toEqual([
+      ...socialMusicKeys.planForPiece("abc"),
+    ]);
   });
 
   it("does nothing on 'composition' with no pieceId", () => {

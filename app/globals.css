@@ -295,9 +295,9 @@
 }
 
 
-/* Export trigger button — gradient pill + one-shot hover sheen + inline
-   progress fill (running). Shares the sheen/shimmer idiom with the in-dialog
-   <ExportProgressBar> so the two read as one system. */
+/* Export trigger button — gradient pill + one-shot hover sheen. It is always
+   idle: a running export's progress shows on the canvas bar and the Exports
+   tab, never on the button. */
 .export-trigger-idle {
   background-image: linear-gradient(
     to bottom,
@@ -329,12 +329,8 @@
   opacity: 1;
   animation: libi-export-sheen 0.85s ease-out;
 }
-.export-trigger-shimmer {
-  animation: libi-export-shimmer 1.15s ease-in-out infinite;
-}
 @media (prefers-reduced-motion: reduce) {
-  .export-trigger-sheen,
-  .export-trigger-shimmer {
+  .export-trigger-sheen {
     animation: none !important;
   }
 }

@@ -22,6 +22,11 @@ vi.mock("@/lib/queries/providers", () => ({
   useProviders: () => ({ data: { connected: providersConnected }, isLoading: false }),
 }));
 
+vi.mock("@/lib/queries/social-music", () => ({
+  useSocialMusicFacts: () => ({ data: undefined }),
+  useSetTikTokKind: () => ({ mutate: vi.fn() }),
+}));
+
 vi.mock("@/lib/queries/social", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/queries/social")>();
   return {

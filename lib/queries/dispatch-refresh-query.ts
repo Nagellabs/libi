@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { pieceKeys } from "@/lib/queries/pieces";
 import { fileKeys } from "@/lib/queries/files";
+import { pieceAudioKeys } from "@/lib/queries/audio-rights";
 import { storyboardKeys } from "@/lib/queries/storyboard";
 import { trackKeys } from "@/lib/queries/tracks";
 import { snapshotKeys } from "@/lib/queries/snapshots";
@@ -9,9 +10,10 @@ import { folderKeys } from "@/lib/queries/folders";
 import { terminalKeys } from "@/lib/queries/terminals";
 import { effectsCatalogKeys } from "@/lib/queries/effects-catalog";
 import { characterKeys, itemKeys } from "@/lib/queries/catalog";
+import { exportKeys } from "@/lib/queries/exports";
 import { socialKeys } from "@/lib/queries/social";
 import { templateKeys } from "@/lib/queries/templates";
-import { templatesCloudKeys } from "@/lib/queries/templates-cloud";
+import { resetPublicDetailBackoff, templatesCloudKeys } from "@/lib/queries/templates-cloud";
 import { CREATOR_STATUS_REFRESH_KEY, TEMPLATES_CATALOG_REFRESH_KEY } from "@/lib/templates/cloud/constants";
 
 /**
@@ -27,11 +29,20 @@ import { CREATOR_STATUS_REFRESH_KEY, TEMPLATES_CATALOG_REFRESH_KEY } from "@/lib
  *   - `analysis` (with fileId) — invalidate `["analysis", "file", fileId]`.
  *   - `pieces`                 — invalidate `pieceKeys.all`.
  *   - `files`                  — invalidate `fileKeys.global()`, plus
- *                                `fileKeys.forPiece(pieceId)` when set.
+ *                                `fileKeys.forPiece(pieceId)` when set, plus
+ *                                the `["piece-audio-rights"]` prefix (an
+ *                                agent- or user-made rights edit changes what
+ *                                the export dialog's copyrighted-music list
+ *                                shows).
+ *   - `files` + `fileId`       — also that file's by-id query
  *   - `piece` (with pieceId)   — invalidate `pieceKeys.detail`,
  *                                `pieceKeys.all`, `fileKeys.forPiece`
  *                                in that exact order (downstream tests
- *                                may assert on it).
+ *                                may assert on it), plus
+ *                                `["piece-audio-rights"]`.
+ *   - `composition` is NOT handled here: `useCompositionRefreshSubscription`
+ *     (hooks/editor/) invalidates the composition, its snapshot, the piece's
+ *     audio rights and its social-music plans.
  *   - `storyboard` (with pieceId) — invalidate `storyboardKeys.detail(pieceId)`.
  *   - `piece-state` (with pieceId) — invalidate `snapshotKeys.state` and
  *                                   `snapshotKeys.compare` for the piece.
@@ -44,6 +55,7 @@ import { CREATOR_STATUS_REFRESH_KEY, TEMPLATES_CATALOG_REFRESH_KEY } from "@/lib
  *   - `social`                 — invalidate `socialKeys.all` (every social
  *                                query; `pieceId` is informational, since the
  *                                per-piece key already sits under that prefix).
+ *   - `exports`                — invalidate `exportKeys.all` (every piece_exports write; `pieceId`/`exportId`/`status` ride along as information).
  *   - `templates`              — invalidate `templateKeys.all` (every list and
  *                                detail query; the template tools and the
  *                                PATCH/DELETE routes emit it after a write).
@@ -66,6 +78,8 @@ export function dispatchRefreshQueryData(
     pieceId?: string;
     fileId?: string;
     trackId?: string;
+    exportId?: string;
+    status?: string;
   },
   queryClient: QueryClient,
 ): boolean {
@@ -89,6 +103,9 @@ export function dispatchRefreshQueryData(
         queryKey: fileKeys.forPiece(event.pieceId),
       });
     }
+    queryClient.invalidateQueries({ queryKey: pieceAudioKeys.all });
+    // A file's own row changed (its rights or a platform pick): the details panel reads it by id.
+    if (event.fileId) queryClient.invalidateQueries({ queryKey: fileKeys.byId(event.fileId) });
     return true;
   }
 
@@ -101,6 +118,7 @@ export function dispatchRefreshQueryData(
     queryClient.invalidateQueries({
       queryKey: fileKeys.forPiece(event.pieceId),
     });
+    queryClient.invalidateQueries({ queryKey: pieceAudioKeys.all });
     return true;
   }
 
@@ -185,7 +203,9 @@ export function dispatchRefreshQueryData(
   }
 
   if (event.queryKey === TEMPLATES_CATALOG_REFRESH_KEY) {
-    // A dev build's catalog switched in another window: re-read which one is active.
+    // A dev build's catalog switched in another window: re-read which one is active,
+    // and forget the old site's slow-down — as the switching window does (templates-catalog.ts).
+    resetPublicDetailBackoff();
     queryClient.invalidateQueries({ queryKey: [TEMPLATES_CATALOG_REFRESH_KEY] });
     return true;
   }
@@ -199,6 +219,12 @@ export function dispatchRefreshQueryData(
     // One invalidation of the whole prefix: both list keys
     // (`["templates","list",<params>]`) and a detail key sit under it.
     queryClient.invalidateQueries({ queryKey: templateKeys.all });
+    return true;
+  }
+
+  if (event.queryKey === "exports") {
+    // One prefix: a piece's list, a by-id read and the running count all sit under it.
+    queryClient.invalidateQueries({ queryKey: exportKeys.all });
     return true;
   }
 

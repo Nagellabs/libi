@@ -27,7 +27,7 @@ vi.mock("@/lib/export/ensure-chromium", async (orig) => ({
   ...(await orig<typeof import("@/lib/export/ensure-chromium")>()),
   ensureChromium: ensure.ensureChromium,
 }));
-// `claimExportPath` sits between the cancel-poll interval's creation and the
+// `claimExportFile` sits between the cancel-poll interval's creation and the
 // backend's `finally`; one case makes it throw to prove the interval is
 // cleared on that exit too. Everything else keeps the real implementation.
 const claim = vi.hoisted(() => ({ throwWith: null as Error | null }));
@@ -35,9 +35,9 @@ vi.mock("@/lib/export/filename", async (orig) => {
   const actual = await orig<typeof import("@/lib/export/filename")>();
   return {
     ...actual,
-    claimExportPath: (...args: Parameters<typeof actual.claimExportPath>) => {
+    claimExportFile: (...args: Parameters<typeof actual.claimExportFile>) => {
       if (claim.throwWith) throw claim.throwWith;
-      return actual.claimExportPath(...args);
+      return actual.claimExportFile(...args);
     },
   };
 });
@@ -74,12 +74,11 @@ function fakeCtx(
   };
 }
 
-function params(destFolder: string): ExportParams {
+function params(): ExportParams {
   return {
     pieceId: PIECE_ID,
     source: "draft",
     filename: "out",
-    destFolder,
     settings: {
       format: "mp4", codec: "avc", bitrate: 1_000_000,
       width: 320, height: 240, fps: 24,
@@ -116,7 +115,7 @@ describe("export runner — ensure-chromium step", () => {
     resetStorage();
     seedPiece(getDb() as never, { id: PIECE_ID });
     fs.mkdirSync(path.join(getLibiStorageDir(), PIECE_ID), { recursive: true });
-    outDir = path.join(getLibiStorageDir(), "export-out");
+    outDir = path.join(getLibiStorageDir(), PIECE_ID, "exports");
     sink = { progress: [], checkpoints: [] };
     await seedCodeOverlay();
   });
@@ -138,7 +137,7 @@ describe("export runner — ensure-chromium step", () => {
       },
     );
 
-    const result = await exportRunner.run(fakeCtx(params(outDir), sink));
+    const result = await exportRunner.run(fakeCtx(params(), sink));
 
     expect(result.backend).toBe("chromium-render");
     expect(ensure.ensureChromium).toHaveBeenCalledTimes(1);
@@ -173,7 +172,7 @@ describe("export runner — ensure-chromium step", () => {
     // nothing.
     ensure.ensureChromium.mockResolvedValue(undefined);
 
-    const result = await exportRunner.run(fakeCtx(params(outDir), sink));
+    const result = await exportRunner.run(fakeCtx(params(), sink));
 
     expect(result.backend).toBe("chromium-render");
     expect(sink.progress.some(([, , unit]) => unit === "MB")).toBe(false);
@@ -185,7 +184,7 @@ describe("export runner — ensure-chromium step", () => {
     ensure.ensureChromium.mockRejectedValue(
       new Error("playwright install chromium exited 1: ECONNRESET"),
     );
-    await expect(exportRunner.run(fakeCtx(params(outDir), sink))).rejects.toThrow(
+    await expect(exportRunner.run(fakeCtx(params(), sink))).rejects.toThrow(
       /exited 1: ECONNRESET/,
     );
     expect(fs.existsSync(outDir) ? fs.readdirSync(outDir) : []).toEqual([]);
@@ -203,7 +202,7 @@ describe("export runner — ensure-chromium step", () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
     try {
       await expect(
-        exportRunner.run(fakeCtx(params(outDir), sink, shouldCancel)),
+        exportRunner.run(fakeCtx(params(), sink, shouldCancel)),
       ).rejects.toThrow(/EACCES/);
       const callsAtFailure = shouldCancel.mock.calls.length;
       vi.advanceTimersByTime(5_000);
@@ -223,7 +222,7 @@ describe("export runner — ensure-chromium step", () => {
       if (opts.shouldCancel?.()) throw new Error("chromium install cancelled");
     });
     await expect(
-      exportRunner.run(fakeCtx(params(outDir), sink, () => cancelled)),
+      exportRunner.run(fakeCtx(params(), sink, () => cancelled)),
     ).rejects.toThrow(/cancelled/);
     expect(sink.progress.some(([, , unit]) => unit === "%")).toBe(false);
     expect(fs.existsSync(outDir) ? fs.readdirSync(outDir) : []).toEqual([]);

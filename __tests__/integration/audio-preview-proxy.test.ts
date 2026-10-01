@@ -22,7 +22,7 @@ import { Input, FilePathSource, ALL_FORMATS } from "mediabunny";
 import { hasFfmpeg, FFMPEG_SKIP_REASON } from "@/__tests__/helpers/media";
 import { resolveFfmpegPath, resolveFfprobePath } from "@/lib/ffmpeg/exec";
 import { probeMedia } from "@/lib/ffmpeg/probe";
-import { audioProxyReason, oggIsChained } from "@/lib/ffmpeg/audio-preview";
+import { audioProxyReason, mayNeedAudioPreviewProxy, oggIsChained, previewPrefersProxy } from "@/lib/ffmpeg/audio-preview";
 import { fileTiming } from "@/lib/ffmpeg/file-timing";
 import { buildAudioProxyArgs, proxyStreamsFor } from "@/lib/proxy/args";
 import { createTestDb, resetTestDb, seedPiece } from "@/__tests__/helpers/test-db";
@@ -31,8 +31,9 @@ import { files } from "@/lib/db/schema/sqlite";
 /** What the boot sweep hands the shared regeneration path (regen-once.ts). */
 let swept: Array<{ id: string; pieceId: string | null }> | null = null;
 vi.mock("@/lib/proxy/regen-once", () => ({
-  runOnceSweep: vi.fn(async (_marker: string, _op: string, select: () => Promise<Array<{ id: string; pieceId: string | null }>>) => {
-    swept = await select();
+  runOnceSweep: vi.fn(async (_marker: string, _op: string, select: (done: ReadonlySet<string>) => Promise<import("@/lib/proxy/regen-once").SweepSelection>) => {
+    const picked = await select(new Set());
+    swept = Array.isArray(picked) ? picked : picked.files;
   }),
 }));
 
@@ -123,5 +124,64 @@ skipIf("audio the preview can't play itself: detected, and proxied (real files, 
     const [track] = await input.getAudioTracks();
     expect(await track.getCodec()).toBe("aac");
     expect(await track.computeDuration()).toBeGreaterThan(4.9);
+  });
+
+  // AUD-4: an audio-only AAC file whose MONO core carries SBR/PS. Chromium
+  // decodes it to stereo, so a 1-channel config fails WebCodecs: the preview's
+  // repair (lib/audio/he-aac-config.ts) fixes the config only when the ASC
+  // SIGNALS SBR, and an in-band-only stream (LC-signalled ASC, as every ADTS
+  // .aac is) is silent. A video has its proxy to fall back to; an audio file
+  // had none. ffprobe decodes, so it names the profile either way.
+  describe("HE-AAC on a mono core (AUD-4)", () => {
+    const FIX = path.resolve(__dirname, "../fixtures/audio");
+    beforeAll(() => {
+      const ff = (args: string[]) => execFileSync(resolveFfmpegPath(), ["-v", "error", "-y", ...args], { stdio: "ignore" });
+      // The mono-core SBR fixture with its ASC's SBR sync extension blanked in
+      // place: an LC-signalled config over the same SBR frames (in-band only).
+      const src = fs.readFileSync(path.join(FIX, "he-aac-v1-mono-backcompat.m4a"));
+      const at_ = src.indexOf(Buffer.from("138856e5a0", "hex"));
+      expect(at_).toBeGreaterThan(0);
+      fs.writeFileSync(
+        at("inband-mono.m4a"),
+        Buffer.concat([src.subarray(0, at_), Buffer.from("1388000000", "hex"), src.subarray(at_ + 5)]),
+      );
+      // ADTS can only say LC: HE-AAC in a .aac file is always in-band.
+      ff(["-i", path.join(FIX, "he-aac-v1-mono-backcompat.m4a"), "-c:a", "copy", "-f", "adts", at("mono-sbr.aac")]);
+    });
+    const fixture = async (name: string) => {
+      const p = path.join(FIX, name);
+      return audioProxyReason(p, await probeMedia(p));
+    };
+
+    it("the mono-core SBR fixture gets a proxy reason, and the preview prefers the proxy", async () => {
+      expect(await fixture("he-aac-v1-mono-backcompat.m4a")).toBe("he-aac-mono");
+      expect(previewPrefersProxy("he-aac-mono")).toBe(true);
+      expect((await fileTiming(path.join(FIX, "he-aac-v1-mono-backcompat.m4a")))!.preferProxyAudio).toBe(true);
+    });
+
+    it("in-band-only SBR (an LC-signalled ASC, or ADTS) is caught too", async () => {
+      expect(await reason("inband-mono.m4a")).toBe("he-aac-mono");
+      expect((await fileTiming(at("inband-mono.m4a")))!.preferProxyAudio).toBe(true);
+      expect(mayNeedAudioPreviewProxy("mono-sbr.aac")).toBe(true);
+      expect(await reason("mono-sbr.aac")).toBe("he-aac-mono");
+      expect(await fixture("he-aac-v2-backcompat.m4a")).toBe("he-aac-mono"); // PS rides a mono core
+    });
+
+    it("leaves alone a stereo core, plain AAC-LC, and a video (which has its own proxy)", async () => {
+      expect(await fixture("he-aac-v1-backcompat.m4a")).toBeNull();
+      expect(await fixture("aac-lc-itunsmpb.m4a")).toBeNull();
+      expect(await fixture("he-aac-v1-mono-video.mp4")).toBeNull();
+      expect((await fileTiming(path.join(FIX, "he-aac-v1-mono-video.mp4")))!.preferProxyAudio).toBe(false);
+    });
+
+    it("its proxy is plain AAC-LC stereo, which WebCodecs decodes", async () => {
+      const src = path.join(FIX, "he-aac-v1-mono-backcompat.m4a");
+      const out = at("he-aac-mono-proxy.m4a");
+      execFileSync(resolveFfmpegPath(), ["-v", "error", ...buildAudioProxyArgs(src, out, proxyStreamsFor(await probeMedia(src)))]);
+      const probe = JSON.parse(
+        execFileSync(resolveFfprobePath(), ["-v", "error", "-show_entries", "stream=codec_name,profile,channels", "-of", "json", out]).toString(),
+      );
+      expect(probe.streams).toEqual([{ codec_name: "aac", profile: "LC", channels: 2 }]);
+    });
   });
 });

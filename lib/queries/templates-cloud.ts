@@ -409,7 +409,7 @@ export const PUBLIC_DETAIL_RATE_LIMITED = "The catalog asked libi to slow down. 
  */
 let rateLimitedUntil = 0;
 
-/** Forget the backoff: a switch of catalog (lib/queries/templates-catalog.ts) — the other site's limit is its own — and tests. */
+/** Forget the backoff: a switch of catalog, in the window that switched (lib/queries/templates-catalog.ts) and every other one (dispatch-refresh-query.ts) — the other site's limit is its own — and tests. */
 export function resetPublicDetailBackoff(): void {
   rateLimitedUntil = 0;
 }
@@ -417,6 +417,16 @@ export function resetPublicDetailBackoff(): void {
 /** Tests only. */
 export function __resetPublicDetailBackoffForTests(): void {
   resetPublicDetailBackoff();
+}
+
+/** Tests only: a backoff as a 429 would leave it. */
+export function __setPublicDetailBackoffForTests(until: number): void {
+  rateLimitedUntil = until;
+}
+
+/** Tests only. */
+export function __publicDetailBackoffUntilForTests(): number {
+  return rateLimitedUntil;
 }
 
 /**

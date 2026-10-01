@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "name": "Beat drop",
+  "description": "A 6-second title card cut to a song",
+  "tags": ["music", "title"],
+  "canvas": { "width": 1080, "height": 1920, "fps": 30 },
+  "duration": 6,
+  "slots": [{ "key": "title", "kind": "text", "label": "Title", "hint": "2-4 words", "required": true }],
+  "overlays": [
+    { "key": "title", "kind": "text", "displayName": "Title", "startTime": 0, "duration": 6, "rect": { "x": 108, "y": 768, "width": 864, "height": 384 }, "z": 1, "opacity": 1, "text": { "slot": "title" }, "font": "bold 96px Inter", "color": "#ffffff", "align": "center" }
+  ],
+  "audioClips": [
+    { "key": "song", "kind": "standalone", "startTime": 0, "duration": 6, "trimStart": 42, "volume": 0.9, "enabled": true, "source": { "musicRef": "espresso" } }
+  ],
+  "assets": [],
+  "musicLinks": [{ "ref": "espresso", "track": { "title": "Espresso", "artist": "Sabrina Carpenter" }, "sourceUrl": "https://example.com/beat-drop.mp3" }],
+  "fonts": [],
+  "captionStyles": []
+}

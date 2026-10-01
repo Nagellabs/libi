@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildCaptionCues } from "@/lib/captions/cues";
+import { buildCaptionCues, captionCharsPerLine } from "@/lib/captions/cues";
 import type { SttWord } from "@/lib/analysis/types";
 
 const w = (text: string, start: number, end: number): SttWord => ({ text, start, end, type: "word" });
@@ -143,4 +143,11 @@ describe("buildCaptionCues", () => {
     expect(cues[1].end).toBeCloseTo(1.0, 5);
     expect(cues[1].start).toBeLessThan(cues[1].end);
   });
+});
+
+describe("captionCharsPerLine — the no-wrap budget for a caption line", () => {
+  it("9:16 at the 90 px cap fits 16 characters", () => expect(captionCharsPerLine(1080, 90)).toBe(16));
+  it("16:9 is capped at 42", () => expect(captionCharsPerLine(1920, 59)).toBe(42));
+  it("1:1 at 59 px fits 25", () => expect(captionCharsPerLine(1080, 59)).toBe(25));
+  it("never below 12", () => expect(captionCharsPerLine(320, 90)).toBe(12));
 });

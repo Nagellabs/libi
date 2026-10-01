@@ -1,4 +1,5 @@
 import type { KnownPlatform, SocialPlatform, InstagramPostType } from "./catalog";
+import type { TargetMusic } from "./music-policy";
 
 export type PostStatus = "draft" | "scheduled" | "publishing" | "published" | "partial" | "failed" | "cancelled";
 export type TargetStatus = "pending" | "published" | "failed" | "cancelled";
@@ -51,9 +52,12 @@ export interface TikTokOptions {
   expressConsentGiven: boolean;
 }
 
+/** `music` is what libi decided for this target's audio (spec §6.4). It rides
+ *  in `metadata.libi.targetOptions`, the round-trip stamp, because Zernio never
+ *  echoes `tiktok_settings` back. */
 export type TargetOptions =
-  | { platform: "instagram"; instagram: InstagramOptions }
-  | { platform: "tiktok"; tiktok: TikTokOptions };
+  | { platform: "instagram"; instagram: InstagramOptions; music?: TargetMusic }
+  | { platform: "tiktok"; tiktok: TikTokOptions; music?: TargetMusic };
 
 export interface SocialTarget {
   /** A post the AGENT made can target any platform the provider supports, and

@@ -137,12 +137,23 @@
  * and none happens in a normal configuration by accident: a confused or
  * prompt-injected agent calling libi's tools, or libi's MCP endpoint,
  * prepares a request and stops there.
- *   Follow-up, not built: in the packaged app, ask Electron main for a native
- *   confirmation (`dialog.showMessageBox`) before the confirm POST. Renderer
- *   script, and a browser-automation tool driving the page, cannot answer a
- *   main-process dialog (computer-use still can: it clicks the screen). It
- *   needs a change under electron/ — a new IPC handler and preload method; no
- *   existing shell or preload API shows a confirmation.
+ *   In the desktop app (0.1.17+ shell), "Publish publicly" first asks Electron
+ *   main for a native confirmation (`electron/confirm-publish.ts`,
+ *   `dialog.showMessageBox`, Cancel the default), on top of the page's arming
+ *   delay, rights box and browser-only confirm route, never instead of them.
+ *   It guards clicks INSIDE THE DESKTOP WINDOW ONLY: script in that page, or
+ *   DOM automation of it, cannot answer a main-process dialog. It does not
+ *   close 3: claude-in-chrome and a Playwright MCP drive a real Chrome, which
+ *   loads the same review page from the studio's loopback port with no bridge,
+ *   never asks, and publishes exactly as before; computer-use can click the
+ *   dialog itself; and a compromised renderer (or 1 and 2, which never load
+ *   the page) skips it. THE GAP: the server cannot tell whether a dialog was
+ *   shown. Closing it needs main to attest to the server — e.g. main adds a
+ *   per-launch secret header to the desktop window's requests
+ *   (`session.webRequest.onBeforeSendHeaders`) and the confirm route requires
+ *   it when packaged (the packaged studio runs inside Electron main). Not
+ *   built. The web/npx studio, and an older shell running this runtime, have
+ *   no dialog at all (`lib/shell/client.ts#confirmPublish` answers undefined).
  */
 import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";

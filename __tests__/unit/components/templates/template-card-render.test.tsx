@@ -30,7 +30,7 @@ function summary(over: Partial<TemplateSummary> = {}): InstalledTemplate {
     id: "t1", cloudId: null, name: "Lower third", description: "", tags: [], origin: "local", version: 2, hasCode: false,
     slots: [], slotCount: 0, canvas: { width: 1080, height: 1920, fps: 30 }, duration: 4, usesTotal: 0, uses7d: 0, lastUsedAt: null,
     createdAt: "2026-09-23T00:00:00.000Z", updatedAt: "2026-09-23T00:00:00.000Z", hasPoster: false, hasExample: false,
-    poster: null, video: null, nickname: null, broken: null, otherCatalog: null, mediaRev: 0, canRenderExample: true, sourcePieceName: "Summer promo",
+    poster: null, video: null, nickname: null, broken: null, otherCatalog: null, mediaRev: 0, canRenderExample: true, sourcePieceName: "Summer promo", sourceEmpty: false,
     ...over,
   } as InstalledTemplate;
 }
@@ -125,6 +125,16 @@ describe("TemplateCard — no example yet", () => {
     mount(summary({ canRenderExample: false }));
     expect(screen.getByTestId("template-card-source-gone").textContent).toBe("No preview — the source piece is gone.");
     expect(screen.queryByTestId("template-card-render")).toBeNull();
+  });
+
+  // TPL-3: a template made from an empty piece never got a template_example
+  // job started for it (mcp/tools/template-tools.ts), so there is no
+  // "Render preview" for the user to press — a note explains why instead.
+  it("the source piece was empty: a note, no button", async () => {
+    mount(summary({ sourceEmpty: true }));
+    expect(screen.getByTestId("template-card-source-empty").textContent).toBe("No preview — the piece is empty.");
+    expect(screen.queryByTestId("template-card-render")).toBeNull();
+    expect(screen.queryByTestId("template-card-source-gone")).toBeNull();
   });
 
   it("an installed template shows neither", () => {

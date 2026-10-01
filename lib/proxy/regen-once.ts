@@ -31,18 +31,23 @@ import { proxyLogger as logger } from "@/lib/logger";
  * **Next.js process only** (uses the in-process JobManager).
  */
 
-const inFlight = new Map<string, Promise<boolean>>();
-/** Files whose proxy this process has regenerated (or is regenerating) since boot. */
-const regeneratedThisBoot = new Set<string>();
+type RegenOnceState = { inFlight: Map<string, Promise<boolean>>; regeneratedThisBoot: Set<string> };
+/** Shared by EVERY copy of this module in the process: a production Next build loads the
+ *  Category B sweeps and `GET /api/pieces/[pieceId]` (`lib/proxy/ensure.ts`) apart, and a
+ *  regeneration one copy started was invisible to the other. (d2f3ea41's class.) */
+const state = ((globalThis as Record<symbol, unknown>)[Symbol.for("libi.proxyRegenOnce.state")] ??= {
+  inFlight: new Map<string, Promise<boolean>>(),
+  regeneratedThisBoot: new Set<string>(),
+}) as RegenOnceState;
 
 /**
  * Regenerate `fileId`'s proxy through the normal `proxy_gen` job path and
  * resolve when it has finished: true when it succeeded.
  */
 export function regenerateProxy(fileId: string, pieceId: string | null): Promise<boolean> {
-  const running = inFlight.get(fileId);
+  const running = state.inFlight.get(fileId);
   if (running) return running;
-  regeneratedThisBoot.add(fileId);
+  state.regeneratedThisBoot.add(fileId);
   const done = (async () => {
     const mgr = getJobManager();
     const live = await findRunningByHash("proxy_gen", canonicalHash({ fileId }));
@@ -59,20 +64,25 @@ export function regenerateProxy(fileId: string, pieceId: string | null): Promise
       );
       return false;
     })
-    .finally(() => inFlight.delete(fileId));
-  inFlight.set(fileId, done);
+    .finally(() => state.inFlight.delete(fileId));
+  state.inFlight.set(fileId, done);
   return done;
 }
 
 /** Test hook: forget this "boot"'s regenerations. */
 export function resetRegenOnceForTest(): void {
-  inFlight.clear();
-  regeneratedThisBoot.clear();
+  state.inFlight.clear();
+  state.regeneratedThisBoot.clear();
+}
+
+/** Whether a regeneration of `fileId` started by this module is in flight. */
+export function regenerationInFlight(fileId: string): boolean {
+  return state.inFlight.has(fileId);
 }
 
 /** Test hook: whether a regeneration of `fileId` is in flight. */
 export function regenerationInFlightForTest(fileId: string): boolean {
-  return inFlight.has(fileId);
+  return regenerationInFlight(fileId);
 }
 
 /**
@@ -99,7 +109,7 @@ export async function sweepStaleGeneratingProxies(
       .all();
   const started: Promise<boolean>[] = [];
   for (const row of candidates) {
-    if (inFlight.has(row.id)) continue;
+    if (state.inFlight.has(row.id)) continue;
     if (await findRunningByHash("proxy_gen", canonicalHash({ fileId: row.id }))) continue;
     logger.info({ tag: "proxy", op: "stale_generating_regen", fileId: row.id, pieceId: row.pieceId }, "proxy.stale_generating_regen");
     started.push(regenerateProxy(row.id, row.pieceId));
@@ -114,11 +124,22 @@ export async function sweepStaleGeneratingProxies(
  * interrupted by a quit resumes where it stopped. A regeneration that fails
  * (ffmpeg refused the file) counts as done: retrying it every boot wouldn't
  * change the answer. Nothing to do when the marker exists.
+ *
+ * `select` may instead answer `{ files, settled, incomplete }` (review I2 of
+ * the audio-preview sweep): `settled` ids were checked and need nothing, and
+ * go in the progress file so the next run's `select` can skip them (it is
+ * handed the done set); `incomplete` means some file could not be judged
+ * (a probe timed out), so the marker is NOT written and the sweep runs again
+ * next boot for what is left.
  */
+export type SweepSelection =
+  | Array<{ id: string; pieceId: string | null }>
+  | { files: Array<{ id: string; pieceId: string | null }>; settled?: string[]; incomplete?: boolean };
+
 export async function runOnceSweep(
   marker: string,
   op: string,
-  select: () => Promise<Array<{ id: string; pieceId: string | null }>>,
+  select: (done: ReadonlySet<string>) => Promise<SweepSelection>,
 ): Promise<void> {
   const stateDir = path.join(getLibiHome(), "state");
   const markerPath = path.join(stateDir, marker);
@@ -132,8 +153,14 @@ export async function runOnceSweep(
   }
   // A file this process already regenerated since boot (the stale-generating
   // recovery, another sweep) is done: regenerating it again would change nothing.
-  const todo = (await select()).filter((f) => !done.has(f.id) && !regeneratedThisBoot.has(f.id));
+  const selection = await select(done);
+  const picked = Array.isArray(selection) ? selection : selection.files;
+  const settled = Array.isArray(selection) ? [] : (selection.settled ?? []);
+  const incomplete = !Array.isArray(selection) && selection.incomplete === true;
+  const todo = picked.filter((f) => !done.has(f.id) && !state.regeneratedThisBoot.has(f.id));
   fs.mkdirSync(stateDir, { recursive: true });
+  const newlySettled = settled.filter((id) => !done.has(id));
+  if (newlySettled.length > 0) fs.appendFileSync(progressPath, newlySettled.map((id) => `${id}\n`).join(""));
   let ok = 0;
   await Promise.all(
     todo.map(async (f) => {
@@ -142,6 +169,12 @@ export async function runOnceSweep(
       fs.appendFileSync(progressPath, `${f.id}\n`);
     }),
   );
+  if (incomplete) {
+    // Something couldn't be judged: no marker, and the progress file stays so
+    // the next run skips what is already settled.
+    logger.warn({ tag: "proxy", op: `${op}_incomplete`, regenerated: ok, failed: todo.length - ok }, `proxy.${op}.incomplete`);
+    return;
+  }
   fs.writeFileSync(markerPath, `${new Date().toISOString()} regenerated=${ok} failed=${todo.length - ok} earlier=${done.size}\n`);
   fs.rmSync(progressPath, { force: true });
   if (todo.length > 0) {

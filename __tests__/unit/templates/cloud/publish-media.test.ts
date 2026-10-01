@@ -282,3 +282,17 @@ describe.skipIf(!hasFfmpeg())("transcode with real ffmpeg", () => {
     expect(poster.includes("secret")).toBe(false);
   }, 60_000);
 });
+
+describe("the example's audio (social-music: a public example never carries a copyrighted song)", () => {
+  it("dropAudio: no audio stream at all (-an), and no audio codec args", () => {
+    const args = buildExampleArgs("in.mov", "out.mp4", { crf: 26, trimSec: 15, dropAudio: true });
+    expect(args).toContain("-an");
+    for (const a of ["-c:a", "-b:a", "-ac"]) expect(args).not.toContain(a);
+    expect(args.slice(-3)).toEqual(["-f", "mp4", "out.mp4"]);
+  });
+  it("otherwise the audio is kept as AAC", () => {
+    const args = buildExampleArgs("in.mov", "out.mp4", { crf: 26, trimSec: 15, dropAudio: false });
+    expect(args).not.toContain("-an");
+    expect(args).toEqual(expect.arrayContaining(["-c:a", "aac"]));
+  });
+});

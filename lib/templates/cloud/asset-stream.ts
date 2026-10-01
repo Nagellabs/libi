@@ -34,9 +34,15 @@ import net from "node:net";
 import { Transform, type Readable } from "node:stream";
 import { hostedUrlProblem } from "@/lib/templates/cloud/preflight";
 
+export type AssetStreamKind = "audio" | "video" | "image";
+/** What each kind accepts. Images are raster only: an SVG is a document, not artwork. */
+const KIND_TYPE: Record<AssetStreamKind, string> = { audio: "audio/[a-z0-9.+-]+", video: "video/[a-z0-9.+-]+", image: "image/(?:jpeg|png|webp|gif|avif)" };
+
 export const ASSET_STREAM_MAX_REDIRECTS = 3;
 /** Per response. A template's own example is capped far lower; this is for someone's hosted clip. */
 export const ASSET_STREAM_MAX_BYTES = 200 * 1024 * 1024;
+/** Per response for an image (artwork): a thumbnail has no business near the clip cap. */
+export const ASSET_STREAM_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
 export const ASSET_STREAM_HEADERS_TIMEOUT_MS = 10_000;
 /** A host name that won't resolve in this long is refused (final review F3): a black-holed nameserver would otherwise hold each hop for the system resolver's 20–30 s. */
 export const ASSET_STREAM_DNS_TIMEOUT_MS = 5_000;
@@ -215,7 +221,7 @@ async function checkedAddress(hostname: string, signal: AbortSignal): Promise<{ 
   return answers[0];
 }
 
-function requestOnce(url: URL, pinned: { address: string; family: number }, range: string | null, signal: AbortSignal): Promise<IncomingMessage> {
+function requestOnce(url: URL, pinned: { address: string; family: number }, range: string | null, signal: AbortSignal, accept: string): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const req = deps.request(
       url,
@@ -227,7 +233,7 @@ function requestOnce(url: URL, pinned: { address: string; family: number }, rang
           opts?.all ? cb(null, [{ address: pinned.address, family: pinned.family }]) : cb(null, pinned.address, pinned.family)) as never,
         headers: {
           "user-agent": "libi",
-          accept: "audio/*, video/*",
+          accept,
           ...(range ? { range } : {}),
         },
         signal,
@@ -248,7 +254,7 @@ function requestOnce(url: URL, pinned: { address: string; family: number }, rang
 }
 
 /** The body, cut at the byte cap, when it stalls, and when it has run too long in all. */
-function guarded(res: IncomingMessage): Readable {
+function guarded(res: IncomingMessage, maxBytes: number): Readable {
   let seen = 0;
   let idle: ReturnType<typeof setTimeout>;
   // eslint-disable-next-line prefer-const -- assigned once `t` exists
@@ -260,7 +266,7 @@ function guarded(res: IncomingMessage): Readable {
   const t = new Transform({
     transform(chunk: Buffer, _enc, cb) {
       seen += chunk.length;
-      if (seen > ASSET_STREAM_MAX_BYTES) {
+      if (seen > maxBytes) {
         cb(new AssetStreamRefusal("too_large", "The media is larger than libi plays inline."));
         return;
       }
@@ -286,18 +292,35 @@ function guarded(res: IncomingMessage): Readable {
 
 /**
  * Open `rawUrl` for streaming under every rule above; `range` is the page's
- * own `Range` (forwarded only when it is a single byte range). Throws an
- * `AssetStreamRefusal` — never the upstream's words.
+ * own `Range` (forwarded only when it is a single byte range). `allowUrl`, when
+ * given, narrows the hosts further and is checked on EVERY hop, redirects
+ * included — a caller that allow-lists its first URL (the social music
+ * preview: platform CDNs only) would otherwise be walked off its list by one
+ * redirect. Throws an `AssetStreamRefusal` — never the upstream's words.
  */
-export async function openAssetStream(rawUrl: string, opts: { range?: string | null; signal: AbortSignal }): Promise<AssetStream> {
+export async function openAssetStream(
+  rawUrl: string,
+  opts: { range?: string | null; signal: AbortSignal; allowUrl?: (u: URL) => boolean; kinds?: readonly AssetStreamKind[] },
+): Promise<AssetStream> {
   const range = forwardableRange(opts.range ?? null);
+  const kinds = opts.kinds && opts.kinds.length > 0 ? opts.kinds : (["audio", "video"] as const);
+  const accept = kinds.map((k) => `${k}/*`).join(", ");
+  const typeOk = new RegExp(`^(?:${kinds.map((k) => KIND_TYPE[k]).join("|")})$`);
+  // A thumbnail has no business near the clip cap.
+  const maxBytes = kinds.length === 1 && kinds[0] === "image" ? ASSET_STREAM_IMAGE_MAX_BYTES : ASSET_STREAM_MAX_BYTES;
   let current = rawUrl;
   for (let hop = 0; ; hop++) {
     const problem = hostedUrlProblem(current);
     if (problem) throw new AssetStreamRefusal("invalid_url", `The media's address ${problem}.`);
     const url = new URL(current);
+    if (opts.allowUrl && !opts.allowUrl(url)) {
+      throw new AssetStreamRefusal(
+        "invalid_url",
+        hop === 0 ? "The media's host isn't one of its allowed hosts." : "The media's host redirected off its allowed hosts.",
+      );
+    }
     const pinned = await checkedAddress(url.hostname.replace(/\.+$/, ""), opts.signal);
-    const res = await requestOnce(url, pinned, range, opts.signal);
+    const res = await requestOnce(url, pinned, range, opts.signal, accept);
     const status = res.statusCode ?? 0;
     if (status >= 300 && status < 400 && res.headers.location) {
       res.destroy(); // never drained: a refused body is not ours to download
@@ -315,12 +338,12 @@ export async function openAssetStream(rawUrl: string, opts: { range?: string | n
     }
     const type = String(res.headers["content-type"] ?? "").trim();
     const base = type.split(";")[0].trim().toLowerCase();
-    if (!/^(audio|video)\/[a-z0-9.+-]+$/.test(base)) {
+    if (!typeOk.test(base)) {
       res.destroy(); // never drained: a refused body is not ours to download
-      throw new AssetStreamRefusal("wrong_type", "The address doesn't serve audio or video.");
+      throw new AssetStreamRefusal("wrong_type", kinds.includes("image") && kinds.length === 1 ? "The address doesn't serve an image." : "The address doesn't serve audio or video.");
     }
     const declared = res.headers["content-length"];
-    if (declared !== undefined && (!/^\d+$/.test(String(declared)) || Number(declared) > ASSET_STREAM_MAX_BYTES)) {
+    if (declared !== undefined && (!/^\d+$/.test(String(declared)) || Number(declared) > maxBytes)) {
       res.destroy(); // never drained: a refused body is not ours to download
       throw new AssetStreamRefusal("too_large", "The media is larger than libi plays inline.");
     }
@@ -329,6 +352,6 @@ export async function openAssetStream(rawUrl: string, opts: { range?: string | n
     const contentRange = res.headers["content-range"];
     if (status === 206 && typeof contentRange === "string" && /^bytes \d+-\d+\/(\d+|\*)$/.test(contentRange)) headers["content-range"] = contentRange;
     if (res.headers["accept-ranges"] === "bytes") headers["accept-ranges"] = "bytes";
-    return { status: status as 200 | 206, headers, body: guarded(res), host: url.host };
+    return { status: status as 200 | 206, headers, body: guarded(res, maxBytes), host: url.host };
   }
 }

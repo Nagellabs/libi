@@ -19,17 +19,18 @@ import os from "node:os";
 import path from "node:path";
 
 let depCalls: string[] = [];
-const ensureDep = vi.fn<(mcpId: string, binary: string) => Promise<void>>();
-const retryDep = vi.fn<(mcpId: string, binary: string) => Promise<void>>();
+type DepOpts = { signal?: AbortSignal; launcherFailed?: boolean; onLauncherOnlyRepair?: () => void };
+const ensureDep = vi.fn<(mcpId: string, binary: string, opts?: DepOpts) => Promise<void>>();
+const retryDep = vi.fn<(mcpId: string, binary: string, opts?: DepOpts) => Promise<void>>();
 vi.mock("@/mcp/registry/dependency-manager", () => ({
   DependencyManager: class {
-    ensureDep(mcpId: string, binary: string): Promise<void> {
+    ensureDep(mcpId: string, binary: string, opts?: DepOpts): Promise<void> {
       depCalls.push(`ensureDep:${mcpId}/${binary}`);
-      return ensureDep(mcpId, binary);
+      return ensureDep(mcpId, binary, opts);
     }
-    retryDep(mcpId: string, binary: string): Promise<void> {
+    retryDep(mcpId: string, binary: string, opts?: DepOpts): Promise<void> {
       depCalls.push(`retryDep:${mcpId}/${binary}`);
-      return retryDep(mcpId, binary);
+      return retryDep(mcpId, binary, opts);
     }
   },
 }));
@@ -38,6 +39,12 @@ const storeFile = vi.fn<(a: { filename: string }) => Promise<{ id: string; filen
 vi.mock("@/mcp/tools/file-tools", () => ({
   storeFile: (a: { filename: string }) => storeFile(a),
   mimeFromExtension: () => "video/mp4",
+}));
+
+// The SSRF guard resolves the url's host before anything spawns. A real lookup is a network round-trip this
+// file cannot bound (see video-download-runner.test.ts): stub it with a public documentation address.
+vi.mock("node:dns", () => ({
+  promises: { lookup: vi.fn(async () => [{ address: "203.0.113.10", family: 4 }]) },
 }));
 
 import { videoDownloadRunner, YtDlpLaunchError } from "@/lib/jobs/runners/video-download";
@@ -134,6 +141,9 @@ describe.skipIf(realPlatform === "win32")("video_download — launcher repair", 
     ]);
     // Two launches: the dead one, then the repaired one.
     expect(spawnCount()).toBe(2);
+    // UV-2: the repair says the launcher failed, so an intact tool venv is repaired offline (launcher only).
+    expect(retryDep.mock.calls[0][2]).toMatchObject({ launcherFailed: true });
+    expect(retryDep.mock.calls[0][2]?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("repairs once and retries once when there is no launcher at all (spawn ENOENT)", async () => {
@@ -167,6 +177,55 @@ describe.skipIf(realPlatform === "win32")("video_download — launcher repair", 
     expect(storeFile).not.toHaveBeenCalled();
   });
 
+  // Review M6: a launcher-only repair (UV-2) that doesn't help used to be reported as "after libi reinstalled it",
+  // with no reinstall ever tried. Now the real reinstall follows once, and the error says what was done.
+  it("a launcher-only repair that doesn't help is followed by ONE real reinstall, and the error says both", async () => {
+    const dead = path.join(home, "gone", "yt-dlp");
+    writeLauncher(dead);
+    retryDep
+      .mockImplementationOnce(async (_m, _b, opts) => {
+        writeLauncher(dead);
+        opts?.onLauncherOnlyRepair?.();
+      })
+      .mockRejectedValueOnce(new Error("libi needs to download the Python packages for video download (a one-time step), and this computer appears to be offline. Try again when you're online."));
+    const err = await videoDownloadRunner.run(makeCtx() as never).then(() => null, (e: Error) => e);
+    expect(err!.message).toMatch(
+      new RegExp(`^${YT_DLP_UNAVAILABLE} yt-dlp could not be started \\(.*\\); rewriting its launcher did not help, and reinstalling it failed: libi needs to download`),
+    );
+    expect(retryDep).toHaveBeenCalledTimes(2);
+    expect(retryDep.mock.calls[1][2]).not.toHaveProperty("launcherFailed");
+    expect(spawnCount()).toBe(2);
+  });
+
+  it("…and when the reinstall works, the third launch downloads", async () => {
+    const dead = path.join(home, "gone", "yt-dlp");
+    writeLauncher(dead);
+    retryDep
+      .mockImplementationOnce(async (_m, _b, opts) => {
+        writeLauncher(dead);
+        opts?.onLauncherOnlyRepair?.();
+      })
+      .mockImplementationOnce(async () => {
+        writeLauncher(writeWorkingEntry());
+      });
+    const result = await videoDownloadRunner.run(makeCtx() as never);
+    expect(result).toMatchObject({ filename: "Clip.mp4" });
+    expect(spawnCount()).toBe(3);
+  });
+
+  it("…and when even that can't start it, the error says the launcher was rewritten AND yt-dlp reinstalled", async () => {
+    const dead = path.join(home, "gone", "yt-dlp");
+    writeLauncher(dead);
+    retryDep.mockImplementation(async (_m, _b, opts) => {
+      writeLauncher(dead);
+      opts?.onLauncherOnlyRepair?.();
+    });
+    const err = await videoDownloadRunner.run(makeCtx() as never).then(() => null, (e: Error) => e);
+    expect(err!.message).toMatch(/still could not be started after libi rewrote its launcher and reinstalled it/);
+    expect(retryDep).toHaveBeenCalledTimes(2);
+    expect(spawnCount()).toBe(3);
+  });
+
   it("marks the failure when the repair itself fails (offline), without a second launch", async () => {
     writeLauncher(path.join(home, "gone", "yt-dlp"));
     retryDep.mockRejectedValue(new Error("Failed to fetch: https://pypi.org/simple/yt-dlp/"));
@@ -194,6 +253,29 @@ describe.skipIf(realPlatform === "win32")("video_download — launcher repair", 
     expect(err!.message).toMatch(/yt-dlp failed \(exit 1\).*Video not found/);
     expect(err!.message).not.toContain(YT_DLP_UNAVAILABLE);
     expect(retryDep).not.toHaveBeenCalled();
+  });
+
+  // UV-1 (G2 report M4): a job waiting on an install another libi runs used to wait out the lock's 35-min cap after
+  // it was cancelled. The job's cancellation now reaches the wait as an AbortSignal.
+  it("a job cancelled while it waits on an install stops waiting at once, and ends cancelled, not needs_install", async () => {
+    let cancelled = false;
+    ensureDep.mockImplementation(
+      (_m, _b, opts) =>
+        new Promise<void>((_resolve, reject) => {
+          opts?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("stopped waiting"), { name: "AbortError" })));
+        }),
+    );
+    const run = videoDownloadRunner.run({ ...makeCtx(), shouldCancel: () => cancelled } as never).then(
+      () => null,
+      (e: Error) => e,
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    const at = Date.now();
+    cancelled = true;
+    const err = await run;
+    expect(Date.now() - at).toBeLessThan(1_000);
+    expect(err?.message).toBe("cancelled");
+    expect(ensureDep.mock.calls[0][2]?.signal).toBeInstanceOf(AbortSignal);
   });
 
   it("marks an install failure from ensureDep as unavailable too", async () => {

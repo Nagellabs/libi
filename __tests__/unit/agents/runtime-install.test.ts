@@ -27,9 +27,11 @@ const codexAdapterBin = path.join(agentsRoot, "node_modules", ".bin", "codex-acp
  * `getLibiHome()` from within `lib/libi-home.ts`'s own module scope — a
  * direct intra-module call the `vi.mock` override on the exported binding
  * cannot see. That real `getLibiHome()` reads `process.env.LIBI_HOME`
- * directly, which `__tests__/setup/isolate-libi-home.ts` sets ONCE, globally,
- * for the entire `npm test` run — shared by every one of the suite's ~1100
- * other test files. Every dynamic import in this file after a
+ * directly, which `__tests__/setup/isolate-libi-home.ts` used to set ONCE,
+ * globally, for the entire `npm test` run — shared by every one of the suite's
+ * ~1100 other test files (since TF-2, 2026-09-27, each vitest worker gets its
+ * own `w<pool id>` home under that run root instead; the reasoning below
+ * still holds within one worker). Every dynamic import in this file after a
  * `vi.resetModules()` (there are more than a dozen) was therefore quietly
  * re-creating dirs and appending log lines to that ONE shared, heavily
  * contended `logs/libi.log` under full-suite parallel load — synchronous

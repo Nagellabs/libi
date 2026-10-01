@@ -25,6 +25,8 @@ interface TimelineAudioSectionProps {
   trackWidth?: number;
   /** Commit a clip's own timing after a horizontal drag. */
   onCommitClipTiming?: (clipId: string, timing: { startTime: number; duration: number }) => void;
+  /** File ids whose audio is copyrighted — drives each row's © badge. */
+  copyrightedFileIds?: Set<string>;
 }
 
 const PERF_WARNING_THRESHOLD = 10;
@@ -43,6 +45,7 @@ export default function TimelineAudioSection({
   height,
   trackWidth,
   onCommitClipTiming,
+  copyrightedFileIds,
 }: TimelineAudioSectionProps) {
   const totalSeconds = totalFrames / fps;
   const time = currentFrame / fps;
@@ -83,6 +86,7 @@ export default function TimelineAudioSection({
             trackWidth={trackWidth}
             audible={audibleSet.has(clip.id)}
             selected={selectedId === clip.id}
+            copyrighted={copyrightedFileIds?.has(clip.fileId) ?? false}
             onSelect={onSelectClip ? () => onSelectClip(clip.id) : undefined}
             onToggleEnabled={() => onToggleClipEnabled(clip.id)}
             onContextMenu={(e) => {

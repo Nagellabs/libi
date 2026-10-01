@@ -47,12 +47,16 @@ import type {
 } from "@/lib/social/types";
 import { isComposablePlatform } from "@/lib/social/catalog";
 import type { KnownPlatform } from "@/lib/social/catalog";
+import type { CatalogTrack } from "@/lib/social/music-policy";
 
 type R = Record<string, unknown>;
 const rec = (v: unknown): R => (v && typeof v === "object" ? (v as R) : {});
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
 const id = (r: R): string => str(r._id) ?? str(r.id) ?? "";
+/** A catalog id: a string, or a number (Python-repr envelopes and some
+ *  platforms send ids as numbers) kept as its decimal string. */
+const idText = (v: unknown): string | undefined => str(v) ?? (num(v) !== undefined ? String(v) : undefined);
 
 const POST_STATUSES: PostStatus[] = ["draft", "scheduled", "publishing", "published", "partial", "failed", "cancelled"];
 /**
@@ -568,10 +572,33 @@ export function toCreateBody(input: CreatePostInput, aiLabelDefault: boolean): R
             isAiGenerated: o.isAiGenerated ?? aiLabelDefault,
             ...(o.collaborators?.length && { collaborators: o.collaborators }),
             ...(o.firstComment && { firstComment: o.firstComment }),
+            // Spec §6.2: the platform's licensed copy, and the Reel's own audio name.
+            ...(t.options.music?.mode === "attach" && {
+              audioConfiguration: { audioId: t.options.music.track.id, audioVolume: t.options.music.musicVolume, videoVolume: t.options.music.originalVolume },
+            }),
+            ...(t.options.music?.soundName && { audioName: t.options.music.soundName }),
           },
         };
       }
-      return { platform: "tiktok", accountId: t.accountId };
+      // Per-target tiktokSettings win over the root `tiktok_settings` (Zernio
+      // "Platform fields"), so two TikTok accounts can get different music.
+      // `musicSoundInfo` is ignored on a draft, which is why `draft` sends only that.
+      const m = t.options.platform === "tiktok" ? t.options.music : undefined;
+      const tts =
+        m?.mode === "attach"
+          ? {
+              musicSoundInfo: {
+                musicSoundId: m.track.id,
+                musicSoundVolume: m.musicVolume,
+                ...(m.startMs !== undefined && { musicSoundStart: m.startMs }),
+                ...(m.endMs !== undefined && { musicSoundEnd: m.endMs }),
+              },
+              videoOriginalSoundVolume: m.originalVolume,
+            }
+          : m?.mode === "draft"
+            ? { draft: true }
+            : null;
+      return { platform: "tiktok", accountId: t.accountId, ...(tts ? { platformSpecificData: { tiktokSettings: tts } } : {}) };
     }),
     tags: ["libi"],
     // `targetOptions` is stamped alongside the rest of `metadata.libi` so a
@@ -721,5 +748,36 @@ export function toDryRun(raw: unknown): TikTokDryRun {
     // rather than inventing a `true` the server never said.
     canPublish: typeof r.canPublish === "boolean" ? r.canPublish : perAccount.length > 0 && perAccount.every((a) => a.canPublish),
     perAccount,
+  };
+}
+
+/** One `accounts_list_tik_tok_commercial_music` track. `id` is the publishable
+ *  song clip id; `commercialMusicId` is rejected by TikTok at publish time. */
+export function toTikTokTrack(raw: unknown): CatalogTrack {
+  const r = rec(raw);
+  return {
+    id: idText(r.id) ?? "",
+    title: str(r.name) ?? "",
+    ...(str(r.artist) ? { artist: str(r.artist) } : {}),
+    ...(num(r.durationSec) !== undefined ? { durationSec: num(r.durationSec) } : {}),
+    ...(str(r.previewUrl) ? { previewUrl: str(r.previewUrl) } : {}),
+    ...(str(r.thumbnailUrl) ? { artworkUrl: str(r.thumbnailUrl) } : {}),
+    kind: "trending",
+    ...(num(r.rank) !== undefined ? { rank: num(r.rank) } : {}),
+  };
+}
+
+/** One Instagram audio asset. An original sound carries `igUsername` instead of `displayArtist`. */
+export function toInstagramTrack(raw: unknown, kind: "search" | "trending"): CatalogTrack {
+  const r = rec(raw);
+  const ms = num(r.durationInMs);
+  const artist = str(r.displayArtist) ?? str(r.igUsername);
+  return {
+    id: idText(r.audioId) ?? "",
+    title: str(r.title) ?? "",
+    ...(artist ? { artist } : {}),
+    ...(ms !== undefined ? { durationSec: Math.round(ms / 1000) } : {}),
+    ...(str(r.downloadUrl) ? { previewUrl: str(r.downloadUrl) } : {}),
+    kind,
   };
 }

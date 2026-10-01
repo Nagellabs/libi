@@ -176,16 +176,19 @@ interface InFlightInstall {
   force: boolean;
 }
 
-let inFlight: InFlightInstall | null = null;
-
-/** When the last install in this process finished successfully — the other
- *  half of `EnsureChromiumOptions.requestedAt`. */
-let lastInstallCompletedAt = 0;
+type ChromiumInstallState = { inFlight: InFlightInstall | null; lastInstallCompletedAt: number };
+/** Shared by EVERY copy of this module in the process: a production Next build loads the job
+ *  runners (export, tracking) and the Settings routes apart, and a flight one copy started was
+ *  invisible to the other — which then let a second `playwright install` start. (d2f3ea41's class.) */
+const state = ((globalThis as Record<symbol, unknown>)[Symbol.for("libi.ensureChromium.state")] ??= {
+  inFlight: null,
+  lastInstallCompletedAt: 0,
+}) as ChromiumInstallState;
 
 /** Tests only — this timestamp is process-global by design. */
 export function _resetChromiumInstallState(): void {
-  inFlight = null;
-  lastInstallCompletedAt = 0;
+  state.inFlight = null;
+  state.lastInstallCompletedAt = 0;
 }
 
 /**
@@ -198,8 +201,8 @@ export function _resetChromiumInstallState(): void {
  * virtual deps).
  */
 export function chromiumInstallInFlight(): ChromiumInstallSnapshot | null {
-  if (!inFlight) return null;
-  return inFlight.lastBytes ? { ...inFlight.lastBytes } : {};
+  if (!state.inFlight) return null;
+  return state.inFlight.lastBytes ? { ...state.inFlight.lastBytes } : {};
 }
 
 /**
@@ -208,18 +211,18 @@ export function chromiumInstallInFlight(): ChromiumInstallSnapshot | null {
  * there; joins the install already running when there is one.
  */
 export function ensureChromium(opts: EnsureChromiumOptions = {}): Promise<void> {
-  if (inFlight) return joinInFlight(inFlight, opts);
+  if (state.inFlight) return joinInFlight(state.inFlight, opts);
 
   // An install that finished AFTER this request was made has already served
   // it — the request just arrived here late enough to have become a `force`.
   // See `EnsureChromiumOptions.requestedAt`.
-  if (opts.force && opts.requestedAt !== undefined && lastInstallCompletedAt > opts.requestedAt) {
+  if (opts.force && opts.requestedAt !== undefined && state.lastInstallCompletedAt > opts.requestedAt) {
     logger.info(
       {
         tag: "export",
         op: "ensure_chromium_force_coalesced",
         requestedAt: opts.requestedAt,
-        completedAt: lastInstallCompletedAt,
+        completedAt: state.lastInstallCompletedAt,
       },
       "export.ensure_chromium_force_coalesced",
     );
@@ -243,13 +246,13 @@ export function ensureChromium(opts: EnsureChromiumOptions = {}): Promise<void> 
     if (!flight.force && (await chromiumInstalled())) return;
     await install(flight);
   })().finally(() => {
-    if (inFlight === flight) inFlight = null;
+    if (state.inFlight === flight) state.inFlight = null;
   });
   // Nobody may be left waiting on it (every participant can detach), so the
   // flight's own rejection must not surface as an unhandled rejection. Each
   // participant still gets the real error through its own `joinInFlight`.
   flight.promise.catch(() => {});
-  inFlight = flight;
+  state.inFlight = flight;
   return joinInFlight(flight, opts);
 }
 
@@ -563,7 +566,7 @@ async function install(flight: InFlightInstall): Promise<void> {
   // arriving late — see FORCE_COALESCE_MS. Stamped only on a real, verified
   // install: the on-disk short-circuit downloaded nothing and must not
   // suppress a Re-download.
-  lastInstallCompletedAt = Date.now();
+  state.lastInstallCompletedAt = Date.now();
   logger.info(
     { tag: "export", op: "ensure_chromium_done", executable, elapsedMs: Date.now() - startedAt },
     "export.ensure_chromium_done",

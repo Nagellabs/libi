@@ -13,10 +13,6 @@ vi.mock("@/lib/queries/export-defaults", () => ({
   useExportDefaults: () => queryState,
   useUpdateExportDefaults: () => ({ mutateAsync, isPending: false }),
 }));
-vi.mock("@/lib/shell/client", () => ({
-  pickDirectory: vi.fn(async () => undefined),
-  hasElectronBridge: () => false,
-}));
 
 import { ExportTab } from "@/components/settings/export-tab";
 
@@ -31,12 +27,9 @@ function graphicsField(): HTMLElement {
 }
 
 const loadedDefaults = {
-  folder: "/Users/me/Movies",
   format: "mp4" as const,
   quality: "source" as const,
   graphicsQuality: "4k" as const,
-  osDefaultFolder: "/Users/me/Movies",
-  effectiveFolder: "/Users/me/Movies",
 };
 
 /**
@@ -60,7 +53,16 @@ describe("ExportTab", () => {
     queryState.isLoading = false;
     queryState.data = { ...loadedDefaults, format: "mov", quality: "1080p" };
     render(<ExportTab />);
-    expect(screen.getByDisplayValue("/Users/me/Movies")).toBeInTheDocument();
+    expect(within(mediaField()).getByRole("button", { name: "1080p" }).className).toContain("bg-primary");
+  });
+
+  it("has no output-folder field — exports are saved with each piece", () => {
+    queryState.isLoading = false;
+    queryState.data = loadedDefaults;
+    render(<ExportTab />);
+    expect(screen.queryByText("Default output folder")).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByTestId("export-location-note").textContent).toMatch(/saved with each piece/);
   });
 
   it("renders both resolution rows with Original + 4K selected at defaults", () => {

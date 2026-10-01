@@ -68,6 +68,13 @@ export interface ProbedMedia {
   videoLead?: number;
   audioLead?: number;
   /**
+   * Every audio stream's lead (as `audioLead`), in stream order: only for a
+   * file with more than one. ffmpeg's default pick (most channels) and the
+   * primary track can differ; where their leads do too, the transcript re-time
+   * can't know which one an old extract read (review round 5, M3).
+   */
+  audioStreamLeads?: number[];
+  /**
    * The primary audio stream's `start_time` minus the file's, unclamped: the
    * time of its first decoded sample (ffmpeg applies an Opus pre-skip or a
    * Matroska CodecDelay first) on the file's timeline. Negative when the
@@ -324,11 +331,21 @@ async function firstPacket(filePath: string, index: number, timeBase?: unknown):
  * frame, review round 4). The last packet's is the stream's end trim.
  *
  * Reads every packet header of the file (no decode): 0.15 s for a
- * 30-minute Opus WebM. The timing route calls it for Matroska Opus only, and
- * caches the answer; nothing else pays for it. Empty when there are none, or
- * ffprobe can't say.
+ * 30-minute Opus WebM, seconds for a 1–2 h recording. The timing route calls
+ * it for Matroska Opus only, and caches a real answer; nothing else pays for
+ * it. `{ ok: true, trims: [] }` when there are none; `{ ok: false }` when
+ * ffprobe failed or timed out, which is NOT "none" (review round 5, M5): the
+ * route then answers without trims and doesn't cache it, so the next request
+ * reads them again.
+ *
+ * Still a whole-stream ffprobe, not the 1 MiB Matroska header walker
+ * (matroska-tracks.ts): a DiscardPadding sits in the BlockGroup of the packet
+ * it trims, and a join can be anywhere in the file, so finding them means
+ * walking every cluster, which is what ffprobe does.
  */
-export async function readOpusDiscards(filePath: string, streamIndex: number): Promise<Array<[number, number]>> {
+export type OpusDiscardsResult = { ok: true; trims: Array<[number, number]> } | { ok: false };
+
+export async function readOpusDiscards(filePath: string, streamIndex: number): Promise<OpusDiscardsResult> {
   try {
     const { stdout } = await exec(
       resolveFfprobePath(),
@@ -343,9 +360,9 @@ export async function readOpusDiscards(filePath: string, streamIndex: number): P
       first ??= time;
       if (discard !== undefined && discard > 0) out.push([+(time - first).toFixed(6), discard]);
     }
-    return out;
+    return { ok: true, trims: out };
   } catch {
-    return [];
+    return { ok: false };
   }
 }
 
@@ -416,6 +433,10 @@ export async function probeMediaResult(filePath: string): Promise<ProbeResult> {
     };
     const videoLead = primaryVideoStreamIndex !== undefined ? leadOf(videoStream) : undefined;
     const audioLead = primaryAudio ? leadOf(primaryAudio) : undefined;
+    const audioStreams = streams.filter((st) => st.codec_type === "audio");
+    const audioStreamLeads = audioStreams.length > 1
+      ? audioStreams.map((st) => leadOf(st)).filter((l): l is number => l !== undefined)
+      : [];
     const audioStart = primaryAudio ? startOf(primaryAudio) : undefined;
     const audioRead = await audioReadFix(filePath, formatName, primaryAudio, startTime, audioLead);
     const oggPacket = /(^|,)ogg(,|$)/.test(formatName) && primaryAudioStreamIndex !== undefined && startTime !== undefined
@@ -437,6 +458,7 @@ export async function probeMediaResult(filePath: string): Promise<ProbeResult> {
         ...(audioPadding > 0 ? { audioPadding } : {}),
         ...(videoLead !== undefined ? { videoLead } : {}),
         ...(audioLead !== undefined ? { audioLead } : {}),
+        ...(audioStreamLeads.length > 1 ? { audioStreamLeads } : {}),
         ...(audioStart !== undefined ? { audioStart } : {}),
         ...(audioRead ? { audioRead } : {}),
         ...(oggFirstPacket !== undefined ? { oggFirstPacket, oggFirstPacketDuration: oggPacket?.duration ?? 0 } : {}),

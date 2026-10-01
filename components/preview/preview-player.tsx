@@ -64,8 +64,7 @@ import {
 import type { ManualAnchor, Track, TrackFit, TrackSmoothing } from "@/lib/tracking/types";
 import { ExportDialog } from "@/components/export/export-dialog";
 import { hasGraphicsOverlays } from "@/lib/export/quality";
-import { ExportSuccessToast, exportToastFor } from "@/components/export/export-success-toast";
-import { revealFile } from "@/lib/shell/client";
+import type { ExportPurpose } from "@/lib/export/audio-policy";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
 import { recordPreviewEvent, useReactRenderTelemetry } from "@/lib/preview/telemetry";
 import type { FrameStore } from "@/lib/preview/frame-store";
@@ -91,8 +90,10 @@ import { isOverlayIn3dMode } from "@/lib/overlays/three-d-mode";
 import { overlayAtPlayhead } from "@/lib/overlays/display-overlay";
 import { ThreeGizmoControls } from "@/components/preview/three-gizmo-controls";
 import type { OverlayTransformPatch } from "@/hooks/editor/use-overlay-transform-commit";
-import { openPostingTab, useExportDialogRequest } from "@/hooks/social/use-posting-intent";
-import { useSocialStatus } from "@/lib/queries/social";
+import { useExportDialogRequest, takeExportDialogPurpose, takeExportDialogReturnToPost, takeExportDialogDraftPostId } from "@/hooks/social/use-posting-intent";
+import { useLatestRunningExport } from "@/lib/queries/exports";
+import { activePercent } from "@/lib/exports/list-view";
+import { useExportAudioTracks } from "@/lib/queries/export-audio";
 
 /** Seconds the user can keep fine-tuning a drag before the re-anchor is
  *  actually committed (POST + seeded re-track). Each new drag resets it. */
@@ -437,54 +438,48 @@ export default function PreviewPlayer({
   const paletteDragRef = useRef<{ move: (ev: MouseEvent) => void; up: (ev: MouseEvent) => void } | null>(null);
 
   // Export dialog open-state (observed, not controlled — ExportDialog stays
-  // uncontrolled and just notifies us via onOpenChange) + the post-close
-  // success toast. If the export finishes while the dialog is CLOSED, we
-  // surface a dismissible "Exported …" pill next to the Export button.
+  // uncontrolled and just notifies us via onOpenChange). A finished export is
+  // announced by the app-wide finish toast (hooks/exports/use-export-finish-toasts.ts).
   const [exportOpen, setExportOpen] = useState(false);
-  const [exportToast, setExportToast] = useState<{ filePath: string; filename: string; note: string | null } | null>(null);
-  const socialStatus = useSocialStatus();
+  // The purpose a requester (the Posting tab's "Export & post") asked the
+  // dialog to open with — read once via `takeExportDialogPurpose` so a later
+  // manual open of the dialog doesn't replay a stale preselection.
+  const [exportPurpose, setExportPurpose] = useState<ExportPurpose | null>(null);
+  // Whether the request came from the post composer: Start then returns the
+  // user to the Posting tab (the dialog does it; this only carries the flag).
+  const [exportReturnsToPost, setExportReturnsToPost] = useState(false);
+  const [exportReturnDraftId, setExportReturnDraftId] = useState<string | null>(null);
+  const exportAudio = useExportAudioTracks(pieceId || null);
+  // Several exports can run; the bar over the canvas follows this piece's most recent one (spec §B2).
+  const runningExport = useLatestRunningExport(pieceId || null);
   // "Export & post" (Posting tab, no export yet) asks for the REAL export
   // dialog rather than a duplicate form — opening it this way just flips the
   // same `exportOpen` state a manual click would.
-  useExportDialogRequest(pieceId, () => setExportOpen(true));
-  const prevExportStatusRef = useRef(exportFlow.status);
-  const exportOpenRef = useRef(exportOpen);
-  exportOpenRef.current = exportOpen;
-  useEffect(() => {
-    const prev = prevExportStatusRef.current;
-    prevExportStatusRef.current = exportFlow.status;
-    // A fresh export starting clears any stale toast.
-    if (exportFlow.status === "starting") {
-      setExportToast(null);
-      return;
-    }
-    // Capture on the success EDGE, while flow.result is still set (the dialog
-    // resets it on close). Only toast when the dialog was closed at finish —
-    // an open dialog already shows its own success card.
-    const becameSuccess = prev !== "success" && exportFlow.status === "success";
-    if (becameSuccess && !exportOpenRef.current && exportFlow.result) {
-      setExportToast(exportToastFor(exportFlow.result));
-    }
-  }, [exportFlow.status, exportFlow.result]);
-
-  // Reopening the dialog after a post-close finish: the flow is still in a
-  // terminal state (it only resets on a terminal-state close, which never
-  // happened because the dialog was already closed when the export finished).
-  // On the closed→open transition, clear any pending toast and reset a
-  // terminal flow so the dialog shows the export FORM, not a stale result card.
+  useExportDialogRequest(pieceId, () => {
+    setExportPurpose(takeExportDialogPurpose());
+    setExportReturnsToPost(takeExportDialogReturnToPost());
+    setExportReturnDraftId(takeExportDialogDraftPostId());
+    setExportOpen(true);
+  });
+  // Reopening the dialog after a Start: back to the export FORM, not the queued banner.
   const prevExportOpenRef = useRef(exportOpen);
   useEffect(() => {
     const wasOpen = prevExportOpenRef.current;
     prevExportOpenRef.current = exportOpen;
     if (!wasOpen && exportOpen) {
-      setExportToast(null);
-      if (
-        exportFlow.status === "success" ||
-        exportFlow.status === "failed" ||
-        exportFlow.status === "cancelled"
-      ) {
+      if (exportFlow.status === "queued" || exportFlow.status === "failed") {
         exportFlow.reset();
       }
+    }
+    // On the open→closed edge, drop any purpose a requester (the Posting
+    // tab's "Export & post") preselected — otherwise it survives in this
+    // long-lived component's state and silently carries into the NEXT,
+    // unrelated export the next time the dialog opens (e.g. a plain click
+    // on the Export button).
+    if (wasOpen && !exportOpen) {
+      setExportPurpose(null);
+      setExportReturnsToPost(false);
+      setExportReturnDraftId(null);
     }
   }, [exportOpen, exportFlow]);
 
@@ -1426,11 +1421,8 @@ export default function PreviewPlayer({
   // the canvas as usual.
   const isEmptyComposition = (composition.overlays?.length ?? 0) === 0;
 
-  const isExporting = exportFlow.status === "starting" || exportFlow.status === "running";
-  const exportProgressRatio =
-    exportFlow.progress && exportFlow.progress.total > 0
-      ? Math.max(0, Math.min(1, exportFlow.progress.done / exportFlow.progress.total))
-      : null;
+  const isExporting = runningExport !== null;
+  const exportProgressRatio = runningExport ? (activePercent(runningExport) ?? 0) / 100 : null;
 
   // Surface hidden-`<video>` load failures (typically: unsupported codec, no proxy yet)
   // so the user isn't staring at a black canvas wondering why only overlays render.
@@ -1547,28 +1539,14 @@ export default function PreviewPlayer({
             // Posting tab's "Export & post") open the real dialog.
             openOverride={exportOpen ? true : undefined}
             onOpenChange={setExportOpen}
+            audioTracks={exportAudio.tracks}
+            audioTracksLoading={exportAudio.isLoading}
+            audioTracksError={exportAudio.isError}
+            onRetryAudioTracks={exportAudio.refetch}
+            initialPurpose={exportPurpose}
+            returnToPost={exportReturnsToPost}
+            returnDraftPostId={exportReturnDraftId}
           />
-          {exportToast && (
-            <div className="absolute top-full right-0 z-20 mt-2">
-              <ExportSuccessToast
-                filename={exportToast.filename}
-                note={exportToast.note}
-                onOpenFolder={() => {
-                  void revealFile(exportToast.filePath);
-                  setExportToast(null);
-                }}
-                onDismiss={() => setExportToast(null)}
-                onPost={
-                  socialStatus.data?.providerId
-                    ? () => {
-                        openPostingTab({ pieceId, exportPath: exportToast.filePath });
-                        setExportToast(null);
-                      }
-                    : undefined
-                }
-              />
-            </div>
-          )}
         </div>
         {onToggleLayers && (
           <button

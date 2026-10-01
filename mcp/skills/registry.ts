@@ -239,6 +239,12 @@ export const BUNDLED_SKILLS: BundledSkillRef[] = [
       "Post a piece to Instagram or TikTok through the user's social provider (Zernio) — export, upload, draft, and only publish or schedule on the user's explicit yes. Use for post / publish / schedule / share to social, what-to-post-where, and boosting a post as an ad.",
   },
   {
+    id: "social-music",
+    name: "social-music",
+    description:
+      "Music rights for a piece: copyrighted vs generated/owned audio, confirming a song's identity, asking what an export is for, relaying each platform's music plan before posting, and fetching a template's left-out song only on the user's yes. Use when a piece has downloaded or uploaded music, when exporting or posting one, or when a template's music was not included.",
+  },
+  {
     id: "templates",
     name: "templates",
     description:

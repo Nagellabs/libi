@@ -70,13 +70,35 @@ def main() -> int:
         return 1
 
     try:
+        import espeakng_loader
         from kokoro_onnx import Kokoro
+        from kokoro_onnx.config import EspeakConfig
     except Exception as e:  # noqa: BLE001
         print(f"kokoro-onnx import failed: {e}", file=sys.stderr)
         return 1
 
+    # espeak-ng truncates a data path of 160+ characters, and the wheel's copy
+    # sits deep in uv's cache under LIBI_HOME — see espeak_path.py. Passed
+    # through EspeakConfig because Kokoro's tokenizer calls
+    # EspeakWrapper.set_data_path itself, overwriting any earlier call.
     try:
-        kokoro = Kokoro(onnx, voices)
+        # The sibling module is found through the script's own dir, which is
+        # NOT on sys.path when the user's environment sets PYTHONSAFEPATH=1
+        # (Python 3.11+) — put it there explicitly.
+        here = os.path.dirname(os.path.abspath(__file__))
+        if here not in sys.path:
+            sys.path.insert(0, here)
+        from espeak_path import short_data_path
+
+        data_path = short_data_path(
+            espeakng_loader.get_data_path(), os.environ.get("LIBI_HOME")
+        )
+    except Exception as e:  # noqa: BLE001
+        print(f"espeak-ng data path: {e}", file=sys.stderr)
+        return 1
+
+    try:
+        kokoro = Kokoro(onnx, voices, espeak_config=EspeakConfig(data_path=data_path))
     except Exception as e:  # noqa: BLE001
         print(f"model load failed: {e}", file=sys.stderr)
         return 1

@@ -174,3 +174,163 @@ describe("clonePieceInto — hasAlpha propagation", () => {
     expect(cloned.hasAlpha).toBeNull();
   });
 });
+
+/**
+ * EXP-1 — a duplicated piece keeps what the source had already paid for: the
+ * probed proxy height (without it the clone reads as "proxy of unknown size"
+ * and the resolution-aware regen re-makes a proxy that was fine) and a READY
+ * filmstrip (without it every timeline bar in the copy is blank until a
+ * regeneration runs). Both ride the same carryProxy guard: a VPx-alpha row
+ * gets neither — its proxy (and any filmstrip sampled from it) predates
+ * alpha-awareness and shows the background the user removed.
+ */
+describe("clonePieceInto — proxy size and filmstrip", () => {
+  async function seedVideo(opts: {
+    filename: string;
+    contentType: string;
+    hasAlpha: boolean;
+    filmstripStatus?: "idle" | "generating" | "ready" | "failed";
+  }) {
+    const { getStorage } = await import("@/lib/storage");
+    const db = getDb();
+    const storage = await getStorage();
+    const base = opts.filename.replace(/\.[^.]+$/, "");
+    seedPiece(db as never, { id: "src" });
+    const generatedAt = new Date(1_700_000_000_000);
+    db.insert(files).values({
+      id: crypto.randomUUID(),
+      pieceId: "src",
+      filename: opts.filename,
+      name: base,
+      description: "",
+      type: "video",
+      storagePath: `src/${opts.filename}`,
+      contentType: opts.contentType,
+      size: 4,
+      mediaHeight: 2160,
+      hasAlpha: opts.hasAlpha,
+      proxyFilename: `${base}-proxy.mp4`,
+      proxyStatus: "ready",
+      proxyGeneratedAt: generatedAt,
+      proxyHeight: 1080,
+      filmstripFilename: `${base}-filmstrip.jpg`,
+      filmstripStatus: opts.filmstripStatus ?? "ready",
+      filmstripGeneratedAt: generatedAt,
+      filmstripFrames: 20,
+      filmstripHeight: 60,
+    }).run();
+    await storage.save("src", opts.filename, Buffer.from("orig"), opts.contentType);
+    await storage.save("src", `${base}-proxy.mp4`, Buffer.from("proxy"));
+    await storage.save("src", `${base}-filmstrip.jpg`, Buffer.from("jpg"), "image/jpeg");
+    db.insert(pieces).values({ id: "dst", name: "src (copy)" }).run();
+    return { storage, db, generatedAt, base };
+  }
+
+  it("carries proxyHeight and a ready filmstrip (file + columns) for an opaque video", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { storage, db, generatedAt } = await seedVideo({
+      filename: "clip.mp4", contentType: "video/mp4", hasAlpha: false,
+    });
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(cloned.proxyHeight).toBe(1080);
+    expect(cloned.filmstripFilename).toBe("clip-filmstrip.jpg");
+    expect(cloned.filmstripStatus).toBe("ready");
+    expect(cloned.filmstripGeneratedAt?.getTime()).toBe(generatedAt.getTime());
+    expect(cloned.filmstripFrames).toBe(20);
+    expect(cloned.filmstripHeight).toBe(60);
+    expect(await storage.exists("dst", "clip-filmstrip.jpg")).toBe(true);
+    expect((await storage.read("dst", "clip-filmstrip.jpg")).toString()).toBe("jpg");
+  });
+
+  it("does not carry a filmstrip that isn't ready", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { storage, db } = await seedVideo({
+      filename: "clip.mp4", contentType: "video/mp4", hasAlpha: false, filmstripStatus: "failed",
+    });
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(cloned.filmstripFilename).toBeNull();
+    expect(cloned.filmstripStatus).toBe("idle");
+    expect(cloned.filmstripFrames).toBeNull();
+    expect(cloned.filmstripHeight).toBeNull();
+    expect(await storage.exists("dst", "clip-filmstrip.jpg")).toBe(false);
+    // The proxy height still rides the proxy.
+    expect(cloned.proxyHeight).toBe(1080);
+  });
+
+  it("gives a VPx-alpha row neither the proxy height nor the filmstrip (B1 guard)", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { storage, db } = await seedVideo({
+      filename: "cutout.webm", contentType: "video/webm", hasAlpha: true,
+    });
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(cloned.proxyFilename).toBeNull();
+    expect(cloned.proxyHeight).toBeNull();
+    expect(cloned.filmstripFilename).toBeNull();
+    expect(cloned.filmstripStatus).toBe("idle");
+    expect(cloned.filmstripGeneratedAt).toBeNull();
+    expect(cloned.filmstripFrames).toBeNull();
+    expect(cloned.filmstripHeight).toBeNull();
+    expect(await storage.exists("dst", "cutout-filmstrip.jpg")).toBe(false);
+  });
+
+  // FINAL m-B1: the columns followed carryProxy while the bytes followed the
+  // file's existence, so a ready row whose proxy file was gone cloned as a
+  // ready row pointing at nothing.
+  it("a ready row whose proxy file is missing clones as idle with no proxy fields", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { storage, db } = await seedVideo({
+      filename: "clip.mp4", contentType: "video/mp4", hasAlpha: false,
+    });
+    await storage.delete("src", "clip-proxy.mp4");
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(cloned.proxyFilename).toBeNull();
+    expect(cloned.proxyStatus).toBe("idle");
+    expect(cloned.proxyGeneratedAt).toBeNull();
+    expect(cloned.proxyHeight).toBeNull();
+    expect(await storage.exists("dst", "clip-proxy.mp4")).toBe(false);
+  });
+
+  it("an evicted source proxy is recorded for the clone", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { recordEvictedProxy, listEvictedProxies } = await import("@/lib/proxy/evicted");
+    const { storage, db } = await seedVideo({
+      filename: "clip.mp4", contentType: "video/mp4", hasAlpha: false,
+    });
+    // What dropProxyFile(…, "lru") leaves: an idle row, no proxy file, a record.
+    const [srcRow] = db.select().from(files).where(eq(files.pieceId, "src")).all();
+    db.update(files)
+      .set({ proxyFilename: null, proxyStatus: "idle", proxyGeneratedAt: null, proxyHeight: null })
+      .where(eq(files.id, srcRow.id))
+      .run();
+    await storage.delete("src", "clip-proxy.mp4");
+    recordEvictedProxy(srcRow.id, 123);
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(listEvictedProxies()[cloned.id]?.bytes).toBe(123);
+    // The source keeps its own record.
+    expect(listEvictedProxies()[srcRow.id]?.bytes).toBe(123);
+  });
+
+  it("a VPx-alpha source's eviction record is not carried (B1 guard)", async () => {
+    const { clonePieceInto } = await import("@/lib/duplication/clone-piece");
+    const { recordEvictedProxy, listEvictedProxies } = await import("@/lib/proxy/evicted");
+    const { db } = await seedVideo({
+      filename: "cutout.webm", contentType: "video/webm", hasAlpha: true,
+    });
+    const [srcRow] = db.select().from(files).where(eq(files.pieceId, "src")).all();
+    recordEvictedProxy(srcRow.id, 123);
+    await clonePieceInto("src", "dst", "draft");
+
+    const [cloned] = db.select().from(files).where(eq(files.pieceId, "dst")).all();
+    expect(listEvictedProxies()[cloned.id]).toBeUndefined();
+  });
+});

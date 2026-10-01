@@ -183,7 +183,17 @@ export const audioAddClipSchema = z.object({
     .enum(["extend", "trim"])
     .optional()
     .describe(
-      "Required ONLY when the clip would end past the piece's current end and no explicit `duration` is given: 'extend' keeps the asset's full length (the piece grows), 'trim' cuts the clip at the piece's current end. Ask the user which they want before choosing.",
+      "Required ONLY when the clip would end past the piece's current end and no explicit `duration` is given: 'extend' keeps the asset's full length (the piece grows), 'trim' cuts the clip at the piece's current end. Ask the user which they want before choosing. Not needed on an EMPTY piece (nothing on the timeline yet): the first asset sets the piece's length and is never refused.",
+    ),
+  rights: z
+    .object({
+      class: z.enum(["copyrighted", "generated"]),
+      track: z.object({ title: z.string().min(1).max(200), artist: z.string().max(200).optional() }).strict().optional(),
+    })
+    .strict()
+    .optional()
+    .describe(
+      "What this song IS, when you know it — you downloaded it, or the user named it. 'copyrighted' with its track (title + artist) stamps the file and, in the same call, matches the song on every connected platform that can attach a licensed copy (the result's `music.summary` says where it matched — relay it). 'generated' ONLY for your own generation tool's output from this turn. 'owned' is not accepted: only the user can mark a track as their own.",
     ),
 });
 
@@ -299,6 +309,20 @@ export const updateFileNotesSchema = z.object({
   notes: z.string().describe("Notes content. In append mode this is the single line to append (a timestamp prefix is added automatically); in replace mode this is the full new notes body."),
   mode: z.enum(["append", "replace"]).default("append").describe("'append' (default) prepends an ISO timestamp and appends a trailing newline; 'replace' overwrites the entire notes field."),
 });
+
+export const setAudioRightsSchema = z.object({
+  pieceId: z.string().describe("The piece the file belongs to."),
+  fileId: z.string().describe("The audio (or video-with-audio) file."),
+  class: z
+    .enum(["copyrighted", "generated", "owned"])
+    .optional()
+    .describe("'generated' ONLY for a file you imported from your own generation tool's output in this turn. 'owned' is refused: only the user can mark a track as their own. A class the user set themselves is refused too (user_decided) — ask them."),
+  track: z
+    .object({ title: z.string().min(1).max(200), artist: z.string().max(200).optional(), album: z.string().max(200).optional(), isrc: z.string().max(20).optional() })
+    .optional()
+    .describe("The song's identity once the user confirmed it (title, artist). Merged into the known track: album / isrc you leave out are kept."),
+});
+export type SetAudioRightsParams = z.infer<typeof setAudioRightsSchema>;
 
 export const updateMcpServerSchema = z.object({
   id: z.string().describe("libi-owned MCP row id, e.g. 'libi-tracking'"),
@@ -728,7 +752,7 @@ export const addOverlaySchema = z.object({
     .enum(["extend", "trim"])
     .optional()
     .describe(
-      "VIDEO overlays only. Required ONLY when startTime + duration would run past the piece's current end: 'extend' keeps the requested duration (the piece grows), 'trim' cuts the overlay at the piece's current end. Ask the user which they want before choosing.",
+      "VIDEO overlays only. Required ONLY when startTime + duration would run past the piece's current end: 'extend' keeps the requested duration (the piece grows), 'trim' cuts the overlay at the piece's current end. Ask the user which they want before choosing. Not needed on an EMPTY piece (nothing on the timeline yet): the first asset sets the piece's length and is never refused.",
     ),
 });
 export type AddOverlayParams = z.infer<typeof addOverlaySchema>;
@@ -810,14 +834,13 @@ export const updateOverlaySchema = z.object({
   // UpdateTrackedOverlaySchema. Sizing for other kinds is `rect`, never this.
   scale: z.number().positive().max(5).optional(),
   group: z.string().max(120).optional(),
-  // Attach a source file's transcript word-timings to THIS overlay (any kind —
-  // esp. a custom `code`/`three` caption). Reads that file's STT words, windows
-  // them to the overlay's [startTime, startTime+duration], converts to
-  // element-local seconds, and stores them as `caption.words`. A custom caption
-  // body then voice-syncs via the injected helpers (`activeWordIndex(words,
-  // time)`, `typewriterRevealedText(words, time)`) instead of embedding timings.
   // The transcript is the source of truth; caption.words is the derived snapshot.
-  captionFromFileId: z.string().optional(),
+  captionFromFileId: z
+    .string()
+    .optional()
+    .describe(
+      "Attach a file's transcript word timings to THIS overlay (any kind — a text cue, or a custom code/three caption). Reads that file's words and windows them to the overlay's TIMELINE window [startTime, startTime+duration] (through where the file plays: its audio clip or video overlay), element-local, stored as caption.words. A custom caption body voice-syncs via activeWordIndex(words, time) / typewriterRevealedText(words, time). A TEXT overlay gets the words its text says, by where each word starts in [startTime, startTime+duration); a cue of a generate_captions track stays in its track and style, and a text overlay with no caption yet joins that file's track (taking its nearest cue's look) — use this to re-split cues. A code/three overlay, or a cue of another file's track, gets its own group cap-<fileId>-custom.",
+    ),
 });
 export type UpdateOverlayParams = z.infer<typeof updateOverlaySchema>;
 
@@ -1197,9 +1220,9 @@ export const analysisSaveSummarySchema = z.object({
 
 export const analysisTranscribeAudioSchema = z.object({
   fileId: z.string().describe("ID of the video or audio file"),
-  retry: z.boolean().optional().describe("If true, only re-process chunks with status='failed' or 'not_started'. Default false."),
+  retry: z.boolean().optional().describe("If true, re-process only chunks with status='failed' or 'not_started', plus 'ready' chunks that came back with no words. Default false."),
   chunkSeconds: z.number().int().positive().optional().describe("Chunk length in seconds. Default 600 (10 minutes)."),
-  model: z.string().optional().describe("Whisper model id (tiny|base|small|medium|large-v3). Default 'small'."),
+  model: z.string().optional().describe("Whisper model id (tiny|base|small|medium|large-v3). Omit it to use 'small' when installed, else the most accurate installed model; the result's `model` says which ran. Pass one only to require that model."),
 });
 
 export const analysisChunkAudioSchema = z.object({
@@ -2444,7 +2467,7 @@ export const exportVideoSchema = {
   filename: z
     .string()
     .optional()
-    .describe("Filename stem (no extension). Defaults to the piece's name. Sanitized + auto-numbered against the destination folder."),
+    .describe("Filename stem (no extension). Defaults to the piece's name. Sanitized + auto-numbered against the piece's other exports."),
   format: z
     .enum(["mp4", "webm"])
     .optional()
@@ -2459,8 +2482,49 @@ export const exportVideoSchema = {
     .describe("Resolution text, code and 3D overlays render at. Default '4k' (sharpest). The output file takes the larger of the two when the piece has text/code/3D."),
   customWidth: z.number().int().positive().optional().describe("Custom output width in pixels (only when quality='custom')."),
   customHeight: z.number().int().positive().optional().describe("Custom output height (only when quality='custom')."),
-  destFolder: z.string().optional().describe("Absolute path to write to. Defaults to the user's configured export folder (Settings → Export). Always confirm with the user before overriding."),
+  destFolder: z
+    .string()
+    .optional()
+    .describe("REMOVED — never pass it. Exports are saved inside the piece (its Exports tab); a destFolder is refused. Find files with libi.list_exports."),
+  purpose: z
+    .enum(["social", "personal"])
+    .optional()
+    .describe("What the export is for. REQUIRED when the piece has copyrighted music (the tool refuses without it — ask the user). 'social' leaves copyrighted songs out by default; 'personal' keeps them. To post, prefer libi.post_piece, which exports per platform."),
+  copyrightedAudio: z.enum(["exclude", "include"]).optional().describe("Override the purpose's default for copyrighted audio."),
+  includeFileIds: z.array(z.string()).optional().describe("Copyrighted files to keep in on top of 'exclude'."),
+  variants: z
+    .array(
+      z
+        .object({
+          format: z.enum(["mp4", "webm"]).optional(),
+          quality: z.enum(["source", "1080p", "1440p", "4k", "custom"]).optional(),
+          graphicsQuality: z.enum(["1080p", "1440p", "4k"]).optional(),
+          customWidth: z.number().int().positive().optional(),
+          customHeight: z.number().int().positive().optional(),
+          filename: z.string().optional(),
+          purpose: z.enum(["social", "personal"]).optional(),
+          copyrightedAudio: z.enum(["exclude", "include"]).optional(),
+          includeFileIds: z.array(z.string()).optional(),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(10)
+    .optional()
+    .describe(
+      "Several exports of this piece in ONE call (1–10), e.g. a 9:16 and a 16:9 cut (quality 'custom' + customWidth/customHeight), or MP4 + WebM. Each entry is its own export; the top-level format/quality/graphicsQuality/purpose/copyrightedAudio/includeFileIds apply to an entry that doesn't set them. With variants the call returns at once with what was queued — { queued: [{ exportId, name, format, width, height }], note } — and the exports render in parallel as the machine allows; check them with libi.list_exports. (A with-song and a without-song cut are two variants that differ in copyrightedAudio.)",
+    ),
 };
+
+export const listExportsSchema = z.object({
+  pieceId: z.string().describe("The piece whose exports to list."),
+  status: z
+    .enum(["queued", "running", "done", "failed", "cancelled"])
+    .optional()
+    .describe("Only exports in this state. Omit for all of them."),
+  show: z.boolean().optional().describe("Also open the piece's Exports tab for the user."),
+});
+export type ListExportsParams = z.infer<typeof listExportsSchema>;
 
 export const forkSkillSchema = z.object({
   id: z.string().describe("ID of the bundled skill to fork into an editable user copy"),
@@ -2838,6 +2902,12 @@ export const applyTemplateSchema = z.object({
 });
 export type ApplyTemplateParams = z.infer<typeof applyTemplateSchema>;
 
+export const fetchTemplateMusicSchema = z.object({
+  pieceId: z.string().describe("The piece the template was applied to."),
+  assetId: z.string().describe("A pendingMusic entry's assetId (from libi.apply_template's result or libi.get_piece_state)."),
+});
+export type FetchTemplateMusicParams = z.infer<typeof fetchTemplateMusicSchema>;
+
 export const publishTemplateSchema = z.object({
   templateId: z.string().min(1).describe("The local template to prepare for publishing (from list_templates / create_template_from_piece)."),
   exampleVideo: z
@@ -2994,6 +3064,16 @@ export const postPieceSchema = z.object({
           .enum(["reel", "feed", "story"])
           .optional()
           .describe("Instagram only. Defaults to the user's own setting."),
+        music: z
+          .object({
+            mode: z.enum(["attach", "draft", "include", "strip"]),
+            trackId: z.string().optional().describe("A candidate id from libi.social_music_search (mode 'attach')."),
+            soundName: z.string().max(100).optional().describe("Instagram: the name of the Reel's own sound (generated/owned music)."),
+          })
+          .optional()
+          .describe(
+            "Override libi's music plan for this target. Omit to use the plan (see libi.social_music_search). 'include' keeps a copyrighted song in the video — only on the user's explicit say-so.",
+          ),
       }),
     )
     .optional()
@@ -3013,6 +3093,14 @@ export const postPieceSchema = z.object({
     ),
 });
 export type PostPieceParams = z.infer<typeof postPieceSchema>;
+
+export const socialMusicSearchSchema = z.object({
+  pieceId: z.string().describe("The piece whose music is being planned."),
+  platform: z.enum(["instagram", "tiktok", "youtube", "facebook", "twitter"]).describe("twitter = X."),
+  accountId: z.string().optional().describe("Required for instagram and tiktok (libi.social_status lists them)."),
+  query: z.string().max(100).optional().describe("Instagram only: search words. TikTok has no search — its trending list is returned."),
+});
+export type SocialMusicSearchParams = z.infer<typeof socialMusicSearchSchema>;
 
 export const socialLinkPostSchema = z.object({
   pieceId: z.string().describe("The piece the post was made from."),

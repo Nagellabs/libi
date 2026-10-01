@@ -83,10 +83,14 @@ describe("regen-once", () => {
     pending.get("job-a")!.resolve(); // a finishes; the app quits with b still queued
     await settle();
     expect(fs.existsSync(marker())).toBe(false);
-    // Next boot: a fresh process (fresh module state).
+    // Next boot: a fresh process. The in-memory state now lives on `globalThis`
+    // (shared across module copies within one process — see the "across module
+    // copies" describe below), so `vi.resetModules()` alone no longer clears it
+    // the way a real process restart would; simulate that restart explicitly.
     jobs.enqueue.mockClear();
     vi.resetModules();
     const fresh = await import("@/lib/proxy/regen-once");
+    fresh.resetRegenOnceForTest();
     const again = fresh.runOnceSweep("sweep-test-v1", "sweep_test", async () => [{ id: "a", pieceId: "p" }, { id: "b", pieceId: "p" }]);
     await settle();
     expect(jobs.enqueue.mock.calls.map((c) => c[1])).toEqual([{ fileId: "b" }]);
@@ -119,6 +123,28 @@ describe("regen-once", () => {
     expect(jobs.enqueue).toHaveBeenCalledWith("proxy_gen", { fileId: "z" }, { pieceId: "p", fileId: "z", forceNew: true });
     pending.get("job-z")!.resolve();
     expect(await done).toBe(true);
+  });
+
+  // A production Next build bundles the Category B sweeps and `GET /api/pieces/[pieceId]`
+  // (lib/proxy/ensure.ts) apart, so each loads its own copy of this module. Before this
+  // fix, a regeneration started in one copy was invisible to `regenerationInFlight` read
+  // from the other — the class of bug d2f3ea41 fixed for lib/agents/acp/agent-registry.ts.
+  describe("in-flight state across module copies (a production build loads the sweep and the route apart)", () => {
+    it("a regeneration started in one copy is reported in flight by a copy loaded separately", async () => {
+      vi.resetModules();
+      const a = await import("@/lib/proxy/regen-once");
+      const running = a.regenerateProxy("f1", "p1");
+      await settle();
+
+      vi.resetModules();
+      const b = await import("@/lib/proxy/regen-once");
+      expect(b).not.toBe(a);
+      expect(b.regenerationInFlight("f1")).toBe(true);
+
+      pending.get("job-f1")!.resolve();
+      await running;
+      expect(b.regenerationInFlight("f1")).toBe(false);
+    });
   });
 
   it("a regeneration that fails still counts as done: no retry every boot", async () => {

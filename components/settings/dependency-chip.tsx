@@ -30,6 +30,13 @@ interface DependencyChipProps {
    * own figure and trigger.
    */
   manualInstall?: boolean;
+  /**
+   * With `manualInstall`: this extension's tools never fetch the dep
+   * themselves, so the only way it arrives is this chip's Download (or the
+   * same button the install plan points at). The copy must not promise "the
+   * first tool call that needs it" there.
+   */
+  buttonOnly?: boolean;
   /** Retry / Download / Re-download handler — all three POST the same
    *  retry-dep route. Without it no control renders in any state. */
   onRetry?: () => void;
@@ -96,6 +103,7 @@ export function DependencyChip({
   bytesDownloaded,
   bytesTotal,
   manualInstall,
+  buttonOnly,
   onRetry,
   retryPending,
 }: DependencyChipProps) {
@@ -202,9 +210,11 @@ export function DependencyChip({
   }
 
   // "pending" — not yet started (or legacy row with !installed and no runtimeStatus)
-  const pendingTip = manualInstall
-    ? `${binary} is downloaded on demand — by the first tool call that needs it, or from the Download button here.`
-    : `${binary} is queued. Download will start automatically.`;
+  const pendingTip = !manualInstall
+    ? `${binary} is queued. Download will start automatically.`
+    : buttonOnly
+      ? `${binary} is not downloaded automatically for this extension — press Download here. Its tools need it and will not fetch it themselves.`
+      : `${binary} is downloaded on demand — by the first tool call that needs it, or from the Download button here.`;
   return (
     <span className="inline-flex items-center gap-1">
       <TooltipProvider>
@@ -227,7 +237,11 @@ export function DependencyChip({
         <ActionButton
           label={retryPending ? "Downloading…" : "Download"}
           ariaLabel={`Download ${binary}`}
-          tip={`Downloads ${binary} now; otherwise it happens on the first tool call that needs it.`}
+          tip={
+            buttonOnly
+              ? `Downloads ${binary} now. This extension's tools need it and do not download it themselves.`
+              : `Downloads ${binary} now; otherwise it happens on the first tool call that needs it.`
+          }
           icon="download"
           onClick={onRetry}
           disabled={retryPending}

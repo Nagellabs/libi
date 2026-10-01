@@ -492,3 +492,24 @@ async function rawCall(url: string, name: string, args: Record<string, unknown>)
   const frame = JSON.parse(line.startsWith("data: ") ? line.slice(6) : line) as { result?: RawResult };
   return frame.result ?? {};
 }
+
+describe("music catalog (fake)", () => {
+  it("defaults to the live states: TikTok Business lane answers tracks, Instagram-Login refuses", async () => {
+    const { adapter } = await boot();
+    const tt = await adapter.musicCatalog(TT, { platform: "tiktok" });
+    expect("tracks" in tt && tt.tracks.some((t) => t.title === "Espresso" && t.artist === "Sabrina Carpenter")).toBe(true);
+    expect(await adapter.musicCatalog(IG, { platform: "instagram" })).toMatchObject({ unavailable: { reason: "needs_facebook_login" } });
+  });
+  it("the knobs flip them", async () => {
+    const { adapter } = await boot({ tiktokLane: "developer", instagramFacebookLogin: true });
+    expect(await adapter.musicCatalog(TT, { platform: "tiktok" })).toMatchObject({ unavailable: { reason: "not_business" } });
+    const ig = await adapter.musicCatalog(IG, { platform: "instagram", query: "espresso" });
+    expect("tracks" in ig && ig.tracks.map((t) => t.title)).toEqual(["Espresso"]);
+  });
+  it("instagram_get_instagram_audio checks the account and its platform like its siblings", async () => {
+    const { fake } = await boot({ instagramFacebookLogin: true });
+    const get = (args: Record<string, unknown>) => rawCall(fake.url, "call_tool", { name: "instagram_get_instagram_audio", arguments: args });
+    expect(text(await get({ account_id: "nope", audio_id: "x" }))).toMatch(/^Error: \[404\] Account nope not found \(code: not_found\)/);
+    expect(text(await get({ account_id: TT, audio_id: "x" }))).toMatch(/^Error: \[422\] This account is not an Instagram account\./);
+  });
+});

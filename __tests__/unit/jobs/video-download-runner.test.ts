@@ -15,6 +15,16 @@ import fsAsync from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+// The SSRF guard resolves the url's host with `dns.promises.lookup` before anything spawns. Left real, that is a
+// network round-trip whose cost nothing in this file controls — and it is the one cold, uncached call in the
+// FIRST test that reaches it. Measured under load it ran 2.6 s in an otherwise passing run, and its own
+// fail-closed bound (`DNS_TIMEOUT_MS` = 5 s) is exactly vitest's per-test default, so a stalled resolver (a busy
+// mDNSResponder, a VPN or wifi change, another agent saturating the machine) times out
+// "ensures uv then yt-dlp…" at 5000 ms with no hint that DNS was the cause. A documentation-range address
+// stands in for "example.com resolves publicly"; the guard's own classification still runs on it.
+const dnsLookup = vi.hoisted(() => vi.fn<(host: string, opts: unknown) => Promise<Array<{ address: string; family: number }>>>());
+vi.mock("node:dns", () => ({ promises: { lookup: dnsLookup } }));
+
 /** Every DependencyManager call in the order the runner made it. */
 let depCalls: string[] = [];
 const ensureDep = vi.fn<(mcpId: string, binary: string) => Promise<void>>();
@@ -37,6 +47,7 @@ interface StoredArgs {
   buffer: Buffer;
   contentType: string | null;
   description?: string;
+  audioRights?: unknown;
 }
 const storeFile = vi.fn<(a: StoredArgs) => Promise<{ id: string; filename: string }>>();
 vi.mock("@/mcp/tools/file-tools", () => ({
@@ -142,8 +153,8 @@ function firstProgressSignal(): { reported: Reported[]; started: Promise<void>; 
   return { reported: [], started, signal };
 }
 
-// example.com resolves publicly, so the SSRF guard's DNS step passes. The fake
-// binary never touches the network, so the hostname only has to be public.
+// The SSRF guard's DNS step is stubbed above to answer with a public address. The fake
+// binary never touches the network, so the hostname only has to parse as a public one.
 const PUBLIC_URL = "https://example.com/watch?v=abc";
 
 beforeEach(() => {
@@ -153,6 +164,8 @@ beforeEach(() => {
   depCalls = [];
   ensureDep.mockReset();
   ensureDep.mockResolvedValue(undefined);
+  dnsLookup.mockReset();
+  dnsLookup.mockResolvedValue([{ address: "203.0.113.10", family: 4 }]);
   storeFile.mockReset();
   storeFile.mockImplementation(async (a) => ({ id: "file-1", filename: a.filename }));
 });
@@ -512,6 +525,17 @@ describe("videoDownloadRunner", () => {
     expect(depCalls).toEqual([]);
   });
 
+  // The guard's DNS step is stubbed, so pin that it is still CONSULTED and still decides: a public-looking
+  // hostname whose answer is private (the rebinding shape) must stop the run before any dependency or spawn.
+  it("rejects a hostname that resolves to a private address, before spawning", async () => {
+    dnsLookup.mockResolvedValue([{ address: "10.0.0.5", family: 4 }]);
+    await expect(
+      videoDownloadRunner.run(makeCtx({ url: PUBLIC_URL, pieceId: null, audioOnly: false }) as never),
+    ).rejects.toThrow(/blocked private address/i);
+    expect(dnsLookup).toHaveBeenCalledWith("example.com", { all: true });
+    expect(depCalls).toEqual([]);
+  });
+
   it("ensures uv then yt-dlp (ensureDep, never retryDep) before spawning, reports byte progress from the --newline lines, and stores the file as an asset", async () => {
     writeFakeYtDlp(
       `echo "[youtube] abc: Downloading webpage"\n` +
@@ -621,7 +645,9 @@ describe("videoDownloadRunner", () => {
       expect(args).toContain("--newline");
       expect(args).toContain("--no-playlist");
       expect(args).toContain("--restrict-filenames");
-      expect(args[args.indexOf("-o") + 1]).toMatch(/%\(title\)\.150s\.%\(ext\)s$/);
+      // Two `-o` flags now (the infojson one, then the media one) — the media
+      // template is always the LAST.
+      expect(args[args.lastIndexOf("-o") + 1]).toMatch(/%\(title\)\.150s\.%\(ext\)s$/);
       // A user's own yt-dlp config must not be able to move `-o`/`--paths`
       // out of the runner's temp dir.
       expect(args).toContain("--ignore-config");
@@ -911,4 +937,40 @@ describe("videoDownloadRunner", () => {
     },
     20_000,
   );
+
+  it("asks yt-dlp for an info json and stamps the stored file copyrighted from it", async () => {
+    writeFakeYtDlp(
+      // The infojson -o is a SEPARATE -o before the media one; the fake keeps the LAST -o as OUT.
+      `printf '%s' '{"webpage_url":"https://www.youtube.com/watch?v=abc","extractor":"youtube","track":"Espresso","artist":"Sabrina Carpenter","title":"x"}' > "$OUTDIR/libi-meta.info.json"\n` +
+        `printf 'audio-bytes' > "$OUTDIR/Espresso.mp3"\n`,
+    );
+    await videoDownloadRunner.run(makeCtx({ url: PUBLIC_URL, pieceId: "piece-9", audioOnly: true }) as never);
+    const stored = storeFile.mock.calls[0][0];
+    expect(stored.filename).toBe("Espresso.mp3"); // never the info json
+    expect(stored.audioRights).toMatchObject({
+      class: "copyrighted",
+      track: { title: "Espresso", artist: "Sabrina Carpenter", trackConfidence: "high" },
+      source: { url: "https://www.youtube.com/watch?v=abc", site: "youtube" },
+      decidedBy: "provenance",
+    });
+  });
+
+  it("still stamps copyrighted (source = the url asked for) when yt-dlp wrote no info json", async () => {
+    writeFakeYtDlp(`printf 'video-bytes' > "$OUTDIR/Some_Title.mp4"\n`);
+    await videoDownloadRunner.run(makeCtx({ url: PUBLIC_URL, pieceId: "piece-9", audioOnly: false }) as never);
+    expect(storeFile.mock.calls[0][0].audioRights).toMatchObject({ class: "copyrighted", source: { url: PUBLIC_URL } });
+  });
+
+  it("passes --write-info-json with its own -o infojson: template before the media -o", async () => {
+    const argsFile = path.join(home, "args.txt");
+    writeFakeYtDlp(`printf '%s\\n' "$@" > "${argsFile}"\nprintf 'v' > "$OUTDIR/v.mp4"\n`);
+    await videoDownloadRunner.run(makeCtx({ url: PUBLIC_URL, pieceId: null, audioOnly: false }) as never);
+    const args = fs.readFileSync(argsFile, "utf-8").trimEnd().split("\n");
+    expect(args).toContain("--write-info-json");
+    const infoAt = args.findIndex((a) => a.startsWith("infojson:"));
+    const mediaAt = args.lastIndexOf("-o");
+    expect(infoAt).toBeGreaterThan(-1);
+    expect(args[infoAt - 1]).toBe("-o");
+    expect(infoAt).toBeLessThan(mediaAt);
+  });
 });

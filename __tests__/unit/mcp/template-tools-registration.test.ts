@@ -22,6 +22,7 @@ const NAMES = [
   "libi.search_templates",
   "libi.get_template",
   "libi.apply_template",
+  "libi.fetch_template_music",
   "libi.delete_template",
   "libi.show_templates",
   "libi.publish_template",

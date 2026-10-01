@@ -16,6 +16,7 @@ import {
 } from "@/lib/music/generate";
 import { getAvailableMemoryBytes } from "@/lib/system/available-memory";
 import { storeFile } from "@/mcp/tools/file-tools";
+import { generatedStamp } from "@/lib/audio-rights/stamp";
 import {
   runJobViaServer,
   LibiServerUnavailableError,
@@ -172,6 +173,8 @@ async function persistAndDelete(
       description: `[Music] ${params.prompt.slice(0, 120)}`,
       mediaDuration: result.durationSeconds,
       hasAudio: true,
+      // ACE-Step ran on this machine from the user's prompt: libi made it (spec §4.2).
+      audioRights: generatedStamp(params.prompt),
     });
     return {
       file: record,

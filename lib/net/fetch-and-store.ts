@@ -15,6 +15,8 @@
  */
 
 import path from "node:path";
+import type { AudioRights } from "@/lib/audio-rights/types";
+import { remoteFetchStamp } from "@/lib/audio-rights/stamp";
 import { fetchFollowingVettedRedirects, type UrlGuard } from "@/lib/net/follow-redirects";
 import { sha256OfBuffer } from "@/lib/security/download-verify";
 import { storeFile, mimeFromExtension } from "@/mcp/tools/file-tools";
@@ -206,6 +208,10 @@ export interface FetchAndStoreOptions {
   signal?: AbortSignal;
   /** See `FetchRemoteBufferOptions.mediaOnly`. */
   mediaOnly?: boolean;
+  /** Rights stamp for the stored file (spec §4.2). Default: copyrighted, with
+   *  this url as its source. The agent may re-stamp `generated` for its own
+   *  generation tool's output (`libi.set_audio_rights`). */
+  audioRights?: AudioRights | null;
 }
 
 export interface FetchAndStoreResult {
@@ -262,6 +268,7 @@ export async function fetchAndStoreRemoteFile(
     buffer,
     contentType: opts.contentType ?? contentType,
     skipProxyGeneration: opts.skipProxyGeneration,
+    audioRights: opts.audioRights === undefined ? remoteFetchStamp(opts.url) : opts.audioRights,
   });
 
   // `record.filename`, not the requested `filename` — see the field's note.

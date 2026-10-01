@@ -10,6 +10,9 @@
  *   transcript is removed, to be made again.
  * - A file without a lead, and a transcript already stamped: untouched.
  * - The old audio.wav and chunk files of a moved or removed transcript go.
+ * - v2 (review round 5, M1): every audio.wav without its timeline sidecar goes,
+ *   whatever its transcript, and chunkAudio extracts a stale one again, on the
+ *   file's timeline, rather than reuse it.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "fs";
@@ -22,8 +25,9 @@ import { hasFfmpeg, FFMPEG_SKIP_REASON } from "../helpers/media";
 import { getDb } from "@/lib/db/client";
 import { analysisAudioChunks, analysisSteps, files, pieces } from "@/lib/db/schema";
 import { resolveFfmpegPath } from "@/lib/ffmpeg/exec";
-import { getAudioPath, getAudioChunksDir } from "@/lib/analysis/storage";
-import { aggregateTranscript } from "@/lib/analysis/manager";
+import { getAudioPath, getAudioChunksDir, getAudioTimelinePath, isAudioExtractCurrent } from "@/lib/analysis/storage";
+import { aggregateTranscript, chunkAudio } from "@/lib/analysis/manager";
+import { probeMedia } from "@/lib/ffmpeg/probe";
 import { sweepRetimeAudioLeadTranscripts, AUDIO_LEAD_RETIME_MARKER } from "@/lib/analysis/retime-audio-lead";
 
 if (!hasFfmpeg()) console.info(`[skip] ${FFMPEG_SKIP_REASON}`);
@@ -49,6 +53,8 @@ skipIf("re-timing transcripts made before the audio lead was kept (real ffmpeg)"
     ff([...V, ...A(), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path.join(dir, "plain.mp4")]);
     ff([...V, ...A(), "-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "25", "-c:a", "flac", path.join(dir, "flac-src.mp4")]);
     ff(["-ss", "1.3", "-to", "2.8", "-i", path.join(dir, "flac-src.mp4"), "-c", "copy", path.join(dir, "flac-cut.mp4")]);
+    // Two audio tracks: the first from 0, the second 0.4 s in (M3).
+    ff([...V, ...A(), ...A(["-itsoffset", "0.4"]), "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", path.join(dir, "two-tracks.mp4")]);
   });
   afterEach(() => {
     resetTestDb();
@@ -75,6 +81,8 @@ skipIf("re-timing transcripts made before the audio lead was kept (real ffmpeg)"
     fs.mkdirSync(getAudioChunksDir(pieceId, id), { recursive: true });
     fs.writeFileSync(getAudioPath(pieceId, id), "old");
     fs.writeFileSync(path.join(getAudioChunksDir(pieceId, id), "chunk-0001.wav"), "old");
+    const past = new Date("2026-09-01T00:00:00Z"); // extracted before this server started
+    fs.utimesSync(getAudioPath(pieceId, id), past, past);
   }
   const words = (id: string) => {
     const [s] = getDb().select().from(analysisSteps).where(eq(analysisSteps.fileId, id)).all();
@@ -93,8 +101,11 @@ skipIf("re-timing transcripts made before the audio lead was kept (real ffmpeg)"
     await transcribed("flac-cut.mp4", "f-flac");
     await transcribed("late.mp4", "f-stamped", true);
 
+    // f-plain's extract is on the file's timeline (its sidecar says so): kept.
+    fs.writeFileSync(getAudioTimelinePath(pieceId, "f-plain"), "file\n");
+
     const r = await sweepRetimeAudioLeadTranscripts();
-    expect(r).toEqual({ retimed: 1, removed: 1 });
+    expect(r).toMatchObject({ mode: "full", retimed: 1, removed: 1 });
 
     const late = words("f-late")!;
     expect(late.audioTimeline).toBe("file");
@@ -110,6 +121,7 @@ skipIf("re-timing transcripts made before the audio lead was kept (real ffmpeg)"
     expect(words("f-plain")!.words[0].start).toBe(0.1); // no lead: untouched, audio.wav kept
     expect(fs.existsSync(getAudioPath(pieceId, "f-plain"))).toBe(true);
     expect(words("f-stamped")!.words[0].start).toBe(0.1); // stamped: untouched
+    expect(fs.existsSync(getAudioPath(pieceId, "f-stamped"))).toBe(false); // but its sidecar-less extract goes
     expect(words("f-flac")).toBeNull(); // removed, chunks with it
     expect(chunk("f-flac")).toBeUndefined();
     expect(fs.existsSync(getAudioPath(pieceId, "f-flac"))).toBe(false);
@@ -124,7 +136,27 @@ skipIf("re-timing transcripts made before the audio lead was kept (real ffmpeg)"
   it("runs once: its marker stops it", async () => {
     await sweepRetimeAudioLeadTranscripts();
     await transcribed("late.mp4", "f-after");
-    expect(await sweepRetimeAudioLeadTranscripts()).toEqual({ retimed: 0, removed: 0 });
+    expect((await sweepRetimeAudioLeadTranscripts()).mode).toBe("done");
     expect(words("f-after")!.words[0].start).toBe(0.1);
+  });
+
+  it("chunkAudio extracts a stale audio.wav again, on the file's timeline", async () => {
+    await transcribed("late.mp4", "f-stale", true); // stamped, but its audio.wav has no sidecar
+    await chunkAudio({ fileId: "f-stale" });
+    expect(isAudioExtractCurrent(pieceId, "f-stale")).toBe(true);
+    // A real WAV now, padded from the file's start: the audio's 0.4 s lead is in it.
+    const wav = await probeMedia(getAudioPath(pieceId, "f-stale"));
+    expect(wav.duration).toBeGreaterThan(2.8);
+    expect(fs.statSync(path.join(getAudioChunksDir(pieceId, "f-stale"), "chunk-0001.wav")).size).toBeGreaterThan(1000);
+  });
+
+  it("a file whose two audio tracks start at different times is left as it is (M3)", async () => {
+    const probed = await probeMedia(path.join(home, "storage", pieceId, "two-tracks.mp4"));
+    expect(probed.audioStreamLeads).toHaveLength(2);
+    expect(Math.abs(probed.audioStreamLeads![1] - probed.audioStreamLeads![0])).toBeGreaterThan(0.3);
+    await transcribed("two-tracks.mp4", "f-two");
+    const r = await sweepRetimeAudioLeadTranscripts();
+    expect(r).toMatchObject({ retimed: 0, removed: 0, multitrack: 1 });
+    expect(words("f-two")!.words[0].start).toBe(0.1);
   });
 });

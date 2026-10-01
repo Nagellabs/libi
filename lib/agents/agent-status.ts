@@ -1,4 +1,5 @@
 import { resolveAgentCli, type ResolvedAgentCli } from "@/lib/agents/cli/resolve";
+import { terminalLaunchFor, type ResolvedBin } from "@/lib/agents/cli/spawn-shape";
 import { detectLibiRegistration, type LibiRegistrations, type LibiToolsState } from "@/lib/agents/libi-registration";
 import { getSignInConfirmedAt } from "@/lib/agents/sign-in-confirmation";
 import { getAgentConfig } from "@/lib/agents/acp/agent-registry";
@@ -16,8 +17,15 @@ export type AdapterState = "ready" | "installing" | "failed" | "missing";
  */
 export interface AgentStatus {
   agentId: SetupAgentId;
-  /** `realPath` is what every printed command uses; `execPath` stays server-side. */
-  cli: { path: string; realPath: string; version: string; meetsMinimum: boolean } | { foundButBroken: true; path: string } | null;
+  /**
+   * `realPath` is what every printed command uses; `execPath` stays server-side. `launch`, Windows only: how a
+   * PowerShell setup terminal runs an npm `.cmd` shim's target directly (`terminalLaunchFor`), so a cancelled sign-in
+   * doesn't stop at cmd's "Terminate batch job (Y/N)?".
+   */
+  cli:
+    | { path: string; realPath: string; version: string; meetsMinimum: boolean; launch?: ResolvedBin }
+    | { foundButBroken: true; path: string }
+    | null;
   adapter: AdapterState;
   /** `needsAuth` is an OBSERVED auth rejection — it outranks a stored `confirmedAt`. */
   signIn: { confirmedAt: string | null; needsAuth: boolean };
@@ -42,6 +50,8 @@ export function adapterStateFrom(config: { installed: boolean; unavailableReason
 
 export interface AgentStatusDeps {
   resolveCli?: () => Promise<ResolvedAgentCli>;
+  /** Tests only: how the terminal launches a CLI (`terminalLaunchFor` on this platform). */
+  terminalLaunch?: (realPath: string) => ResolvedBin | null;
   adapterConfig?: () => { installed: boolean; unavailableReason?: { code: string } } | undefined;
   signInConfirmedAt?: () => Date | null;
   readinessState?: () => string;
@@ -58,12 +68,20 @@ export interface AgentStatusDeps {
 
 export async function buildAgentStatus(agentId: SetupAgentId, deps: AgentStatusDeps = {}): Promise<AgentStatus> {
   const resolved = await (deps.resolveCli ?? (() => resolveAgentCli(agentId)))();
+  const launchFor = deps.terminalLaunch ?? ((realPath: string) => terminalLaunchFor(realPath));
+  const launch = resolved !== null && !("foundButBroken" in resolved) ? launchFor(resolved.realPath) : null;
   const cli: AgentStatus["cli"] =
     resolved === null
       ? null
       : "foundButBroken" in resolved
         ? { foundButBroken: true, path: resolved.path }
-        : { path: resolved.path, realPath: resolved.realPath, version: resolved.version, meetsMinimum: resolved.meetsMinimum };
+        : {
+            path: resolved.path,
+            realPath: resolved.realPath,
+            version: resolved.version,
+            meetsMinimum: resolved.meetsMinimum,
+            ...(launch ? { launch } : {}),
+          };
   const adapter = adapterStateFrom((deps.adapterConfig ?? (() => getAgentConfig(agentId)))());
   const confirmedAt = (deps.signInConfirmedAt ?? (() => getSignInConfirmedAt(agentId)))();
   const readiness = (deps.readinessState ?? (() => getSessionManager().getReadiness(agentId).state))();

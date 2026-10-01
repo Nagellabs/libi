@@ -123,7 +123,11 @@ export default function ContextUsageChip({ sessionId }: { sessionId: string | nu
           <button
             type="button"
             aria-label="Context usage"
-            title={`${formatTokens(usage.used)} / ${formatTokens(usage.size)} tokens`}
+            title={
+              usage.maxSize
+                ? `${formatTokens(usage.used)} / ${formatTokens(usage.size)} tokens (model supports up to ${formatTokens(usage.maxSize)})`
+                : `${formatTokens(usage.used)} / ${formatTokens(usage.size)} tokens`
+            }
             className={`flex h-8 cursor-pointer items-center gap-1 rounded-lg px-1.5 text-xs transition-colors outline-none hover:bg-surface-hover focus-visible:ring-1 focus-visible:ring-ring/50 ${SEVERITY_TEXT[severity]}`}
           />
         }
@@ -137,6 +141,17 @@ export default function ContextUsageChip({ sessionId }: { sessionId: string | nu
           pct={pct}
           sub={`${formatTokens(usage.used)} / ${formatTokens(usage.size)} tokens`}
         />
+        {usage.maxSize ? (
+          // Owner decision (CW-1): Codex reports a larger MAXIMUM window than
+          // the one it actually runs the chat inside — shown here beside the
+          // authoritative number, never in place of it (the ring/percentage
+          // above stay pinned to usage.size). No mention of config.toml: libi
+          // never hand-edits or tells a user to hand-edit Codex's config.
+          <div className="text-[10px] leading-snug text-muted-foreground">
+            Model supports up to {formatTokens(usage.maxSize)} — Codex uses{" "}
+            {formatTokens(usage.size)} unless you raise its context setting.
+          </div>
+        ) : null}
         {isClaude ? <PlanUsageSection open={open} /> : null}
         {/* No cost row (user decision 2026-07-05): the adapter's cost figure
             is API-priced and misleading on subscription auth, and neither

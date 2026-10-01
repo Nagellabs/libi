@@ -4,6 +4,7 @@ import { serverLogger as logger } from "@/lib/logger";
 import { errShape } from "@/lib/social/errors";
 import { browserOnlyRefusal } from "@/lib/security/request-guard";
 import { startSignIn } from "@/lib/social/oauth/flow";
+import { getCurrentPort } from "@/lib/libi-home";
 
 export const dynamic = "force-dynamic";
 
@@ -12,10 +13,19 @@ export const dynamic = "force-dynamic";
  * authorization URL for the page to open — never a token, and never anything
  * the SDK obtained on the way there.
  *
- * The studio port comes off this very request, because that is the port the
- * callback has to come back to: the redirect is `127.0.0.1:<that port>`, and
- * under the packaged app the port is ephemeral, so a remembered one would be
- * wrong on the next launch.
+ * The callback has to come back to the port this studio is serving on — the
+ * redirect is `127.0.0.1:<that port>` — so it is read from `getCurrentPort()`:
+ * `LIBI_SERVER_PORT`, which Category B publishes from the port actually bound,
+ * this launch. The same source the refresh path uses (`lib/social/service.ts`).
+ *
+ * NEVER from `request.url`. libi's production servers (packaged
+ * `lib/server/next-server.ts`, npx `lib/cli/studio.ts`) are custom servers,
+ * and Next synthesizes a handler's `request.url` from the port and hostname it
+ * was CONSTRUCTED with, falling back to `localhost:3000` — not the socket the
+ * request arrived on. Reading the port off it sent every packaged and npx
+ * sign-in back to `127.0.0.1:3000`, a refused connection (SOC-3, 0.1.16); only
+ * `next dev`, which passes its real port, ever worked. A remembered port would
+ * be wrong too: the packaged port is ephemeral.
  *
  * Connecting an account is the user's, from libi's own page
  * (`browserOnlyRefusal`): a header-less loopback caller is refused.
@@ -29,9 +39,14 @@ export async function POST(request: Request): Promise<Response> {
   const { providerId } = getSocialSettings();
   if (!providerId) return NextResponse.json({ error: "no_provider" }, { status: 409 });
 
-  const port = Number(new URL(request.url).port || 80);
-  if (!Number.isInteger(port) || port <= 0) {
-    logger.error({ tag: "social", op: "oauth.start_failed", providerId }, "no studio port on the request");
+  let port: number;
+  try {
+    port = getCurrentPort();
+  } catch {
+    port = NaN;
+  }
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    logger.error({ tag: "social", op: "oauth.start_failed", providerId }, "studio port unknown");
     return NextResponse.json({ error: "start_failed" }, { status: 502 });
   }
 

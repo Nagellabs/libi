@@ -122,9 +122,14 @@ export function AppSidebar(props: AppSidebarProps) {
   // carries its own agentId; `activeProviderId` is optimistic client state, so
   // it is only the fallback.
   const notReady = needsAuth || readiness.state === "not-installed";
+  // The agent refused its own config: the fix is in that config, not on the
+  // Agents page, so the line says what to change and New chat RETRIES (a fresh
+  // session/new) rather than routing to setup or waiting on a standby that
+  // will never be made.
+  const configError = readiness.state === "config-error";
   const setupHref = agentSetupHref(needsAuth ? readiness.agentId : activeProviderId);
   const showSetupLine =
-    notReady && !isTerminalSurface && !isAgentConnecting && readinessNote !== null;
+    (notReady || configError) && !isTerminalSurface && !isAgentConnecting && readinessNote !== null;
 
   // The dot used to go green the instant `_activeAgentId` was set, which is
   // before anything has been proven — that is how an agent that could never
@@ -136,7 +141,7 @@ export function AppSidebar(props: AppSidebarProps) {
     sessionList.canCreate;
   const agentDotClass = isAgentConnecting
     ? "bg-amber-400 animate-pulse"
-    : needsAuth
+    : needsAuth || configError
       ? "bg-amber-400"
       : readiness.state === "not-installed"
         ? "bg-destructive"
@@ -197,7 +202,7 @@ export function AppSidebar(props: AppSidebarProps) {
       : // A not-ready agent deliberately ENABLES the button: it opens that
         // agent's setup on the Agents page. A dead control with an explanation
         // nobody can reach is what we are removing.
-        sessionList.canCreate || notReady;
+        sessionList.canCreate || notReady || configError;
   const newButtonLabel = isTerminalSurface ? "New terminal" : "New chat";
 
   /** What the tooltip says when the button can't (or shouldn't) start a chat.
@@ -221,6 +226,7 @@ export function AppSidebar(props: AppSidebarProps) {
     if (notReady) {
       return readinessNote ? `${readinessNote} — Set up in Agents` : "Set up in Agents";
     }
+    if (configError) return "Try starting a chat again";
     return canCreate ? newButtonLabel : newButtonBlockedLabel;
   })();
 
@@ -271,13 +277,15 @@ export function AppSidebar(props: AppSidebarProps) {
               way to fix it. */}
           {showSetupLine ? (
             <div className="flex flex-col gap-1 px-2 pb-1 group-data-[collapsible=icon]:hidden">
-              <p className="text-xs leading-snug text-muted-foreground">{readinessNote}</p>
-              <Link
-                href={setupHref}
-                className="w-fit cursor-pointer text-xs font-medium text-primary underline-offset-4 hover:underline"
-              >
-                Set up in Agents
-              </Link>
+              <p data-testid="agent-readiness-note" className="break-words text-xs leading-snug text-muted-foreground">{readinessNote}</p>
+              {!configError && (
+                <Link
+                  href={setupHref}
+                  className="w-fit cursor-pointer text-xs font-medium text-primary underline-offset-4 hover:underline"
+                >
+                  Set up in Agents
+                </Link>
+              )}
             </div>
           ) : null}
           {/* Icon-collapsed: colored status dot that expands the sidebar */}

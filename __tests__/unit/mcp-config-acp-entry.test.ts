@@ -293,6 +293,17 @@ describe("getMcpServersForAcp", () => {
       }
     });
 
+    it("a skill-eval session (LIBI_AGENT_SKIP_USER_SETTINGS) loads no user scope, so only local and project names get aliases", () => {
+      process.env.LIBI_TEST_MODE = "1";
+      vi.stubEnv("LIBI_AGENT_SKIP_USER_SETTINGS", "1");
+      writeClaude(
+        { ElevenLabs: { command: "uvx", args: ["elevenlabs-mcp"] } },
+        { fal: { type: "http", url: "https://mcp.fal.ai/mcp" } },
+      );
+      invalidateMcpConfig({ reason: "test-mode-on" });
+      expect(names()).toEqual(["libi", "fal-ai", "elevenlabs", "fal"]);
+    });
+
     it("gives Codex no aliases, and nobody any outside test mode or with the fakes opted out", () => {
       writeClaude({ ElevenLabs: { command: "uvx", args: ["elevenlabs-mcp"] } });
       expect(names()).toEqual(["libi"]);

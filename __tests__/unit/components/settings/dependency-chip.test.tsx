@@ -175,3 +175,30 @@ describe("DependencyChip — Category A deps are unchanged", () => {
     expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 });
+
+/**
+ * LM review M-1: on Whisper, Kokoro and ACE-Step no tool fetches uv — the
+ * tools return needs_install and the plan sends the user to this button — so
+ * the chip must not promise "the first tool call that needs it" there.
+ */
+describe("DependencyChip — a dep only the button installs (buttonOnly)", () => {
+  it("pending: says it is not downloaded automatically, and never promises a tool call will", () => {
+    const onRetry = vi.fn();
+    render(
+      <DependencyChip
+        binary="uv"
+        path={null}
+        source={null}
+        installed={false}
+        runtimeStatus="pending"
+        manualInstall
+        buttonOnly
+        onRetry={onRetry}
+      />,
+    );
+    expect(screen.getByRole("button", { name: /download uv/i })).toHaveTextContent("Download");
+    expect(screen.queryByText(/first tool call that needs it/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/not downloaded automatically for this extension/i)).toBeInTheDocument();
+    expect(screen.getByText(/do not download it themselves/i)).toBeInTheDocument();
+  });
+});

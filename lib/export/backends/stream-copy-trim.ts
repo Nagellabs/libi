@@ -109,7 +109,7 @@ export class StreamCopyTrimBackend implements ExportBackend {
         format: ctx.settings.format,
       };
     } finally {
-      if (!ok) {
+      if (!ok && (ctx.ownsOutput?.() ?? true)) {
         try { fs.unlinkSync(ctx.outputPath); } catch { /* ignore */ }
       }
     }

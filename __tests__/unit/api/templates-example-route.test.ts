@@ -21,7 +21,10 @@ const renderExport = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/jobs/runners/export", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/jobs/runners/export")>()), renderExport }));
 vi.mock("@/lib/composition/persistence", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/composition/persistence")>();
-  return { ...real, loadComposition: vi.fn(async () => ({ manifest: { width: 1080, height: 1920, fps: 30, overlays: [], audioClips: [] } })) };
+  // Non-empty by default: renderExport is mocked separately, so this manifest is only read
+  // for the example's own settings (fps/size) and — new for TPL-3 Important-1 — the live
+  // "does this piece have anything to export" check the route now runs before enqueueing.
+  return { ...real, loadComposition: vi.fn(async () => ({ manifest: { width: 1080, height: 1920, fps: 30, overlays: [{ id: "o1" }], audioClips: [] } })) };
 });
 
 const trackServerEvent = vi.hoisted(() => vi.fn());
@@ -29,10 +32,11 @@ vi.mock("@/lib/analytics/server", () => ({ trackServerEvent }));
 
 import { POST } from "@/app/api/templates/[id]/example/route";
 import { GET as rendering } from "@/app/api/templates/examples/rendering/route";
+import { loadComposition } from "@/lib/composition/persistence";
 import { getDb } from "@/lib/db/client";
 import { jobs } from "@/lib/db/schema/sqlite";
 import { getJobManager } from "@/lib/jobs/manager";
-import { SOURCE_PIECE_GONE } from "@/lib/jobs/runners/template-example";
+import { SOURCE_PIECE_EMPTY, SOURCE_PIECE_GONE } from "@/lib/jobs/runners/template-example";
 import type { JobContext } from "@/lib/jobs/types";
 import { createTemplate, templateDir } from "@/lib/templates/store";
 
@@ -48,7 +52,7 @@ async function make(over: { createdFromPieceId?: string | null; origin?: "local"
 }
 const resetSingletons = () => {
   delete (globalThis as { __libiJobManager?: unknown }).__libiJobManager;
-  delete (globalThis as { __libiExportLane?: unknown }).__libiExportLane;
+  delete (globalThis as { __libiExportScheduler?: unknown }).__libiExportScheduler;
 };
 /** Resolves when `jobId` has finished, whichever way. */
 async function settled(jobId: string): Promise<string> {
@@ -65,10 +69,10 @@ beforeEach(() => {
   process.env.LIBI_HOME = home;
   createTestDb();
   resetSingletons();
-  renderExport.mockReset().mockImplementation(async (c: JobContext<{ destFolder: string }>) => {
+  renderExport.mockReset().mockImplementation(async (c: JobContext<unknown>, target: { dir: string }) => {
     c.reportProgress(50, 100, "%");
-    fs.mkdirSync(c.params.destFolder, { recursive: true });
-    const out = path.join(c.params.destFolder, "template-example.mp4");
+    fs.mkdirSync(target.dir, { recursive: true });
+    const out = path.join(target.dir, "template-example.mp4");
     fs.writeFileSync(out, "rendered piece");
     return { filePath: out };
   });
@@ -104,11 +108,11 @@ describe("POST /api/templates/<id>/example", () => {
     const pieceId = seedPiece(getDb() as never, { id: "piece-1" });
     const id = await make({ createdFromPieceId: pieceId });
     let finish: () => void = () => {};
-    renderExport.mockImplementationOnce(async (c: JobContext<{ destFolder: string }>) => {
+    renderExport.mockImplementationOnce(async (c: JobContext<unknown>, target: { dir: string }) => {
       await new Promise<void>((r) => (finish = r));
-      fs.mkdirSync(c.params.destFolder, { recursive: true });
-      fs.writeFileSync(path.join(c.params.destFolder, "template-example.mp4"), "x");
-      return { filePath: path.join(c.params.destFolder, "template-example.mp4") };
+      fs.mkdirSync(target.dir, { recursive: true });
+      fs.writeFileSync(path.join(target.dir, "template-example.mp4"), "x");
+      return { filePath: path.join(target.dir, "template-example.mp4") };
     });
     const first = (await (await post(id)).json()) as { jobId: string };
     await new Promise((r) => setTimeout(r, 30));
@@ -148,6 +152,31 @@ describe("POST /api/templates/<id>/example", () => {
     expect(r.status).toBe(409);
     expect(await r.json()).toMatchObject({ code: "installed" });
     expect(getDb().select().from(jobs).all()).toEqual([]);
+  });
+
+  // TPL-3 Important-1: a piece non-empty at template-creation time (sourceEmpty false,
+  // "Render preview" shown) can be emptied by the time it is clicked. The route must
+  // catch that BEFORE enqueueing — never start a job that would classify as "nothing to
+  // export" and fail with an error-level jobs.run.failed for an expected case.
+  it("409 source_piece_empty: the CURRENT piece has no overlays and no audio, no job started", async () => {
+    vi.mocked(loadComposition).mockResolvedValueOnce({ manifest: { width: 1080, height: 1920, fps: 30, overlays: [], audioClips: [] } as never, legacyScenes: 0 });
+    const pieceId = seedPiece(getDb() as never, { id: "piece-1" });
+    const r = await post(await make({ createdFromPieceId: pieceId }));
+    expect(r.status).toBe(409);
+    expect(await r.json()).toEqual({ error: SOURCE_PIECE_EMPTY, code: "source_piece_empty" });
+    expect(SOURCE_PIECE_EMPTY).toBe("The piece is empty — add something to it first.");
+    expect(getDb().select().from(jobs).all()).toEqual([]);
+    expect(renderExport).not.toHaveBeenCalled();
+  });
+
+  it("a piece with only an audio clip still starts the render (matches the classifier: audio alone exports)", async () => {
+    vi.mocked(loadComposition).mockResolvedValueOnce({ manifest: { width: 1080, height: 1920, fps: 30, overlays: [], audioClips: [{ id: "a1" }] } as never, legacyScenes: 0 });
+    const pieceId = seedPiece(getDb() as never, { id: "piece-1" });
+    const id = await make({ createdFromPieceId: pieceId });
+    const r = await post(id);
+    expect(r.status).toBe(202);
+    const { jobId } = (await r.json()) as { jobId: string };
+    expect(await settled(jobId)).toBe("completed");
   });
 });
 

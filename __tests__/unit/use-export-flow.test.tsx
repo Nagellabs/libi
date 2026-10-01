@@ -1,223 +1,84 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { renderHook, act } from "@testing-library/react";
 import { useExportFlow } from "@/hooks/editor/use-export-flow";
 
 /**
- * `useExportFlow` POSTs to `/api/export`, then subscribes to
- * `/api/jobs/<id>/events` via EventSource. We mock both.
+ * `useExportFlow` POSTs to `/api/export` and hands back the queued export —
+ * nothing more. Progress and the finish live on the export's record (the
+ * Exports tab, the canvas bar, the finish toast): a second Start is never
+ * blocked by the first (spec 2026-09-29 §B2).
  */
+const START = { pieceId: "p1", source: "draft" as const, filename: "X", format: "mp4" as const, quality: "source" as const };
+let fetchMock: ReturnType<typeof vi.fn>;
+/** The export POSTs (the analytics beacon also goes through fetch). */
+const enqueues = () => fetchMock.mock.calls.filter(([url]) => url === "/api/export");
 
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  url: string;
-  listeners = new Map<string, ((ev: MessageEvent) => void)[]>();
-  onerror: (() => void) | null = null;
-  closed = false;
-  constructor(url: string) {
-    this.url = url;
-    MockEventSource.instances.push(this);
-  }
-  addEventListener(type: string, listener: (ev: MessageEvent) => void): void {
-    if (!this.listeners.has(type)) this.listeners.set(type, []);
-    this.listeners.get(type)!.push(listener);
-  }
-  removeEventListener(): void { /* noop */ }
-  close(): void {
-    this.closed = true;
-  }
-  emit(type: string, data: unknown): void {
-    const ls = this.listeners.get(type) ?? [];
-    const ev = new MessageEvent(type, { data: JSON.stringify(data) });
-    for (const l of ls) l(ev);
-  }
-}
+beforeEach(() => {
+  fetchMock = vi.fn(async () => new Response(JSON.stringify({ jobId: "job-1", exportId: "exp_1", name: "X" }), { status: 200 }));
+  vi.stubGlobal("fetch", fetchMock);
+});
+afterEach(() => vi.unstubAllGlobals());
 
 describe("useExportFlow", () => {
-  beforeEach(() => {
-    MockEventSource.instances = [];
-    vi.stubGlobal("EventSource", MockEventSource);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: string, init?: RequestInit) => {
-        if (input === "/api/export") {
-          return new Response(JSON.stringify({ jobId: "job-1" }), { status: 200 });
-        }
-        if (input.startsWith("/api/jobs/") && init?.method === "DELETE") {
-          return new Response(null, { status: 204 });
-        }
-        return new Response("not mocked", { status: 404 });
-      }),
-    );
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it("starts idle with null progress and no result", () => {
+  it("starts idle", () => {
     const { result } = renderHook(() => useExportFlow());
     expect(result.current.status).toBe("idle");
-    expect(result.current.progress).toBeNull();
-    expect(result.current.result).toBeNull();
+    expect(result.current.queued).toBeNull();
   });
 
-  it("start() sends graphicsQuality in the POST body", async () => {
+  it("start() sends the settings and lands on queued with the export's id and name", async () => {
     const { result } = renderHook(() => useExportFlow());
+    let returned: unknown;
     await act(async () => {
-      await result.current.start({
-        pieceId: "p1",
-        source: "draft",
-        filename: "X",
-        format: "mp4",
-        quality: "source",
-        graphicsQuality: "1440p",
-      });
+      returned = await result.current.start({ ...START, graphicsQuality: "1440p" });
     });
-    const fetchMock = (global as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
-    const exportCall = fetchMock.mock.calls.find(
-      (call: unknown[]) => call[0] === "/api/export",
-    );
-    const body = JSON.parse((exportCall?.[1] as RequestInit).body as string);
-    expect(body.graphicsQuality).toBe("1440p");
+    // The queued export is handed back too, for a caller that acts on it at once.
+    expect(returned).toEqual({ exportId: "exp_1", name: "X", pieceId: "p1" });
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ pieceId: "p1", graphicsQuality: "1440p" });
+    expect(body.destFolder).toBeUndefined();
+    expect(result.current.status).toBe("queued");
+    expect(result.current.queued).toEqual({ exportId: "exp_1", name: "X", pieceId: "p1" });
   });
 
-  it("start() enqueues then transitions through running → success when SSE emits completed", async () => {
+  it("never blocks a second Start: another export queues while the first is still rendering", async () => {
     const { result } = renderHook(() => useExportFlow());
-
-    await act(async () => {
-      await result.current.start({
-        pieceId: "p1",
-        source: "draft",
-        filename: "My Video",
-        format: "mp4",
-        quality: "source",
-      });
-    });
-
-    await waitFor(() => expect(result.current.status).toBe("running"));
-    expect(MockEventSource.instances.length).toBe(1);
-    expect(MockEventSource.instances[0].url).toBe("/api/jobs/job-1/events");
-
-    await act(async () => {
-      MockEventSource.instances[0].emit("progress", {
-        jobId: "job-1",
-        done: 50,
-        total: 100,
-        unit: "%",
-        etaMs: 5000,
-      });
-    });
-    expect(result.current.progress).toEqual({
-      done: 50,
-      total: 100,
-      unit: "%",
-      etaMs: 5000,
-    });
-
-    await act(async () => {
-      MockEventSource.instances[0].emit("completed", {
-        jobId: "job-1",
-        result: {
-          filePath: "/Users/test/Movies/libi/My Video.mp4",
-          sizeBytes: 1234,
-          durationSeconds: 10,
-          backend: "ffmpeg-overlay",
-          width: 1920,
-          height: 1080,
-        },
-      });
-    });
-
-    expect(result.current.status).toBe("success");
-    expect(result.current.result?.filePath).toBe("/Users/test/Movies/libi/My Video.mp4");
+    await act(() => result.current.start(START));
+    await act(() => result.current.start({ ...START, filename: "Y" }));
+    expect(enqueues()).toHaveLength(2);
   });
 
-  it("transitions to failed when SSE emits failed", async () => {
+  it("ignores a double click on the same Start while it is still being sent", async () => {
     const { result } = renderHook(() => useExportFlow());
     await act(async () => {
-      await result.current.start({
-        pieceId: "p1",
-        source: "draft",
-        filename: "X",
-        format: "mp4",
-        quality: "source",
-      });
+      await Promise.all([result.current.start(START), result.current.start(START)]);
     });
-    await waitFor(() => expect(result.current.status).toBe("running"));
+    expect(enqueues()).toHaveLength(1);
+  });
 
+  it("a failed POST shows the route's words; reset() returns to idle", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "includeFileIds must be an array of strings" }), { status: 400 }));
+    const { result } = renderHook(() => useExportFlow());
+    let returned: unknown = "unset";
     await act(async () => {
-      MockEventSource.instances[0].emit("failed", { jobId: "job-1", error: "boom" });
+      returned = await result.current.start(START);
     });
-
+    expect(returned).toBeNull();
     expect(result.current.status).toBe("failed");
-    expect(result.current.error).toBe("boom");
-  });
-
-  it("cancel() DELETEs the job", async () => {
-    const fetchMock = (global as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch;
-    const { result } = renderHook(() => useExportFlow());
-    await act(async () => {
-      await result.current.start({
-        pieceId: "p1",
-        source: "draft",
-        filename: "X",
-        format: "mp4",
-        quality: "source",
-      });
-    });
-    await waitFor(() => expect(result.current.status).toBe("running"));
-
-    await act(async () => {
-      await result.current.cancel();
-    });
-
-    const lastCall = fetchMock.mock.calls.at(-1);
-    expect(lastCall?.[0]).toBe("/api/jobs/job-1");
-    expect(lastCall?.[1]?.method).toBe("DELETE");
-  });
-
-  it("reset() returns the hook to idle", async () => {
-    const { result } = renderHook(() => useExportFlow());
-    await act(async () => {
-      await result.current.start({
-        pieceId: "p1",
-        source: "draft",
-        filename: "X",
-        format: "mp4",
-        quality: "source",
-      });
-    });
-    await waitFor(() => expect(result.current.status).toBe("running"));
-
-    await act(async () => {
-      MockEventSource.instances[0].emit("failed", { jobId: "job-1", error: "x" });
-    });
-    expect(result.current.status).toBe("failed");
-
-    act(() => {
-      result.current.reset();
-    });
+    expect(result.current.error).toBe("includeFileIds must be an array of strings");
+    act(() => result.current.reset());
     expect(result.current.status).toBe("idle");
-    expect(result.current.result).toBeNull();
     expect(result.current.error).toBeNull();
   });
 
-  it("a failed POST surfaces error and leaves status=failed", async () => {
-    (global as unknown as { fetch: ReturnType<typeof vi.fn> }).fetch = vi.fn(async () => {
-      return new Response("Piece not found", { status: 404 });
-    });
-    const { result } = renderHook(() => useExportFlow());
-    await act(async () => {
-      await result.current.start({
-        pieceId: "missing",
-        source: "draft",
-        filename: "X",
-        format: "mp4",
-        quality: "source",
-      });
-    });
-    await waitFor(() => expect(result.current.status).toBe("failed"));
-    expect(result.current.error).toContain("Piece not found");
+  it("a 422 purpose_required is not an error: idle, purposeRequired set, the caller told to refetch", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: "purpose_required", message: "This piece has copyrighted music (x)." }), { status: 422 }));
+    const onPurposeRequired = vi.fn();
+    const { result } = renderHook(() => useExportFlow({ onPurposeRequired }));
+    await act(() => result.current.start(START));
+    expect(result.current.status).toBe("idle");
+    expect(result.current.purposeRequired).toBe(true);
+    expect(onPurposeRequired).toHaveBeenCalledWith("p1");
   });
 });

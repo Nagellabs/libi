@@ -50,7 +50,7 @@ function summary(over: Partial<TemplateSummary>): TemplateSummary {
     video: "/api/templates/t1/media/example.mp4",
     nickname: null,
     broken: null, otherCatalog: null,
-    mediaRev: 0, canRenderExample: true, sourcePieceName: "Source piece",
+    mediaRev: 0, canRenderExample: true, sourcePieceName: "Source piece", sourceEmpty: false,
     ...over,
   };
 }

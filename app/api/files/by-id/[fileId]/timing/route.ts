@@ -15,6 +15,11 @@ interface RouteParams {
 const cache = new Map<string, FileTiming>();
 const CACHE_MAX = 512;
 
+/** One `fileTiming` probe in flight per key, so concurrent uncached requests
+ *  for the same file (a fresh preview mounting several players at once) share
+ *  one ffprobe read instead of each running it themselves. */
+const inflight = new Map<string, ReturnType<typeof fileTiming>>();
+
 /**
  * GET /api/files/by-id/[fileId]/timing →
  *   `{ startTime: number | null, audioCodecDelay: number, audioPadding: number, audioStart: number | null,
@@ -82,15 +87,26 @@ export async function GET(_req: Request, { params }: RouteParams) {
 
   let timing = cache.get(key);
   if (timing === undefined) {
-    const answer = await fileTiming(filePath);
+    let pending = inflight.get(key);
+    if (!pending) {
+      pending = fileTiming(filePath).finally(() => inflight.delete(key));
+      inflight.set(key, pending);
+    }
+    const answer = await pending;
     // A failed probe (timeout, ffprobe missing) is not remembered, and not an
     // answer: the preview retries it (source-time-origin.ts).
     if (!answer) {
       return NextResponse.json({ error: "probe failed" }, { status: 503, headers: { "Cache-Control": "no-store" } });
     }
-    timing = answer;
-    if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
-    cache.set(key, timing);
+    const { cacheable, ...body } = answer;
+    timing = body;
+    // An answer with a part that couldn't be read (an Opus file's trims that
+    // timed out) is served, but not remembered: the next request reads it
+    // again (review round 5, M5).
+    if (cacheable) {
+      if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value!);
+      cache.set(key, timing);
+    }
   }
   return NextResponse.json(timing, { headers: { "Cache-Control": "no-store" } });
 }

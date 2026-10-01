@@ -109,17 +109,30 @@ function resolveClaudeBin(): ClaudeBinResolution | null {
 
 type Bins = { "claude-agent-acp": ClaudeBinResolution | null; "codex-acp": CodexBinResolution };
 
-/** Lazily resolved binary paths — deferred so filesystem access doesn't run at import time. */
-let resolvedBins: Bins | null = null;
+/**
+ * The resolved bins and the detection built on them, shared by EVERY copy of this
+ * module in the process. A production Next build bundles the job runners and the
+ * API routes apart, and each loads its own copy: while these were module-level
+ * `let`s, the `agent_install` job's `refreshAgentCache()` refreshed only its own
+ * copy, and the status route kept reporting a just-downloaded adapter as missing —
+ * the Agents wizard's "Couldn't download Codex support", with nothing failed
+ * (0.1.16). Dev resolves both adapters from the checkout, so it never showed there.
+ * Bins are resolved lazily so filesystem access doesn't run at import time.
+ */
+type AgentCache = { resolvedBins: Bins | null; cachedAgents: CliAgentConfig[] | null };
+const cache = ((globalThis as Record<symbol, unknown>)[Symbol.for("libi.agentRegistry.cache")] ??= {
+  resolvedBins: null,
+  cachedAgents: null,
+}) as AgentCache;
 
 function getBins(): Bins {
-  if (!resolvedBins) {
-    resolvedBins = {
+  if (!cache.resolvedBins) {
+    cache.resolvedBins = {
       "claude-agent-acp": resolveClaudeBin(),
       "codex-acp": resolveCodexBin(),
     };
   }
-  return resolvedBins;
+  return cache.resolvedBins;
 }
 
 /**
@@ -184,8 +197,6 @@ export function knownAgentIds(): string[] {
   return getKnownAgents().map((a) => a.id);
 }
 
-let cachedAgents: CliAgentConfig[] | null = null;
-
 /**
  * Claude Code "installed" = its ACP adapter is on disk (the checkout in dev,
  * ~/.libi/agents otherwise). The CLI the adapter drives is the user's own
@@ -239,9 +250,9 @@ function runDetection(): CliAgentConfig[] {
 
 /** Returns cached agent detection results. Always instant after warmup. */
 export function detectInstalledAgents(): CliAgentConfig[] {
-  if (cachedAgents) return cachedAgents;
-  cachedAgents = runDetection();
-  return cachedAgents;
+  if (cache.cachedAgents) return cache.cachedAgents;
+  cache.cachedAgents = runDetection();
+  return cache.cachedAgents;
 }
 
 /** Get the config for a specific agent by ID */
@@ -262,13 +273,13 @@ export function getAgentConfig(
  * adapter is now on disk.
  */
 export function refreshAgentCache(): CliAgentConfig[] {
-  resolvedBins = null;
-  cachedAgents = runDetection();
-  return cachedAgents;
+  cache.resolvedBins = null;
+  cache.cachedAgents = runDetection();
+  return cache.cachedAgents;
 }
 
 /** Clear the cache (for tests) */
 export function clearAgentCache(): void {
-  resolvedBins = null;
-  cachedAgents = null;
+  cache.resolvedBins = null;
+  cache.cachedAgents = null;
 }

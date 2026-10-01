@@ -13,6 +13,7 @@ import {
   type DetectedProviderEntry, type SetupAgentId,
 } from "@/lib/agents/setup/commands";
 import { setupScriptsDir } from "@/lib/agents/setup/scripts-dir";
+import { terminalLaunchFor } from "@/lib/agents/cli/spawn-shape";
 import { createSignInMarkerReader, signInMarkerLine } from "@/lib/providers/sign-in-markers";
 import { PROVIDER_CATALOG, KEY_PLACEHOLDER, findProvider } from "@/lib/providers/catalog";
 import type { ShellFlavor } from "@/lib/terminal/shell-quote";
@@ -684,12 +685,12 @@ describe("the PowerShell scripts, as text", () => {
   };
 
   it("take their arguments as plain positional strings, and refuse an unknown provider or agent with exit 2", () => {
-    expect(add()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli)");
+    expect(add()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$CliScript)");
     // The one switch: -NoSignOut, for a local entry of a provider you sign in to.
-    expect(remove()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)");
-    expect(remove()).toContain("usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut]");
-    expect(replace()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [string]$ScriptsDir)");
-    expect(scriptText("signin-provider.ps1")).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry)");
+    expect(remove()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut, [string]$CliScript)");
+    expect(remove()).toContain("usage: remove-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-NoSignOut] [-CliScript <script>]");
+    expect(replace()).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [string]$ScriptsDir, [string]$CliScript)");
+    expect(scriptText("signin-provider.ps1")).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$CliScript)");
     for (const text of [remove(), replace()]) {
       expect(text).toMatch(/default +\{ \[Console\]::Error\.WriteLine\("[a-z-]+\.ps1: unknown agent '\$Agent'"\); exit 2 \}/);
     }
@@ -718,7 +719,7 @@ describe("the PowerShell scripts, as text", () => {
         expect(add()).toMatch(new RegExp(`^ {2}'${def.id}/${agent}' +\\{ \\$addArgs = @\\(${escapeRegExp(list)}\\) \\}$`, "m"));
       }
     }
-    expect(add()).toContain("& $Cli @addArgs");
+    expect(add()).toContain("& $Cli @cliPre @addArgs");
   });
   it("add-provider.ps1 reads the key as a SecureString, saves a Codex key for the Windows user only when one was entered, and never prints it", () => {
     const text = add();
@@ -729,14 +730,14 @@ describe("the PowerShell scripts, as text", () => {
     expect(text).toContain('Write-Host "Saved $codexKeyEnv for your Windows user. Restart libi and Codex so they read it."');
     // Saved before the add, and nothing is saved or added without a key.
     expect(text.indexOf("if (-not $key)")).toBeLessThan(text.indexOf("SetEnvironmentVariable"));
-    expect(text.indexOf("SetEnvironmentVariable")).toBeLessThan(text.indexOf("& $Cli @addArgs"));
+    expect(text.indexOf("SetEnvironmentVariable")).toBeLessThan(text.indexOf("& $Cli @cliPre @addArgs"));
     // `$key` appears in the read, the empty check, the save and the argument lists — nowhere it could be printed.
     const keyLines = codeLines(text).filter((line) => /\$key\b/.test(line));
     const keyedCommands = WITH_COMMANDS.flatMap((def) => [def.commands!.claude, def.commands!.codex]).filter((c) => c.includes(KEY_PLACEHOLDER));
     expect(keyLines).toHaveLength(1 + 1 + 1 + keyedCommands.length);
     for (const line of keyLines) expect(line).not.toMatch(/Write-|Out-|echo|\$Host/);
     // The agent's own exit code comes back out (the whole tail is checked in the Claude sign-in test below).
-    expect(text).toContain("  & $Cli @addArgs\n  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n");
+    expect(text).toContain("  & $Cli @cliPre @addArgs\n  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n");
     expect(text).toMatch(/\nexit \$code\n$/);
   });
   it("add-provider.ps1 asks nothing for a provider signed in to with an account, and says what the sign-in does in the same words as add-provider.sh", () => {
@@ -747,8 +748,8 @@ describe("the PowerShell scripts, as text", () => {
     expect(shMessages).toHaveLength(2);
     for (const message of shMessages) expect(text).toContain(`Write-Host "${message}"`);
     // Both come before the add: Codex's add starts the sign-in, and Claude Code's sign-in follows it.
-    expect(text.indexOf('Write-Host "Codex adds')).toBeLessThan(text.indexOf("& $Cli @addArgs"));
-    expect(text.indexOf('Write-Host "Claude Code adds')).toBeLessThan(text.indexOf("& $Cli @addArgs"));
+    expect(text.indexOf('Write-Host "Codex adds')).toBeLessThan(text.indexOf("& $Cli @cliPre @addArgs"));
+    expect(text.indexOf('Write-Host "Claude Code adds')).toBeLessThan(text.indexOf("& $Cli @cliPre @addArgs"));
   });
   it("add-provider.ps1 runs Claude Code's own `mcp login` for the entry the add made, only after an add that worked, and exits with its code", () => {
     const text = add();
@@ -763,9 +764,9 @@ describe("the PowerShell scripts, as text", () => {
       new RegExp(
         escapeRegExp("if ($signsIn) {\n") +
           "[^}]*" +
-          escapeRegExp('  Write-Host "[libi sign-in start: $Provider]"\n}\n$code = 0\ntry {\n  & $Cli @addArgs\n') +
+          escapeRegExp('  Write-Host "[libi sign-in start: $Provider]"\n}\n$code = 0\ntry {\n  & $Cli @cliPre @addArgs\n') +
           escapeRegExp("  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n  } elseif ($signsIn) {\n") +
-          escapeRegExp("    $loginArgs = @('mcp', 'login', '--', $Provider)\n    & $Cli @loginArgs\n") +
+          escapeRegExp("    $loginArgs = @('mcp', 'login', '--', $Provider)\n    & $Cli @cliPre @loginArgs\n") +
           escapeRegExp("    if (-not $?) {\n      $code = 1\n      if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n    }\n  }\n") +
           escapeRegExp("} finally {\n") +
           "  #[^\\n]*\\n" +
@@ -790,7 +791,7 @@ describe("the PowerShell scripts, as text", () => {
     expect(text).toMatch(
       new RegExp(
         escapeRegExp(`Write-Host "${sh}"\n$marked = $Agent -ceq 'claude'\nif ($marked) { Write-Host "[libi sign-in start: $Entry]" }\n`) +
-          escapeRegExp("$code = 0\ntry {\n  $loginArgs = @('mcp', 'login', '--', $Entry)\n  & $Cli @loginArgs\n") +
+          escapeRegExp("$code = 0\ntry {\n  $loginArgs = @('mcp', 'login', '--', $Entry)\n  & $Cli @cliPre @loginArgs\n") +
           escapeRegExp("  if (-not $?) {\n    $code = 1\n    if ($LASTEXITCODE) { $code = $LASTEXITCODE }\n  }\n") +
           escapeRegExp("} finally {\n") +
           "  #[^\\n]*\\n" +
@@ -803,25 +804,25 @@ describe("the PowerShell scripts, as text", () => {
     const text = remove();
     expect(text).toContain("'claude' { $removeArgs = @('mcp', 'remove', '--scope', $Scope, '--', $Entry) }");
     expect(text).toContain("'codex'  { $removeArgs = @('mcp', 'remove', '--', $Entry) }");
-    expect(text).toMatch(/& \$Cli @removeArgs\nif \(-not \$\?\) \{\n {2}if \(\$LASTEXITCODE\) \{ exit \$LASTEXITCODE \}\n {2}exit 1\n\}/);
+    expect(text).toMatch(/& \$Cli @cliPre @removeArgs\nif \(-not \$\?\) \{\n {2}if \(\$LASTEXITCODE\) \{ exit \$LASTEXITCODE \}\n {2}exit 1\n\}/);
     expect(text).toContain("$null -ne [Environment]::GetEnvironmentVariable($codexKeyEnv, 'User')");
     expect(text).toContain("[Environment]::SetEnvironmentVariable($codexKeyEnv, $null, 'User')");
     expect(text).toContain('Write-Host "Removed $codexKeyEnv from your Windows user environment. Restart libi and Codex so they stop using it."');
-    expect(text.indexOf("& $Cli @removeArgs")).toBeLessThan(text.indexOf("SetEnvironmentVariable"));
+    expect(text.indexOf("& $Cli @cliPre @removeArgs")).toBeLessThan(text.indexOf("SetEnvironmentVariable"));
   });
   it("remove-provider.ps1 signs out of a provider signed in to with an account before the remove, in the same words as remove-provider.sh, and a failed sign-out never stops the remove", () => {
     const code = codeLines(remove()).join("\n");
     const sh = [...scriptText("remove-provider.sh").matchAll(/"((?:Signing out of|Couldn't sign out of) \$name[^"]*)"/g)].map((m) => m[1]);
     expect(sh).toHaveLength(2);
     expect(code).toContain(
-      `if ($auth -ceq 'oauth' -and -not $NoSignOut) {\n  Write-Host "${sh[0]}"\n  $logoutArgs = @('mcp', 'logout', '--', $Entry)\n  & $Cli @logoutArgs\n  if (-not $?) { Write-Host "${sh[1]}" }\n}`,
+      `if ($auth -ceq 'oauth' -and -not $NoSignOut) {\n  Write-Host "${sh[0]}"\n  $logoutArgs = @('mcp', 'logout', '--', $Entry)\n  & $Cli @cliPre @logoutArgs\n  if (-not $?) { Write-Host "${sh[1]}" }\n}`,
     );
-    expect(code.indexOf("& $Cli @logoutArgs")).toBeLessThan(code.indexOf("& $Cli @removeArgs"));
+    expect(code.indexOf("& $Cli @cliPre @logoutArgs")).toBeLessThan(code.indexOf("& $Cli @cliPre @removeArgs"));
   });
 
   it("remove-provider.ps1 skips the sign-out with -NoSignOut, for a local entry that has none", () => {
     const text = remove();
-    expect(text).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut)");
+    expect(text).toContain("param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [switch]$NoSignOut, [string]$CliScript)");
     expect(codeLines(text).join("\n")).toContain("if ($auth -ceq 'oauth' -and -not $NoSignOut) {");
   });
   it("remove-provider.ps1 resets $LASTEXITCODE right before the remove, so a remove that never started exits 1 and one that ran exits with its own code, never the sign-out's", () => {
@@ -829,9 +830,9 @@ describe("the PowerShell scripts, as text", () => {
     // Global: a native command sets the global one, and a plain assignment would make a script-scope copy that the
     // check after the remove would read instead.
     expect(code).toMatch(
-      /\n\$global:LASTEXITCODE = 0\n& \$Cli @removeArgs\nif \(-not \$\?\) \{\n {2}if \(\$LASTEXITCODE\) \{ exit \$LASTEXITCODE \}\n {2}exit 1\n\}/,
+      /\n\$global:LASTEXITCODE = 0\n& \$Cli @cliPre @removeArgs\nif \(-not \$\?\) \{\n {2}if \(\$LASTEXITCODE\) \{ exit \$LASTEXITCODE \}\n {2}exit 1\n\}/,
     );
-    expect(code.indexOf("$global:LASTEXITCODE = 0")).toBeGreaterThan(code.indexOf("& $Cli @logoutArgs"));
+    expect(code.indexOf("$global:LASTEXITCODE = 0")).toBeGreaterThan(code.indexOf("& $Cli @cliPre @logoutArgs"));
     expect(code.match(/LASTEXITCODE = /g)).toHaveLength(1);
   });
 
@@ -852,11 +853,11 @@ describe("the PowerShell scripts, as text", () => {
     expect(code).toContain("if (-not $ScriptsDir) { $ScriptsDir = $PSScriptRoot }");
     expect(code).toContain("$addScript = if ($ScriptsDir) { [IO.Path]::Combine($ScriptsDir, 'add-provider.ps1') } else { '' }");
     expect(code.indexOf("Test-Path -LiteralPath $addScript -PathType Leaf")).toBeGreaterThan(-1);
-    expect(code.indexOf("Test-Path -LiteralPath $addScript -PathType Leaf")).toBeLessThan(code.indexOf("& $Cli @removeArgs"));
+    expect(code.indexOf("Test-Path -LiteralPath $addScript -PathType Leaf")).toBeLessThan(code.indexOf("& $Cli @cliPre @removeArgs"));
     expect(code.indexOf("if (-not $?)")).toBeLessThan(code.indexOf("[scriptblock]::Create"));
     // The add's own `exit` ends the replace with its code; a terminating error, or getting past it at all, exits 1.
     expect(code).toMatch(
-      /\ntry \{\n {2}& \(\[scriptblock\]::Create\(\[IO\.File\]::ReadAllText\(\$addScript\)\)\) \$Provider \$Agent \$Cli\n\} catch \{\n {2}\[Console\]::Error\.WriteLine\("replace-provider\.ps1: add-provider\.ps1 stopped: \$\(\$_\.Exception\.Message\)"\)\n {2}exit 1\n\}\nexit 1$/,
+      /\ntry \{\n {2}& \(\[scriptblock\]::Create\(\[IO\.File\]::ReadAllText\(\$addScript\)\)\) \$Provider \$Agent \$Cli -CliScript \$CliScript\n\} catch \{\n {2}\[Console\]::Error\.WriteLine\("replace-provider\.ps1: add-provider\.ps1 stopped: \$\(\$_\.Exception\.Message\)"\)\n {2}exit 1\n\}\nexit 1$/,
     );
     // The saved key is replaced by the add, never cleared by the remove.
     expect(text).not.toContain("SetEnvironmentVariable");
@@ -868,7 +869,7 @@ describe("the PowerShell scripts, as text", () => {
       expect(code).toContain(
         `if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {\n  [Console]::Error.WriteLine("${name}: unknown scope '$Scope' (user, local or project)")\n  exit 2\n}`,
       );
-      expect(code.indexOf("-cnotin @('user', 'local', 'project')")).toBeLessThan(code.indexOf("& $Cli @removeArgs"));
+      expect(code.indexOf("-cnotin @('user', 'local', 'project')")).toBeLessThan(code.indexOf("& $Cli @cliPre @removeArgs"));
     }
   });
 
@@ -1087,9 +1088,13 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
   });
 
   it("a Claude Code sign-in stopped by a signal still announces its end, and the reader libi runs on the terminal finds both lines", async () => {
-    // A login that waits until it is stopped, as `mcp login` waits on the browser.
+    // A login that waits until it is stopped, as `mcp login` waits on the browser. Short sleeps rather than one long
+    // one, so a SIGINT that lands between the `echo` and the wait is still seen, and nothing can outlive 10 s.
     const hanging = path.join(root, "bin", "claude-hangs");
-    writeFileSync(hanging, '#!/bin/sh\n[ "$2" != login ] || { echo waiting > "$0.started"; sleep 30; }\nexit 0\n');
+    writeFileSync(
+      hanging,
+      '#!/bin/sh\n[ "$2" != login ] || { echo waiting > "$0.started"; i=0; while [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; }\nexit 0\n',
+    );
     chmodSync(hanging, 0o755);
     const runs: Array<[string, string[]]> = [
       ["signin-provider.sh", ["elevenlabs", "claude", hanging, "elevenlabs"]],
@@ -1104,10 +1109,36 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
       let out = "";
       child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
       const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
-      await waitUntil(() => existsSync(`${hanging}.started`), 10_000);
-      // Ctrl-C reaches the whole foreground group: the script and the CLI it waits on.
-      process.kill(-child.pid!, "SIGINT");
-      expect(await exited).toBe(130);
+      try {
+        // 5 s to start + the 8 s deadline below, twice, stays inside the suite's 30 s: a miss on the second run
+        // still fails by name instead of timing out.
+        await waitUntil(() => existsSync(`${hanging}.started`), 5_000);
+        // Ctrl-C reaches the whole foreground group: the script and the CLI it waits on.
+        process.kill(-child.pid!, "SIGINT");
+        // A signal that doesn't end the group fails here, by name, well inside the suite's 30 s budget.
+        let deadline: NodeJS.Timeout | undefined;
+        const missed = new Promise<never>((_, reject) => {
+          deadline = setTimeout(
+            () => reject(new Error(`the script did not exit within 8 s of SIGINT (group ${child.pid}); out so far: ${JSON.stringify(out)}`)),
+            8_000,
+          );
+        });
+        try {
+          expect(await Promise.race([exited, missed])).toBe(130);
+        } finally {
+          clearTimeout(deadline);
+        }
+      } finally {
+        // Nothing this run started outlives it, whatever failed above.
+        // No pid means the spawn itself failed; its own error is the one to see, not a kill of NaN.
+        if (child.pid) {
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          }
+        }
+      }
       await new Promise((r) => setTimeout(r, 50));
       const read = createSignInMarkerReader();
       expect(read(out)).toEqual([
@@ -1988,5 +2019,97 @@ describe("generated line length", () => {
     });
     expect(count).toBeGreaterThan(30);
     expect(longest.bytes, `longest generated line: ${longest.label}, ${longest.bytes} bytes`).toBeLessThanOrEqual(4096);
+  });
+});
+
+// PRV-4: an npm-installed CLI on Windows is a `.cmd` shim. PowerShell runs a `.cmd` in cmd.exe, whose Ctrl-C stops at
+// "Terminate batch job (Y/N)?" before anything else happens — a cancelled sign-in needed an extra answer. The server
+// resolves the shim to what it runs (`terminalLaunchFor`: node + its script, or its native .exe), and the printed
+// command runs that. The platform is pinned to win32 here; the fixture is a real shim file on disk.
+describe("an npm .cmd shim on Windows is run as what it runs, not through cmd.exe", () => {
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const NODE = "C:\\Program Files\\libi\\node\\node.exe";
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(os.tmpdir(), "libi-cmd-shim-"));
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+  });
+  afterEach(() => {
+    Object.defineProperty(process, "platform", platform);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** npm cmd-shim's output for a JS bin (as npm writes it for `@anthropic-ai/claude-code` < 2.1.267). */
+  const jsShim = (target: string) =>
+    "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\n" +
+    'IF EXIST "%dp0%\\node.exe" (\r\n  SET "_prog=%dp0%\\node.exe"\r\n) ELSE (\r\n  SET "_prog=node"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\n' +
+    `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${target}" %*\r\n`;
+
+  it("a JS target: sign-in, connect and update run `& '<node>' '<script>'`, never the .cmd", () => {
+    const cmd = path.join(dir, "claude.cmd");
+    writeFileSync(cmd, jsShim("node_modules\\@anthropic-ai\\claude-code\\cli.js"));
+    const launch = terminalLaunchFor(cmd, { nodeCommand: () => NODE });
+    const script = path.join(dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+    expect(launch).toEqual({ command: NODE, args: [script] });
+    const cli = { agentId: "claude-code" as const, realPath: cmd, launch: launch! };
+    expect(signInCommand(cli, "powershell")).toBe(`& '${NODE}' '${script}'`);
+    expect(connectLibiCommand(cli, "powershell", ENDPOINT)).toBe(
+      `& '${NODE}' '${script}' 'mcp' 'add' '--scope' 'user' '--transport' 'http' 'libi' '${ENDPOINT}'`,
+    );
+    expect(updateCommand(cli, "powershell", { claudeUpdateExists: true })).toBe(`& '${NODE}' '${script}' 'update'`);
+    expect(signInCommand(cli, "powershell")).not.toContain(".cmd");
+    // The provider scripts get node as <cli> and the JS file as -CliScript (review I2: the QA repro was a provider
+    // sign-in over a JS shim), and the shim appears nowhere.
+    const entry = { agentId: "claude-code", name: "elevenlabs", scope: "user" } as const;
+    const tail = `'${NODE}' 'elevenlabs' -CliScript '${script}'"`;
+    expect(providerSignInCommand(cli, "powershell", entry, elevenlabs, SCRIPTS_WIN)!.endsWith(`'elevenlabs' 'claude' ${tail}`)).toBe(true);
+    expect(providerAddCommand(cli, "powershell", elevenlabs, SCRIPTS_WIN)!.endsWith(`'elevenlabs' 'claude' '${NODE}' -CliScript '${script}'"`)).toBe(true);
+    expect(providerRemoveCommand(cli, "powershell", entry, elevenlabs, SCRIPTS_WIN)).toContain(`'${NODE}' 'elevenlabs' 'user' -CliScript '${script}'`);
+    const replaced = providerReplaceCommand(cli, "powershell", elevenlabs, entry, SCRIPTS_WIN)!;
+    expect(replaced).toContain(`'${NODE}' 'elevenlabs' 'user' -ScriptsDir '${SCRIPTS_WIN}' -CliScript '${script}'`);
+    for (const line of [replaced, providerAddCommand(cli, "powershell", elevenlabs, SCRIPTS_WIN)!]) expect(line).not.toContain("claude.cmd");
+    // Every .ps1 runs `& $Cli @cliPre @<args>`, where $cliPre holds -CliScript when given, and replace hands it on to the add.
+    for (const name of ["add-provider.ps1", "remove-provider.ps1", "replace-provider.ps1", "signin-provider.ps1"]) {
+      const text = scriptText(name);
+      expect(text, name).toContain("$cliPre = @()\nif ($CliScript) { $cliPre = @($CliScript) }");
+      expect(text.match(/& \$Cli @(?!cliPre )/g), name).toBeNull();
+    }
+    expect(scriptText("replace-provider.ps1")).toContain("$Provider $Agent $Cli -CliScript $CliScript");
+  });
+
+  // PRV M8: npm's own JS shim probes `"%dp0%\node.exe"` (nvm-windows, Volta place one beside the shim) and falls
+  // back to a bare `node` only when it is absent. Always running libi's OWN managed node instead ignores that: the
+  // user's nvm-managed / Volta-pinned Node version is skipped in favour of libi's, which can be a different major.
+  it("a JS target with node.exe beside the shim runs that node, not libi's managed one", () => {
+    const cmd = path.join(dir, "claude.cmd");
+    writeFileSync(cmd, jsShim("node_modules\\@anthropic-ai\\claude-code\\cli.js"));
+    const script = path.join(dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js");
+    const sibling = path.win32.join(path.win32.dirname(cmd), "node.exe");
+    const launch = terminalLaunchFor(cmd, { nodeCommand: () => NODE, exists: (p) => p === sibling });
+    expect(launch).toEqual({ command: sibling, args: [script] });
+    expect(launch!.command).not.toBe(NODE);
+  });
+
+  it("a native .exe target (claude-code ≥ 2.1.267): commands and the provider scripts run the .exe", () => {
+    const cmd = "C:\\Users\\me\\AppData\\Roaming\\npm\\claude.cmd";
+    const exe = "C:\\Users\\me\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe";
+    const text = '@ECHO off\r\n"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*\r\n';
+    const launch = terminalLaunchFor(cmd, { readFile: () => text });
+    expect(launch).toEqual({ command: exe, args: [] });
+    const cli = { agentId: "claude-code" as const, realPath: cmd, launch: launch! };
+    expect(signInCommand(cli, "powershell")).toBe(`& '${exe}'`);
+    const signIn = providerSignInCommand(cli, "powershell", { agentId: "claude-code", name: "elevenlabs", scope: "user" }, elevenlabs, SCRIPTS_WIN);
+    expect(signIn).toContain(`'${exe}'`);
+    expect(signIn).not.toContain("claude.cmd");
+    expect(providerAddCommand(cli, "powershell", elevenlabs, SCRIPTS_WIN)).toContain(`'${exe}'`);
+  });
+
+  it("nothing to skip: not a .cmd, an unreadable shim, or not Windows; posix commands never use a launch", () => {
+    expect(terminalLaunchFor("C:\\Users\\me\\.local\\bin\\claude.exe")).toBeNull();
+    expect(terminalLaunchFor("C:\\nowhere\\claude.cmd", { readFile: () => { throw new Error("ENOENT"); } })).toBeNull();
+    expect(terminalLaunchFor("C:\\x\\claude.cmd", { platform: "linux", readFile: () => jsShim("cli.js") })).toBeNull();
+    const withLaunch = { ...claude, launch: { command: NODE, args: ["/x/cli.js"] } };
+    expect(signInCommand(withLaunch, "posix")).toBe(signInCommand(claude, "posix"));
+    expect(cliInvocation(claude.realPath, "posix", withLaunch.launch)).toBe(cliInvocation(claude.realPath, "posix"));
   });
 });

@@ -472,7 +472,9 @@ export class FfmpegOverlayBackend implements ExportBackend {
     const isWebm = ctx.settings.format === "webm";
     const encoder = isWebm
       ? "libvpx-vp9"
-      : (pickEncoder("h264", availableEncoders, process.platform) ?? "libx264");
+      : ctx.forceSoftwareEncoder
+        ? "libx264"
+        : (pickEncoder("h264", availableEncoders, process.platform) ?? "libx264");
     const audioCodec = isWebm ? "libopus" : "aac";
 
     // ffmpeg args:
@@ -561,7 +563,7 @@ export class FfmpegOverlayBackend implements ExportBackend {
         format: ctx.settings.format,
       };
     } finally {
-      if (!ok) {
+      if (!ok && (ctx.ownsOutput?.() ?? true)) {
         try { fs.unlinkSync(ctx.outputPath); } catch { /* ignore */ }
       }
       if (graphDir && !keepGraph) await rm(graphDir, { recursive: true, force: true }).catch(() => {});

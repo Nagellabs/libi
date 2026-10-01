@@ -8,6 +8,7 @@ import { BusyLabel, BUSY_BUTTON_CLASS } from "@/components/agents-page/agents-ta
 import { TemplatePromptButton } from "@/components/templates/template-prompt-button";
 import { DetailsHeader, DetailsLayout, DetailsMessage, DetailsPlayer, DetailsRefreshNotice, useDetailsViewed } from "@/components/templates/template-details/details-layout";
 import { DetailsSkeleton } from "@/components/templates/template-details/details-skeleton";
+import { MusicLinks } from "@/components/templates/template-details/music-links";
 import { OverlaysList } from "@/components/templates/template-details/overlays-list";
 import { ResourcesList } from "@/components/templates/template-details/resources-list";
 import { UsagePanel } from "@/components/templates/template-details/usage-panel";
@@ -19,7 +20,7 @@ import { Button } from "@/components/ui/button";
 import { useQueryClient } from "@tanstack/react-query";
 import { cachedTemplateCanvas, TemplatesHttpError, templateAssetUrl, templateMediaUrl, useDeleteTemplate, useTemplate } from "@/lib/queries/templates";
 import { useCloudMine } from "@/lib/queries/templates-cloud";
-import { lastUsedDayOf, overlayRows, resourceRows, usesInLastDays } from "@/lib/templates/details";
+import { lastUsedDayOf, musicLinkRows, overlayRows, resourceRows, usesInLastDays } from "@/lib/templates/details";
 
 const TEMPLATES_HREF = "/templates";
 export const LOCAL_NOT_FOUND = "This template isn't on this machine any more.";
@@ -158,6 +159,7 @@ export function LocalTemplateDetails({ id }: { id: string }) {
       ) : (
         <>
           <OverlaysList rows={overlays} />
+          {scaffold && <MusicLinks rows={musicLinkRows(scaffold)} />}
           <ResourcesList rows={resources} fontSamples />
         </>
       )}

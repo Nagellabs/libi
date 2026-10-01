@@ -93,6 +93,38 @@ describe("proxyGenRunner", () => {
     expect(row.proxyGeneratedAt).toBeInstanceOf(Date);
   });
 
+  it("a file assigned to a piece while ffmpeg runs gets its proxy beside it, named after its new filename", async () => {
+    seedPiece(db, { id: "dest", name: "dest" });
+    const globalDir = path.join(tmp, "storage", "_global");
+    const destDir = path.join(tmp, "storage", "dest");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(path.join(globalDir, "clip.mp4"), Buffer.alloc(1024));
+    db.insert(files)
+      .values({
+        id: "fm", pieceId: null, filename: "clip.mp4", name: "clip", description: "",
+        type: "video", storagePath: "_global/clip.mp4", contentType: "video/mp4", size: 1024,
+      })
+      .run();
+
+    vi.mocked(runFfmpeg).mockImplementation(async () => {
+      fs.writeFileSync(path.join(globalDir, "clip-proxy.mp4"), Buffer.alloc(200));
+      // assign_file lands mid-render, deduping the name in the destination.
+      db.update(files).set({ pieceId: "dest", filename: "clip (1).mp4" }).where(eq(files.id, "fm")).run();
+      return { stdout: "", stderr: "" };
+    });
+
+    const mgr = new JobManager();
+    const jobId = jobIdOf(await mgr.enqueue("proxy_gen", { fileId: "fm" }));
+    const result = await mgr.runToCompletion<{ proxyFilename: string }>(jobId);
+
+    expect(result.proxyFilename).toBe("clip (1)-proxy.mp4");
+    const row = db.select().from(files).where(eq(files.id, "fm")).all()[0];
+    expect(row.proxyStatus).toBe("ready");
+    expect(row.proxyFilename).toBe("clip (1)-proxy.mp4");
+    expect(fs.existsSync(path.join(destDir, "clip (1)-proxy.mp4"))).toBe(true);
+    expect(fs.existsSync(path.join(globalDir, "clip-proxy.mp4"))).toBe(false);
+  });
+
   it("missing source file throws", async () => {
     seedPiece(db, { id: "p", name: "p" });
     db.insert(files)

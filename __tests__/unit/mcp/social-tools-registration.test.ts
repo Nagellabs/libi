@@ -17,7 +17,7 @@ import { resolveManualSection, splitManual } from "@/mcp/manual-sections";
  * They are registered on BOTH surfaces on purpose: a user's own Claude Code or
  * Codex posts from its own project, so none of them is in `IN_APP_ONLY_TOOLS`.
  */
-const NAMES = ["libi.social_status", "libi.post_piece", "libi.social_link_post"] as const;
+const NAMES = ["libi.social_status", "libi.post_piece", "libi.social_link_post", "libi.social_music_search"] as const;
 
 async function listTools(surface?: AgentSurface) {
   const server = createLibiMcpServer(surface !== undefined ? { surface } : undefined);
@@ -76,6 +76,19 @@ describe("the social tools are reachable over MCP", () => {
     expect(link.inputSchema.required).toEqual(["pieceId", "providerPostId"]);
     const status = tools.find((t) => t.name === "libi.social_status")!;
     expect(status.inputSchema.properties ?? {}).toEqual({});
+  });
+
+  it("social_music_search takes any of the five platforms and tells the agent the export its plan implies", async () => {
+    const { tools } = await listTools();
+    const tool = tools.find((t) => t.name === "libi.social_music_search")!;
+    const props = (tool.inputSchema.properties ?? {}) as Record<string, { enum?: string[] }>;
+    expect(Object.keys(props).sort()).toEqual(["accountId", "pieceId", "platform", "query"]);
+    expect(props.platform.enum).toEqual(["instagram", "tiktok", "youtube", "facebook", "twitter"]);
+    expect(tool.inputSchema.required).toEqual(["pieceId", "platform"]);
+    const d = tool.description ?? "";
+    expect(d).toMatch(/exportVideoArgs/);
+    expect(d).toMatch(/libi\.export_video/);
+    expect(d).toMatch(/Read-only/);
   });
 
   it("post_piece's description tells the agent it never publishes", async () => {

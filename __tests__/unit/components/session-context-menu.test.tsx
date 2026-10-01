@@ -41,4 +41,15 @@ describe("SessionContextMenu", () => {
     fireEvent.click(item);
     expect(onRestart).not.toHaveBeenCalled();
   });
+
+  it("offers Remove from list only when asked to (a chat whose history is gone), and runs it on click", () => {
+    const onRemove = vi.fn();
+    render(<SessionContextMenu state={state} onCopyId={vi.fn()} onRemove={onRemove} />);
+    expect(screen.getAllByRole("menuitem").map((b) => b.textContent)).toEqual(["Copy session ID", "Remove from list"]);
+    const item = screen.getByRole("menuitem", { name: "Remove from list" });
+    expect(item).toHaveClass("cursor-pointer");
+    expect(item.querySelector("svg")).not.toBeNull();
+    fireEvent.click(item);
+    expect(onRemove).toHaveBeenCalledOnce();
+  });
 });

@@ -45,7 +45,8 @@ IS the safe state.
 
 `libi.post_piece` builds **Instagram and TikTok** posts. Zernio reaches far more — Facebook, X
 (`twitter` on the wire), YouTube and others — and the user's account may well have one connected.
-For those, skip `libi.post_piece` and create the post with Zernio's own full-shaped tools (§2),
+For those, skip `libi.post_piece` and create the post with Zernio's own full-shaped tools (§2) —
+if the piece has music, get that platform's plan and export from the `social-music` skill first —
 then call `libi.social_link_post` so the piece and the post are linked and libi's Posts, Schedule
 and Analytics views show it like any other. Say plainly which route you took: libi's own screens
 cannot compose for those platforms yet, and the user should know the post came from you.
@@ -54,6 +55,8 @@ Never pass such a platform to `libi.post_piece` — its `targets` enum rejects i
 `targets` skips it rather than posting there.
 
 ## 1. The default path: `libi.post_piece`
+
+**Music:** if the piece has music, load the `social-music` skill. `libi.post_piece` returns a music plan per target whose `sentence` you relay before anyone publishes, and may make two linked drafts (with / without the song).
 
 Use this whenever libi is connected. It exports if needed, checks the fit per platform locally, uploads,
 creates ONE draft carrying the options TikTok and Instagram actually reported, links it to the piece and
@@ -69,8 +72,9 @@ opens the Posting tab.
 - Call `libi.post_piece({ pieceId, targets, caption })`. `targets` omitted = every connected account.
 - Read the result: `reusedExport` non-null means it posted the piece's LAST export, which libi cannot
   tell is current — **name that file to the user** and offer to re-export.
-- `does_not_fit` → say which platform and why, then offer `libi.export_video` at a size that fits, or
-  dropping that target. Nothing was uploaded. `libi_not_connected` → §2. `piece_not_found` →
+- `does_not_fit` → say which platform and why, then offer `libi.export_video` at a size that fits
+  (several platforms at once: ONE call with `variants`, one entry per size, then `libi.list_exports`
+  for the files), or dropping that target. Nothing was uploaded. `libi_not_connected` → §2. `piece_not_found` →
   `libi.list_pieces`.
 - Then ONE line: *"Draft is in the piece's Posting tab (and Social → Posts). Approve it there, or tell me
   to schedule or publish it."* Stop.
@@ -105,7 +109,8 @@ Every draft you create yourself:
   is `metadata.libi.requestId`. Reuse the same one on a retry, and treat a duplicate-content rejection
   as success rather than posting twice.
 - Instagram options go in each platform row's `platformSpecificData`; TikTok's go in the ROOT
-  `tiktok_settings`.
+  `tiktok_settings` (a per-target `platformSpecificData.tiktokSettings` is also valid and wins over
+  the root one — that is where the `social-music` skill puts TikTok's licensed music).
 - TikTok: read `accounts_get_tik_tok_creator_info` and use ONLY a `privacy_level` it returned — never a
   guessed one. Set `allow_comment` / `allow_duet` / `allow_stitch` explicitly from what it reports,
   `content_preview_confirmed` and `express_consent_given` from the user's actual confirmation, and
@@ -155,5 +160,12 @@ match client-side). Analytics can be **"syncing" rather than zero**: `syncStatus
 
 ## 6. Later phases
 
-X and YouTube, Zernio's per-profile queue and calendar, and account-level analytics are **a later
-phase** — say so and stop rather than improvising a path to them.
+Zernio's per-profile queue and calendar, and account-level analytics, are **a later phase** — say so
+and stop rather than improvising a path to them.
+
+Facebook, X (`twitter`) and YouTube posts are NOT a later phase: they go through §0b (your own
+Zernio tools, then `libi.social_link_post`). When the piece has music, load the `social-music` skill
+first and follow its plan for that platform — `libi.social_music_search`, then `libi.export_video`
+with the plan's `exportVideoArgs` (several platforms: one call with `pieceId` at the top level and
+`variants`, each entry carrying its platform's `exportVideoArgs` minus `pieceId` — an entry takes
+only the per-export fields, so a `pieceId` inside one is refused) — before you create the post.

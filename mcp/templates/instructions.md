@@ -1,4 +1,4 @@
-<!-- libi-instructions-start v1.21.2 -->
+<!-- libi-instructions-start v1.21.6 -->
 
 # Libi Video Composition API
 
@@ -198,6 +198,25 @@ reports success, so never present it as complete — tell the user which clip
   track (re-track the bad section). Otherwise export again; if it repeats, treat
   it like `"load"`.
 
+### Exports
+
+`libi.export_video` saves the file INSIDE the piece: the user finds it in the piece's
+**Exports** tab (and under the piece in Resources). There is no export folder — never pass
+`destFolder` (it is refused) and never offer to save it somewhere else. The result gives the
+file's `filePath` and its `exportId`.
+- **Several exports at once** — "export it as 9:16 and 16:9", MP4 + WebM, three sizes — is ONE
+  `libi.export_video` call with `variants` (1–10 entries, each its own settings; a 16:9 cut of a
+  9:16 piece is `quality: "custom"` with `customWidth`/`customHeight`). It returns at once with what
+  was queued; they render in parallel as the machine allows. Tell the user what you queued and that
+  it appears in the piece's Exports tab, then check with `libi.list_exports`. Without `variants` the
+  call waits for its one export, as before.
+- **`libi.list_exports({ pieceId, status? })`** — the piece's exports as the user sees them:
+  `name`, `status`, `path` (the file, once done), `missing`, `aspect`, size, length,
+  `carriesCopyrightedMusic`, and for a queued or rendering export its `percent` or `waiting`
+  reason. Use it for "where is my export?", to pick a file to share or post, and to check on
+  exports you started. `show: true` also opens the Exports tab.
+- Renaming and deleting exports is the user's, in the Exports tab — there is no tool for it.
+
 ### Video processing (ffmpeg-backed)
 
 These tools operate on files that already exist on a piece. They're fast for common operations (trim / extract audio / concat of compatible clips are stream-copy, typically under a second).
@@ -233,7 +252,7 @@ A composition's audio is a list of **clips**, each with a composition-global `st
   - `trimStart` (number, optional, default 0) -- Offset into the source file
   - `volume` (number, optional, default 1) -- 0 to 1
   - `enabled` (boolean, optional, default true) -- the timeline speaker toggle
-  - If the clip would run past the piece's end and you passed no explicit `duration`, the tool refuses with `asset_longer_than_piece` — **ask the user first**, then re-call with `lengthPolicy: "extend" | "trim"` (or a `duration` that fits).
+  - If the clip would run past the piece's end and you passed no explicit `duration`, the tool refuses with `asset_longer_than_piece` — **ask the user first**, then re-call with `lengthPolicy: "extend" | "trim"` (or a `duration` that fits). Not needed on an EMPTY piece: the first asset sets the piece's length and is never refused.
 
 - **`libi.audio_update_clip`** -- Patch a clip: `clipId` plus any of `startTime`, `duration`, `trimStart`, `volume`, `enabled`, `label`, `timelineOrder`.
 
@@ -414,7 +433,8 @@ clearly wants you to, and don't bail on the first imperfect result. See the
 ## Canvas Dimensions
 
 The canvas (composition's `width × height`) is the final video's frame size. The default
-is 1920×1080. **Don't assume horizontal.** Vertical sources (e.g. YouTube Shorts, TikTok)
+is 1080×1920 (9:16), unless the user's default aspect in Settings says otherwise. **Don't
+assume horizontal.** Vertical sources (e.g. YouTube Shorts, TikTok)
 need a vertical canvas; otherwise the source either crops, letterboxes, or stretches.
 
 ### When to consider canvas dimensions
@@ -795,8 +815,9 @@ When working in the Libi editor, you operate on **pieces** — each piece is a v
 > **ALWAYS put imported video on the timeline (non-negotiable).** Whenever you
 > `libi.upload_file` (or otherwise import) a **video** into a piece, in the SAME
 > turn you MUST also: (a) call `libi.update_composition_dimensions` to match the
-> video's `mediaWidth`×`mediaHeight` (vertical clips are 9:16 — do not leave the
-> canvas at the 1920×1080 default), and (b) call
+> video's `mediaWidth`×`mediaHeight` (the canvas defaults to 1080×1920 (9:16) — a
+> horizontal or square clip still needs its own dimensions set, never assume the
+> current canvas already fits), and (b) call
 > `libi.add_overlay({ kind: "video", fileId })` (full-frame editable overlay — its
 > audio auto-links) so the clip is on the timeline. An uploaded video that is not
 > on the timeline shows the user "Generate a video to see preview", which reads as
@@ -815,7 +836,8 @@ When working in the Libi editor, you operate on **pieces** — each piece is a v
 
 - The canvas origin (0, 0) is at the **top-left** corner.
 - X increases to the right, Y increases downward.
-- Default canvas size is **1920x1080** (Full HD).
+- Default canvas size is **1080×1920 (9:16)**, unless the user's default aspect in Settings
+  says otherwise.
 
 ## The DrawContext
 
@@ -1338,7 +1360,7 @@ When saving assets via `libi.save_asset`, provide a descriptive `name` and `desc
 
 ## Version Check
 
-This manual (version **1.21.2**) was served by the running libi over MCP, so it is
+This manual (version **1.21.6**) was served by the running libi over MCP, so it is
 always current for that install — there is no separate on-disk copy to go stale. If a
 tool you expect is missing or behaves unexpectedly, the user's libi is probably older
 than this version marker. Ask them to upgrade (`npx @nagellabs/libi@latest`, or the

@@ -29,6 +29,7 @@ import {
   acquireInstallLock,
   acquireInstallLocks,
   InstallLockTimeoutError,
+  InstallWaitAbortedError,
 } from "@/mcp/registry/install-lock";
 import { serverLogger } from "@/lib/logger";
 import { DependencyManager } from "@/mcp/registry/dependency-manager";
@@ -159,6 +160,36 @@ describe("acquireInstallLock", () => {
     expect(fs.existsSync(lockPath)).toBe(true); // theirs, left alone
   });
 
+  // UV-1 (G2 report M4 "Not done"): a cancelled job stopped waiting only at the 35-min cap.
+  it("an abort stops the wait on a live owner within 100 ms, logs it, and leaves the owner's lock alone", async () => {
+    foreignLock(999_999);
+    const info = vi.spyOn(serverLogger, "info");
+    const ac = new AbortController();
+    // A long poll: the abort must not wait for the next look.
+    const pending = acquireInstallLock(lockPath, { pollMs: 5_000, isAlive: () => true, signal: ac.signal }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const aborted = Date.now();
+    ac.abort();
+    const err = await pending;
+    expect(Date.now() - aborted).toBeLessThan(100);
+    expect(err).toBeInstanceOf(InstallWaitAbortedError);
+    expect(err!.name).toBe("AbortError");
+    expect(err!.message).toBe("Stopped waiting for the install of uv: the job that needed it was cancelled.");
+    expect(info.mock.calls.some((c) => (c[0] as { op?: string }).op === "install_lock_wait_aborted")).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(true);
+  });
+
+  it("an abort before a free lock is taken changes nothing: the lock is taken", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const lock = await acquireInstallLock(lockPath, { signal: ac.signal });
+    expect(fs.existsSync(lockPath)).toBe(true);
+    lock.release();
+  });
+
   it("on Windows retries a transient create error, then takes the lock", async () => {
     vi.spyOn(os, "platform").mockReturnValue("win32");
     const real = fs.openSync;
@@ -206,6 +237,49 @@ describe("acquireInstallLock", () => {
 // the shared bin/. retryDep must wait for it and then NOT download uv again.
 // Runs on every host: the files are named the way the product names them —
 // `uv.exe`, `uv.exe.install-token`, `uv.exe.install-lock` on Windows (exeSuffix()).
+// Review M5: a job cancelled while it waits on another libi's install recorded the dep as failed and logged at error
+// level, while the other install carried on. The wait's end is now not a failure of the dep.
+describe("retryDep cancelled while it waits on another libi's install", () => {
+  it("rejects with the abort, writes no failed status, logs no error, and leaves the other lock alone", async () => {
+    foreignLock(process.ppid); // a live process that is not this one, mid-install
+    const error = vi.spyOn(serverLogger, "error");
+    const info = vi.spyOn(serverLogger, "info");
+    const ac = new AbortController();
+    const pending = new DependencyManager().retryDep("youtube-download", "uv", { signal: ac.signal }).then(
+      () => null,
+      (e: Error) => e,
+    );
+    await new Promise((r) => setTimeout(r, 60));
+    ac.abort();
+    const err = await pending;
+    expect(err).toBeInstanceOf(InstallWaitAbortedError);
+    const uv = transitions.filter((t) => t.binary === "uv");
+    expect(uv.some((t) => t.patch.runtimeStatus === "failed")).toBe(false);
+    expect(uv.at(-1)?.patch).toMatchObject({ runtimeStatus: "pending", error: null });
+    expect(error.mock.calls.some((c) => (c[0] as { op?: string }).op === "retry_failed")).toBe(false);
+    expect(info.mock.calls.some((c) => (c[0] as { op?: string }).op === "retry_wait_aborted")).toBe(true);
+    expect(fs.existsSync(lockPath)).toBe(true);
+  });
+
+  it("a caller that JOINED an install here stops waiting on its own abort, recording nothing; the install it joined goes on", async () => {
+    foreignLock(process.ppid);
+    const first = new AbortController();
+    const joiner = new AbortController();
+    const a = new DependencyManager().retryDep("youtube-download", "uv", { signal: first.signal }).then(() => null, (e: Error) => e);
+    await new Promise((r) => setTimeout(r, 30));
+    const b = new DependencyManager().retryDep("youtube-download", "uv", { signal: joiner.signal }).then(() => null, (e: Error) => e);
+    await new Promise((r) => setTimeout(r, 30));
+    const before = transitions.length;
+    joiner.abort();
+    expect(await b).toBeInstanceOf(InstallWaitAbortedError);
+    expect(transitions.length).toBe(before); // the joiner wrote nothing
+    expect(await Promise.race([a.then(() => "settled"), new Promise((r) => setTimeout(() => r("waiting"), 50))])).toBe("waiting");
+    first.abort();
+    expect(await a).toBeInstanceOf(InstallWaitAbortedError);
+    expect(transitions.some((t) => t.patch.runtimeStatus === "failed")).toBe(false);
+  });
+});
+
 describe("retryDep across processes", () => {
   let child: ChildProcess | null = null;
   afterEach(() => {
@@ -254,6 +328,10 @@ describe("retryDep across processes", () => {
     const ops = info.mock.calls.map((c) => (c[0] as { op?: string }).op);
     expect(ops).toContain("install_lock_wait");
     expect(ops).toContain("dep_install_served_elsewhere");
+    // Shares the install path's own `deps` tag, not `lifecycle` — the rest of
+    // this path (download_start, install_start, …) already logs `deps`.
+    const served = info.mock.calls.map(([o]) => o as Record<string, unknown>).find((o) => o.op === "dep_install_served_elsewhere");
+    expect(served?.tag).toBe("deps");
     expect(download).not.toHaveBeenCalled();
     const last = transitions.filter((t) => t.mcpId === "youtube-download" && t.binary === "uv").at(-1);
     expect(last?.patch).toMatchObject({ installed: true });

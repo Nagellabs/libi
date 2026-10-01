@@ -90,6 +90,17 @@ export const realPtyFactory: PtyFactory = (opts): PtyLike => {
     cols: opts.cols,
     rows: opts.rows,
     env: opts.env as { [key: string]: string },
+    // Windows: node-pty's OWN conpty.dll (+ OpenConsole.exe, from
+    // prebuilds/win32-<arch>/conpty/, loaded next to conpty.node). Without it,
+    // node-pty 1.1.0's kill() collects the console's process list by
+    // `child_process.fork(conpty_console_list_agent.js)` — and in the packaged
+    // app this runs in Electron main, where `fork` launches Libi.exe with
+    // ELECTRON_RUN_AS_NODE=1. The `runAsNode: false` fuse ignores that, so every
+    // terminal close booted a second APP (refused by the single-instance lock,
+    // focusing the window) and node-pty waited out its 5 s timeout (Windows F1).
+    // The DLL path's kill closes the pseudoconsole and forks nothing
+    // (node-pty/lib/windowsPtyAgent.js#kill). Ignored off Windows; omitted there.
+    ...(isWindows() ? { useConptyDll: true } : {}),
   });
   return {
     pid: pty.pid,

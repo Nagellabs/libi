@@ -365,7 +365,7 @@ export class JobManager extends EventEmitter {
 
   /** How many jobs of `kind` hold a slot or wait for one in this process. A
    *  background example render reads it for `export`, so it does not start
-   *  between two queued user exports only to yield at once (lib/export/export-lane.ts). */
+   *  between two queued user exports only to yield at once (lib/export/scheduler.ts, the `busy` probe). */
   activeOrWaiting(kind: string): number {
     return (this.activeByKind.get(kind) ?? 0) + (this.waiters.get(kind)?.length ?? 0);
   }

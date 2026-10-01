@@ -79,8 +79,8 @@ async function codeFor(id: string): Promise<string> {
   expect(v?.confirmCode, "the page's own read carries the code").toBeTruthy();
   return v!.confirmCode!;
 }
-function media(id: string, name: string) {
-  return MEDIA(new Request(`${ORIGIN}/api/templates/cloud/publish-requests/${id}/media/${name}`, { headers: BROWSER }), { params: Promise.resolve({ id, name }) });
+function media(id: string, name: string, headers: Record<string, string> = BROWSER) {
+  return MEDIA(new Request(`${ORIGIN}/api/templates/cloud/publish-requests/${id}/media/${name}`, { headers }), { params: Promise.resolve({ id, name }) });
 }
 const row = (id: string) => getDb().select().from(templatePublishRequests).where(eq(templatePublishRequests.id, id)).get();
 
@@ -199,6 +199,43 @@ describe("GET the review", () => {
     fs.rmSync(example);
     fs.symlinkSync(path.join(home, "source.mp4"), example);
     expect((await media(requestId, "example.mp4")).status).toBe(404);
+  });
+
+  // Suites W1b: one 404 on a just-prepared request's example.mp4, root cause unknown. The next
+  // one must say which of the two checks refused it — never the file's path.
+  it("a 404 for a well-formed request's file logs why: no_row or not_file, with tag and op and no path", async () => {
+    const warn = vi.spyOn(serverLogger, "warn");
+    const reasons = () =>
+      warn.mock.calls
+        .map(([o]) => o as Record<string, unknown>)
+        .filter((o) => o.op === "publish_request_media_not_found");
+
+    // A name the route never serves, and an id that is not a request id, are not W1b: no line.
+    expect((await media(requestId, "notes.txt")).status).toBe(404);
+    expect((await media("nope", "example.mp4")).status).toBe(404);
+    expect(reasons()).toEqual([]);
+
+    const unknown = "00000000-0000-4000-8000-000000000000";
+    expect((await media(unknown, "example.mp4")).status).toBe(404);
+    fs.rmSync(path.join(publishRequestDir(requestId), "poster.jpg"));
+    expect((await media(requestId, "poster.jpg")).status).toBe(404);
+
+    expect(reasons()).toEqual([
+      { tag: "templates-cloud", op: "publish_request_media_not_found", requestId: unknown, name: "example.mp4", reason: "no_row" },
+      { tag: "templates-cloud", op: "publish_request_media_not_found", requestId, name: "poster.jpg", reason: "not_file" },
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(home);
+    warn.mockRestore();
+  });
+
+  it("another site's guess still 404s, but is never worth a warn line", async () => {
+    const warn = vi.spyOn(serverLogger, "warn");
+    const unknown = "00000000-0000-4000-8000-000000000000";
+    for (const site of ["cross-site", "same-site"]) {
+      expect((await media(unknown, "example.mp4", { ...BROWSER, "sec-fetch-site": site })).status).toBe(404);
+    }
+    expect(warn.mock.calls.map(([o]) => o as Record<string, unknown>).filter((o) => o.op === "publish_request_media_not_found")).toEqual([]);
+    warn.mockRestore();
   });
 
   it("a later change to the SOURCE changes nothing: the review still shows what was prepared, and it can still be published", async () => {

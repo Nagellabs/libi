@@ -16,7 +16,7 @@ vi.mock("@/lib/server/lifecycle", () => ({
   runInstallPhase: vi.fn(async () => ({ ok: true })),
 }));
 vi.mock("@/lib/server/lifecycle/adapters/cli", () => ({ cliAdapter: vi.fn(() => ({})) }));
-vi.mock("@/lib/install/next-externals", () => ({ ensureNextExternalSymlinks: vi.fn() }));
+vi.mock("@/lib/install/next-externals", () => ({ ensureNextExternalSymlinks: vi.fn(() => ({ created: [], verified: [] })) }));
 
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),

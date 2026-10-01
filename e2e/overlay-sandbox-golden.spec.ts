@@ -12,8 +12,10 @@ import { test, expect } from "./helpers/app";
  * Baselines: `LIBI_GOLDEN_UPDATE=1 npm run test:e2e -- e2e/overlay-sandbox-golden.spec.ts`
  * writes e2e/golden/overlay-sandbox/frame-<ms>.png. Without the flag the spec
  * compares and, on a mismatch, writes `<name>.actual.png` beside the baseline.
- * The committed baselines come from the pre-refactor renderer (3110575a)
- * through the frames-only encode that 40bd30c6 introduced. The full
+ * The committed baselines were recaptured from HEAD on 2026-09-27, a
+ * deliberate rendering change that brought the 3D-text label back (see below).
+ * A capture-path change still regenerates from the pre-refactor renderer
+ * (3110575a), never from HEAD. The full
  * provenance is in e2e/golden/overlay-sandbox/README.md.
  *
  * Fonts: `Inter` 700 (bundled) AND an uploaded face (`libifont-<id>`, the
@@ -45,20 +47,19 @@ import { test, expect } from "./helpers/app";
  * A green run therefore means "no visible change at export fidelity", not
  * "byte-identical rasterization". Task 14 should report it at that fidelity.
  *
- * 3D TEXT IS DELIBERATELY ABSENT from the three body. The first version of this
- * fixture put a `new Text()` label under the cube, and the baseline was flaky:
- * roughly one run in three differed by exactly 836 channels (max delta 12) in a
- * 40x34 box on the label's glyphs, byte-identical everywhere else — two stable
- * outcomes rather than noise, i.e. a latching race in the canvas-text
- * rasterization / content-fit framing, NOT encoder jitter. It reproduced on the
- * pristine tree with no source change, so it is a property of the 3D text path,
- * not of this spec. A golden that cries regression one run in three is worse
- * than no golden, so the label is gone and a second mesh takes its place.
- *
- * Consequence to hold on to: `Text` is one of the injected THREE_PARAM_NAMES,
- * so the refactor must keep injecting it — and THIS SPEC NO LONGER PROVES THAT.
- * Cover it with a non-pixel assertion elsewhere; do not add the label back
- * without first fixing the underlying race.
+ * 3D TEXT IS COVERED. The three body puts a `new Text()` label ("Parity")
+ * under the cube, so the spec also proves `Text` is still injected into three
+ * bodies (it is one of THREE_PARAM_NAMES) and that a label exports the same
+ * pixels every time. The label was out of the fixture from 2026-09-23 to
+ * 2026-09-27: roughly one run in three differed on its glyphs, two stable
+ * outcomes rather than noise. The cause was the label's own canvas. It was a
+ * GPU-backed 2D context, and its large-glyph rasterization wasn't repeatable:
+ * three different bitmaps in eight runs for the same text, size and metrics.
+ * The texture was never uploaded a frame late; it was uploaded on time with
+ * different pixels. `lib/engine/canvas-text.ts` now asks for a CPU-backed
+ * context (`willReadFrequently`), and 10 of 10 runs are byte-identical
+ * (`__tests__/unit/engine/three-text-latch.test.ts` pins both halves). If
+ * this label starts flaking again, suspect the label canvas's backing first.
  */
 const GOLDEN_DIR = path.resolve(__dirname, "golden", "overlay-sandbox");
 const TIMES = [0.5, 1.5];
@@ -179,20 +180,20 @@ drawTextBlock(ctx, "Golden uploaded", 80, 300, 1600, 120, { font: "700 96px ${fo
 `;
 
 /**
- * NO `new Text()` here, deliberately — see the "3D text" note in the header.
- * A second mesh stands in for the removed label so the scene still has more
- * than one object and a non-trivial content-fit framing.
+ * The cube plus a `new Text()` label, which guards 3D text (see the "3D text"
+ * note in the header). The label also widens the content-fit framing past the
+ * cube alone.
  */
 const THREE_BODY = `
 const geo = new THREE.BoxGeometry(1.4, 1.4, 1.4);
 const mesh = new THREE.Mesh(geo, new THREE.MeshNormalMaterial());
 scene.add(mesh);
-const bar = new THREE.Mesh(
-  new THREE.BoxGeometry(2.2, 0.28, 0.28),
-  new THREE.MeshNormalMaterial(),
-);
-bar.position.set(0, -1.4, 0);
-scene.add(bar);
+const label = new Text();
+label.text = "Parity";
+label.fontSize = 0.6;
+label.color = 0xffffff;
+label.position.set(0, -1.4, 0);
+scene.add(label);
 return (api) => { mesh.rotation.x = api.time; mesh.rotation.y = api.time * 0.7; };
 `;
 
@@ -285,7 +286,7 @@ test.describe("overlay sandbox golden frames", () => {
       }
       expect(
         fs.existsSync(baseline),
-        `missing baseline ${baseline} — run with LIBI_GOLDEN_UPDATE=1 on the PRE-refactor tree`,
+        `missing baseline ${baseline} — capture one with LIBI_GOLDEN_UPDATE=1 (provenance: e2e/golden/overlay-sandbox/README.md)`,
       ).toBe(true);
       const [want, got] = await Promise.all([pixels(baseline), pixels(f.path)]);
       expect({ w: got.w, h: got.h }).toEqual({ w: want.w, h: want.h });

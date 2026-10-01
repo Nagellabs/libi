@@ -3,7 +3,7 @@
 // catalog's per-day counts turned into 30-day uses and a last-used day.
 import { describe, expect, it } from "vitest";
 import { makeScaffold } from "@/__tests__/helpers/templates";
-import { assetStreamUrl, formatDuration, lastUsedDayOf, overlayRows, resourceRows, usesInLastDays } from "@/lib/templates/details";
+import { assetStreamUrl, formatDuration, lastUsedDayOf, musicLinkRows, overlayRows, resourceRows, usesInLastDays } from "@/lib/templates/details";
 import type { TemplateScaffold } from "@/lib/templates/scaffold-schema";
 
 const rect = { x: 0, y: 0, width: 10, height: 10 };
@@ -100,6 +100,16 @@ describe("usesInLastDays / lastUsedDayOf", () => {
     expect(lastUsedDayOf({ "20260901": 1, "2026-09-20": 2, "20260922": 0 })).toBe("2026-09-20");
     expect(lastUsedDayOf({ "20260922": 0 })).toBeNull();
     expect(lastUsedDayOf({})).toBeNull();
+  });
+});
+
+describe("musicLinkRows", () => {
+  it("labels each link and parses its source host", () => {
+    expect(musicLinkRows({ musicLinks: [{ ref: "e", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" }, { ref: "x", track: { title: "Untitled" } }] })).toEqual([
+      { ref: "e", label: "Espresso — Sabrina Carpenter", source: { url: "https://www.youtube.com/watch?v=abc", host: "www.youtube.com" } },
+      { ref: "x", label: "Untitled", source: null },
+    ]);
+    expect(musicLinkRows({})).toEqual([]);
   });
 });
 

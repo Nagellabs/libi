@@ -1,7 +1,8 @@
 import type { SocialAdapter, AdsRead } from "@/lib/social/adapter";
 import type { ProviderMcp } from "@/lib/social/mcp-client";
 import { SocialError } from "@/lib/social/errors";
-import type { SocialProviderId } from "@/lib/social/catalog";
+import type { SocialProviderId, SocialPlatform } from "@/lib/social/catalog";
+import type { AccountMusicFacts, CatalogTrack, MusicCatalogResult, MusicUnavailableReason } from "@/lib/social/music-policy";
 import type * as T from "@/lib/social/types";
 import { serverLogger as logger } from "@/lib/logger";
 import { beginPostIntent, markPostIntentUnknown, resolvePostIntent } from "@/lib/social/links";
@@ -70,6 +71,29 @@ function recencyOf(p: T.SocialPost): number {
  * between this machine and Zernio's, not for finding older posts.
  */
 const RECOVERY_LOOKBACK_MS = 5 * 60_000;
+
+/**
+ * Why an account's music catalog is unavailable (spec §12 answers in the plan).
+ * Instagram's Instagram-Login refusal is VERIFIED live (400 +
+ * `instagram_audio_requires_facebook_login`). TikTok's refusal for a connection
+ * not on the Business-app lane is NOT documented: any 4xx Zernio's own tool
+ * answer carries (`statusFromText`) that is not a dead grant, a missing account
+ * or a rate limit is read as "not business". A transport-level 4xx is "error".
+ * A dead grant is rethrown so `withAdapter` can mark it.
+ */
+export function musicUnavailableReason(platform: SocialPlatform, err: unknown): MusicUnavailableReason {
+  if (!(err instanceof SocialError)) return "error";
+  if (err.kind === "unauthorized") throw err;
+  if (err.kind === "unsupported") return "unsupported";
+  if (platform === "instagram") return /instagram_audio_requires_facebook_login/.test(err.message) ? "needs_facebook_login" : "error";
+  // Only Zernio's own answer (a status in the tool result's text) speaks to
+  // this connection. A transport 4xx — the SDK's "No valid session ID" 400, a
+  // scope 403 — is a failure to ask, and must not record the account personal.
+  if (err.statusFromText !== true) return "error";
+  const s = err.status ?? 0;
+  if (err.kind === "forbidden" || err.kind === "validation" || (err.kind === "provider" && s >= 400 && s < 500)) return "not_business";
+  return "error";
+}
 
 /**
  * The Zernio `SocialAdapter`: a tool-name → normalized-entity map, nothing
@@ -462,6 +486,51 @@ export class ZernioAdapter implements SocialAdapter {
 
   async tiktokCreatorInfo(accountId: string): Promise<T.TikTokCreatorInfo> {
     return N.toCreatorInfo(accountId, await this.call("accounts.tiktokCreatorInfo", { account_id: accountId }));
+  }
+
+  async musicCatalog(accountId: string, q: { platform: SocialPlatform; query?: string; countryCode?: string }): Promise<MusicCatalogResult> {
+    try {
+      if (q.platform === "tiktok") {
+        const raw = await this.call("music.tiktokCommercial", { account_id: accountId, ...(q.countryCode ? { country_code: q.countryCode } : {}) });
+        return { tracks: arr(unwrap(raw, "tracks")).map(N.toTikTokTrack).filter((t) => t.id && t.title) };
+      }
+      const raw = await this.call("music.instagramSearch", { account_id: accountId, audio_type: "music", ...(q.query ? { q: q.query } : {}) });
+      const kind = q.query ? "search" : "trending";
+      return { tracks: arr(unwrap(raw, "audio")).map((r) => N.toInstagramTrack(r, kind)).filter((t) => t.id && t.title) };
+    } catch (err) {
+      const reason = musicUnavailableReason(q.platform, err);
+      const e = err instanceof SocialError ? err : null;
+      logger.info(
+        { tag: "social-music", op: "catalog_unavailable", platform: q.platform, accountId, reason, kind: e?.kind, status: e?.status },
+        "music catalog unavailable for this account",
+      );
+      return { unavailable: { reason, ...(e ? { detail: e.message } : {}) } };
+    }
+  }
+
+  async getCatalogTrack(accountId: string, trackId: string): Promise<CatalogTrack | null> {
+    try {
+      const raw = await this.call("music.instagramGet", { account_id: accountId, audio_id: trackId });
+      const t = N.toInstagramTrack(unwrap(raw, "audio"), "search");
+      return t.id ? t : null;
+    } catch (err) {
+      if (err instanceof SocialError && (err.kind === "not_found" || err.kind === "validation")) return null;
+      throw err;
+    }
+  }
+
+  async musicAccountFacts(accountId: string, platform: SocialPlatform): Promise<AccountMusicFacts> {
+    const r = await this.musicCatalog(accountId, { platform });
+    const checkedAt = new Date().toISOString();
+    const reason = "unavailable" in r ? r.unavailable.reason : null;
+    if (platform === "tiktok") {
+      if (reason === null) return { tiktokKind: { value: "business", source: "detected", checkedAt } };
+      if (reason === "not_business") return { tiktokKind: { value: "personal", source: "detected", checkedAt } };
+      return {};
+    }
+    if (reason === null) return { instagramFacebookLogin: { value: true, source: "detected", checkedAt } };
+    if (reason === "needs_facebook_login") return { instagramFacebookLogin: { value: false, source: "detected", checkedAt } };
+    return {};
   }
 
   async listAdAccounts(accounts?: T.SocialAccount[]): Promise<AdsRead<T.SocialAdAccount>> {

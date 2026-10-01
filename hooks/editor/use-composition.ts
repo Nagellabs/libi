@@ -12,6 +12,7 @@ import { useEditorState } from "@/lib/editor-state-context";
 import type { CompositionManifest } from "@/lib/composition/persistence";
 import { getCompositionFrames } from "@/lib/engine/renderer";
 import { useLegacyScenesNotice } from "@/hooks/editor/use-legacy-scenes-notice";
+import { useRemovedTranscriptsNotice } from "@/hooks/editor/use-removed-transcripts-notice";
 
 export interface UseCompositionResult {
   /** Hydrated composition (overlay array attached), or null when empty/loading. */
@@ -83,6 +84,8 @@ export function useComposition(activePieceId: string | null): UseCompositionResu
     compositionQuery.data?.legacyScenes,
     compositionQuery.data?.legacyScenesNoticed,
   );
+  // Transcripts a boot migration removed (garbled FLAC-in-MP4 reads): say so once.
+  useRemovedTranscriptsNotice(activePieceId, compositionQuery.data?.removedTranscripts);
 
   // useFiles already gates internally on `!!pieceId`, so passing `""` when
   // inactive is inert. We only include filesQuery here for the filesById

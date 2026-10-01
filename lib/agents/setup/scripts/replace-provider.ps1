@@ -20,6 +20,10 @@
 #   ScriptsDir  the folder add-provider.ps1 is in. Text run this way has no
 #               folder of its own. Run as a file, this script's own folder is
 #               used when ScriptsDir is left out.
+#   CliScript   optional, Windows npm installs: the JS file the agent's `.cmd`
+#               shim runs. libi passes it with the node the shim would use as
+#               `cli`, so the agent runs without cmd.exe, whose Ctrl+C would
+#               stop at "Terminate batch job (Y/N)?". Handed on to the add.
 #
 # What it does:
 #   1. Runs the agent's own `mcp remove` for the entry you have now.
@@ -32,7 +36,7 @@
 # replaces it. The entry's name goes after `--`, so a name that starts with `-`
 # is never read as an option.
 
-param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [string]$ScriptsDir)
+param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$Scope, [string]$ScriptsDir, [string]$CliScript)
 
 # Checked before anything is removed, so an add that could not run never
 # follows a remove. A libi test keeps this list the same as the providers
@@ -47,9 +51,13 @@ switch -CaseSensitive ($Agent) {
   default  { [Console]::Error.WriteLine("replace-provider.ps1: unknown agent '$Agent'"); exit 2 }
 }
 if (-not $Cli -or -not $Entry -or ($Agent -ceq 'claude' -and -not $Scope)) {
-  [Console]::Error.WriteLine('usage: replace-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-ScriptsDir <folder>]')
+  [Console]::Error.WriteLine('usage: replace-provider.ps1 <provider> <agent> <cli> <entry> [<scope>] [-ScriptsDir <folder>] [-CliScript <script>]')
   exit 2
 }
+
+# The agent's command: `cli`, or node running the agent's own script (-CliScript).
+$cliPre = @()
+if ($CliScript) { $cliPre = @($CliScript) }
 if ($Scope -and $Scope -cnotin @('user', 'local', 'project')) {
   [Console]::Error.WriteLine("replace-provider.ps1: unknown scope '$Scope' (user, local or project)")
   exit 2
@@ -62,7 +70,7 @@ if (-not $addScript -or -not (Test-Path -LiteralPath $addScript -PathType Leaf))
 }
 
 # 1. The agent's own remove. When it fails, stop with its exit code.
-& $Cli @removeArgs
+& $Cli @cliPre @removeArgs
 if (-not $?) {
   if ($LASTEXITCODE) { exit $LASTEXITCODE }
   exit 1
@@ -71,7 +79,7 @@ if (-not $?) {
 # 2. The add, run from its text like this script. Its `exit` ends this script
 #    too, with the add's own code. An error that stops it instead is a failure.
 try {
-  & ([scriptblock]::Create([IO.File]::ReadAllText($addScript))) $Provider $Agent $Cli
+  & ([scriptblock]::Create([IO.File]::ReadAllText($addScript))) $Provider $Agent $Cli -CliScript $CliScript
 } catch {
   [Console]::Error.WriteLine("replace-provider.ps1: add-provider.ps1 stopped: $($_.Exception.Message)")
   exit 1

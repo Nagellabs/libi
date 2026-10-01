@@ -1,8 +1,15 @@
 import { defineConfig } from "@playwright/test";
-import { spawnSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import {
+  assertPortPairFree,
+  claimScratch,
+  createDirIfAbsent,
+  makeOwnedTempDir,
+  rememberNextEnvDts,
+  runnerBrowsersPath,
+} from "./e2e/support/harness";
 
 /**
  * Playwright config for Libi end-to-end tests.
@@ -26,61 +33,27 @@ import os from "os";
  */
 // `??=` so the value survives Playwright re-loading this config in each worker.
 const e2ePort = (process.env.LIBI_E2E_PORT ??= "3465");
+// The spawned `next dev` points next-env.d.ts at its own Next dir; the global
+// teardown puts it back (e2e/support/harness.ts).
+rememberNextEnvDts();
 const e2eMcpPort = String(Number(e2ePort) + 1);
 
-/**
- * The ports in `ports` something already accepts connections on, over
- * 127.0.0.1 or ::1. A config module can't await, so the probe is a short
- * synchronous child process; a refused (or unroutable) connect means free.
- */
-function listeningPorts(ports: string[]): string[] {
-  const probe = `
-    const net = require("net");
-    const open = new Set();
-    const checks = process.argv.slice(1).flatMap((port) => ["127.0.0.1", "::1"].map((host) => new Promise((resolve) => {
-      const socket = net.connect({ host, port: Number(port) });
-      const done = (listening) => { socket.destroy(); if (listening) open.add(port); resolve(); };
-      socket.setTimeout(1000, () => done(false));
-      socket.once("connect", () => done(true));
-      socket.once("error", () => done(false));
-    })));
-    Promise.all(checks).then(() => process.stdout.write(JSON.stringify([...open])));
-  `;
-  const result = spawnSync(process.execPath, ["-e", probe, ...ports], { encoding: "utf8", timeout: 10_000 });
-  if (result.error || result.status !== 0) {
-    throw new Error(`e2e: could not check whether port ${ports.join(" / ")} is free: ${result.error?.message ?? result.stderr}`);
-  }
-  return (JSON.parse(result.stdout) as string[]).sort();
-}
-
-/**
- * Refuse to start when the studio port or the MCP port beside it is taken.
- * Playwright's own check covers only `webServer.port`, and nothing checked the
- * MCP port: under the old 3456 default a running libi held 3457, so the
- * spawned libi's MCP endpoint could not bind, and a spec that registers
- * `http://127.0.0.1:<port+1>/mcp` reached the other libi instead. Checked once,
- * in the runner process: its workers re-load this config while the spawned
- * libi holds both ports, so the checked pair is written back into process.env.
- */
-if (process.env.LIBI_E2E_PORTS_CHECKED !== `${e2ePort},${e2eMcpPort}`) {
-  const busy = listeningPorts([e2ePort, e2eMcpPort]);
-  if (busy.length > 0) {
-    throw new Error(
-      `e2e: port ${busy.join(" and ")} ${busy.length > 1 ? "are" : "is"} already in use. The libi these tests spawn needs ${e2ePort} ` +
-        `for the studio and ${e2eMcpPort} for its MCP endpoint, and a libi already listening there would answer the specs instead. ` +
-        `Stop whatever holds it, or set LIBI_E2E_PORT to a port whose next port is free too.`,
-    );
-  }
-  process.env.LIBI_E2E_PORTS_CHECKED = `${e2ePort},${e2eMcpPort}`;
-}
+// Both ports must be free: see assertPortPairFree (e2e/support/harness.ts).
+assertPortPairFree({ port: e2ePort, mcpPort: e2eMcpPort, checkedVar: "LIBI_E2E_PORTS_CHECKED", portVar: "LIBI_E2E_PORT" });
+// A dir the caller named is theirs to keep; only one THIS config creates is
+// removed after the run (see "owned by construction" in e2e/support/harness.ts).
+const namedHome = process.env.LIBI_E2E_HOME !== undefined;
+const namedCliDir = process.env.LIBI_TEST_AGENT_CLI_DIRS !== undefined;
 // `??=` so the value survives Playwright re-loading this config in each worker.
-const scratchHome = (process.env.LIBI_E2E_HOME ??= path.join(os.tmpdir(), `libi-e2e-${Date.now()}`));
+const scratchHome = (process.env.LIBI_E2E_HOME ??= makeOwnedTempDir(os.tmpdir(), "libi-e2e"));
 // Beside the scratch home, never inside it: the resolver treats everything under
 // LIBI_HOME as libi's own tree and never reports a CLI there as the user's.
 // path.resolve drops a trailing slash that would otherwise put it inside the home.
 // The scratch home must not live under the repo either: the repo cwd is also a libi root.
 const fakeCliDir = (process.env.LIBI_TEST_AGENT_CLI_DIRS ??= path.resolve(scratchHome) + "-fake-cli");
+const createdCliDir = !namedCliDir && createDirIfAbsent(fakeCliDir);
 fs.mkdirSync(fakeCliDir, { recursive: true });
+claimScratch(e2ePort, [...(namedHome ? [] : [scratchHome]), ...(createdCliDir ? [fakeCliDir] : [])]);
 // The user-level skill installs go under the agent's HOME (`~/.agents/skills`
 // for Codex) and under CLAUDE_CONFIG_DIR: both must be scratch, never the
 // developer's own. Written back into process.env like the others so every
@@ -102,33 +75,6 @@ fs.writeFileSync(
   }),
 );
 
-/**
- * The Playwright browser cache the SPAWNED libi should use for its own
- * chromium-render / tracking launches.
- *
- * `webServer.env` gives that libi a scratch `HOME`, and playwright-core derives
- * its registry directory from the home — so without this it looks for Chromium
- * under a brand-new empty directory and every chromium-render path fails with
- * "Playwright Chromium failed to launch after install" (overlay-sandbox-golden
- * hit exactly that). Pointing it at the RUNNER's cache adds no new requirement:
- * these tests already need a Playwright browser install to drive a page, and it
- * saves a ~173 MB download into a directory each run throws away.
- *
- * Safe against libi's boot housekeeping: `pruneStalePlaywrightRevisions`
- * (lib/server/lifecycle/housekeeping.ts) removes only unpinned revisions
- * carrying libi's own `.libi-installed` marker file, never Playwright's.
- */
-function runnerBrowsersPath(): string {
-  const override = process.env.PLAYWRIGHT_BROWSERS_PATH;
-  if (override && override !== "0") return override;
-  const home = os.homedir();
-  if (process.platform === "darwin") return path.join(home, "Library", "Caches", "ms-playwright");
-  if (process.platform === "win32") {
-    return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "ms-playwright");
-  }
-  return path.join(process.env.XDG_CACHE_HOME ?? path.join(home, ".cache"), "ms-playwright");
-}
-
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -145,6 +91,7 @@ export default defineConfig({
   // checkout that merely lives under some `electron` directory.
   testIgnore: new RegExp(`^${escapeRegExp(path.join(__dirname, "e2e", "electron") + path.sep)}`),
   timeout: 60_000,
+  globalTeardown: "./e2e/support/global-teardown.ts",
   fullyParallel: false,
   retries: 0,
   workers: 1,
@@ -160,9 +107,14 @@ export default defineConfig({
     reuseExistingServer: false,
     timeout: 120_000,
     env: {
+      // Its own Next dir (next.config.ts `distDir`): Next locks `<distDir>/dev`
+      // for one dev server, so on the shared `.next` this server died with
+      // "Another next dev server is already running" whenever the checkout's
+      // own dev app was up.
+      LIBI_NEXT_DIST_DIR: ".next-e2e",
       LIBI_HOME: scratchHome,
       // Chromium for the spawned libi's own render/tracking launches — see
-      // runnerBrowsersPath() above.
+      // runnerBrowsersPath() in e2e/support/harness.ts.
       PLAYWRIGHT_BROWSERS_PATH: runnerBrowsersPath(),
       PORT: e2ePort,
       // Inside a git worktree bin/libi.js's bootstrap picks its own studio
@@ -188,6 +140,11 @@ export default defineConfig({
       // MCP (mcp/dev/fake-zernio) that social-posting.spec.ts drives — see
       // `lib/social/test-fake.ts`.
       LIBI_TEST_MODE: "1",
+      // Not a fully clean environment: this skips only the worktree bootstrap's
+      // merge of the MAIN checkout's `.env.local` / `.env`
+      // (lib/dev/worktree-bootstrap.ts). Next's own loader still reads `.env*`
+      // from the checkout it boots in — the canonical checkout's, when run there.
+      LIBI_NO_ENV_FILES: "1",
       LIBI_FAKE_ZERNIO_CONFIG: fakeZernioConfigPath,
     },
   },

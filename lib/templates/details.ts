@@ -7,7 +7,7 @@
  * template author's text. For an installed or public template that author is
  * a stranger: the page renders it as plain text only.
  */
-import type { TemplateAsset } from "@/lib/templates/scaffold-schema";
+import type { TemplateAsset, TemplateMusicLink } from "@/lib/templates/scaffold-schema";
 
 /** The overlay fields the page reads — both scaffold types (the schema's and the app's) have them. */
 interface OverlayLike {
@@ -17,7 +17,7 @@ interface OverlayLike {
   duration: number;
   z: number;
   displayName?: string;
-  source?: { slot: string } | { assetRef: string };
+  source?: { slot: string } | { assetRef: string } | { musicRef: string };
   text?: { slot: string } | { fixed: string };
 }
 
@@ -25,6 +25,7 @@ interface OverlayLike {
 export interface ScaffoldForDetails {
   overlays: ReadonlyArray<OverlayLike>;
   assets: ReadonlyArray<TemplateAsset>;
+  musicLinks?: ReadonlyArray<TemplateMusicLink>;
 }
 
 export interface OverlayRow {
@@ -186,4 +187,26 @@ export function formatDuration(sec: number): string {
  */
 export function assetStreamUrl(cloudId: string, url: string): string {
   return `/api/templates/cloud/asset-stream?${new URLSearchParams({ cloudId, url })}`;
+}
+
+export interface MusicLinkRow {
+  ref: string;
+  label: string;
+  source: { url: string; host: string } | null;
+}
+
+/** A template's music links (social-music spec §7): named, never carried. */
+export function musicLinkRows(s: { musicLinks?: ReadonlyArray<TemplateMusicLink> }): MusicLinkRow[] {
+  return (s.musicLinks ?? []).map((m) => {
+    let source: MusicLinkRow["source"] = null;
+    if (m.sourceUrl) {
+      try {
+        const u = new URL(m.sourceUrl);
+        if (u.protocol === "https:") source = { url: u.href, host: u.host };
+      } catch {
+        source = null;
+      }
+    }
+    return { ref: m.ref, label: m.track.artist ? `${m.track.title} — ${m.track.artist}` : m.track.title, source };
+  });
 }

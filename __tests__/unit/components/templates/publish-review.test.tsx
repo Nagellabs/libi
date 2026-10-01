@@ -466,6 +466,18 @@ describe("which catalog the review publishes to (review M6: from the request its
     render(<PublishReviewPanel r={view()} highlighted={false} />);
     expect(screen.getByTestId("publish-review-catalog")).toHaveTextContent("Publishes to the public catalog at libi.nagellabs.com.");
   });
+  // Review N2: the Terms follow the REQUEST's catalog for production too — right after another window
+  // switched this build to Development, the page's links point at the development site.
+  it("links a production request to production's Terms even while the page's links point at a development site", () => {
+    catalogView.current = { devBuild: true, active: { kind: "development", origin: "http://localhost:3300", host: "localhost:3300" }, legalOrigin: "http://localhost:3300" };
+    render(<PublishReviewPanel r={view()} highlighted={false} />);
+    expect(screen.getByTestId("publish-review-terms")).toHaveAttribute("href", "https://libi.nagellabs.com/terms#templates-catalog");
+  });
+  it("a test-mode request (no origin) keeps the page's own Terms", () => {
+    catalogView.current = { devBuild: true, active: { kind: "test-mode", origin: null, host: null }, legalOrigin: "http://localhost:3300" };
+    render(<PublishReviewPanel r={view({ catalog: { kind: "test-mode", origin: null, host: null } })} highlighted={false} />);
+    expect(screen.getByTestId("publish-review-terms")).toHaveAttribute("href", "http://localhost:3300/terms#templates-catalog");
+  });
   it("is there in a packaged build too, and names test mode's fixture", () => {
     const { unmount } = render(<PublishReviewPanel r={view()} highlighted={false} />);
     expect(screen.getByTestId("publish-review-catalog")).toHaveTextContent("Publishes to the public catalog at libi.nagellabs.com.");

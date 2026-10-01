@@ -57,6 +57,8 @@ export const FULL_SHAPED_TOOLS = [
   // the REST surface — `search_tools` finds it, `tools/list` does not carry it.
   "instagram_get_instagram_story_insights",
   "ad_accounts_list_ad_accounts", "ad_campaigns_list_ad_campaigns", "ad_campaigns_list_ads",
+  // Music, found by search_tools 2026-09-27; the TikTok one answered live.
+  "accounts_list_tik_tok_commercial_music", "instagram_search_instagram_audio", "instagram_get_instagram_audio",
 ];
 
 /** What the server lists. The default for both fakes, as it is live. */
@@ -117,6 +119,9 @@ export const ZERNIO_INPUT_SCHEMAS: Record<string, { properties: readonly string[
   media_get_media_presigned_url: { properties: ["filename", "content_type", "size"] },
   ad_accounts_list_ad_accounts: { properties: ["account_id"], required: ["account_id"] },
   ad_campaigns_list_ad_campaigns: { properties: ["account_id", "ad_account_id"] },
+  accounts_list_tik_tok_commercial_music: { properties: ["account_id", "country_code"], required: ["account_id"] },
+  instagram_search_instagram_audio: { properties: ["account_id", "audio_type", "q"], required: ["account_id", "audio_type"] },
+  instagram_get_instagram_audio: { properties: ["account_id", "audio_id"], required: ["account_id", "audio_id"] },
 
   // --- the curated tools `tools/list` advertises ---------------------------
   accounts_list: { properties: [] },

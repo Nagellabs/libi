@@ -1,6 +1,7 @@
 import type { VirtualDep } from "./types";
 import {
-  isWhisperModelInstalled,
+  installedWhisperModels,
+  whisperModelsDir,
   DEFAULT_WHISPER_MODEL,
 } from "@/lib/whisper/models";
 import { getJobManager } from "@/lib/jobs/manager";
@@ -8,7 +9,13 @@ import { isInstalling } from "./in-flight";
 
 const MODEL = DEFAULT_WHISPER_MODEL;
 
-/** Whisper default-model weights gated as a Settings chip.
+/** Whisper model weights gated as a Settings chip.
+ *
+ *  Satisfied by ANY installed catalogue model, not only the default: a user
+ *  who installed `tiny` has a working Whisper, and the card must say so. It
+ *  used to read "whisper small weights" and stay "Setup required" after a
+ *  working `tiny` install (0.1.16 full verification F8). Download still
+ *  fetches the default (`small`) — the model the plan proposes.
  *
  *  Re-uses the existing `whisper_model_download` JobManager runner so the
  *  chip shares progress plumbing (bytesDownloaded/bytesTotal + cancel)
@@ -18,7 +25,7 @@ const MODEL = DEFAULT_WHISPER_MODEL;
  *  `runJobViaServer` shim used by MCP-child tools. */
 export const whisperModelVirtualDep: VirtualDep = {
   id: "whisper-model",
-  label: `whisper ${MODEL} weights`,
+  label: "a Whisper model",
   async inspect() {
     if (isInstalling(this.id)) {
       return {
@@ -30,11 +37,11 @@ export const whisperModelVirtualDep: VirtualDep = {
         error: null,
       };
     }
-    const installed = isWhisperModelInstalled(MODEL);
+    const installed = installedWhisperModels().length > 0;
     return {
       binary: this.label,
       installed,
-      path: null,
+      path: installed ? whisperModelsDir() : null,
       source: installed ? "bundled" : null,
       runtimeStatus: installed ? "installed" : "pending",
       error: null,

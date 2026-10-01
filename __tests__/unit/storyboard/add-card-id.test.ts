@@ -55,3 +55,51 @@ describe("addStoryboardCard — the card id", () => {
     expect(await loadStoryboard(pieceId)).toBeNull();
   });
 });
+
+// EXP-3 — `render.file` is agent-supplied path text too: it is joined under the card's folder and
+// the default sketch is written there. LocalFileStorage's containment was the only thing stopping
+// `../x.png`; now each segment is judged by isUnsafeStorageName and a bad one is refused with the
+// same card-validation error shape, before anything is written.
+describe("addStoryboardCard — the render file", () => {
+  beforeEach(() => {
+    createTempStorageDir();
+    resetStorage();
+  });
+  afterEach(() => {
+    cleanupTempDir();
+    resetStorage();
+  });
+
+  it.each([
+    "../x.png", "sketches/../../x.jsx", "/abs/unit.jsx", "a//b.jsx", "a\\b.jsx", ".", "sketches/./..", "a\0b",
+    // review m3 — Windows hazards: an NTFS stream, a drive segment, a trailing dot or space.
+    "sketches/sk_1/unit.jsx:x", "C:/unit.jsx", "sketches./unit.jsx", "unit.jsx.", "sketches /unit.jsx",
+  ])(
+    "refuses %j and writes nothing",
+    async (file) => {
+      await expect(
+        addStoryboardCard(pieceId, { id: "s1", title: "x", render: { kind: "canvas", file } }),
+      ).rejects.toThrow(/invalid card render file/);
+      expect(await loadStoryboard(pieceId)).toBeNull();
+      expect(fs.existsSync(path.join(getLibiStorageDir(), pieceId))).toBe(false);
+    },
+  );
+
+  it.each(["sketches/sk_1/unit.jsx", "unit.jsx", "sketches/sk 2/rough...jsx"])("accepts %j", async (file) => {
+    const card = await addStoryboardCard(pieceId, { title: "x", render: { kind: "canvas", file } });
+    expect(card.sketches?.[0]?.render?.file).toBe(file);
+    expect(
+      fs.existsSync(path.join(getLibiStorageDir(), pieceId, "storyboard", "cards", card.id, file)),
+    ).toBe(true);
+  });
+
+  it("the add_storyboard_card tool returns the refusal as a clear error", async () => {
+    const result = await addCardTool(
+      { pieceId, card: { title: "x", render: { kind: "canvas", file: "../x.png" } } },
+      { pieceId },
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('invalid card render file "../x.png"');
+    expect(await loadStoryboard(pieceId)).toBeNull();
+  });
+});

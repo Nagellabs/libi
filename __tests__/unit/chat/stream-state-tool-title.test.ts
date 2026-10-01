@@ -66,6 +66,26 @@ describe("stream-state: agent-tool-title", () => {
     expect(titleOf(state, "w1")).toBe("Write a.txt");
   });
 
+  it("SES-3: ignores a title LESS specific than the row's (a placeholder, or a strict prefix)", () => {
+    const specific = run([thinking, writeCall, titleEvent("Write graphics/g1.js")]);
+    expect(titleOf(run([titleEvent("Preparing file…")], specific), "w1")).toBe("Write graphics/g1.js");
+    expect(titleOf(run([titleEvent("Preparing file...")], specific), "w1")).toBe("Write graphics/g1.js");
+    expect(titleOf(run([titleEvent("Write")], specific), "w1")).toBe("Write graphics/g1.js");
+    // Just as specific, only different: adopted.
+    expect(titleOf(run([titleEvent("Wrote graphics/g1.js")], specific), "w1")).toBe("Wrote graphics/g1.js");
+  });
+
+  it("SES-3 review M4: a REAL title that happens to end in an ellipsis is adopted; only a placeholder is not", () => {
+    const specific = run([thinking, writeCall, titleEvent("Write graphics/g1.js")]);
+    expect(titleOf(run([titleEvent('Grep "TODO..." in src')], specific), "w1")).toBe('Grep "TODO..." in src');
+    expect(titleOf(run([titleEvent("`echo waiting...`")], specific), "w1")).toBe("`echo waiting...`");
+    expect(titleOf(run([titleEvent("Summarize the three chapters of the brief…")], specific), "w1")).toBe(
+      "Summarize the three chapters of the brief…",
+    );
+    // The adapter's placeholder shape (a few plain words and an ellipsis) still never wins.
+    expect(titleOf(run([titleEvent("Loading session...")], specific), "w1")).toBe("Write graphics/g1.js");
+  });
+
   it("ignores an empty title and an unknown call", () => {
     const base = run([thinking, writeCall]);
     expect(titleOf(run([titleEvent("")], base), "w1")).toBe("Preparing file…");

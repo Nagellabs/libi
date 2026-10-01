@@ -252,7 +252,7 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
   // server's own words — and point at the agent's setup on the Agents page,
   // where setup actually happens.
   const showSetup =
-    showNoSession && (readiness.state === "needs-auth" || readiness.state === "not-installed");
+    showNoSession && (readiness.state === "needs-auth" || readiness.state === "not-installed" || readiness.state === "config-error");
 
   // After SESSION_START_GRACE_MS with no session and no setup to point at,
   // the "Starting a chat session…" sentence stops being honest — it must
@@ -537,13 +537,27 @@ function ChatPanel({ sessionId, onToolResult, onNavigate, onSessionsChanged, onO
         {showSetup && activeProviderId && (
           <div className="flex h-full items-center justify-center">
             <div className="flex w-full max-w-sm flex-col items-center gap-3 text-center">
-              <p className="text-sm text-muted-foreground">{readinessMessage(readiness)}</p>
-              <Link
-                href={agentSetupHref(activeProviderId)}
-                className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-              >
-                Set up an agent
-              </Link>
+              <p data-testid="chat-readiness-note" className="break-words text-sm text-muted-foreground">{readinessMessage(readiness)}</p>
+              {readiness.state === "config-error" ? (
+                // The fix is in the agent's own config, not on the Agents page:
+                // once it's fixed, a fresh session is the proof.
+                <button
+                  type="button"
+                  data-testid="chat-readiness-retry"
+                  disabled={sessionList?.isCreating}
+                  onClick={() => void sessionList?.createSessionWithResult()}
+                  className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-default disabled:opacity-60"
+                >
+                  {sessionList?.isCreating ? "Starting a chat…" : "Try again"}
+                </button>
+              ) : (
+                <Link
+                  href={agentSetupHref(activeProviderId)}
+                  className="cursor-pointer inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                >
+                  Set up an agent
+                </Link>
+              )}
             </div>
           </div>
         )}

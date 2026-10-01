@@ -19,6 +19,8 @@ import {
 import { hashSpec } from "@/lib/uv-env/hash-spec";
 import { isTokenCurrent, writeInstallToken } from "@/lib/uv-env/install-token";
 import { packageRoot } from "@/lib/runtime/package-root";
+import { getLibiHome } from "@/lib/libi-home";
+import { serverLogger as logger } from "@/lib/logger";
 
 export const MAX_TTS_CHARS = 5000;
 
@@ -146,33 +148,69 @@ export function parseSynthesisStdout(
   };
 }
 
+/**
+ * The LAST 500 characters of a Kokoro run's stderr. uv writes its download /
+ * install lines first (a first run, a pin bump), and the error that matters —
+ * `model load failed: …`, espeak's `Error processing file …phontab` — comes
+ * last, so the head can be all uv chatter.
+ */
+function stderrTail(err: string): string {
+  return err.trim().slice(-500);
+}
+
+/**
+ * Run the Kokoro entrypoint under libi's uv. Every way it can fail — a
+ * non-zero exit, the timeout, a spawn error — is logged as `tts/synth_failed`
+ * as well as rejected: in 0.1.16 the espeak-ng path failure reached only the
+ * agent's tool result, and libi.log had nothing to grep (full verification F7).
+ */
 function runUv(args: string[], timeoutMs: number): Promise<string> {
   const uv = resolveUvPath();
+  const op = args.includes("--download-only") ? "validate" : "synthesize";
   return new Promise((resolve, reject) => {
     const child = spawn(uv, args, {
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: buildUvEnv(),
+      // synthesize.py builds its short espeak-ng data path under
+      // <LIBI_HOME>/tts — hand it the home this process resolved, rather
+      // than trust the environment to carry it.
+      env: buildUvEnv({ LIBI_HOME: getLibiHome() }),
     });
     let out = "";
     let err = "";
+    let timedOut = false;
     const timer = setTimeout(() => {
+      timedOut = true;
       child.kill("SIGKILL");
+      logger.warn(
+        { tag: "tts", op: "synth_failed", reason: "timeout", run: op, timeoutMs, stderr: stderrTail(err) },
+        `kokoro timed out after ${timeoutMs}ms`,
+      );
       reject(new KokoroSynthesizeError(`kokoro timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.stdout.on("data", (d) => (out += d.toString()));
     child.stderr.on("data", (d) => (err += d.toString()));
     child.on("error", (e) => {
       clearTimeout(timer);
+      logger.warn(
+        { tag: "tts", op: "synth_failed", reason: "spawn_error", run: op, err: e.message },
+        "uv spawn failed for kokoro",
+      );
       reject(new KokoroSynthesizeError(`uv spawn failed: ${e.message}`));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      // The kill above closes the child too; that failure is already logged.
+      if (timedOut) return;
       if (code !== 0) {
+        logger.warn(
+          { tag: "tts", op: "synth_failed", reason: "exit", run: op, code, stderr: stderrTail(err) },
+          `kokoro exited ${code}`,
+        );
         const offline = uvNetworkFailureMessage("voiceover", err);
         reject(
           new KokoroSynthesizeError(
-            offline ?? `kokoro exited ${code}: ${err.trim().slice(0, 500)}`,
+            offline ?? `kokoro exited ${code}: ${stderrTail(err)}`,
           ),
         );
         return;

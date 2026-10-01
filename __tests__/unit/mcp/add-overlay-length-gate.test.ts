@@ -30,6 +30,7 @@ vi.mock("@/lib/db/client", () => ({
 }));
 
 import { addOverlay } from "@/mcp/tools/overlay-tools";
+import { addOverlaySchema } from "@/mcp/tools/schemas";
 
 // addOverlay takes ONE params object — `pieceId` is a field on it, there is no
 // separate ToolContext argument.
@@ -84,6 +85,10 @@ describe("addOverlay length gate", () => {
     loadManifest.mockResolvedValue({ overlays: [], audioClips: [] });
     const r = await addOverlay(video() as never);
     expect(r.success).toBe(true);
+  });
+
+  it("the lengthPolicy description names the empty-piece exemption", () => {
+    expect(addOverlaySchema.shape.lengthPolicy.description).toMatch(/empty piece/i);
   });
 
   it("does not gate a text overlay — it has no asset length", async () => {

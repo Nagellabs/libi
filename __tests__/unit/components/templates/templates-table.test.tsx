@@ -29,7 +29,7 @@ function local(over: Partial<TemplateSummary>): TemplateSummary {
     id: "t1", cloudId: null, name: "Local one", description: "", tags: [], origin: "local", version: 1, hasCode: false, slots: [], slotCount: 0,
     canvas: { width: 1080, height: 1920, fps: 30 }, duration: 3, usesTotal: 2, uses7d: 1, lastUsedAt: null,
     createdAt: "2026-09-23T00:00:00.000Z", updatedAt: "2026-09-23T00:00:00.000Z", hasPoster: false, hasExample: false,
-    poster: null, video: null, nickname: null, broken: null, otherCatalog: null, mediaRev: 0, canRenderExample: false, sourcePieceName: null, ...over,
+    poster: null, video: null, nickname: null, broken: null, otherCatalog: null, mediaRev: 0, canRenderExample: false, sourcePieceName: null, sourceEmpty: false, ...over,
   };
 }
 function cloud(over: Partial<MineTemplate>): MineTemplate {

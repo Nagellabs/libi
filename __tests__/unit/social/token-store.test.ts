@@ -387,3 +387,75 @@ describe("SocialTokenStore — a test-mode grant is not the user's", () => {
     expect(s.status()).toMatchObject({ connected: true, revoked: false });
   });
 });
+
+/**
+ * On macOS asking the OS whether it can encrypt IS a keychain read, and a read
+ * the item's access list doesn't cover is a login-password prompt. The shell's
+ * cipher answers `available()` lazily (electron/secret-cipher.ts); these pin
+ * that the store asks only when a grant is about to be written — never for a
+ * status check on a machine with nothing stored (owner report 2026-09-29: a
+ * keychain prompt at every launch of the installed app, no grant on disk).
+ */
+describe("SocialTokenStore — the keychain is asked only when a grant is written", () => {
+  function lazyAes(isAvailable = true) {
+    return {
+      label: "keychain" as const,
+      available: vi.fn(() => isAvailable),
+      encrypt: vi.fn(aes.encrypt),
+      decrypt: vi.fn(aes.decrypt),
+    };
+  }
+
+  it("with no grant, status() and where() never touch the cipher", () => {
+    const c = lazyAes();
+    registerSecretCipher(c);
+    const s = new SocialTokenStore("zernio", dir);
+    expect(s.status()).toMatchObject({ connected: false, revoked: false, where: "keychain" });
+    expect(s.readSecret()).toBeNull();
+    expect(c.available).not.toHaveBeenCalled();
+    expect(c.encrypt).not.toHaveBeenCalled();
+    expect(c.decrypt).not.toHaveBeenCalled();
+  });
+
+  it("an encrypted grant is read with decrypt alone — no availability check", () => {
+    const c = lazyAes();
+    registerSecretCipher(c);
+    const s = new SocialTokenStore("zernio", dir);
+    s.write(grant);
+    c.available.mockClear();
+    expect(s.readSecret()).toEqual(grant);
+    expect(c.decrypt).toHaveBeenCalledTimes(1);
+    expect(c.available).not.toHaveBeenCalled();
+  });
+
+  it("encryption unavailable: the write stays a private plaintext file, never a failed connect", () => {
+    const c = lazyAes(false);
+    registerSecretCipher(c);
+    const s = new SocialTokenStore("zernio", dir);
+    s.write(grant);
+    expect(c.encrypt).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(s.path(), "utf8")).enc).toBe("none");
+    if (process.platform !== "win32") expect(fs.statSync(s.path()).mode & 0o777).toBe(0o600);
+    expect(s.readSecret()).toEqual(grant);
+    expect(s.where()).toBe("file");
+  });
+
+  it("encryption unavailable: a plaintext grant is not 'healed' (and warned about) on every read", () => {
+    const s = new SocialTokenStore("zernio", dir);
+    s.write(grant);
+    const c = lazyAes(false);
+    registerSecretCipher(c);
+    expect(s.readSecret()).toEqual(grant);
+    expect(s.readSecret()).toEqual(grant);
+    expect(c.encrypt).not.toHaveBeenCalled();
+    expect(logSpies.warn).not.toHaveBeenCalled();
+    expect(JSON.parse(fs.readFileSync(s.path(), "utf8")).enc).toBe("none");
+  });
+
+  it("a cipher from an older shell (no available()) still encrypts", () => {
+    registerSecretCipher(aes);
+    const s = new SocialTokenStore("zernio", dir);
+    s.write(grant);
+    expect(JSON.parse(fs.readFileSync(s.path(), "utf8")).enc).toBe("keychain");
+  });
+});

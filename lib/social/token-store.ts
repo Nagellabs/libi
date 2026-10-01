@@ -5,7 +5,7 @@ import { chmodBestEffort, getLibiSocialDir } from "@/lib/libi-home";
 import { serverLogger as logger } from "@/lib/logger";
 import { isTestMode } from "@/lib/test-mode";
 import { errShape } from "./errors";
-import { getSecretCipher } from "./secret-cipher";
+import { cipherForWrite, getSecretCipher, type SecretCipher } from "./secret-cipher";
 
 /**
  * The OAuth client libi registered dynamically with the provider
@@ -171,7 +171,10 @@ export class SocialTokenStore {
    * protect it. A grant written under `npx` and then opened in the desktop
    * app is still a plaintext file until something reads (and so heals) it, and
    * telling the user "keychain" about it would be a lie. With no file yet,
-   * this answers what the next write will do.
+   * this answers what the next write will MOST LIKELY do, without asking the
+   * keychain (`cipherForWrite()` would — a password prompt for a status line).
+   * A Linux box with no keyring is the one case it gets wrong, until the
+   * first write, and the answer read back after that write is the real one.
    */
   where(): GrantLocation {
     const env = this.readEnvelope();
@@ -226,7 +229,10 @@ export class SocialTokenStore {
     if (!env) return null;
     try {
       if (env.enc === "none") {
-        if (getSecretCipher()) this.reencrypt(env.grant);
+        // Healing is a write, so it may read the keychain — but only when a
+        // grant is on disk to heal, never on a machine that has none.
+        const cipher = cipherForWrite();
+        if (cipher) this.reencrypt(env.grant, cipher);
         return env.grant;
       }
       const cipher = getSecretCipher();
@@ -248,7 +254,7 @@ export class SocialTokenStore {
   }
 
   write(grant: StoredGrant): void {
-    const cipher = getSecretCipher();
+    const cipher = cipherForWrite();
     const env: Envelope = cipher
       ? { v: 1, enc: "keychain", blob: cipher.encrypt(JSON.stringify(grant)).toString("base64") }
       : { v: 1, enc: "none", grant };
@@ -328,12 +334,12 @@ export class SocialTokenStore {
   }
 
   /** Re-write a plaintext grant encrypted. Never fails a read. */
-  private reencrypt(grant: StoredGrant): void {
+  private reencrypt(grant: StoredGrant, cipher: SecretCipher): void {
     try {
       this.writeEnvelope({
         v: 1,
         enc: "keychain",
-        blob: getSecretCipher()!.encrypt(JSON.stringify(grant)).toString("base64"),
+        blob: cipher.encrypt(JSON.stringify(grant)).toString("base64"),
       });
       logger.info(
         { tag: "social", op: "token_store.reencrypted", providerId: this.providerId },

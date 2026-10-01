@@ -363,6 +363,25 @@ function adsGate(state: FakeState, accountId: unknown): ToolAnswer | null {
   return fail(422, "Ads are not available for this account.", "linked_account_required");
 }
 
+/** Verified live 2026-09-27 (Instagram-Login account), word for word. */
+const IG_FB_LOGIN_TEXT =
+  'Error: [400] The Instagram audio catalog requires an account connected via Facebook Login. Reconnect this account choosing the "Facebook" connection method, then retry. (field: accountId; code: instagram_audio_requires_facebook_login)';
+
+/**
+ * The live shape (fixtures/tiktok-commercial-music.json), with a song the scenarios post.
+ * No `previewUrl` / `downloadUrl` in the fake: previews stream only from
+ * allow-listed CDN hosts, so the UI hides the play button in test mode.
+ */
+export const FAKE_TIKTOK_TRACKS: Row[] = [
+  { id: "7400000000000000001", commercialMusicId: "7400000000000000900", name: "Espresso", artist: "Sabrina Carpenter", durationSec: 175, genres: ["POP"], rank: 1, clip: { id: "7400000000000000002", durationSec: 30 } },
+  { id: "7521888697513396241", commercialMusicId: "7521887909633886224", name: "Self Aware", artist: "Mark Allan Wolfe", durationSec: 227, genres: ["ROCK"], rank: 2, clip: { id: "7521887675088865297", durationSec: 60 } },
+  { id: "7584037896080902145", commercialMusicId: "7584036660708460560", name: "Sunset in Girona", artist: "Noah Preminger & Max Light", durationSec: 281, genres: ["JAZZ"], rank: 3 },
+];
+export const FAKE_IG_AUDIO: Row[] = [
+  { audioId: "482851939985510", title: "Espresso", audioType: "music", durationInMs: 175000, displayArtist: "Sabrina Carpenter" },
+  { audioId: "482851939985511", title: "Summer Nights", audioType: "music", durationInMs: 182000, displayArtist: "The Example Band" },
+];
+
 // ---------------------------------------------------------------------------
 // The table
 // ---------------------------------------------------------------------------
@@ -404,6 +423,31 @@ export const HANDLERS: Record<string, ToolHandler> = {
       },
       commercialContentTypes: [{ value: "none", label: "None" }, { value: "brand_organic", label: "Your brand" }],
     });
+  },
+  accounts_list_tik_tok_commercial_music: (a, { state }) => {
+    const account = accountById(state, a.account_id);
+    if (!account) return fail(404, `Account ${str(a.account_id)} not found`, "not_found");
+    if (account.platform !== "tiktok") return fail(422, "This account is not a TikTok account.", "wrong_platform");
+    if (state.cfg.tiktokLane === "developer") {
+      return fail(403, "The Commercial Music Library needs a TikTok account connected through the TikTok for Business app. Reconnect this account.", "tiktok_business_app_required");
+    }
+    return value({ tracks: FAKE_TIKTOK_TRACKS });
+  },
+  instagram_search_instagram_audio: (a, { state }) => {
+    const account = accountById(state, a.account_id);
+    if (!account) return fail(404, `Account ${str(a.account_id)} not found`, "not_found");
+    if (account.platform !== "instagram") return fail(422, "This account is not an Instagram account.", "wrong_platform");
+    if (!state.cfg.instagramFacebookLogin) return { kind: "error", text: IG_FB_LOGIN_TEXT };
+    const q = str(a.q).toLowerCase();
+    return value({ audio: q ? FAKE_IG_AUDIO.filter((x) => `${str(x.title)} ${str(x.displayArtist)}`.toLowerCase().includes(q)) : FAKE_IG_AUDIO });
+  },
+  instagram_get_instagram_audio: (a, { state }) => {
+    const account = accountById(state, a.account_id);
+    if (!account) return fail(404, `Account ${str(a.account_id)} not found`, "not_found");
+    if (account.platform !== "instagram") return fail(422, "This account is not an Instagram account.", "wrong_platform");
+    if (!state.cfg.instagramFacebookLogin) return { kind: "error", text: IG_FB_LOGIN_TEXT };
+    const hit = FAKE_IG_AUDIO.find((x) => x.audioId === a.audio_id);
+    return hit ? value({ audio: hit }) : fail(404, "Audio not found", "not_found");
   },
   posts_create_post: (a, ctx) => createPost(ctx, a),
   posts_get_post: (a, { state }) => {

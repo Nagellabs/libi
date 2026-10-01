@@ -24,6 +24,7 @@ import {
   type PersistedOverlay,
 } from "@/lib/composition/persistence";
 import { articleFor, fileCategoryOf, storeFile } from "@/mcp/tools/file-tools";
+import { ownedByProvenance } from "@/lib/audio-rights/stamp";
 import { getUserPreset, saveUserPreset } from "@/lib/overlays/preset-store";
 import { CAPTION_STYLES } from "@/lib/captions/styles";
 import { cssFamilyForFontFile, withFamily } from "@/lib/fonts/family";
@@ -40,6 +41,8 @@ import {
   type TemplateSource,
 } from "@/lib/templates/scaffold";
 import { TEMPLATES_LOG_TAG, getTemplate, readScaffold, readTemplateFile, recordUse } from "@/lib/templates/store";
+import type { PendingMusic, PendingMusicClip } from "@/lib/templates/pending-music";
+import { hostedUrlProblem } from "@/lib/templates/cloud/preflight";
 
 /** Downloads hosted assets / slot urls into the piece and answers per url.
  *  The MCP tool passes a `remote_fetch` job runner with `mediaOnly: true`, so
@@ -81,6 +84,8 @@ export interface ApplyScaffoldResult {
    *  available"): libi's words, never the author's value. Empty for the user's
    *  own template, which is applied as it is. */
   leftOut: string[];
+  /** Songs left out (the template names them; the agent fetches on the user's yes). */
+  pendingMusic: PendingMusic[];
 }
 
 /** The description a template's stored asset carries in the piece: libi's words
@@ -264,6 +269,13 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
         buffer,
         contentType,
         description: mark,
+        // Bytes a template carries are never a copyrighted song: extract turns
+        // one into a music link (or a video slot), and a public template's
+        // audio and video arrive as hosted urls (remote_fetch stamps those
+        // copyrighted). A scaffold records no rights, so the file's original
+        // class is unknown here — owned is the reading that fits bytes that
+        // passed extract. storeFile writes it only when the file carries audio.
+        audioRights: ownedByProvenance(),
       });
       fileIdByAssetRef.set(a.ref, record.id);
     } else if (a.url) {
@@ -429,6 +441,9 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     src: TemplateSource,
     owner: string,
   ): { fileId: string } | { unfilledSlot: TemplateSlot } | null => {
+    // A music link names a song and carries no file: a clip on one is recorded
+    // as pending music by the clip loop, and the schema lets nothing else name one.
+    if ("musicRef" in src) return null;
     if ("assetRef" in src) {
       const id = fileIdByAssetRef.get(src.assetRef);
       if (id) return { fileId: id };
@@ -494,12 +509,42 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     outOverlays.push(base as unknown as PersistedOverlay);
   }
 
+  // A clip on a music link names a copyrighted song the template never carries
+  // (social-music spec §7): nothing is fetched now. The piece records the song
+  // with the template's timing, and libi.fetch_template_music places it once the
+  // user says yes. A stranger's link is named by its position, never its ref.
+  const musicByRef = new Map((scaffold.musicLinks ?? []).map((m, i) => [m.ref, { link: m, n: i + 1 }]));
+  const pending = new Map<string, PendingMusic>();
+  // A pending clip's duck names scaffold keys too, re-minted with the rest below.
+  const pendingDucks: Array<{ clip: PendingMusicClip; sidechainKeys: string[] }> = [];
+
   // ── 4. Clips ────────────────────────────────────────────────────────────
   // Two passes: a duck's sidechains and a clip's link are scaffold KEYS, and a
   // clip may name one that is minted after it.
   const clipIdByKey: Record<string, string> = {};
   const staged: Array<{ clip: PersistedAudioClip; sidechainKeys: string[]; linkedKey?: string }> = [];
   for (const [clipIndex, c] of scaffold.audioClips.entries()) {
+    if ("musicRef" in c.source) {
+      const named = musicByRef.get(c.source.musicRef);
+      if (!named) continue; // the scaffold schema already refused this
+      const { link, n } = named;
+      const assetId = `tpl-${input.templateId.slice(0, 8)}-${authored ? `music-${n}` : link.ref}`;
+      const entry = pending.get(assetId) ?? {
+        assetId,
+        templateId: input.templateId,
+        track: { title: link.track.title, ...(link.track.artist ? { artist: link.track.artist } : {}) },
+        ...(link.sourceUrl && hostedUrlProblem(link.sourceUrl) === null ? { sourceUrl: link.sourceUrl } : {}),
+        clips: [],
+      };
+      const pendingClip: PendingMusicClip = { startTime: c.startTime, duration: c.duration, trimStart: c.trimStart, volume: c.volume, enabled: c.enabled };
+      if (c.duck) {
+        pendingClip.duck = { ...c.duck, sidechainClipIds: [] };
+        pendingDucks.push({ clip: pendingClip, sidechainKeys: c.duck.sidechainClipIds ?? [] });
+      }
+      entry.clips.push(pendingClip);
+      pending.set(assetId, entry);
+      continue;
+    }
     const resolved = resolveSource(c.source, c.key);
     if (resolved === null) continue;
     if (!("fileId" in resolved)) {
@@ -527,6 +572,9 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     if (linkedKey) clip.linkedOverlayId = overlayIdByKey[linkedKey];
     return clip;
   });
+  for (const { clip, sidechainKeys } of pendingDucks) {
+    clip.duck!.sidechainClipIds = sidechainKeys.map((k) => clipIdByKey[k]).filter((v): v is string => !!v);
+  }
 
   // The template's canvas wins on a piece with nothing in it (and on a replace,
   // which empties it). A piece the user has already built in keeps its own —
@@ -545,6 +593,12 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
 
   manifest.overlays = [...existing, ...outOverlays];
   manifest.audioClips = [...existingClips, ...outClips];
+  // Append merges by assetId (applying the same template again replaces its
+  // entry); a replace starts the piece over, so only this apply's songs remain.
+  const keptPending = input.mode === "replace" ? [] : (manifest.pendingMusic ?? []).filter((p) => !pending.has(p.assetId));
+  const allPending = [...keptPending, ...pending.values()];
+  if (allPending.length > 0) manifest.pendingMusic = allPending;
+  else delete manifest.pendingMusic;
   state.wrote = true;
   await saveManifest(input.pieceId, manifest);
   recordUse(input.templateId, input.pieceId);
@@ -562,5 +616,11 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     },
     "template applied",
   );
-  return { pieceId: input.pieceId, overlays: overlayIdByKey, clips: clipIdByKey, unfilledSlots, warnings, leftOut };
+  if (pending.size > 0) {
+    logger.info(
+      { tag: "social-music", op: "template_music_pending", templateId: input.templateId, pieceId: input.pieceId, count: pending.size },
+      "template music left out, pending",
+    );
+  }
+  return { pieceId: input.pieceId, overlays: overlayIdByKey, clips: clipIdByKey, unfilledSlots, warnings, leftOut, pendingMusic: [...pending.values()] };
 }

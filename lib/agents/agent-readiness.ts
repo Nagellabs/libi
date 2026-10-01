@@ -28,6 +28,12 @@ export type AgentReadiness =
   | { state: "ready" }
   /** The agent answered an auth challenge negatively. Observed, never inferred. */
   | { state: "needs-auth"; agentId: string; message: string }
+  /**
+   * The agent refused its OWN configuration (codex's "failed to load
+   * configuration"), so no session can start or load. Observed, never inferred;
+   * `message` says what to fix. The next clean session clears it.
+   */
+  | { state: "config-error"; agentId: string; message: string }
   /** Not on disk. Mirrors the existing detect* `unavailableReason`. */
   | { state: "not-installed"; reason: string }
   /** Nothing has been attempted yet this process. NOT a claim of health. */
@@ -62,6 +68,7 @@ export function readinessAllowsChat(r: AgentReadiness): boolean {
 export function readinessMessage(r: AgentReadiness): string | null {
   switch (r.state) {
     case "needs-auth":
+    case "config-error":
       return r.message;
     case "not-installed":
       return r.reason;

@@ -27,7 +27,7 @@ const LIBI_HOME = process.env.LIBI_HOME ?? "";
 const LIBI_PORT = process.env.LIBI_PORT ?? "";
 const SHOULD_RUN = LIBI_HOME.startsWith("/tmp/") && LIBI_PORT !== "";
 
-const EXPORT_DEST = path.join(LIBI_HOME, "exports");
+const STORAGE_DIR = path.join(LIBI_HOME, "storage");
 
 test.describe("Electron — LIBI_HOME + export end-to-end", () => {
   test.skip(!SHOULD_RUN, "Set LIBI_HOME=/tmp/... and LIBI_PORT=... to run this spec");
@@ -114,9 +114,8 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
         await transport.close().catch(() => {});
       }
 
-      // ── 3. Kick off an export, override destFolder so the artifact
-      // lands inside the scratch home (easy to assert on).
-      fs.mkdirSync(EXPORT_DEST, { recursive: true });
+      // ── 3. Kick off an export. It lands in the piece's exports folder
+      // inside the scratch home's storage.
       const enqueued = await main.evaluate(async (args) => {
         const r = await fetch(`http://127.0.0.1:${args.port}/api/export`, {
           method: "POST",
@@ -127,12 +126,11 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
             filename: "electron-e2e",
             format: "mp4",
             quality: "source",
-            destFolder: args.destFolder,
           }),
         });
         const text = await r.text();
         return { status: r.status, body: text };
-      }, { port, pieceId: piece.id, destFolder: EXPORT_DEST });
+      }, { port, pieceId: piece.id });
 
       if (enqueued.status !== 200) {
         throw new Error(
@@ -173,9 +171,8 @@ test.describe("Electron — LIBI_HOME + export end-to-end", () => {
       expect(fs.existsSync(filePath!)).toBe(true);
       const st = fs.statSync(filePath!);
       expect(st.size).toBeGreaterThan(500); // non-empty MP4
-      // The output MUST live inside the destFolder we requested — proves
-      // the export route honors per-call destFolder, not the global default.
-      expect(filePath!.startsWith(EXPORT_DEST)).toBe(true);
+      // The output MUST live in the piece's own exports folder.
+      expect(filePath!.startsWith(path.join(STORAGE_DIR, piece.id, "exports") + path.sep)).toBe(true);
       // The layer is in the file: a non-empty MP4 could still be black frames.
       // The body fills the frame with #0ea5e9, so a 2x2 patch away from the
       // "libi" label must decode to that blue (within H.264's colour error).

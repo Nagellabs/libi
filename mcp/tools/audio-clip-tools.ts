@@ -21,6 +21,10 @@ import {
 export { findInlineClipForOverlay };
 import { getDb } from "@/lib/db/client";
 import { files } from "@/lib/db/schema";
+import { effectiveRights } from "@/lib/audio-rights/read";
+import { updateAudioRights } from "@/lib/audio-rights/write";
+import { COPYRIGHTED_CLIP_NOTE } from "@/lib/audio-rights/piece-audio";
+import { requestSongMatch } from "./audio-rights-tools";
 import type { ToolContext, ToolResult } from "./types";
 import type {
   AudioAddClipParams,
@@ -88,6 +92,21 @@ export async function audioAddClip(
     }
   }
 
+  // Stamp BEFORE the clip exists (P-13): a refusal writes nothing.
+  let rightsNow = effectiveRights(file);
+  if (params.rights) {
+    const stamped = updateAudioRights(
+      params.fileId,
+      { class: params.rights.class, ...(params.rights.track ? { track: params.rights.track } : {}) },
+      "agent",
+      { pieceId: ctx.pieceId },
+    );
+    if (!stamped.ok) {
+      return { success: false, error: stamped.code === "not_found" ? "file_not_found" : stamped.code, data: { hint: stamped.message } };
+    }
+    rightsNow = stamped.rights;
+  }
+
   const id = `clip_${randomId()}`;
   const next = addClip(manifest, {
     id,
@@ -102,7 +121,20 @@ export async function audioAddClip(
     label: params.label,
   });
   await saveManifest(ctx.pieceId, next);
-  return { success: true, data: { clipId: id } };
+  const rights = rightsNow;
+  // Match a copyrighted song the agent just named, or one never matched yet
+  // (addendum §3). A failed match never fails the clip add.
+  const shouldMatch = rights?.class === "copyrighted" && (params.rights !== undefined || !rights.platformPicks);
+  const music = shouldMatch ? await requestSongMatch(params.fileId) : undefined;
+  return {
+    success: true,
+    data: {
+      clipId: id,
+      ...(rights ? { rights: { class: rights.class, ...(rights.track ? { track: rights.track } : {}) } } : {}),
+      ...(rights?.class === "copyrighted" ? { note: COPYRIGHTED_CLIP_NOTE } : {}),
+      ...(music ? { music } : {}),
+    },
+  };
 }
 
 export async function audioUpdateClip(

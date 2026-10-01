@@ -35,10 +35,16 @@ describe("bundled-mcps registry", () => {
     }
   });
 
-  it("no entry outside the allowlist is flagged manualInstall", () => {
+  // …with one shared exception: `uv` is libi-installed on EVERY card that
+  // declares it (the one `UV_DEPENDENCY`, full-verification F6) — its plan
+  // sends the user to that chip's Download button.
+  it("no dep outside the allowlist except uv is flagged manualInstall", () => {
     for (const def of BUNDLED_MCPS) {
       if (LIBI_INSTALLED_IDS.has(def.id)) continue;
-      expect(def.dependencies.some((d) => d.manualInstall)).toBe(false);
+      expect(
+        def.dependencies.filter((d) => d.manualInstall && d.binary !== "uv").map((d) => d.binary),
+        def.id,
+      ).toEqual([]);
     }
   });
 

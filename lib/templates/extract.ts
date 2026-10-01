@@ -20,6 +20,10 @@ import { cssFamilyForFontFile } from "@/lib/fonts/family";
 import { getUserPreset } from "@/lib/overlays/preset-store";
 import { serverLogger as logger } from "@/lib/logger";
 import { extensionForType, mediaTypeFor } from "@/lib/http/media-types";
+import { effectiveRights, isCopyrighted } from "@/lib/audio-rights/read";
+import { songLabel } from "@/lib/audio-rights/types";
+import { hostedUrlProblem } from "@/lib/templates/cloud/preflight";
+import type { TemplateMusicLink } from "@/lib/templates/scaffold-schema";
 import {
   TEMPLATE_KEY_RE,
   TEMPLATE_LIMITS,
@@ -230,6 +234,7 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
     kind: TemplateSlot["kind"],
     owner: { key: string; label: string },
     filename: string,
+    why = `not an allowed ${kind} file`,
   ): string | null => {
     const memo = autoSlotByFile.get(`${kind}:${fileId}`);
     if (memo) return memo;
@@ -239,7 +244,7 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
       key,
       kind,
       label: owner.label.slice(0, 80) || key,
-      hint: `The source used ${filename.slice(0, 120)}, which a template cannot carry (not an allowed ${kind} file). Supply your own.`,
+      hint: `The source used ${filename.slice(0, 120)}, which a template cannot carry (${why}). Supply your own.`,
       required: false,
     });
     autoSlotByFile.set(`${kind}:${fileId}`, key);
@@ -250,14 +255,19 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
     const key = keyByOverlayId[o.id];
     if (mediaSlotByKey.has(key)) continue;
     const row = fileRow(o.fileId);
-    if (carriedExt(row, o.kind) !== null) continue;
-    const slotKey = slotForUncarriable(o.fileId, o.kind, { key, label: o.displayName ?? row.name ?? key }, row.filename);
+    // A video whose sound is a copyrighted song never travels either
+    // (social-music spec §7): the user supplies their own footage.
+    const copyrighted = o.kind === "video" && isCopyrighted(row);
+    if (carriedExt(row, o.kind) !== null && !copyrighted) continue;
+    const why = copyrighted ? "it carries copyrighted audio" : `not an allowed ${o.kind} file`;
+    const skipped = copyrighted ? "carries copyrighted audio" : `is not an allowed ${o.kind} file`;
+    const slotKey = slotForUncarriable(o.fileId, o.kind, { key, label: o.displayName ?? row.name ?? key }, row.filename, why);
     if (slotKey) {
       mediaSlotByKey.set(key, slotKey);
-      warnings.push(`asset skipped: ${row.filename} is not an allowed ${o.kind} file; ${o.kind} overlay "${key}" is now the unfilled slot "${slotKey}"`);
+      warnings.push(`asset skipped: ${row.filename} ${skipped}; ${o.kind} overlay "${key}" is now the unfilled slot "${slotKey}"`);
     } else {
       droppedOverlayIds.add(o.id);
-      warnings.push(`asset skipped: ${row.filename} is not an allowed ${o.kind} file; ${o.kind} overlay "${key}" was dropped (no slot left under the ${TEMPLATE_LIMITS.slots}-slot cap)`);
+      warnings.push(`asset skipped: ${row.filename} ${skipped}; ${o.kind} overlay "${key}" was dropped (no slot left under the ${TEMPLATE_LIMITS.slots}-slot cap)`);
     }
   }
   if (droppedOverlayIds.size > 0) {
@@ -398,14 +408,44 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
     }
   }
 
+  // A copyrighted song is NAMED, never carried (social-music spec §7).
+  const musicLinks: TemplateMusicLink[] = [];
+  const musicRefByFile = new Map<string, string>();
+  const musicLinkFor = (fileId: string): string => {
+    const known = musicRefByFile.get(fileId);
+    if (known) return known;
+    const row = fileRow(fileId);
+    const rights = effectiveRights(row);
+    // `||`, not `??`: an empty name is no title (the scaffold's track.title is min 1).
+    const title = (rights?.track?.title || row.name || row.filename).slice(0, 120);
+    const artist = rights?.track?.artist?.slice(0, 120);
+    const url = rights?.source?.url;
+    // Kept only when the scaffold would take it: a hosted https link within its url cap.
+    const keepUrl = !!url && hostedUrlProblem(url) === null && Buffer.byteLength(url, "utf8") <= TEMPLATE_LIMITS.urlBytes;
+    const ref = uniqueKey(slugifyKey(title, "music"), takenRefs);
+    const link: TemplateMusicLink = {
+      ref,
+      track: { title, ...(artist ? { artist } : {}) },
+      ...(keepUrl ? { sourceUrl: url } : {}),
+    };
+    musicLinks.push(link);
+    musicRefByFile.set(fileId, ref);
+    warnings.push(`music not included: ${songLabel(link.track)}; applying the template leaves it out until the agent fetches it`);
+    return ref;
+  };
+
   const audioClips: TemplateAudioClip[] = clipsIn.filter((c) => !droppedClipIds.has(c.id)).map((c) => {
     const key = keyByClipId[c.id];
     const out: TemplateAudioClip = {
       ...omit(c, ["id", "fileId", "linkedOverlayId", "duck"]),
       key,
+      // An inline clip follows its video: a copyrighted video became a slot
+      // above, and its inline clip went with it.
       source: clipSlotByKey.has(key)
         ? { slot: clipSlotByKey.get(key)! }
-        : { assetRef: assetFor(c.fileId, "audio", c.kind === "inline" ? "video" : undefined) },
+        : c.kind !== "inline" && isCopyrighted(fileRow(c.fileId))
+          ? { musicRef: musicLinkFor(c.fileId) }
+          : { assetRef: assetFor(c.fileId, "audio", c.kind === "inline" ? "video" : undefined) },
     } as TemplateAudioClip;
     if (c.linkedOverlayId) out.linkedOverlayId = keyByOverlayId[c.linkedOverlayId];
     const duck = c.duck;
@@ -453,13 +493,20 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
     overlays,
     audioClips,
     assets,
+    ...(musicLinks.length > 0 ? { musicLinks } : {}),
     fonts,
     captionStyles: [...captionStyles].map(([id, fields]) => ({ id, fields })),
   };
+  // Two kinds of warning, logged apart: a file the template cannot carry (not
+  // an allowed type, or a video with copyrighted audio), and a song it names
+  // but leaves out.
+  const musicNotes = warnings.filter((w) => w.startsWith("music not included:"));
+  const skippedNotes = warnings.filter((w) => !w.startsWith("music not included:"));
   log.info(
-    { overlays: overlays.length, clips: audioClips.length, assets: assets.length, tracked: trackingRedo.length, skipped: warnings.length },
+    { overlays: overlays.length, clips: audioClips.length, assets: assets.length, tracked: trackingRedo.length, skipped: skippedNotes.length, musicLinks: musicLinks.length },
     "scaffold extracted",
   );
-  if (warnings.length > 0) log.warn({ warnings }, "assets skipped: not an allowed media type");
+  if (skippedNotes.length > 0) log.warn({ warnings: skippedNotes }, "assets skipped: the template cannot carry them");
+  if (musicNotes.length > 0) log.info({ warnings: musicNotes }, "copyrighted music named by the template, not included");
   return { scaffold, copies, writes, trackingAppendix, keyByOverlayId, warnings };
 }

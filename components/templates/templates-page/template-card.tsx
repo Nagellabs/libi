@@ -45,6 +45,10 @@ export function mediaUrl(t: InstalledTemplate, name: string): string {
 /** Said on a local card with no example whose source piece was deleted. */
 export const SOURCE_GONE_NOTE = "No preview — the source piece is gone.";
 
+/** Said on a local card with no example whose source piece had nothing to render (TPL-3): no
+ *  `template_example` job is ever started for it, so there is nothing "Render preview" would do. */
+export const EMPTY_PIECE_NOTE = "No preview — the piece is empty.";
+
 /**
  * "Render preview" renders the source piece AS IT IS NOW — which may have
  * changed since the template was made, so the preview could show something
@@ -99,7 +103,9 @@ export function RenderPreviewDialog({
  * `template_example` job, after the confirm above), its wait named on the
  * button while it runs — the agent's create starts one too — and why the
  * last render failed, if it did (review M1); or, with the source piece gone,
- * a note. Installed templates keep their author's example and show neither.
+ * a note; or, with the source piece empty (TPL-3: nothing for the export
+ * renderer to read, so no job was ever started for it), a different note.
+ * Installed templates keep their author's example and show neither.
  */
 export function NoExample({ t }: { t: InstalledTemplate }) {
   const renderExample = useRenderExample();
@@ -111,6 +117,12 @@ export function NoExample({ t }: { t: InstalledTemplate }) {
     return (
       <p className="text-[0.65rem] text-muted-foreground" data-testid="template-card-source-gone">
         {SOURCE_GONE_NOTE}
+      </p>
+    );
+  if (t.sourceEmpty)
+    return (
+      <p className="text-[0.65rem] text-muted-foreground" data-testid="template-card-source-empty">
+        {EMPTY_PIECE_NOTE}
       </p>
     );
   const busy = renderExample.isPending || (rendering.data?.templateIds.includes(t.id) ?? false);

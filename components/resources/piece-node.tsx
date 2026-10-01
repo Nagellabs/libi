@@ -5,7 +5,9 @@ import { ChevronRight, ChevronDown, EllipsisVertical, Loader2 } from "lucide-rea
 import type { PieceSummary } from "@/lib/queries/pieces";
 import type { FileRecord } from "@/lib/db/schema/types";
 import PieceAssets from "./piece-assets";
+import PieceExportsNode from "./piece-exports-node";
 import { PieceMark } from "./piece-mark";
+import { useActiveExports } from "@/lib/queries/exports";
 import type { SortOption } from "./sort-utils";
 
 interface PieceNodeProps {
@@ -58,6 +60,7 @@ export default function PieceNode({
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(piece.name);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const runningExports = (useActiveExports().data ?? []).filter((e) => e.pieceId === piece.id).length;
 
   // Handle external trigger to start rename (e.g., from context menu).
   // Seeding + opening happen during render (self-limiting: setting
@@ -210,6 +213,15 @@ export default function PieceNode({
                 title="Uncommitted draft changes"
               />
             )}
+            {runningExports > 0 && (
+              <span
+                data-testid="piece-exports-running"
+                title={`${runningExports} export${runningExports === 1 ? "" : "s"} running`}
+                className="ml-1.5 shrink-0 rounded-full bg-primary/20 px-1.5 text-[10px] font-semibold text-primary"
+              >
+                {runningExports}
+              </span>
+            )}
           </span>
         )}
         <button
@@ -249,6 +261,7 @@ export default function PieceNode({
             innerSort={innerSort}
             search={search}
           />
+          <PieceExportsNode pieceId={piece.id} innerSort={innerSort} search={search} />
         </div>
       )}
     </div>

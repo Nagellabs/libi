@@ -268,6 +268,60 @@ describe("/api/social/posts", () => {
     expect(res.status).toBe(400);
   });
 
+  it("create with a target's music decision tracks social_music_plan", async () => {
+    stubService({ createPost: async () => ({ post, deduped: false }) });
+    const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+    const res = await createPost(new Request("http://x/api/social/posts", {
+      method: "POST",
+      headers: PAGE,
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        content: "hi",
+        media: [],
+        targets: [{
+          platform: "tiktok",
+          accountId: "acct-tt",
+          options: {
+            platform: "tiktok",
+            tiktok: { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: false, allowStitch: false, commercialContentType: "none", contentPreviewConfirmed: true, expressConsentGiven: true },
+            music: { mode: "attach", track: { id: "t", title: "x" }, musicVolume: 80, originalVolume: 100 },
+          },
+        }],
+        when: { mode: "draft" },
+        libi: { pieceId: p.id },
+        createdBy: "ui",
+      }),
+    }));
+    expect(res.status).toBe(200);
+    expect(tracked.calls).toContainEqual(["social_music_plan", { platform: "tiktok", mode: "attach" }]);
+  });
+
+  it("400s on a create body whose target music has an invalid mode", async () => {
+    stubService({ createPost: async () => { throw new Error("should not be called"); } });
+    const res = await createPost(new Request("http://x/api/social/posts", {
+      method: "POST",
+      headers: PAGE,
+      body: JSON.stringify({
+        requestId: randomUUID(),
+        content: "hi",
+        media: [],
+        targets: [{
+          platform: "tiktok",
+          accountId: "acct-tt",
+          options: {
+            platform: "tiktok",
+            tiktok: { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: false, allowStitch: false, commercialContentType: "none", contentPreviewConfirmed: true, expressConsentGiven: true },
+            music: { mode: "loud" },
+          },
+        }],
+        when: { mode: "draft" },
+        libi: { pieceId: "p1" },
+        createdBy: "ui",
+      }),
+    }));
+    expect(res.status).toBe(400);
+  });
+
   it("unauthorized → 401 needs_reconnect", async () => {
     stubService({}, { connected: false });
     const res = await listPosts(new Request("http://x/api/social/posts"));
@@ -384,7 +438,8 @@ describe("/api/social/posts/:postId", () => {
   });
 
   it("PATCH updates the post, touches the link status and tracks the right action per when.mode", async () => {
-    stubService({ updatePost: async () => ({ post: { ...post, status: "scheduled" }, deduped: false }) });
+    // A reschedule with no targets reads the post back for the gone-track check.
+    stubService({ updatePost: async () => ({ post: { ...post, status: "scheduled" }, deduped: false }), getPost: async () => post });
     const [p] = getDb().insert(pieces).values({ name: "patch-me" }).returning().all();
     insertLink({ providerId: "zernio", providerPostId: post.id, pieceId: p.id, exportPath: null, requestId: null, createdBy: "ui" });
     const res = await patchPost(
@@ -915,5 +970,219 @@ describe("/api/social/request-id", () => {
     insertLink({ providerId: "zernio", providerPostId: "post_1", pieceId: p.id, exportPath: null, requestId: "r-link", createdBy: "ui" });
     const body = await (await requestIdRoute(url(`pieceId=${p.id}&postId=post_1`))).json();
     expect(body).toEqual({ requestId: "r-link", source: "link" });
+  });
+});
+
+describe("/api/social/posts — a scheduled Instagram track Instagram no longer offers", () => {
+  const igTarget = {
+    platform: "instagram",
+    accountId: "acct-ig",
+    options: {
+      platform: "instagram",
+      instagram: { contentType: "reel" },
+      music: { mode: "attach", track: { id: "ig-gone", title: "Espresso" }, musicVolume: 80, originalVolume: 100 },
+    },
+  };
+  const scheduleBody = (pieceId: string) => JSON.stringify({
+    requestId: randomUUID(),
+    content: "hi",
+    media: [],
+    targets: [igTarget],
+    when: { mode: "schedule", scheduledFor: "2026-10-02T09:00:00Z", timezone: "UTC" },
+    libi: { pieceId },
+    createdBy: "ui",
+  });
+
+  it("POST refuses the schedule with 422 and never creates the post", async () => {
+    const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+    const lookedUp: Array<[string, string]> = [];
+    stubService({
+      createPost: createPostSpy,
+      getCatalogTrack: async (accountId: string, trackId: string) => { lookedUp.push([accountId, trackId]); return null; },
+    });
+    const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+    const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: scheduleBody(p.id) }));
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "validation", message: "Instagram no longer offers *Espresso*. Pick another track or post without it." });
+    expect(lookedUp).toEqual([["acct-ig", "ig-gone"]]);
+    expect(createPostSpy).not.toHaveBeenCalled();
+  });
+
+  it("POST schedules when Instagram still offers the track", async () => {
+    const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+    stubService({ createPost: createPostSpy, getCatalogTrack: async () => ({ id: "ig-gone", title: "Espresso" }) });
+    const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+    const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: scheduleBody(p.id) }));
+    expect(res.status).toBe(200);
+    expect(createPostSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST does not re-check the track for a draft", async () => {
+    const getCatalogTrack = vi.fn(async () => null);
+    stubService({ getCatalogTrack });
+    const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+    const body = JSON.parse(scheduleBody(p.id));
+    const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: JSON.stringify({ ...body, when: { mode: "draft" } }) }));
+    expect(res.status).toBe(200);
+    expect(getCatalogTrack).not.toHaveBeenCalled();
+  });
+
+  it("PATCH scheduling with the gone track is refused before the update", async () => {
+    const updatePost = vi.fn(async () => ({ post, deduped: false }));
+    stubService({ updatePost, getCatalogTrack: async () => null });
+    const res = await patchPost(
+      new Request("http://x", {
+        method: "PATCH",
+        headers: PAGE,
+        body: JSON.stringify({ requestId: randomUUID(), createdBy: "ui", targets: [igTarget], when: { mode: "schedule", scheduledFor: "2026-10-02T09:00:00Z", timezone: "UTC" } }),
+      }),
+      { params: Promise.resolve({ postId: post.id }) },
+    );
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "validation", message: "Instagram no longer offers *Espresso*. Pick another track or post without it." });
+    expect(updatePost).not.toHaveBeenCalled();
+  });
+
+  /** Review finding: the composer reschedules an existing draft with only
+   *  `{requestId, when}` (components/social/post-actions.tsx), so the check
+   *  must read the post's OWN stamped targets when the body carries none. */
+  it("PATCH rescheduling without targets checks the post's stamped track and refuses before the update", async () => {
+    const updatePost = vi.fn(async () => ({ post, deduped: false }));
+    const lookedUp: Array<[string, string]> = [];
+    const stamped = {
+      ...post,
+      targets: [{ platform: "instagram", accountId: "acct-ig", status: "pending" }],
+      libi: { pieceId: "piece", targetOptions: [igTarget.options] },
+    };
+    const getPost = vi.fn(async () => stamped);
+    stubService({
+      updatePost,
+      getPost,
+      getCatalogTrack: async (accountId: string, trackId: string) => { lookedUp.push([accountId, trackId]); return null; },
+    });
+    const res = await patchPost(
+      new Request("http://x", {
+        method: "PATCH",
+        headers: PAGE,
+        body: JSON.stringify({ requestId: randomUUID(), createdBy: "ui", when: { mode: "schedule", scheduledFor: "2026-10-02T09:00:00Z", timezone: "UTC" } }),
+      }),
+      { params: Promise.resolve({ postId: post.id }) },
+    );
+    expect(res.status).toBe(422);
+    expect(await res.json()).toEqual({ error: "validation", message: "Instagram no longer offers *Espresso*. Pick another track or post without it." });
+    expect(getPost).toHaveBeenCalledWith(post.id);
+    expect(lookedUp).toEqual([["acct-ig", "ig-gone"]]);
+    expect(updatePost).not.toHaveBeenCalled();
+  });
+
+  it("POST refuses a TikTok music window whose end is not after its start", async () => {
+    const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+    stubService({ createPost: createPostSpy });
+    const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+    const tiktok = { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: false, allowStitch: false, commercialContentType: "none", contentPreviewConfirmed: true, expressConsentGiven: true };
+    for (const [startMs, endMs] of [[30000, 30000], [30000, 12000]]) {
+      const body = JSON.stringify({
+        requestId: randomUUID(), content: "hi", media: [], when: { mode: "draft" }, libi: { pieceId: p.id }, createdBy: "ui",
+        targets: [{ platform: "tiktok", accountId: "acct-tt", options: { platform: "tiktok", tiktok, music: { mode: "attach", track: { id: "7400", title: "Espresso" }, musicVolume: 80, originalVolume: 100, startMs, endMs } } }],
+      });
+      const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body }));
+      expect(res.status).toBe(400);
+    }
+    expect(createPostSpy).not.toHaveBeenCalled();
+  });
+
+  describe("a TikTok track off today's trending list (I2)", () => {
+    const tiktok = { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: false, allowStitch: false, commercialContentType: "none", contentPreviewConfirmed: true, expressConsentGiven: true };
+    const ttBody = (pieceId: string) => JSON.stringify({
+      requestId: randomUUID(), content: "hi", media: [], libi: { pieceId }, createdBy: "ui",
+      when: { mode: "schedule", scheduledFor: "2026-10-02T09:00:00Z", timezone: "UTC" },
+      targets: [{ platform: "tiktok", accountId: "acct-tt", options: { platform: "tiktok", tiktok, music: { mode: "attach", track: { id: "7400", title: "Espresso" }, musicVolume: 80, originalVolume: 100 } } }],
+    });
+
+    it("POST refuses the schedule, reading the list once with no query", async () => {
+      const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+      const musicCatalog = vi.fn(async () => ({ tracks: [{ id: "other", title: "Other", kind: "trending" }] }));
+      stubService({ createPost: createPostSpy, musicCatalog });
+      const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+      const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: ttBody(p.id) }));
+      expect(res.status).toBe(422);
+      expect(await res.json()).toEqual({ error: "validation", message: "*Espresso* is no longer in TikTok's top 100. Pick another track, or send the post as a TikTok draft." });
+      expect(musicCatalog).toHaveBeenCalledTimes(1);
+      expect(musicCatalog).toHaveBeenCalledWith("acct-tt", { platform: "tiktok" });
+      expect(createPostSpy).not.toHaveBeenCalled();
+    });
+
+    it("POST publish-now is refused the same way; a draft save is never checked (I2-now)", async () => {
+      const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+      const withWhen = (when: object) => JSON.stringify({ ...JSON.parse(ttBody(p.id)), when });
+      const musicCatalog = vi.fn(async () => ({ tracks: [{ id: "other", title: "Other", kind: "trending" }] }));
+      const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+      stubService({ createPost: createPostSpy, musicCatalog });
+      const now = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: withWhen({ mode: "now" }) }));
+      expect(now.status).toBe(422);
+      expect((await now.json()).message).toBe("*Espresso* is no longer in TikTok's top 100. Pick another track, or send the post as a TikTok draft.");
+      expect(createPostSpy).not.toHaveBeenCalled();
+      musicCatalog.mockClear();
+      const draft = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: withWhen({ mode: "draft" }) }));
+      expect(draft.status).toBe(200);
+      expect(musicCatalog).not.toHaveBeenCalled();
+    });
+
+    it("PATCH publishing a draft now reads its stamped track back and refuses it (I2-now)", async () => {
+      const ttOptions = JSON.parse(ttBody("x")).targets[0].options;
+      const stamped = { ...post, targets: [{ platform: "tiktok", accountId: "acct-tt", status: "pending" }], libi: { pieceId: "piece", targetOptions: [ttOptions] } };
+      const updatePost = vi.fn(async () => ({ post, deduped: false }));
+      const musicCatalog = vi.fn(async () => ({ tracks: [{ id: "other", title: "Other", kind: "trending" }] }));
+      stubService({ updatePost, getPost: async () => stamped, musicCatalog });
+      const patch = (when: object) =>
+        patchPost(
+          new Request("http://x", { method: "PATCH", headers: PAGE, body: JSON.stringify({ requestId: randomUUID(), createdBy: "ui", when }) }),
+          { params: Promise.resolve({ postId: post.id }) },
+        );
+      const res = await patch({ mode: "now" });
+      expect(res.status).toBe(422);
+      expect((await res.json()).message).toContain("is no longer in TikTok's top 100");
+      expect(updatePost).not.toHaveBeenCalled();
+      musicCatalog.mockClear();
+      expect((await patch({ mode: "draft" })).status).toBe(200);
+      expect(musicCatalog).not.toHaveBeenCalled();
+    });
+
+    it("POST schedules when the track is still on the list, or when the list can't be read", async () => {
+      const [p] = getDb().insert(pieces).values({ name: "x" }).returning().all();
+      for (const musicCatalog of [
+        async () => ({ tracks: [{ id: "7400", title: "Espresso", kind: "trending" }] }),
+        async () => ({ unavailable: { reason: "error" } }),
+        async () => {
+          throw new Error("boom");
+        },
+      ]) {
+        const createPostSpy = vi.fn(async () => ({ post, deduped: false }));
+        stubService({ createPost: createPostSpy, musicCatalog });
+        const res = await createPost(new Request("http://x/api/social/posts", { method: "POST", headers: PAGE, body: ttBody(p.id) }));
+        expect(res.status).toBe(200);
+        expect(createPostSpy).toHaveBeenCalledTimes(1);
+      }
+    });
+  });
+
+  it("PATCH rescheduling without targets goes through when the stamped track is still offered", async () => {
+    const updatePost = vi.fn(async () => ({ post, deduped: false }));
+    const stamped = {
+      ...post,
+      targets: [{ platform: "instagram", accountId: "acct-ig", status: "pending" }],
+      libi: { pieceId: "piece", targetOptions: [igTarget.options] },
+    };
+    stubService({ updatePost, getPost: async () => stamped, getCatalogTrack: async () => ({ id: "ig-gone", title: "Espresso" }) });
+    const res = await patchPost(
+      new Request("http://x", {
+        method: "PATCH",
+        headers: PAGE,
+        body: JSON.stringify({ requestId: randomUUID(), createdBy: "ui", when: { mode: "schedule", scheduledFor: "2026-10-02T09:00:00Z", timezone: "UTC" } }),
+      }),
+      { params: Promise.resolve({ postId: post.id }) },
+    );
+    expect(res.status).toBe(200);
+    expect(updatePost).toHaveBeenCalledTimes(1);
   });
 });

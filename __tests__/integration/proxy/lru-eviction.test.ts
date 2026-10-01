@@ -119,15 +119,54 @@ describe("evictProxiesIfOverBudget — integration", () => {
     expect(fs.existsSync(path.join(storageBaseDir, "p", "new-proxy.mp4"))).toBe(true);
   });
 
-  it("never evicts an audio file's proxy: the only audio the preview can play for it (review round 4)", async () => {
+  it("an audio file's proxy counts, and goes only after every video proxy not in use (review round 5, M4)", async () => {
     makeProxy("p", "radio", 50, Date.now() - 30_000, "audio");
     makeProxy("p", "clip", 50, Date.now() - 20_000);
     makeProxy("p", "clip2", 50, Date.now() - 10_000);
     const { evictProxiesIfOverBudget } = await import("@/lib/proxy/lru");
     evictProxiesIfOverBudget({ byteBudget: 60, storageBaseDir, inUseFileIds: new Set() });
     const db = vi.mocked(getDb)();
+    // Both videos go first, although the audio proxy is the oldest.
     expect(db.select().from(files).where(eq(files.id, "radio")).all()[0].proxyFilename).toBe("radio-proxy.mp4");
     expect(db.select().from(files).where(eq(files.id, "clip")).all()[0].proxyFilename).toBeNull();
+    expect(db.select().from(files).where(eq(files.id, "clip2")).all()[0].proxyFilename).toBeNull();
+  });
+
+  it("over budget with only audio proxies not in use: the oldest one is evicted (review round 5, M4)", async () => {
+    makeProxy("p", "song-old", 50, Date.now() - 30_000, "audio");
+    makeProxy("p", "song-new", 50, Date.now() - 10_000, "audio");
+    const { evictProxiesIfOverBudget } = await import("@/lib/proxy/lru");
+    evictProxiesIfOverBudget({ byteBudget: 60, storageBaseDir, inUseFileIds: new Set() });
+    const db = vi.mocked(getDb)();
+    const old = db.select().from(files).where(eq(files.id, "song-old")).all()[0];
+    expect(old.proxyFilename).toBeNull();
+    expect(old.proxyStatus).toBe("idle");
+    expect(fs.existsSync(path.join(storageBaseDir, "p", "song-old-proxy.mp4"))).toBe(false);
+    expect(db.select().from(files).where(eq(files.id, "song-new")).all()[0].proxyFilename).toBe("song-new-proxy.mp4");
+  });
+
+  it("an in-use audio proxy is never evicted, even over budget; logged (review m5)", async () => {
+    makeProxy("p", "song-open", 50, Date.now() - 30_000, "audio");
+    makeProxy("p", "clip-open", 50, Date.now() - 20_000);
+    const { evictProxiesIfOverBudget } = await import("@/lib/proxy/lru");
+    const { proxyLogger } = await import("@/lib/logger");
+    const warn = vi.spyOn(proxyLogger, "warn");
+    evictProxiesIfOverBudget({ byteBudget: 10, storageBaseDir, inUseFileIds: new Set(["song-open", "clip-open"]) });
+    const db = vi.mocked(getDb)();
+    expect(db.select().from(files).where(eq(files.id, "song-open")).all()[0].proxyFilename).toBe("song-open-proxy.mp4");
+    expect(db.select().from(files).where(eq(files.id, "clip-open")).all()[0].proxyFilename).toBeNull(); // video: last resort
+    expect(warn.mock.calls.some((c) => (c[0] as { op?: string }).op === "evict_in_use_audio_kept")).toBe(true);
+    warn.mockRestore();
+  });
+
+  it("an audio proxy in use stays while one not in use goes", async () => {
+    makeProxy("p", "song-open", 50, Date.now() - 30_000, "audio");
+    makeProxy("p", "song-other", 50, Date.now() - 10_000, "audio");
+    const { evictProxiesIfOverBudget } = await import("@/lib/proxy/lru");
+    evictProxiesIfOverBudget({ byteBudget: 60, storageBaseDir, inUseFileIds: new Set(["song-open"]) });
+    const db = vi.mocked(getDb)();
+    expect(db.select().from(files).where(eq(files.id, "song-open")).all()[0].proxyFilename).toBe("song-open-proxy.mp4");
+    expect(db.select().from(files).where(eq(files.id, "song-other")).all()[0].proxyFilename).toBeNull();
   });
 
   it("no-op when under budget", async () => {

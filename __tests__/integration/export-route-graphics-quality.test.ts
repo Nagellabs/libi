@@ -87,7 +87,7 @@ describe("POST /api/export — graphics resolution", () => {
     };
     await addOverlayToManifest(PIECE_ID, overlay);
 
-    const res = await POST(makeRequest({ pieceId: PIECE_ID, destFolder }));
+    const res = await POST(makeRequest({ pieceId: PIECE_ID }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { settings: { width: number; height: number; quality: string; graphicsQuality: string } };
     expect(body.settings.quality).toBe("source");
@@ -109,10 +109,46 @@ describe("POST /api/export — graphics resolution", () => {
     };
     await addOverlayToManifest(PIECE_ID, overlay);
 
-    const res = await POST(makeRequest({ pieceId: PIECE_ID, destFolder }));
+    const res = await POST(makeRequest({ pieceId: PIECE_ID }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { settings: { width: number; height: number } };
     expect([body.settings.width, body.settings.height]).toEqual([1080, 1920]);
+  });
+
+  it("stays at the composition size when the only graphics overlay is hidden", async () => {
+    await seedPortraitManifest();
+    const videoOverlay: PersistedOverlay = {
+      id: "o-video",
+      kind: "video",
+      fileId: "f1",
+      rect: { x: 0, y: 0, width: 1080, height: 1920 },
+      startTime: 0,
+      duration: 2,
+      z: 0,
+      opacity: 1,
+    };
+    const hiddenTextOverlay: PersistedOverlay = {
+      id: "o-text-hidden",
+      kind: "text",
+      content: "hi",
+      font: "800 60px Inter",
+      color: "#fff",
+      align: "center",
+      rect: { x: 0, y: 0, width: 200, height: 80 },
+      startTime: 0,
+      duration: 2,
+      z: 0,
+      opacity: 1,
+      hidden: true,
+    };
+    await addOverlayToManifest(PIECE_ID, videoOverlay);
+    await addOverlayToManifest(PIECE_ID, hiddenTextOverlay);
+
+    const res = await POST(makeRequest({ pieceId: PIECE_ID }));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { settings: { width: number; height: number; drivenBy?: string } };
+    expect([body.settings.width, body.settings.height]).toEqual([1080, 1920]);
+    expect(body.settings.drivenBy).not.toBe("graphics");
   });
 
   it("reads overlays from the SNAPSHOT (not the draft) when source is 'snapshot'", async () => {
@@ -135,7 +171,7 @@ describe("POST /api/export — graphics resolution", () => {
     };
     await addOverlayToManifest(PIECE_ID, textOverlay);
 
-    const res = await POST(makeRequest({ pieceId: PIECE_ID, source: "snapshot", destFolder }));
+    const res = await POST(makeRequest({ pieceId: PIECE_ID, source: "snapshot" }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { settings: { width: number; height: number } };
     expect([body.settings.width, body.settings.height]).toEqual([1080, 1920]);
@@ -155,7 +191,7 @@ describe("POST /api/export — graphics resolution", () => {
     };
     await addOverlayToManifest(PIECE_ID, overlay);
 
-    const res = await POST(makeRequest({ pieceId: PIECE_ID, graphicsQuality: "1080p", destFolder }));
+    const res = await POST(makeRequest({ pieceId: PIECE_ID, graphicsQuality: "1080p" }));
     expect(res.status).toBe(200);
     const body = (await res.json()) as { settings: { width: number; height: number; graphicsQuality: string } };
     expect(body.settings.graphicsQuality).toBe("1080p");
@@ -167,7 +203,7 @@ describe("POST /api/export — graphics resolution", () => {
 
   it("rejects an unknown graphicsQuality with a 400 instead of a NaN frame", async () => {
     await seedPortraitManifest();
-    const res = await POST(makeRequest({ pieceId: PIECE_ID, graphicsQuality: "8k", destFolder }));
+    const res = await POST(makeRequest({ pieceId: PIECE_ID, graphicsQuality: "8k" }));
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/graphicsQuality must be one of 1080p, 1440p, 4k/);

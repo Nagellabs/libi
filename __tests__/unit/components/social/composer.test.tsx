@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom/vitest";
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render as tlRender, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render as tlRender, screen, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { SocialAccount, TikTokCreatorInfo } from "@/lib/social/types";
 import { composerDraftKey } from "@/hooks/social/use-composer-draft";
@@ -14,6 +14,97 @@ vi.mock("@/components/social/ask-agent-button", () => ({
   AskAgentButton: ({ kind, label }: { kind: string; label?: string }) => (
     <button data-testid={`ask-agent-${kind}`}>{label ?? "Ask the agent"}</button>
   ),
+}));
+// The Music block has its own tests (music-block.test.tsx) — here it is a
+// stub whose click reports one of the two variants, so the composer's own
+// gating (mixed variants, export mismatch) can be exercised without pulling
+// in the plan/catalog queries.
+//
+// On MOUNT it auto-reports a NEUTRAL default ("strip" for every account, so
+// `exportVariantOf` stays "without-song" until a test explicitly diverges the
+// two accounts by clicking) — this is what a real MusicBlock does the moment
+// ANY plan arrives, confident or not (the fallback mode is still a decided
+// plan). Three sets steer that per account:
+// - `unresolved`: still fires `onChange` (reported), but `onResolved(false)`
+//   — a needsChoice plan, which is a RAIL-MARK cosmetic only, never a gate.
+// - `neverReports`: fires NOTHING — simulates a MusicBlock that hasn't
+//   mounted this session yet, or whose plan request never lands.
+// - `erroring`: fires `onError(true)` and nothing else — the plan REQUEST
+//   itself failed.
+// - `awaiting`: reports NO music and `onAwaitingPick(true)` — attach with no
+//   matching track, waiting on the user's pick or another option.
+let unresolved = new Set<string>();
+let neverReports = new Set<string>();
+let erroring = new Set<string>();
+let awaiting = new Set<string>();
+/** Every `choice` each account's MusicBlock was MOUNTED with — the post override the composer holds. */
+let mountedChoices: Array<{ accountId: string; choice: unknown }> = [];
+vi.mock("@/components/social/music/music-block", async () => {
+  const { useEffect } = await import("react");
+  return {
+    MusicBlock: ({
+      accountId,
+      choice,
+      onChange,
+      onChoice,
+      onResolved,
+      onAwaitingPick,
+      onError,
+    }: {
+      accountId: string;
+      choice?: unknown;
+      onChange: (m: unknown) => void;
+      onChoice?: (c: unknown, expected?: unknown) => void;
+      onResolved?: (r: boolean) => void;
+      onAwaitingPick?: (w: boolean) => void;
+      onError?: (e: boolean) => void;
+    }) => {
+      useEffect(() => {
+        mountedChoices.push({ accountId, choice });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      useEffect(() => {
+        if (neverReports.has(accountId)) return;
+        if (erroring.has(accountId)) {
+          onError?.(true);
+          return;
+        }
+        if (awaiting.has(accountId)) {
+          onChange(undefined);
+          onResolved?.(false);
+          onAwaitingPick?.(true);
+          return;
+        }
+        // Like the real plan: an override's mode is kept; otherwise the neutral default.
+        onChange((choice as { mode?: string } | undefined)?.mode ? { mode: (choice as { mode: string }).mode } : { mode: "strip" });
+        onResolved?.(!unresolved.has(accountId));
+        onError?.(false);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [accountId]);
+      return (
+        <>
+          <button data-testid={`music-block-${accountId}`} onClick={() => onChange(accountId === "acct-ig" ? { mode: "include" } : { mode: "strip" })}>
+            music
+          </button>
+          <button data-testid={`music-choose-include-${accountId}`} onClick={() => onChoice?.({ mode: "include" })}>
+            include
+          </button>
+          <button data-testid={`music-settle-stale-${accountId}`} onClick={() => onChoice?.(undefined, { mode: "attach", trackId: "old" })}>
+            settle
+          </button>
+        </>
+      );
+    },
+  };
+});
+let pieceCopyrighted: Array<{ fileId: string; name: string; clipSeconds: number }> = [];
+let pieceAudioState: "ok" | "loading" | "error" = "ok";
+const pieceAudioRefetch = vi.fn();
+vi.mock("@/lib/queries/audio-rights", () => ({
+  usePieceAudioRights: () =>
+    pieceAudioState === "ok"
+      ? { data: { copyrighted: pieceCopyrighted, ownMusic: [] }, isLoading: false, isError: false, refetch: pieceAudioRefetch }
+      : { data: undefined, isLoading: pieceAudioState === "loading", isError: pieceAudioState === "error", refetch: pieceAudioRefetch },
 }));
 
 const accounts: SocialAccount[] = [
@@ -127,6 +218,14 @@ beforeEach(() => {
   // the flow starts several steps in.
   window.localStorage.clear();
   calls = [];
+  pieceCopyrighted = [];
+  pieceAudioState = "ok";
+  pieceAudioRefetch.mockReset();
+  mountedChoices = [];
+  unresolved = new Set();
+  neverReports = new Set();
+  awaiting = new Set();
+  erroring = new Set();
   creatorInfoFixture = creatorInfo;
   existingPost = undefined;
   postsFailures = 0;
@@ -202,6 +301,7 @@ function renderComposer(over: Partial<React.ComponentProps<typeof Composer>> = {
 }
 
 const next = () => screen.getByTestId("composer-next");
+const composerBack = () => screen.getByTestId("composer-back");
 
 /** Tick the upload job's SSE to completion, if one is open. */
 async function finishUpload(percent?: number) {
@@ -230,7 +330,9 @@ async function advanceToCaption() {
   fireEvent.click(next()); // media -> targets
   consentTikTok();
   await waitFor(() => expect(next()).toBeEnabled());
-  fireEvent.click(next()); // targets -> caption
+  fireEvent.click(next()); // targets -> music
+  await waitFor(() => expect(next()).toBeEnabled());
+  fireEvent.click(next()); // music -> caption (this is what starts the upload)
 }
 
 describe("Composer — media step", () => {
@@ -380,6 +482,278 @@ describe("Composer — targets step", () => {
     fireEvent.click(screen.getByTestId("tiktok-consent-express"));
     await waitFor(() => expect(next()).toBeEnabled());
   });
+
+  it("the Music step blocks targets that need different exports, naming why", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    renderComposer();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(screen.getByTestId("music-step")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("music-block-acct-ig")); // include → with-song
+    fireEvent.click(screen.getByTestId("music-block-acct-tt")); // strip → without-song
+    expect(await screen.findByTestId("music-blocked-reason")).toHaveTextContent(
+      "These accounts need different exports — one keeps the song, one doesn't. Post them one at a time.",
+    );
+    expect(next()).toBeDisabled();
+  });
+});
+
+describe("Composer — an export that does not match the music plan", () => {
+  const decided = (carriesCopyrighted: boolean) => ({
+    ...latestExport,
+    audioDecision: { purpose: carriesCopyrighted ? "personal" : "social", excludedFileIds: [], carriesCopyrighted },
+  });
+
+  it("offers Export for social, names why, and calls back", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    // A with-song export, but both targets default to leaving the song out.
+    const { onExportRequested } = renderComposer({ latestExport: decided(true) as React.ComponentProps<typeof Composer>["latestExport"] });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(await screen.findByTestId("music-blocked-reason")).toHaveTextContent("This export doesn't match the music plan — export it for a social post first.");
+    expect(next()).toBeDisabled();
+    fireEvent.click(screen.getByTestId("export-for-social"));
+    expect(onExportRequested).toHaveBeenCalledTimes(1);
+  });
+
+  it("judges the export actually used, not only the latest one — and, with a fitting export on hand, says what differs rather than to export again", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    // The latest export leaves the song out; the one the composer was opened on keeps it.
+    const older = { ...decided(true), filePath: "/exp/older.mp4" };
+    renderComposer({
+      intent: { pieceId: "p1", pieceName: "Cutdown v3", exportPath: "/exp/older.mp4" },
+      latestExport: decided(false) as React.ComponentProps<typeof Composer>["latestExport"],
+      exports: [decided(false), older] as React.ComponentProps<typeof Composer>["exports"],
+    });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(await screen.findByTestId("music-blocked-reason")).toHaveTextContent("This export has the song; your plan posts without it.");
+  });
+
+  it("offers nothing when the export already leaves the song out", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    renderComposer({ latestExport: decided(false) as React.ComponentProps<typeof Composer>["latestExport"] });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    await screen.findByTestId("music-step");
+    expect(screen.queryByTestId("export-for-social")).not.toBeInTheDocument();
+  });
+});
+
+describe("Composer — the Music step's rail mark", () => {
+  it("is ticked once every target's plan is resolved, and not while one still needs a choice — but needsChoice never blocks Next", async () => {
+    unresolved = new Set(["acct-tt"]);
+    renderComposer();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(screen.getByTestId("music-step")).toBeInTheDocument();
+    expect(screen.getByTestId("rail-music")).not.toHaveTextContent("✓");
+    expect(screen.getByTestId("rail-targets")).toHaveTextContent("✓");
+    // needsChoice is a rail-mark cosmetic only — the fallback mode the mock
+    // already reported ("strip") is still a decided plan, so Next holds open.
+    expect(next()).toBeEnabled();
+  });
+  it("ticked when resolved", async () => {
+    renderComposer();
+    await advanceToCaption();
+    expect(screen.getByTestId("rail-music")).toHaveTextContent("✓ Music");
+  });
+});
+
+/** A `latestExport` that matches the mock's default "strip" (without-song)
+ *  report, so `exportMismatch` never muddies a test aimed at the reported/
+ *  unreported gate specifically. */
+const withoutSongExport = (): React.ComponentProps<typeof Composer>["latestExport"] =>
+  ({ ...latestExport, audioDecision: { purpose: "social", excludedFileIds: [], carriesCopyrighted: false } }) as React.ComponentProps<
+    typeof Composer
+  >["latestExport"];
+
+describe("Composer — Music blocks ONLY a copyrighted piece with a target that hasn't reported", () => {
+  it("Next on Music holds while a target's MusicBlock has never reported (loading, or never mounted) — copyrighted piece", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    neverReports = new Set(["acct-tt"]);
+    renderComposer({ latestExport: withoutSongExport() });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(screen.getByTestId("music-step")).toBeInTheDocument();
+    expect(next()).toBeDisabled();
+    expect(screen.getByTestId("music-blocked-reason")).toHaveTextContent("Working out the music for @nagellabs…");
+  });
+
+  it("the same never-reported target does NOT block a piece with no copyrighted music", async () => {
+    neverReports = new Set(["acct-tt"]);
+    renderComposer();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(next()).toBeEnabled();
+    fireEvent.click(next()); // music -> caption
+    expect(screen.getByTestId("caption-step")).toBeInTheDocument();
+  });
+
+  it("a plan-request error blocks a copyrighted piece with its own reason, but never a piece with no copyrighted music", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    erroring = new Set(["acct-tt"]);
+    renderComposer({ latestExport: withoutSongExport() });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(next()).toBeDisabled();
+    expect(screen.getByTestId("music-blocked-reason")).toHaveTextContent("Couldn't work out the music for @nagellabs — try again on the Music step");
+  });
+
+  it("attach with no matching track holds Next and says to pick a track or choose another option; a decision frees it", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    awaiting = new Set(["acct-tt"]);
+    renderComposer({ latestExport: withoutSongExport() });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(next()).toBeDisabled();
+    expect(screen.getByTestId("music-blocked-reason")).toHaveTextContent("Pick a TikTok track for @nagellabs, or choose another music option");
+    fireEvent.click(screen.getByTestId("music-block-acct-tt")); // the user decides: the block reports
+    await waitFor(() => expect(next()).toBeEnabled());
+    expect(screen.queryByTestId("music-blocked-reason")).not.toBeInTheDocument();
+  });
+
+  it("the same plan-request error does not block a piece with no copyrighted music", async () => {
+    erroring = new Set(["acct-tt"]);
+    renderComposer();
+    await advanceToCaption();
+    expect(screen.getByTestId("caption-step")).toBeInTheDocument();
+  });
+
+  it("a target added back after Review was already reached blocks Review again, even jumped to via the rail", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    renderComposer({ latestExport: withoutSongExport() });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    // Drop TikTok before Music is ever visited: its MusicBlock never mounts.
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt"));
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music (only Instagram mounts and reports)
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // music -> caption
+    fireEvent.click(next()); // caption -> when
+    fireEvent.click(next()); // when -> review
+    await waitFor(() => expect(screen.getByTestId("review-step")).toBeInTheDocument());
+
+    // Back to Targets, add TikTok back — its MusicBlock has never reported a
+    // plan this session, and it carries no restored `options.music` either.
+    fireEvent.click(screen.getByTestId("rail-targets"));
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt"));
+    consentTikTok();
+
+    // The rail must refuse to jump straight back to Review: `furthest`
+    // already includes it, but the newly-added target's music is unreported.
+    expect(screen.getByTestId("rail-review")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("rail-review"));
+    expect(screen.queryByTestId("review-step")).not.toBeInTheDocument();
+
+    // Visiting Music reports it (the mock fires on mount) and Review becomes
+    // reachable again.
+    fireEvent.click(screen.getByTestId("rail-music"));
+    await waitFor(() => expect(screen.getByTestId("rail-review")).toBeEnabled());
+  });
+
+  it("a restored options.music counts as reported even if its MusicBlock never reports again this session", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    neverReports = new Set(["acct-ig"]);
+    existingPost = {
+      id: "post_existing",
+      status: "draft",
+      content: "old caption",
+      createdAt: "2026-09-19T00:00:00.000Z",
+      media: [{ url: "https://media.zernio.com/media/old.mp4", type: "video" }],
+      targets: [
+        {
+          platform: "instagram",
+          accountId: "acct-ig",
+          status: "pending",
+          options: { platform: "instagram", instagram: { contentType: "reel", shareToFeed: true, commentsEnabled: true, isAiGenerated: true }, music: { mode: "strip" } },
+        },
+      ],
+      tags: [],
+      link: null,
+      libi: undefined,
+    };
+    renderComposer({
+      intent: { pieceId: "p1", pieceName: "Cutdown v3", exportPath: "/exp/e.mp4", draftPostId: "post_existing" },
+      latestExport: withoutSongExport(),
+    });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets (Zernio echoed this target's options)
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    // Its MusicBlock never calls back this session, but the RESTORED
+    // options.music already satisfies "reported" — Next is not held.
+    expect(next()).toBeEnabled();
+    expect(screen.queryByTestId("music-blocked-reason")).not.toBeInTheDocument();
+
+    fireEvent.click(next()); // music -> caption (starts the upload)
+    await finishUpload();
+    fireEvent.click(next()); // caption -> when
+    fireEvent.click(next()); // when -> review
+    await waitFor(() => expect(screen.getByTestId("composer-submit")).toBeEnabled());
+  });
+
+  it("while the piece's audio is still being read, an unreported target blocks as on a copyrighted piece (M3)", async () => {
+    pieceAudioState = "loading";
+    neverReports = new Set(["acct-tt"]);
+    renderComposer();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(next()).toBeDisabled();
+    expect(screen.getByTestId("music-blocked-reason")).toHaveTextContent("Checking the piece's music…");
+  });
+
+  it("a failed read of the piece's audio blocks an unreported target, says so, and offers a retry (M3)", async () => {
+    pieceAudioState = "error";
+    neverReports = new Set(["acct-tt"]);
+    renderComposer();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(next()).toBeDisabled();
+    expect(screen.getByTestId("music-blocked-reason")).toHaveTextContent("Couldn't read the piece's music — try again");
+    fireEvent.click(screen.getByTestId("piece-audio-retry"));
+    expect(pieceAudioRefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("a piece with no copyrighted music still reaches Review with no friction", async () => {
+    renderComposer(); // pieceCopyrighted defaults to [] — no music to decide
+    await advanceToCaption();
+    expect(screen.getByTestId("caption-step")).toBeInTheDocument();
+  });
 });
 
 describe("Composer — a disabled Next says what is missing", () => {
@@ -445,11 +819,13 @@ describe("Composer — caption step", () => {
   it("an Instagram Story target has no caption at all", async () => {
     renderComposer();
     await waitFor(() => expect(next()).toBeEnabled());
-    fireEvent.click(next());
+    fireEvent.click(next()); // media -> targets
     fireEvent.click(screen.getByTestId("ig-type-story"));
     consentTikTok();
     await waitFor(() => expect(next()).toBeEnabled());
-    fireEvent.click(next());
+    fireEvent.click(next()); // targets -> music
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // music -> caption
     expect(screen.getByText("Story: no caption")).toBeInTheDocument();
   });
 });
@@ -561,7 +937,9 @@ describe("Composer — restoring a TikTok draft's own settings", () => {
     await waitFor(() => expect(next()).toBeEnabled());
     fireEvent.click(next()); // media -> targets
     await waitFor(() => expect(next()).toBeEnabled());
-    fireEvent.click(next()); // targets -> caption (this is what starts the upload)
+    fireEvent.click(next()); // targets -> music
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // music -> caption (this is what starts the upload)
     await finishUpload();
     fireEvent.click(next()); // caption -> when
     fireEvent.click(next()); // when -> review
@@ -644,7 +1022,7 @@ describe("Composer — review and submit", () => {
 });
 
 describe("Composer — the upload job", () => {
-  it("uploads once after Targets, shows the percentage, and never re-uploads on a second Next", async () => {
+  it("uploads once after Music, shows the percentage, and never re-uploads on a second Next", async () => {
     renderComposer();
     await advanceToCaption();
     await finishUpload(62);
@@ -999,5 +1377,493 @@ describe("Composer — an update re-sends media libi can still resolve", () => {
     expect(patch.media?.[0].url).toContain("/temp/");
     expect(patch.media?.[0].url).not.toContain("/media/");
     expect(patch.libi?.mediaUrl).toBe("https://media.zernio.com/temp/1_e.mp4");
+  });
+});
+
+describe("Composer — the post's music override is the user's choice, never the resolved plan (I1)", () => {
+  async function toMusic() {
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(screen.getByTestId("music-step")).toBeInTheDocument();
+  }
+  const choicesOf = (id: string) => mountedChoices.filter((m) => m.accountId === id).map((m) => m.choice);
+
+  it("leaving Music and coming back re-plans with NO override: the reported music is not pinned", async () => {
+    renderComposer();
+    await toMusic();
+    // Each block reported its resolved music on mount ("strip" in this stub)…
+    fireEvent.click(next()); // music -> caption
+    fireEvent.click(composerBack()); // caption -> music: the blocks remount
+    await waitFor(() => expect(choicesOf("acct-tt")).toHaveLength(2));
+    // …and still mount with no override: the song's current pick decides.
+    expect(choicesOf("acct-tt")).toEqual([undefined, undefined]);
+    expect(choicesOf("acct-ig")).toEqual([undefined, undefined]);
+  });
+
+  it("an explicit choice survives the round trip; a settling pick clears only the override it set", async () => {
+    renderComposer();
+    await toMusic();
+    fireEvent.click(screen.getByTestId("music-choose-include-acct-ig"));
+    // A stale settle (expects an override that is no longer there) changes nothing.
+    fireEvent.click(screen.getByTestId("music-settle-stale-acct-ig"));
+    fireEvent.click(composerBack()); // music -> targets
+    fireEvent.click(next()); // targets -> music
+    await waitFor(() => expect(choicesOf("acct-ig")).toHaveLength(2));
+    expect(choicesOf("acct-ig")[1]).toEqual({ mode: "include" });
+    expect(choicesOf("acct-tt")[1]).toBeUndefined();
+  });
+});
+
+describe("Composer — a reopened post keeps its explicit Keep in / Leave out (I1-reopen)", () => {
+  const igOptions = (mode: string) => ({
+    platform: "instagram", instagram: { contentType: "reel", shareToFeed: true, commentsEnabled: true, isAiGenerated: true }, music: { mode },
+  });
+  const reopen = (mode: string) => {
+    // The provider's real shape: Instagram's echoed options carry NO music —
+    // libi's decision survives only in its own stamp (metadata.libi.targetOptions).
+    const { music: _music, ...echoed } = igOptions(mode);
+    void _music;
+    existingPost = {
+      id: "post_existing", status: "draft", content: "old caption", createdAt: "2026-09-19T00:00:00.000Z",
+      media: [{ url: "https://media.zernio.com/media/old.mp4", type: "video" }],
+      targets: [{ platform: "instagram", accountId: "acct-ig", status: "pending", options: echoed }],
+      tags: [], link: null, libi: { pieceId: "p1", targetOptions: [igOptions(mode)] },
+    };
+    return renderComposer({ intent: { pieceId: "p1", pieceName: "Cutdown v3", exportPath: "/exp/e.mp4", draftPostId: "post_existing" } });
+  };
+
+  for (const mode of ["include", "strip"]) {
+    it(`a provider draft with ${mode}: the plan keeps it and a re-save sends it`, async () => {
+      reopen(mode);
+      await waitFor(() => expect(next()).toBeEnabled());
+      fireEvent.click(next()); // media -> targets
+      await waitFor(() => expect(next()).toBeEnabled());
+      fireEvent.click(next()); // targets -> music
+      await waitFor(() => expect(mountedChoices.some((m) => m.accountId === "acct-ig")).toBe(true));
+      expect(mountedChoices.find((m) => m.accountId === "acct-ig")!.choice).toEqual({ mode });
+      await waitFor(() => expect(next()).toBeEnabled());
+      fireEvent.click(next()); // music -> caption
+      await finishUpload();
+      fireEvent.click(next()); // caption -> when
+      fireEvent.click(next()); // when -> review
+      await waitFor(() => expect(screen.getByTestId("composer-submit")).toBeEnabled());
+      fireEvent.click(screen.getByTestId("composer-submit"));
+      await waitFor(() => expect(updateMutate).toHaveBeenCalled());
+      const patch = updateMutate.mock.calls[0][0] as { targets?: Array<{ options: { music?: { mode: string } } }> };
+      expect(patch.targets?.[0].options.music).toEqual({ mode });
+    });
+  }
+
+  it("a local composer draft saved without musicChoice restores include as the override; attach is not pinned", async () => {
+    window.localStorage.setItem(
+      composerDraftKey("p1", null),
+      JSON.stringify({
+        v: 1, step: "targets", exportPath: "/exp/e.mp4", caption: "c", when: { mode: "draft" }, savedAt: new Date().toISOString(),
+        targets: [
+          { platform: "instagram", accountId: "acct-ig", options: igOptions("include") },
+          { platform: "tiktok", accountId: "acct-tt", options: { platform: "tiktok", tiktok: { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: true, allowStitch: true, commercialContentType: "none", madeWithAi: true, contentPreviewConfirmed: false, expressConsentGiven: false }, music: { mode: "attach", track: { id: "t", title: "Espresso" }, musicVolume: 80, originalVolume: 100 } } },
+        ],
+      }),
+    );
+    renderComposer();
+    await waitFor(() => expect(screen.getByTestId("rail-targets")).toBeInTheDocument());
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    await waitFor(() => expect(mountedChoices).toHaveLength(2));
+    expect(mountedChoices.find((m) => m.accountId === "acct-ig")!.choice).toEqual({ mode: "include" });
+    expect(mountedChoices.find((m) => m.accountId === "acct-tt")!.choice).toBeUndefined();
+  });
+});
+
+// ── The exports rework: the picker, the music plan, and the round trip ─────────
+
+type ComposerExports = NonNullable<React.ComponentProps<typeof Composer>["exports"]>;
+type AwaitedExport = NonNullable<React.ComponentProps<typeof Composer>["awaitedExport"]>;
+
+/** One finished export, as the Posting tab hands it to the composer. */
+const exportRow = (id: string, over: Record<string, unknown> = {}, song: "with" | "without" | "none" = "none") => ({
+  filePath: `/s/p1/exports/${id}.mp4`,
+  exportId: `exp_${id}`,
+  name: id,
+  aspect: "9:16",
+  ...PROBE,
+  ...(song === "none"
+    ? {}
+    : {
+        audioDecision: {
+          purpose: song === "with" ? "personal" : "social",
+          excludedFileIds: song === "with" ? [] : ["s"],
+          carriesCopyrighted: song === "with",
+        },
+      }),
+  ...over,
+});
+
+/** An export record in any state, as `useExports` answers it. */
+const record = (id: string, over: Record<string, unknown> = {}) =>
+  ({
+    id: `exp_${id}`, pieceId: "p1", pieceName: "Cutdown v3", jobId: null, name: id, fileName: `${id}.mp4`, path: null, status: "running",
+    missing: false, error: null, queuedAt: 1, startedAt: 2, completedAt: null, sizeBytes: null, durationSec: null, width: null, height: null,
+    aspect: "9:16", container: "mp4", codec: "avc", fps: 30, quality: "source", graphicsQuality: null, purpose: "social",
+    carriesCopyrighted: false, excludedFileIds: [], backend: null, droppedOverlays: null, source: "user", progress: null, waiting: null, ...over,
+  }) as unknown as AwaitedExport;
+
+/** `renderComposer`, but keeping the query client so a rerender is the SAME composer. */
+function renderKeeping(props: Partial<React.ComponentProps<typeof Composer>>) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  const onExportRequested = vi.fn();
+  const base = {
+    intent: { pieceId: "p1", pieceName: "Cutdown v3" },
+    latestExport: null,
+    onExportRequested,
+    onDone: vi.fn(),
+  } as React.ComponentProps<typeof Composer>;
+  const tree = (over: Partial<React.ComponentProps<typeof Composer>>) => (
+    <QueryClientProvider client={qc}>
+      <Composer {...base} {...props} {...over} />
+    </QueryClientProvider>
+  );
+  const utils = tlRender(tree({}));
+  return { ...utils, onExportRequested, update: (over: Partial<React.ComponentProps<typeof Composer>>) => utils.rerender(tree(over)) };
+}
+
+describe("Composer — the Media step's export picker offers every finished export", () => {
+  it("lists them newest first, each labelled so they can be told apart", async () => {
+    const list = [
+      exportRow("promo-final", { aspect: "9:16", width: 1080, height: 1920 }, "without"),
+      exportRow("promo-song", { aspect: "9:16", sizeBytes: 20_000_000 }, "with"),
+      exportRow("wide-cut", { aspect: "16:9", width: 1920, height: 1080 }, "none"),
+    ] as ComposerExports;
+    renderComposer({ intent: { pieceId: "p1", pieceName: "Cutdown v3" }, latestExport: list[0], exports: list });
+    const picker = await screen.findByRole("combobox", { name: "Export file" });
+    const options = Array.from(picker.querySelectorAll("option")).map((o) => o.textContent);
+    expect(options).toEqual([
+      "promo-final · 9:16 · 1080×1920 · 39.1 MB · without the song",
+      "promo-song · 9:16 · 1080×1920 · 19.1 MB · with the song",
+      "wide-cut · 16:9 · 1920×1080 · 39.1 MB",
+    ]);
+    // The newest is selected, and the step says what it carries.
+    expect(picker).toHaveValue("/s/p1/exports/promo-final.mp4");
+    expect(screen.getByTestId("export-song-note")).toHaveTextContent("without the song");
+  });
+
+  it("an explicit pick is what the composer posts, and a later poll does not undo it", async () => {
+    const list = [exportRow("new"), exportRow("old")] as ComposerExports;
+    const { update } = renderKeeping({ latestExport: list[0], exports: list });
+    const picker = await screen.findByRole("combobox", { name: "Export file" });
+    fireEvent.change(picker, { target: { value: "/s/p1/exports/old.mp4" } });
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("old.mp4");
+    // A newer export lands in the list meanwhile.
+    const more = [exportRow("newest"), ...list] as ComposerExports;
+    update({ latestExport: more[0], exports: more });
+    expect(screen.getByTestId("export-line")).toHaveTextContent("old.mp4");
+    await waitFor(() => expect(calls.some((c) => (c.body as { exportPath?: string } | undefined)?.exportPath === "/s/p1/exports/old.mp4")).toBe(true));
+  });
+
+  it("a single export needs no picker", async () => {
+    const list = [exportRow("only")] as ComposerExports;
+    renderComposer({ intent: { pieceId: "p1", pieceName: "Cutdown v3" }, latestExport: list[0], exports: list });
+    await screen.findByTestId("export-line");
+    expect(screen.queryByRole("combobox", { name: "Export file" })).toBeNull();
+  });
+});
+
+describe("Composer — a music plan that needs another export uses one the piece already has", () => {
+  const SONG = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+  async function toMusic() {
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    await screen.findByTestId("music-step");
+  }
+  const NO_PIN = { pieceId: "p1", pieceName: "Cutdown v3" };
+
+  it("switches to the newest export that leaves the song out, says which, and never offers to export again", async () => {
+    pieceCopyrighted = SONG;
+    // The newest keeps the song; the plan (both accounts default to leaving it out) needs one that doesn't.
+    const list = [exportRow("with-song-new", {}, "with"), exportRow("social-new", {}, "without"), exportRow("social-old", {}, "without")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await toMusic();
+    expect(await screen.findByTestId("export-notice")).toHaveTextContent("Switched to social-new");
+    expect(screen.getByTestId("export-notice")).toHaveTextContent("leaves out the song");
+    expect(screen.queryByTestId("music-blocked-reason")).toBeNull();
+    expect(screen.queryByTestId("export-for-social")).toBeNull();
+    expect(next()).toBeEnabled();
+    // Back on Media, the switched-to export is the one selected.
+    fireEvent.click(screen.getByTestId("rail-media"));
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("social-new.mp4");
+  });
+
+  it("offers Export for social only when no finished export fits", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("with-song-new", {}, "with"), exportRow("with-song-old", {}, "with")] as ComposerExports;
+    const { onExportRequested } = renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await toMusic();
+    expect(await screen.findByTestId("music-blocked-reason")).toHaveTextContent("This export doesn't match the music plan");
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+    fireEvent.click(screen.getByTestId("export-for-social"));
+    expect(onExportRequested).toHaveBeenCalledTimes(1);
+  });
+
+  it("an export that predates the audio record never counts as a match", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("with-song", {}, "with"), exportRow("undated", {}, "none")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await toMusic();
+    expect(await screen.findByTestId("export-for-social")).toBeInTheDocument();
+  });
+
+  it("an export the user chose for this plan is not swapped: the block says why and offers the one that fits", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("with-song", {}, "with"), exportRow("social", {}, "without")] as ComposerExports;
+    // Opened on the song export on purpose (Post…); the plan wants the song left out.
+    renderComposer({
+      intent: { pieceId: "p1", pieceName: "Cutdown v3", exportPath: "/s/p1/exports/with-song.mp4" },
+      latestExport: list[0],
+      exports: list,
+    });
+    await toMusic();
+    expect(await screen.findByTestId("music-blocked-reason")).toHaveTextContent("This export has the song; your plan posts without it.");
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+    expect(screen.queryByTestId("export-for-social")).toBeNull();
+    fireEvent.click(screen.getByTestId("use-matching-export"));
+    await waitFor(() => expect(next()).toBeEnabled());
+    expect(screen.queryByTestId("music-blocked-reason")).toBeNull();
+  });
+
+  it("a pick made under one plan is swapped, with an explanation, once the plan changes and it no longer fits", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("social", {}, "without"), exportRow("with-song", {}, "with")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await waitFor(() => expect(next()).toBeEnabled());
+    // The user picks the social (no-song) export for the plan as it stands…
+    fireEvent.change(await screen.findByRole("combobox", { name: "Export file" }), { target: { value: "/s/p1/exports/social.mp4" } });
+    fireEvent.click(next()); // media -> targets
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt")); // post to Instagram only
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    await screen.findByTestId("music-step");
+    // …and no swap happens while the plan still fits it.
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+    // Then the user keeps the song in: the pick no longer fits, and the composer says what it moved to.
+    fireEvent.click(screen.getByTestId("music-block-acct-ig"));
+    expect(await screen.findByTestId("export-notice")).toHaveTextContent("Switched to with-song");
+    expect(screen.getByTestId("export-notice")).toHaveTextContent("keeps the song");
+    expect(next()).toBeEnabled();
+  });
+
+  it("does nothing before the plan is known: a song export is not swapped away on the first steps", async () => {
+    pieceCopyrighted = SONG;
+    neverReports = new Set(["acct-ig", "acct-tt"]);
+    const list = [exportRow("with-song", {}, "with"), exportRow("social", {}, "without")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await toMusic();
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+    fireEvent.click(screen.getByTestId("rail-media"));
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("with-song.mp4");
+  });
+});
+
+describe("Composer — the export this post is waiting for", () => {
+  it("while it renders, the Media step says so with the record's own progress, and offers no second export", async () => {
+    renderKeeping({ awaitedExport: record("social", { status: "running", progress: { done: 40, total: 100, unit: "%", etaMs: null } }) });
+    const box = await screen.findByTestId("export-await");
+    expect(box).toHaveTextContent("Exporting social for this post");
+    expect(screen.getByTestId("export-await-line")).toHaveTextContent("Exporting 40%");
+    expect(screen.getByTestId("media-step")).toHaveTextContent("Your export is rendering");
+    expect(screen.queryByRole("button", { name: "Export & post" })).toBeNull();
+  });
+
+  it("a queued export says why it waits", async () => {
+    renderKeeping({
+      awaitedExport: record("social", { status: "queued", waiting: { reason: "memory", message: "Waiting for memory — 2 exports running" } }),
+    });
+    expect(await screen.findByTestId("export-await-line")).toHaveTextContent("Waiting for memory — 2 exports running");
+  });
+
+  it("when it finishes it is selected for the user, who can go on", async () => {
+    const { update } = renderKeeping({ awaitedExport: record("social", { status: "running" }) });
+    await screen.findByTestId("export-await");
+    expect(screen.queryByTestId("composer-next")).toBeNull();
+
+    const done = exportRow("social", {}, "without") as unknown as LatestExportRow;
+    update({
+      latestExport: done,
+      exports: [done] as ComposerExports,
+      awaitedExport: record("social", { status: "done", path: done.filePath }),
+    });
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("social.mp4");
+    expect(screen.queryByTestId("export-await")).toBeNull();
+    expect(screen.getByTestId("export-notice")).toHaveTextContent("Your new export social");
+    await waitFor(() => expect(next()).toBeEnabled());
+  });
+
+  it("selects it over an older export the composer had already picked", async () => {
+    const older = exportRow("older") as unknown as LatestExportRow;
+    const { update } = renderKeeping({ latestExport: older, exports: [older] as ComposerExports, awaitedExport: record("social", { status: "running" }) });
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("older.mp4");
+    const done = exportRow("social", {}, "without") as unknown as LatestExportRow;
+    update({ latestExport: done, exports: [done, older] as ComposerExports, awaitedExport: record("social", { status: "done", path: done.filePath }) });
+    await waitFor(() => expect(screen.getByTestId("export-line")).toHaveTextContent("social.mp4"));
+  });
+
+  it("a failed export is said so in the composer, with its reason, and Try again asks for the dialog again", async () => {
+    const { onExportRequested } = renderKeeping({ awaitedExport: record("social", { status: "failed", error: "ffmpeg ran out of memory" }) });
+    const box = await screen.findByTestId("export-await");
+    expect(box).toHaveTextContent("The export social failed: ffmpeg ran out of memory");
+    fireEvent.click(screen.getByTestId("export-await-retry"));
+    expect(onExportRequested).toHaveBeenCalledTimes(1);
+    // The Media step is back to offering to export, not stuck "rendering".
+    expect(screen.getByTestId("media-step")).not.toHaveTextContent("Your export is rendering");
+    fireEvent.click(screen.getByTestId("export-await-dismiss"));
+    expect(screen.queryByTestId("export-await")).toBeNull();
+  });
+
+  it("a cancelled export is said so too", async () => {
+    renderKeeping({ awaitedExport: record("social", { status: "cancelled" }) });
+    expect(await screen.findByTestId("export-await")).toHaveTextContent("The export social was cancelled.");
+    expect(screen.getByTestId("export-await-retry")).toBeInTheDocument();
+  });
+
+  it("does not offer Export for social on the Music step while one is already rendering", async () => {
+    pieceCopyrighted = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+    const withSong = exportRow("with-song", {}, "with") as unknown as LatestExportRow;
+    renderKeeping({
+      latestExport: withSong,
+      exports: [withSong] as ComposerExports,
+      awaitedExport: record("social", { status: "running" }),
+    });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // media -> targets
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(await screen.findByTestId("music-blocked-reason")).toBeInTheDocument();
+    expect(screen.queryByTestId("export-for-social")).toBeNull();
+    expect(screen.getByTestId("export-await")).toBeInTheDocument();
+  });
+});
+
+type LatestExportRow = NonNullable<React.ComponentProps<typeof Composer>["latestExport"]>;
+
+
+describe("Composer — pins, notices and the hand-offs it stops handing on", () => {
+  const SONG = [{ fileId: "s", name: "s.mp3", clipSeconds: 10 }];
+  const NO_PIN = { pieceId: "p1", pieceName: "Cutdown v3" };
+  const toTargets = async () => {
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next());
+  };
+
+  it("says what differs, and offers the fitting export, when the pick does not fit but another does; only 'export it' when none does", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("social", {}, "without"), exportRow("with-song", {}, "with")] as ComposerExports;
+    renderComposer({ intent: { ...NO_PIN, exportPath: "/s/p1/exports/with-song.mp4" }, latestExport: list[0], exports: list });
+    await toTargets();
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next());
+    const reason = await screen.findByTestId("music-blocked-reason");
+    expect(reason).toHaveTextContent("This export has the song; your plan posts without it.");
+    expect(reason).not.toHaveTextContent("export it for a social post first");
+    expect(screen.getByTestId("use-matching-export")).toBeInTheDocument();
+    expect(screen.queryByTestId("export-for-social")).toBeNull();
+  });
+
+  it("a Post… export is pinned to the plan it first meets, not to a guess: a without-song export under an include plan is swapped", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("social", {}, "without"), exportRow("with-song", {}, "with")] as ComposerExports;
+    // Post… on the no-song export, but the plan (Instagram only, keep the song) needs the one with it.
+    renderComposer({ intent: { ...NO_PIN, exportPath: "/s/p1/exports/social.mp4" }, latestExport: list[0], exports: list });
+    await toTargets();
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt"));
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    await screen.findByTestId("music-step");
+    expect(screen.queryByTestId("export-notice")).toBeNull(); // strip plan: the no-song export fits and stays
+    fireEvent.click(screen.getByTestId("music-block-acct-ig")); // include
+    expect(await screen.findByTestId("export-notice")).toHaveTextContent("Switched to with-song");
+  });
+
+  it("after a swap the pick is released: the plan going A -> B -> A swaps back instead of blocking", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("no-song", {}, "without"), exportRow("with-song", {}, "with")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await waitFor(() => expect(next()).toBeEnabled());
+    // The user picks the no-song export under the plan as it stands.
+    fireEvent.change(await screen.findByRole("combobox", { name: "Export file" }), { target: { value: "/s/p1/exports/no-song.mp4" } });
+    fireEvent.click(next()); // media -> targets
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt")); // Instagram only
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music (plan: without the song, which fits)
+    await screen.findByTestId("music-step");
+    fireEvent.click(screen.getByTestId("music-block-acct-ig")); // plan B: with the song -> swaps
+    expect(await screen.findByTestId("export-notice")).toHaveTextContent("Switched to with-song");
+    // Plan A again: post to TikTok only (it reports "without the song").
+    fireEvent.click(composerBack()); // music -> targets
+    fireEvent.click(screen.getByTestId("target-toggle-acct-tt"));
+    fireEvent.click(screen.getByTestId("target-toggle-acct-ig"));
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // targets -> music
+    expect(await screen.findByTestId("export-notice")).toHaveTextContent("Switched to no-song");
+    expect(screen.queryByTestId("music-blocked-reason")).toBeNull();
+    expect(next()).toBeEnabled();
+  });
+
+  it("a swap's notice goes away with its step and with its plan", async () => {
+    pieceCopyrighted = SONG;
+    const list = [exportRow("with-song-new", {}, "with"), exportRow("social", {}, "without")] as ComposerExports;
+    renderComposer({ intent: NO_PIN, latestExport: list[0], exports: list });
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next());
+    consentTikTok();
+    await waitFor(() => expect(next()).toBeEnabled());
+    fireEvent.click(next()); // music: swaps
+    expect(await screen.findByTestId("export-notice")).toBeInTheDocument();
+    fireEvent.click(next()); // caption
+    await waitFor(() => expect(screen.getByTestId("rail-caption")).toHaveAttribute("aria-current", "step"));
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+  });
+
+  it("an adopted awaited export is reported handled once, and a dismissed failure too", async () => {
+    const onAwaitedHandled = vi.fn();
+    const done = exportRow("social", {}, "without") as unknown as LatestExportRow;
+    const { update } = renderKeeping({ onAwaitedHandled, awaitedExport: record("social", { status: "running" }) });
+    await screen.findByTestId("export-await");
+    expect(onAwaitedHandled).not.toHaveBeenCalled();
+    update({ latestExport: done, exports: [done] as ComposerExports, awaitedExport: record("social", { status: "done", path: done.filePath }), onAwaitedHandled });
+    await waitFor(() => expect(onAwaitedHandled).toHaveBeenCalledTimes(1));
+
+    const dismissed = vi.fn();
+    cleanup();
+    renderKeeping({ onAwaitedHandled: dismissed, awaitedExport: record("x", { status: "failed", error: "boom" }) });
+    fireEvent.click(await screen.findByTestId("export-await-dismiss"));
+    expect(dismissed).toHaveBeenCalledTimes(1);
+  });
+
+  it("another export finishing meanwhile is not adopted: only the awaited one is", async () => {
+    const older = exportRow("older") as unknown as LatestExportRow;
+    const other = exportRow("other", {}, "without") as unknown as LatestExportRow;
+    const { update } = renderKeeping({ latestExport: older, exports: [older] as ComposerExports, awaitedExport: record("social", { status: "running" }) });
+    expect(await screen.findByTestId("export-line")).toHaveTextContent("older.mp4");
+    update({ latestExport: other, exports: [other, older] as ComposerExports, awaitedExport: record("social", { status: "running" }) });
+    await screen.findByTestId("export-await");
+    expect(screen.getByTestId("export-line")).toHaveTextContent("older.mp4");
+    expect(screen.queryByTestId("export-notice")).toBeNull();
+  });
+
+  it("a finished export the composer cannot read says so instead of the panel just vanishing", async () => {
+    // Done, but the record has no size: it never enters the list of finished exports.
+    renderKeeping({ awaitedExport: record("odd", { status: "done", path: "/s/p1/exports/odd.mp4", width: null, height: null }) });
+    const box = await screen.findByTestId("export-await");
+    expect(box).toHaveTextContent("finished, but libi can't read its file");
+    expect(screen.getByTestId("export-await-retry")).toBeInTheDocument();
   });
 });

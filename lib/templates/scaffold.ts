@@ -15,6 +15,7 @@ import {
   TEMPLATE_LIMITS,
   TEMPLATE_TAG_RE,
   type TemplateAsset,
+  type TemplateMusicLink,
   type TemplateSlot,
   type TemplateSource,
   type TemplateText,
@@ -27,6 +28,7 @@ export {
   TEMPLATE_TAG_RE,
   TEMPLATE_LIMITS,
   type TemplateAsset,
+  type TemplateMusicLink,
   type TemplateSlot,
   type TemplateSource,
   type TemplateText,
@@ -75,6 +77,7 @@ export interface TemplateScaffold {
   overlays: TemplateOverlay[];
   audioClips: TemplateAudioClip[];
   assets: TemplateAsset[];
+  musicLinks?: TemplateMusicLink[];
   fonts: Array<{ family: string; assetRef: string }>;
   captionStyles: Array<{ id: string; fields: Record<string, unknown> }>;
 }

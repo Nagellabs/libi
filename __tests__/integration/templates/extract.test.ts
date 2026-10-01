@@ -7,13 +7,25 @@ import { seedTemplateFixturePiece, type FixtureIds } from "@/__tests__/helpers/t
 import { validateScaffold } from "@/lib/templates/scaffold";
 import { eq } from "drizzle-orm";
 import { files } from "@/lib/db/schema/sqlite";
+import { effectiveRights } from "@/lib/audio-rights/read";
 
 let testDb: ReturnType<typeof createTestDb>;
 let storageDir: string;
 vi.mock("@/lib/db/client", () => ({ getDb: () => testDb }));
 vi.mock("@/lib/storage", () => ({ getStorage: async () => new LocalFileStorage(storageDir) }));
+// The one rights reader, passed through; a test may make it answer a value no
+// stored row can hold (the stored schema already caps what it parses).
+vi.mock("@/lib/audio-rights/read", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/audio-rights/read")>();
+  return { ...real, effectiveRights: vi.fn(real.effectiveRights) };
+});
 
 import { extractScaffold, slugifyKey, uniqueKey } from "@/lib/templates/extract";
+
+/** A copyrighted stamp that names no song — what a remote import carries. An
+ *  unstamped file reads as the user's own (owner decision 2026-09-28), so the
+ *  copyrighted cases stamp explicitly. */
+const COPYRIGHTED_NO_TRACK = JSON.stringify({ class: "copyrighted", decidedBy: "provenance", decidedAt: "2026-09-27T00:00:00.000Z" });
 
 describe("extractScaffold", () => {
   let pieceId: string;
@@ -140,6 +152,89 @@ describe("extractScaffold", () => {
     expect(logo.contentType).toBe("image/png");
     expect(validateScaffold(r.scaffold).ok).toBe(true);
     expect(r.warnings).toEqual([]);
+  });
+
+  it("a copyrighted song becomes a music link (no bytes); a copyrighted video becomes a slot", async () => {
+    testDb.update(files).set({ audioRights: JSON.stringify({ class: "copyrighted", track: { title: "Espresso", artist: "Sabrina Carpenter" }, source: { url: "https://www.youtube.com/watch?v=abc", site: "youtube" }, decidedBy: "agent", decidedAt: "x" }) }).where(eq(files.id, ids.audioFileId)).run();
+    testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK }).where(eq(files.id, ids.videoFileId)).run();
+    const r = await extractScaffold(pieceId);
+    expect(validateScaffold(r.scaffold).ok).toBe(true);
+    expect(r.scaffold.musicLinks).toEqual([{ ref: "espresso", track: { title: "Espresso", artist: "Sabrina Carpenter" }, sourceUrl: "https://www.youtube.com/watch?v=abc" }]);
+    const music = r.scaffold.audioClips.find((c) => c.key === "music")!;
+    expect(music.source).toEqual({ musicRef: "espresso" });
+    expect(r.copies.map((c) => c.rel)).not.toContain("assets/music.mp3");
+    expect(r.copies.map((c) => c.rel)).not.toContain("assets/background-clip.mp4");
+    expect((r.scaffold.overlays.find((o) => o.key === "background") as { source: unknown }).source).toEqual({ slot: expect.any(String) });
+    expect(r.warnings).toContain("music not included: Espresso — Sabrina Carpenter; applying the template leaves it out until the agent fetches it");
+    expect(r.warnings.some((w) => /bg\.mp4 carries copyrighted audio; video overlay "background" is now the unfilled slot/.test(w))).toBe(true);
+  });
+
+  // Owner decision 2026-09-28: an unstamped file is the user's own upload, so
+  // the template carries its bytes like any other owned asset.
+  it("an unstamped (null rights) audio file is the user's own: carried as bytes, no music link", async () => {
+    testDb.update(files).set({ audioRights: null }).where(eq(files.id, ids.audioFileId)).run();
+    const r = await extractScaffold(pieceId);
+    expect(validateScaffold(r.scaffold).ok).toBe(true);
+    expect(r.scaffold.musicLinks ?? []).toEqual([]);
+    expect(r.scaffold.audioClips.find((c) => c.key === "music")!.source).toEqual({ assetRef: expect.any(String) });
+    expect(r.copies.map((c) => c.rel)).toContain("assets/music.mp3");
+  });
+
+  // Task 20 review, Minor 4: a copyrighted file with no track (a remote import).
+  it("a copyrighted audio file with no track becomes a music link named by the file, with no source link", async () => {
+    testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK }).where(eq(files.id, ids.audioFileId)).run();
+    const r = await extractScaffold(pieceId);
+    expect(validateScaffold(r.scaffold).ok).toBe(true);
+    expect(r.scaffold.musicLinks).toEqual([{ ref: "music", track: { title: "Music" } }]);
+    expect(r.scaffold.audioClips.find((c) => c.key === "music")!.source).toEqual({ musicRef: "music" });
+    expect(r.copies.map((c) => c.rel)).not.toContain("assets/music.mp3");
+    expect(r.warnings).toContain("music not included: Music; applying the template leaves it out until the agent fetches it");
+  });
+
+  // Task 20 review, Minor 2: track.title has min(1) in the scaffold schema.
+  it("a file with an empty name falls back to its filename for the music link's title", async () => {
+    testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK, name: "" }).where(eq(files.id, ids.audioFileId)).run();
+    const r = await extractScaffold(pieceId);
+    expect(validateScaffold(r.scaffold).ok).toBe(true);
+    expect(r.scaffold.musicLinks).toEqual([{ ref: "music-mp3", track: { title: "music.mp3" } }]);
+  });
+
+  // Task 20 review, Minor 2: a link the scaffold would refuse is not kept.
+  it("a source link over the scaffold's url cap is left off (the scaffold stays valid)", async () => {
+    const long = `https://www.youtube.com/watch?v=${"a".repeat(2100)}`;
+    testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK }).where(eq(files.id, ids.audioFileId)).run();
+    vi.mocked(effectiveRights).mockImplementation((f) =>
+      (f as { id?: string }).id === ids.audioFileId
+        ? { class: "copyrighted", track: { title: "Espresso" }, source: { url: long }, decidedBy: "agent", decidedAt: "x" }
+        : null,
+    );
+    try {
+      const r = await extractScaffold(pieceId);
+      expect(validateScaffold(r.scaffold).ok).toBe(true);
+      expect(r.scaffold.musicLinks).toEqual([{ ref: "espresso", track: { title: "Espresso" } }]);
+    } finally {
+      vi.mocked(effectiveRights).mockReset();
+      const real = await vi.importActual<typeof import("@/lib/audio-rights/read")>("@/lib/audio-rights/read");
+      vi.mocked(effectiveRights).mockImplementation(real.effectiveRights);
+    }
+  });
+
+  // Task 20 review, Minor 4: a STANDALONE clip on a copyrighted video file is
+  // a song like any other — named, never carried. (The video overlay on that
+  // file still becomes a slot; only an INLINE clip follows its overlay.)
+  it("a standalone clip on a copyrighted VIDEO file becomes a music link", async () => {
+    const { loadManifest, saveManifest } = await import("@/lib/composition/persistence");
+    const m = await loadManifest(pieceId);
+    const clip = m.audioClips!.find((c) => c.id === ids.clipB)!;
+    clip.fileId = ids.videoFileId;
+    await saveManifest(pieceId, m);
+    testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK }).where(eq(files.id, ids.videoFileId)).run();
+    const r = await extractScaffold(pieceId);
+    expect(validateScaffold(r.scaffold).ok).toBe(true);
+    expect(r.scaffold.musicLinks).toEqual([{ ref: "background-clip", track: { title: "Background clip" } }]);
+    expect(r.scaffold.audioClips.find((c) => c.key === "music")!.source).toEqual({ musicRef: "background-clip" });
+    expect(r.copies.map((c) => c.rel)).not.toContain("assets/background-clip.mp4");
+    expect((r.scaffold.overlays.find((o) => o.key === "background") as { source: unknown }).source).toEqual({ slot: expect.any(String) });
   });
 
   // Final re-review 1, Minor: a file outside the media allowlist (HEIC, BMP,

@@ -3,9 +3,9 @@
  *
  * ## Why this exists
  *
- * The vitest global setup (`__tests__/setup/isolate-libi-home.ts`) repoints
- * `LIBI_HOME` at a per-run temp dir so tests can never touch the developer's
- * real `~/.libi`. Everything the uv-managed Python sidecar needs is derived
+ * The vitest setup (`__tests__/setup/isolate-libi-home.ts` plus
+ * `per-worker-libi-home.ts`) repoints `LIBI_HOME` at a per-worker temp dir
+ * so tests can never touch the developer's real `~/.libi`. Everything the uv-managed Python sidecar needs is derived
  * from `getLibiHome()`:
  *
  *   - `uvPath()`        → `<LIBI_HOME>/bin/uv`   (falls back to bare `"uv"`)

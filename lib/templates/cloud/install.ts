@@ -84,7 +84,9 @@ export type InstallErrorCode =
   | "code_blocked"
   | "rejected"
   | "stopped"
-  | "failed";
+  | "failed"
+  /** Not the install's own: the `template_install` job refused a catalog changed since it was queued (catalog-source.ts#catalogForQueuedJob). */
+  | "catalog_changed";
 
 export type InstallResult =
   | { ok: true; templateId: string; version: number; reinstalled: boolean }

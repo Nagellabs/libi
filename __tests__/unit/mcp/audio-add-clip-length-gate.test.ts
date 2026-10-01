@@ -15,6 +15,7 @@ vi.mock("@/lib/db/client", () => ({
 }));
 
 import { audioAddClip } from "@/mcp/tools/audio-clip-tools";
+import { audioAddClipSchema } from "@/mcp/tools/schemas";
 
 const ctx = { pieceId: "p1" };
 const base = { fileId: "f1", kind: "standalone" as const, startTime: 0 };
@@ -68,6 +69,16 @@ describe("audioAddClip length gate", () => {
     const r = await audioAddClip(ctx, base as never);
     expect(r.success).toBe(true);
     expect(saveManifest.mock.calls[0][1].audioClips[0].duration).toBe(229);
+  });
+
+  it("adds at full length on an EMPTY piece without asking (the first asset sets the length)", async () => {
+    loadManifest.mockResolvedValue({ overlays: [] });
+    const r = await audioAddClip(ctx, base as never);
+    expect(r.success).toBe(true);
+  });
+
+  it("the lengthPolicy description names the empty-piece exemption", () => {
+    expect(audioAddClipSchema.shape.lengthPolicy.description).toMatch(/empty piece/i);
   });
 
   it("gates on the clip's END, not its raw length (startTime counts)", async () => {

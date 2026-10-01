@@ -25,6 +25,7 @@ import {
   slotUnitPath,
   slotSketchPath,
   cardSketchesDir,
+  isSafeCardRelativePath,
 } from "./paths";
 import { migrateRawCardSketches } from "./migrate-sketches";
 import { DEFAULT_ROUGH_RENDER } from "./default-render-unit";
@@ -254,6 +255,19 @@ export async function addStoryboardCard(
     throw new Error(
       `invalid card id ${JSON.stringify(requestedId.slice(0, 80))}: use letters, digits, "-" and "_", ` +
         `with dots only between them (e.g. "s1-hook"), or omit it to get one generated`,
+    );
+  }
+  // `render.file` is agent-supplied path text as well, joined under the card's folder and written
+  // to below. Storage containment only keeps it inside the PIECE folder (`../x.png` lands beside
+  // the card, `../../` in the storyboard root); hold every segment to the stored-name rule so the
+  // unit stays inside its own card. Same refusal shape, same point: before anything is written.
+  const renderFile = input.render?.file;
+  if (renderFile !== undefined && !isSafeCardRelativePath(renderFile)) {
+    throw new Error(
+      `invalid card render file ${JSON.stringify(String(renderFile).slice(0, 80))}: use a relative path ` +
+        `inside the card folder, "/"-separated, with no "." or ".." segment, no ":" and no segment ending in "." or a space ` +
+        `(e.g. "sketches/sk_1/unit.jsx"), ` +
+        `or omit render to get the default sketch`,
     );
   }
   return mutateStoryboard(pieceId, async (loaded) => {

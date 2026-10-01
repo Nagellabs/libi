@@ -512,6 +512,20 @@
       "when": 1790398030483,
       "tag": "0072_goofy_dagger",
       "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "6",
+      "when": 1790520983268,
+      "tag": "0073_safe_squirrel_girl",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "6",
+      "when": 1790696428885,
+      "tag": "0074_cute_quentin_quire",
+      "breakpoints": true
     }
   ]
 }

@@ -24,6 +24,8 @@ vi.mock("@/lib/agents/libi-registration", async () => {
 // The login-shell PATH the resolver's probe last delivered: none unless a case sets one.
 const login = vi.hoisted(() => ({ dirs: null as string[] | null }));
 vi.mock("@/lib/agents/cli/login-shell-path", () => ({ lastLoginShellPathDirs: () => login.dirs }));
+// Windows' counterpart (the registry's PATH) is never read off Windows.
+vi.mock("@/lib/agents/cli/windows-registry-path", () => ({ lastWindowsRegistryPathDirs: () => null, refreshWindowsRegistryPath: async () => null }));
 
 import { captureStandbyFreshness, staleStandbyReason } from "@/lib/sessions/standby-freshness";
 import { __resetSetupActivity, noteSetupTerminalClosed, noteSetupTerminalOpened } from "@/lib/terminal/setup-activity";

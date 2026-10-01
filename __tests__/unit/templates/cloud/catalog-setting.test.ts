@@ -73,6 +73,10 @@ describe("parseDevOrigin", () => {
     expect(parseDevOrigin("https://libi.nagellabs.com.evil.example")).toMatchObject({ ok: true });
     expect(parseDevOrigin("https://staging.libi.nagellabs.com")).toMatchObject({ ok: true });
   });
+  it("refuses a host too long for the desktop shell's native confirm dialog (m-C2)", async () => {
+    const { parseDevOrigin } = await fresh();
+    expect(parseDevOrigin(`http://${"a".repeat(250)}:3300`)).toEqual({ ok: false, error: "That address is too long for a web address." });
+  });
   it("names only https *.vercel.app origins as Vercel deployments", async () => {
     const { isVercelPreviewOrigin } = await fresh();
     expect(isVercelPreviewOrigin(PREVIEW)).toBe(true);
@@ -291,7 +295,7 @@ describe("a dev build is decided from libi's own code, never the caller's cwd (r
 
   it("an npx-installed `serve-mcp` started inside a git worktree reads Production, ignores the stored Development choice and never sends the token", async () => {
     const { installed, project } = layout();
-    vi.doMock("@/lib/runtime/package-root", () => ({ packageRoot: () => installed, findPackageRoot: () => installed }));
+    vi.doMock("@/lib/runtime/package-root", () => ({ packageRoot: () => installed, findPackageRoot: () => installed, packageRootFound: () => true }));
     const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
     try {
       const m = await fresh();
@@ -303,6 +307,48 @@ describe("a dev build is decided from libi's own code, never the caller's cwd (r
     } finally {
       cwd.mockRestore();
     }
+  });
+
+  // Review N1: inside a Turbopack-bundled Next server `__dirname` is `/ROOT/…` and the walk finds
+  // nothing. Then only the dev launcher's marker (bin/libi.js) makes it a dev build — never the cwd,
+  // which a future entry point might leave at the user's own project, a git repo.
+  describe("when libi can't find its own code", () => {
+    const BUNDLED = "/ROOT/lib/templates/cloud";
+    it("the walk from a /ROOT/… __dirname finds nothing", async () => {
+      const { packageRootFound } = await import("@/lib/runtime/package-root");
+      expect(packageRootFound(BUNDLED)).toBe(false);
+      expect(packageRootFound(__dirname)).toBe(true);
+    });
+    it("no marker: not a dev build, even with the cwd a git checkout", async () => {
+      const m = await fresh();
+      const { project } = layout();
+      expect(m.isDevBuildFrom(BUNDLED, { LIBI_RUNTIME_SOURCE: undefined }, project)).toBe(false);
+    });
+    it("the marker naming the cwd, with a .git there: a dev build", async () => {
+      const m = await fresh();
+      const { project } = layout();
+      expect(m.isDevBuildFrom(BUNDLED, { LIBI_DEV_CHECKOUT_ROOT: project, LIBI_RUNTIME_SOURCE: undefined }, project)).toBe(true);
+    });
+    it("the marker naming another folder than the cwd: not a dev build", async () => {
+      const m = await fresh();
+      const { project } = layout();
+      const elsewhere = tmp();
+      fs.mkdirSync(path.join(elsewhere, ".git"));
+      expect(m.isDevBuildFrom(BUNDLED, { LIBI_DEV_CHECKOUT_ROOT: elsewhere, LIBI_RUNTIME_SOURCE: undefined }, project)).toBe(false);
+    });
+    it("the marker naming the cwd without a .git, or a packaged runtime: not a dev build", async () => {
+      const m = await fresh();
+      const plain = tmp();
+      expect(m.isDevBuildFrom(BUNDLED, { LIBI_DEV_CHECKOUT_ROOT: plain, LIBI_RUNTIME_SOURCE: undefined }, plain)).toBe(false);
+      const { project } = layout();
+      expect(m.isDevBuildFrom(BUNDLED, { LIBI_DEV_CHECKOUT_ROOT: project, LIBI_RUNTIME_SOURCE: "bundled" }, project)).toBe(false);
+    });
+    it("a root that IS found keeps today's answer, whatever the marker says", async () => {
+      const m = await fresh();
+      const { installed, project } = layout();
+      expect(m.isDevBuildFrom(path.join(installed, "lib"), { LIBI_DEV_CHECKOUT_ROOT: project, LIBI_RUNTIME_SOURCE: undefined }, project)).toBe(false);
+      expect(m.isDevBuildFrom(__dirname, { LIBI_RUNTIME_SOURCE: undefined }, "/")).toBe(true);
+    });
   });
 
   it("the real dev checkout still reads the setting, whatever the cwd", async () => {

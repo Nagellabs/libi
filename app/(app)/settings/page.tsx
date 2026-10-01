@@ -45,10 +45,13 @@ export default function SettingsPage() {
   // Settings → Templates exists only in a dev build (its one card is the catalog switch).
   const catalog = useTemplatesCatalog();
   const devBuild = catalog.data?.devBuild === true;
-  // Known NOT to be a dev build (the view says so, or can't be read): no Templates
-  // panel at all — a `?tab=templates` link opens General instead. Until the view
-  // loads, the panel's own skeleton stands in.
-  const noTemplatesTab = !devBuild && (catalog.data !== undefined || catalog.isError);
+  // Known NOT to be a dev build (the view says so): no Templates panel at all — a
+  // `?tab=templates` link opens General instead (review M5). Until the view loads,
+  // the panel's own skeleton stands in. A view that FAILED to load hides the panel
+  // too, except where the URL asks for it: there the card's error and Retry stand
+  // in, so a dev build can recover without a reload (review N3). The trigger
+  // stays hidden until the view says dev build.
+  const noTemplatesTab = !devBuild && (catalog.data !== undefined || (catalog.isError && urlTab !== "templates"));
   const [tab, setTab] = useState<SettingsTab>(
     isSettingsTab(urlTab) ? urlTab : DEFAULT_TAB,
   );
@@ -215,8 +218,7 @@ export default function SettingsPage() {
               <div>
                 <h2 className="text-lg font-semibold">Export</h2>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Where exported videos go by default and which format/quality to start with.
-                  Each export still lets you override these in the dialog.
+                  Which format and quality new exports start with. Each export can still change them in the dialog.
                 </p>
               </div>
               <ExportTab />

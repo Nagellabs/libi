@@ -9,6 +9,9 @@ import { socialRoute, jsonBody } from "@/lib/social/route-helpers";
 import { createPostSchema, postLibiSchema } from "@/app/api/social/posts/route";
 import { serverLogger as logger } from "@/lib/logger";
 import { browserOnlyRefusal } from "@/lib/security/request-guard";
+import { goneCatalogTrack, goneTrackMessage } from "@/lib/social/music-validate";
+import { musicOfTarget } from "@/lib/social/post-music";
+import type { CreatePostInput, SocialPost } from "@/lib/social/types";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +53,16 @@ function actionFor(when: z.infer<typeof updatePostSchema>["when"]): "schedule" |
   return "edit";
 }
 
+/** An existing post's targets with the music libi stamped on them
+ *  (`metadata.libi.targetOptions`) — only the ones that carry a stamp. */
+function stampedTargets(post: SocialPost): CreatePostInput["targets"] {
+  return post.targets.flatMap((t, i) => {
+    const music = musicOfTarget(post, i);
+    const stamped = post.libi?.targetOptions?.[i];
+    return music && stamped ? [{ platform: stamped.platform, accountId: t.accountId, options: { ...stamped, music } }] : [];
+  });
+}
+
 /** Editing, scheduling, publishing and cancelling an existing post are the
  *  user's, from libi's own page (`browserOnlyRefusal`). No agent tool edits a
  *  post — `libi.post_piece` only creates drafts — so the `createdBy: "agent"`
@@ -76,6 +89,17 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ postId
         { error: "agent_draft_only", message: "An agent can only create a draft. Publishing and scheduling are the user's to do." },
         { status: 422 },
       );
+    }
+    // The same check `POST /api/social/posts` makes, when this write
+    // schedules or publishes. A reschedule of an existing draft carries no targets (the
+    // composer sends only `{requestId, when}`), so the post's own stamped
+    // targets are read back and checked instead.
+    if (patch.when?.mode === "schedule" || patch.when?.mode === "now") {
+      const bodyTargets = patch.targets;
+      const gone = await withAdapter(async (a) =>
+        goneCatalogTrack(a, bodyTargets ?? stampedTargets(await a.getPost(postId))),
+      );
+      if (gone) return NextResponse.json({ error: "validation", message: goneTrackMessage(gone) }, { status: 422 });
     }
     const providerId = getSocialSettings().providerId!;
     const result = await withAdapter((a) => a.updatePost(postId, patch));

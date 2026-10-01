@@ -38,4 +38,11 @@ export interface AgentSetup {
    *  does not fix. */
   install: true | null;
   signIn: AgentSignInDeclaration;
+  /**
+   * Where the agent reads its own config, as the user would type it — what a
+   * "couldn't load its configuration" message points at. `project` is relative
+   * to the folder the agent runs in (libi's agent folder, for its chat).
+   * Omitted when the agent has no such file libi can name.
+   */
+  configFiles?: { user: string; project: string };
 }

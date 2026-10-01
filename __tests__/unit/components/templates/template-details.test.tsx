@@ -59,7 +59,7 @@ function summary(over: Partial<TemplateSummary> = {}): TemplateSummary {
     slots: [], slotCount: 2, canvas: { width: 1080, height: 1920, fps: 30 }, duration: 3.5, usesTotal: 3, uses7d: 2, lastUsedAt: null,
     createdAt: "2026-09-23T00:00:00.000Z", updatedAt: "2026-09-23T00:00:00.000Z", hasPoster: true, hasExample: true,
     poster: "/api/templates/t1/media/poster.jpg", video: "/api/templates/t1/media/example.mp4", nickname: null, broken: null, otherCatalog: null,
-    mediaRev: 7, canRenderExample: true, sourcePieceName: "Source piece",
+    mediaRev: 7, canRenderExample: true, sourcePieceName: "Source piece", sourceEmpty: false,
     ...over,
   } as TemplateSummary;
 }

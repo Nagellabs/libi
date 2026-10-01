@@ -9,6 +9,11 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    // The e2e servers' own Next dirs (next.config.ts distDir, LIBI_NEXT_DIST_DIR).
+    ".next-e2e/**",
+    ".next-electron-e2e/**",
+    // The skill-eval scenario server's own Next dir (same mechanism).
+    ".next-skill-eval/**",
     "out/**",
     "build/**",
     "next-env.d.ts",

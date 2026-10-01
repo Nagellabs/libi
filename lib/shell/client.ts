@@ -7,6 +7,16 @@ interface ElectronApi {
   platform?: string;
   revealFile?: (absPath: string) => Promise<void>;
   pickDirectory?: (initialPath?: string) => Promise<string | null>;
+  /** Added in 0.1.17's shell; an older shell running a newer runtime lacks it. */
+  confirmPublish?: (args: ConfirmPublishArgs) => Promise<boolean | "refused">;
+  /** Added in 0.1.17's shell; an older shell running a newer runtime lacks it. */
+  copyFileToClipboard?: (absPath: string) => Promise<boolean>;
+}
+
+/** What the desktop app's native publish confirm names. */
+export interface ConfirmPublishArgs {
+  templateName: string;
+  catalogHost: string;
 }
 
 function bridge(): ElectronApi | undefined {
@@ -27,6 +37,18 @@ export async function revealFile(absPath: string): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: absPath }),
   });
+}
+
+/**
+ * Put an export FILE (not its path) on the OS clipboard through the desktop
+ * shell (electron/copy-file.ts). `true`: the file is on the clipboard.
+ * `false`: the shell refused or can't on this platform. `undefined`: no such
+ * bridge (the npx browser, an older shell) — the caller copies the path.
+ */
+export async function copyFileToClipboard(absPath: string): Promise<boolean | undefined> {
+  const api = bridge();
+  if (typeof api?.copyFileToClipboard !== "function") return undefined;
+  return (await api.copyFileToClipboard(absPath)) === true;
 }
 
 /** Open a native directory picker. Returns `null` if the user cancelled,
@@ -73,6 +95,35 @@ export async function pickFolder(initialPath?: string): Promise<PickFolderClient
   } catch (err) {
     return { status: "unavailable", reason: err instanceof Error ? err.message : String(err) };
   }
+}
+
+/** True iff this shell can show the native publish confirm (see `confirmPublish`). */
+export function hasNativePublishConfirm(): boolean {
+  return typeof bridge()?.confirmPublish === "function";
+}
+
+/**
+ * The desktop app's native "Publish … to the public catalog?" dialog, shown by
+ * Electron main (electron/confirm-publish.ts) — a gate page script and DOM
+ * automation can't answer. An EXTRA confirm before the review panel's own
+ * confirm POST, never a replacement for it.
+ *
+ * `true`: the user pressed Publish. `false`: anything else. `"refused"`: the
+ * shell won't show these arguments (the name breaks the catalog's single-line
+ * rule, say) — the caller says so, rather than reading it as a Cancel.
+ * `undefined`: no such dialog here — the web/npx studio, or an OLDER shell
+ * running this newer runtime — and the caller proceeds as it always has. A
+ * bridge that throws rejects: the caller must fail closed.
+ *
+ * It guards clicks inside the desktop window only; see
+ * lib/approval/extensions.ts LIMITATIONS for what it does not guard.
+ */
+export async function confirmPublish(args: ConfirmPublishArgs): Promise<boolean | "refused" | undefined> {
+  const api = bridge();
+  if (typeof api?.confirmPublish !== "function") return undefined;
+  const answer = await api.confirmPublish(args);
+  if (answer === "refused") return "refused";
+  return answer === true;
 }
 
 /** True iff the Electron preload bridge is available (matters for the

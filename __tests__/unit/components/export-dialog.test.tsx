@@ -1,26 +1,17 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
 const exportDefaults: { data: unknown } = { data: undefined };
 vi.mock("@/lib/queries/export-defaults", () => ({
   useExportDefaults: () => exportDefaults,
 }));
-vi.mock("@/lib/shell/client", () => ({
-  revealFile: vi.fn(),
-  pickDirectory: vi.fn(async () => undefined),
-  hasElectronBridge: () => false,
-}));
-// The dialog's success view reads social status for its "Post…" button —
-// mocked here (not exercised by this file's tests) so none of these renders
-// need a QueryClientProvider just to satisfy that one read.
-const socialStatus: { data: { providerId: string | null } | undefined } = { data: undefined };
-vi.mock("@/lib/queries/social", () => ({
-  useSocialStatus: () => socialStatus,
-}));
+const openExportInTab = vi.hoisted(() => vi.fn());
+vi.mock("@/hooks/exports/use-open-export", () => ({ openExportInTab }));
 
 import { ExportDialog } from "@/components/export/export-dialog";
+import { consumePostingIntent, isExportForPost, subscribePostingIntent } from "@/hooks/social/use-posting-intent";
 import type { UseExportFlowResult } from "@/hooks/editor/use-export-flow";
 
 /**
@@ -100,8 +91,6 @@ describe("ExportDialog form seeding", () => {
       format: "webm",
       quality: "1080p",
       graphicsQuality: "1440p",
-      folder: "/tmp/exports",
-      effectiveFolder: "/tmp/exports",
     };
     renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: true });
     // The seeded format renders as the selected Segmented chip.
@@ -266,12 +255,194 @@ describe("ExportDialog quality hint — orientation-aware presets", () => {
   });
 });
 
-// Final review F7: an export queued behind another in the export lane.
-describe("ExportDialog — waiting for another export", () => {
-  it("names the wait in the progress view, never '0 %'", () => {
-    const flow = { ...idleFlow(), status: "running", progress: { done: 0, total: 1, unit: "waiting", etaMs: null } } as unknown as UseExportFlowResult;
+// Spec 2026-09-29 §B2: Start queues the export and the dialog shows its form again — never a
+// progress view; the export's own record carries progress (Exports tab, canvas bar, finish toast).
+describe("ExportDialog — after Start", () => {
+  const queuedFlow = () =>
+    ({ ...idleFlow(), status: "queued", queued: { exportId: "exp_1", name: "My piece", pieceId: "p1" } }) as unknown as UseExportFlowResult;
+
+  it("shows the form again with a queued banner, ready for another export", () => {
+    const flow = queuedFlow();
     renderDialog({ hasDraft: true, hasSnapshot: false, flow });
-    expect(screen.getByTestId("export-waiting").textContent).toBe("Waiting for another export to finish");
-    expect(screen.queryByText(/^0%$/)).toBeNull();
+    expect(screen.getByTestId("export-queued")).toHaveTextContent("Export queued — see the Exports tab");
+    expect(screen.getByTestId("export-queued")).toHaveTextContent("My piece");
+    // The form is still there, and Export is enabled: nothing blocks a second Start.
+    expect(screen.getByDisplayValue("My piece")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Export another" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    expect(flow.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("links to the piece's Exports tab on that export, and closes", () => {
+    const onOpenChange = vi.fn();
+    render(
+      <ExportDialog
+        pieceId="p1"
+        pieceName="My piece"
+        compositionWidth={1920}
+        compositionHeight={1080}
+        flow={queuedFlow()}
+        hasSnapshot={false}
+        hasDraft
+        openOverride
+        onOpenChange={onOpenChange}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open the Exports tab" }));
+    expect(openExportInTab).toHaveBeenCalledWith({ pieceId: "p1", exportId: "exp_1" });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("closing a queued dialog resets the flow, so the next open starts on a clean form", () => {
+    const flow = queuedFlow();
+    renderDialog({ hasDraft: true, hasSnapshot: false, flow });
+    const footer = screen.getByRole("button", { name: "Export" }).parentElement as HTMLElement;
+    fireEvent.click(within(footer).getByRole("button", { name: "Close" }));
+    expect(flow.reset).toHaveBeenCalled();
+  });
+
+  describe("a social upload does not default to 4K", () => {
+    const base = {
+      pieceId: "p1", pieceName: "My piece", compositionWidth: 1080, compositionHeight: 1920, hasGraphics: true, hasSnapshot: false, hasDraft: true,
+    };
+    const dialog = (over: { openOverride: boolean; returnToPost: boolean }) => (
+      <ExportDialog {...base} flow={idleFlow()} {...over} />
+    );
+    const selected = (field: HTMLElement) =>
+      within(field).getAllByRole("button").find((b) => b.className.includes("bg-primary"))?.textContent;
+
+    it("opened from the composer, Videos & images and Text, code & 3D start at 1080p, and the user can change them", () => {
+      const { rerender } = render(dialog({ openOverride: false, returnToPost: true }));
+      rerender(dialog({ openOverride: true, returnToPost: true }));
+      expect(selected(mediaField())).toBe("1080p");
+      expect(selected(graphicsField())).toBe("1080p");
+      expect(screen.getByText("Output 1080×1920")).toBeInTheDocument();
+      fireEvent.click(within(mediaField()).getByRole("button", { name: "4K" }));
+      expect(selected(mediaField())).toBe("4K");
+    });
+
+    it("a WebM default is MP4 here (Instagram and TikTok want it), changeable, never saved, and back on the next plain open", () => {
+      exportDefaults.data = { format: "webm", quality: "4k", graphicsQuality: "4k" };
+      try {
+        const { rerender } = render(dialog({ openOverride: false, returnToPost: true }));
+        rerender(dialog({ openOverride: true, returnToPost: true }));
+        expect(screen.getByRole("button", { name: "MP4" }).className).toContain("bg-primary");
+        expect(screen.getByRole("button", { name: "WebM" }).className).not.toContain("bg-primary");
+        fireEvent.click(screen.getByRole("button", { name: "WebM" }));
+        expect(screen.getByRole("button", { name: "WebM" }).className).toContain("bg-primary");
+        // The stored defaults object is untouched.
+        expect(exportDefaults.data).toEqual({ format: "webm", quality: "4k", graphicsQuality: "4k" });
+        rerender(dialog({ openOverride: false, returnToPost: false }));
+        rerender(dialog({ openOverride: true, returnToPost: false }));
+        expect(screen.getByRole("button", { name: "WebM" }).className).toContain("bg-primary");
+      } finally {
+        exportDefaults.data = undefined;
+      }
+    });
+
+    it("the next ordinary open is back to what it was before the preset", () => {
+      exportDefaults.data = { format: "mp4", quality: "4k", graphicsQuality: "4k" };
+      try {
+        const { rerender } = render(dialog({ openOverride: false, returnToPost: true }));
+        rerender(dialog({ openOverride: true, returnToPost: true }));
+        expect(selected(mediaField())).toBe("1080p");
+        rerender(dialog({ openOverride: false, returnToPost: false }));
+        rerender(dialog({ openOverride: true, returnToPost: false }));
+        expect(selected(mediaField())).toBe("4K");
+        expect(selected(graphicsField())).toBe("4K");
+      } finally {
+        exportDefaults.data = undefined;
+      }
+    });
+  });
+
+  describe("opened from the post composer", () => {
+    const queued = { exportId: "exp_9", name: "My piece", pieceId: "p1" };
+
+    function renderFromPost(returnToPost: boolean, started: unknown, returnDraftPostId: string | null = null) {
+      const flow = idleFlow();
+      flow.start.mockResolvedValue(started);
+      const onOpenChange = vi.fn();
+      const seen: Array<{ pieceId: string; awaitExportId?: string | null; providerPostId?: string | null }> = [];
+      const off = subscribePostingIntent((i) => seen.push(i));
+      render(
+        <ExportDialog
+          pieceId="p1"
+          pieceName="My piece"
+          compositionWidth={1920}
+          compositionHeight={1080}
+          flow={flow}
+          hasSnapshot={false}
+          hasDraft
+          openOverride
+          onOpenChange={onOpenChange}
+          returnToPost={returnToPost}
+          returnDraftPostId={returnDraftPostId}
+        />,
+      );
+      return { flow, onOpenChange, seen, off };
+    }
+
+    it("after Start, hands the queued export to the Posting tab and closes", async () => {
+      const { onOpenChange, seen, off } = renderFromPost(true, queued);
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+      await waitFor(() => expect(seen).toHaveLength(1));
+      off();
+      consumePostingIntent();
+      expect(seen[0]).toMatchObject({ pieceId: "p1", awaitExportId: "exp_9" });
+      expect(onOpenChange).toHaveBeenCalledWith(false);
+      // …and remembers it was made for a post, so its finish toast can say "Continue post".
+      expect(isExportForPost("exp_9")).toBe(true);
+    });
+
+    it("carries the draft being edited back to the Posting tab", async () => {
+      const { seen, off } = renderFromPost(true, queued, "post_7");
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+      await waitFor(() => expect(seen).toHaveLength(1));
+      off();
+      consumePostingIntent();
+      expect(seen[0]).toMatchObject({ pieceId: "p1", awaitExportId: "exp_9", providerPostId: "post_7" });
+    });
+
+    it("a refused Start stays in the dialog and goes nowhere", async () => {
+      const { flow, onOpenChange, seen, off } = renderFromPost(true, null);
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+      await waitFor(() => expect(flow.start).toHaveBeenCalled());
+      off();
+      expect(seen).toEqual([]);
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
+
+    it("an ordinary open stays where it is after Start", async () => {
+      const { flow, onOpenChange, seen, off } = renderFromPost(false, queued);
+      fireEvent.click(screen.getByRole("button", { name: "Export" }));
+      await waitFor(() => expect(flow.start).toHaveBeenCalled());
+      off();
+      expect(seen).toEqual([]);
+      expect(onOpenChange).not.toHaveBeenCalled();
+    });
+  });
+
+  it("while the request is in flight, the button says Queuing… with a spinner and does not start again", () => {
+    const flow = { ...idleFlow(), status: "starting" } as unknown as UseExportFlowResult & { start: ReturnType<typeof vi.fn> };
+    renderDialog({ hasDraft: true, hasSnapshot: false, flow });
+    const button = screen.getByRole("button", { name: "Queuing…" });
+    expect(button).toHaveAttribute("aria-disabled", "true");
+    expect(button.querySelector("svg.animate-spin, svg[class*='animate-spin']")).not.toBeNull();
+    fireEvent.click(button);
+    expect(flow.start).not.toHaveBeenCalled();
+  });
+
+  it("a failed Start shows its error above the form", () => {
+    const flow = { ...idleFlow(), status: "failed", error: "Composition cannot be exported" } as unknown as UseExportFlowResult;
+    renderDialog({ hasDraft: true, hasSnapshot: false, flow });
+    expect(screen.getByText("Composition cannot be exported")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("My piece")).toBeInTheDocument();
+  });
+
+  it("shows no banner before anything is queued", () => {
+    renderDialog({ hasDraft: true, hasSnapshot: false });
+    expect(screen.queryByTestId("export-queued")).toBeNull();
   });
 });

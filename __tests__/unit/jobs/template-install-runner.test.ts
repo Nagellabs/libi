@@ -42,9 +42,11 @@ describe("template_install runner", () => {
     expect(templateInstallRunner.exclusiveResource).toBe(true);
   });
 
-  it("takes { cloudId, version? } and nothing else — no transient value can split the dedupe key", () => {
+  it("takes { cloudId, version?, source? } and nothing else — no transient value can split the dedupe key", () => {
     const schema = templateInstallRunner.paramsSchema;
     expect(schema.parse({ cloudId: ID })).toEqual({ cloudId: ID });
+    // The catalog it was queued on (review M2): stable, so it may key the job (template-install-catalog-pin.test.ts).
+    expect(schema.parse({ cloudId: ID, source: "https://libi.nagellabs.com" })).toEqual({ cloudId: ID, source: "https://libi.nagellabs.com" });
     expect(schema.parse({ cloudId: ID, version: 3 })).toEqual({ cloudId: ID, version: 3 });
     for (const bad of [{ cloudId: ID, force: true }, { cloudId: ID, toolCallId: "t1" }, { cloudId: "../etc" }, { cloudId: ID, version: 0 }, {}]) {
       expect(schema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);

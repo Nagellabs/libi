@@ -4,6 +4,7 @@ import { getJobManager } from "@/lib/jobs/manager";
 import { isTemplateInstallError, type TemplateInstallResult } from "@/lib/jobs/runners/template-install";
 import { isCancelledError } from "@/lib/jobs/types";
 import { navigationEmitter } from "@/lib/navigation-events";
+import { activeCatalogSource } from "@/lib/templates/cloud/catalog-setting";
 import { CLOUD_ID_PATTERN } from "@/lib/templates/cloud/constants";
 import type { InstallErrorCode } from "@/lib/templates/cloud/install";
 
@@ -29,6 +30,7 @@ const INSTALL_ERROR_COPY: Partial<Record<InstallErrorCode, string>> = {
   older_version: "A newer version of this template is already installed.",
   code_blocked: "Templates that run code can't be installed yet.",
   rejected: "This template didn't pass libi's checks, so it wasn't installed.",
+  catalog_changed: "The templates catalog changed before this install started. Try again.",
   stopped: "The install was stopped.",
 };
 const INSTALL_FAILED = "Couldn't install the template.";
@@ -46,7 +48,7 @@ function installFailure(err: unknown): { error: string; code?: InstallErrorCode 
  * re-download) is `discardOutput`, never a param, so it shares that one run's
  * key; a forced call that found a run in flight waits for it, then runs its own.
  */
-async function runInstall(params: { cloudId: string; version?: number }, force: boolean, retried = false): Promise<TemplateInstallResult> {
+async function runInstall(params: { cloudId: string; version?: number; source: string }, force: boolean, retried = false): Promise<TemplateInstallResult> {
   const jm = getJobManager();
   const enq = await jm.enqueue("template_install", params, { forceNew: true, discardOutput: force });
   if (enq.status === "matching_completed") throw new Error("the install could not be started");
@@ -86,7 +88,8 @@ export async function POST(req: Request): Promise<Response> {
   if (!parsed.success) return NextResponse.json({ ok: false, error: "cloudId is required" }, { status: 400 });
   const { cloudId, version, force } = parsed.data;
   try {
-    const r = await runInstall({ cloudId, ...(version !== undefined ? { version } : {}) }, force === true);
+    // The catalog the page is on now: the job installs from it even if the user switches before it starts.
+    const r = await runInstall({ cloudId, ...(version !== undefined ? { version } : {}), source: activeCatalogSource({ fresh: true }) }, force === true);
     navigationEmitter.emit("refresh_query", { queryKey: "templates" });
     return NextResponse.json({ ok: true, ...r });
   } catch (err) {

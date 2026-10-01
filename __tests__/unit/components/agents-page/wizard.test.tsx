@@ -490,7 +490,7 @@ describe("Wizard — step 2, install", () => {
   it("a usable CLI and a ready adapter enable Next, which reports the step and moves to sign-in", async () => {
     render(ui(2));
     expect(screen.getByText("Claude Code 2.1.250 is installed.")).toBeInTheDocument();
-    expect(screen.getByText("/usr/local/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText("/u/claude")).toBeInTheDocument();
     expect(screen.getByTestId("wizard-adapter")).toHaveTextContent("Claude Code support is downloaded.");
     await click(/^next$/i);
     expect(onStep).toHaveBeenCalledWith(3);
@@ -511,7 +511,7 @@ describe("Wizard — step 2, what the install step says", () => {
     job = installJob({ status: "running", progressDone: 22, progressTotal: 56, progressUnit: "MB" });
     render(ui(2));
     expect(screen.getByText("Claude Code 2.1.250 is installed.")).toBeInTheDocument();
-    expect(screen.getByText("/usr/local/bin/claude")).toBeInTheDocument();
+    expect(screen.getByText("/u/claude")).toBeInTheDocument();
     expect(screen.getByTestId("wizard-adapter-needed")).toHaveTextContent(
       "libi needs to download Claude Code support to run it in libi's chat (56 MB, one time).",
     );
@@ -550,6 +550,17 @@ describe("Wizard — step 2, what the install step says", () => {
     render(ui(2));
     expect(screen.getByTestId("wizard-adapter")).toHaveTextContent("Downloading Claude Code support was cancelled.");
     expect(screen.queryByTestId("wizard-adapter-needed")).toBeNull();
+  });
+
+  // PRV-5 (full-verification F13): under fnm the PATH hit is a per-shell shim folder that changes on every probe
+  // (`~/.local/state/fnm_multishells/<pid>_<ts>/bin/claude`). The card shows where the CLI really lives.
+  it("shows the CLI's real path, not the PATH hit it was found through", () => {
+    const shim = "/Users/me/.local/state/fnm_multishells/48213_1727400000000/bin/claude";
+    const real = "/Users/me/.local/share/fnm/node-versions/v22.9.0/installation/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+    status = usable({ cli: { path: shim, realPath: real, version: "2.1.250", meetsMinimum: true } });
+    render(ui(2));
+    expect(screen.getByText(real)).toBeInTheDocument();
+    expect(screen.queryByText(shim)).toBeNull();
   });
 
   it("Codex's lines name Codex and its own download size", () => {

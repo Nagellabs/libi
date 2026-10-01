@@ -17,6 +17,8 @@ import {
   toCampaign,
   toAdAccount,
   toDryRun,
+  toInstagramTrack,
+  toTikTokTrack,
 } from "@/lib/social/providers/zernio/normalize";
 
 describe("zernio normalize", () => {
@@ -367,5 +369,64 @@ describe("zernio normalize", () => {
     expect(toPost({ _id: "p3", metadata: { libi: { pieceId: "piece_1", targetOptions: [{ foo: "bar" }] } } }).libi?.targetOptions).toBeUndefined();
     // A tiktok entry with no actual tiktok settings block.
     expect(toPost({ _id: "p4", metadata: { libi: { pieceId: "piece_1", targetOptions: [{ platform: "tiktok" }] } } }).libi?.targetOptions).toBeUndefined();
+  });
+});
+
+describe("toCreateBody — music", () => {
+  const base = { requestId: "r", content: "c", media: [], when: { mode: "draft" as const }, libi: { pieceId: "p" } };
+  const tiktok = { privacyLevel: "PUBLIC_TO_EVERYONE", allowComment: true, allowDuet: true, allowStitch: true, commercialContentType: "none" as const, contentPreviewConfirmed: true, expressConsentGiven: true };
+
+  it("Instagram attach → audioConfiguration; soundName → audioName", () => {
+    const body = toCreateBody({ ...base, targets: [{ platform: "instagram", accountId: "ig", options: { platform: "instagram", instagram: { contentType: "reel" }, music: { mode: "attach", track: { id: "482851939985510", title: "Espresso" }, musicVolume: 80, originalVolume: 100, soundName: "my mix" } } }] }, true);
+    const p = (body.platforms as Array<Record<string, Record<string, unknown>>>)[0].platformSpecificData;
+    expect(p.audioConfiguration).toEqual({ audioId: "482851939985510", audioVolume: 80, videoVolume: 100 });
+    expect(p.audioName).toBe("my mix");
+  });
+
+  it("TikTok attach → per-target tiktokSettings.musicSoundInfo; draft → draft: true; strip → nothing", () => {
+    const body = toCreateBody({
+      ...base,
+      targets: [
+        { platform: "tiktok", accountId: "t1", options: { platform: "tiktok", tiktok, music: { mode: "attach", track: { id: "7400000000000000001", title: "Espresso" }, musicVolume: 80, originalVolume: 100, startMs: 12500, endMs: 42500 } } },
+        { platform: "tiktok", accountId: "t2", options: { platform: "tiktok", tiktok, music: { mode: "draft" } } },
+        { platform: "tiktok", accountId: "t3", options: { platform: "tiktok", tiktok, music: { mode: "strip" } } },
+      ],
+    }, true);
+    const rows = body.platforms as Array<Record<string, unknown>>;
+    expect(rows[0]).toEqual({ platform: "tiktok", accountId: "t1", platformSpecificData: { tiktokSettings: { musicSoundInfo: { musicSoundId: "7400000000000000001", musicSoundVolume: 80, musicSoundStart: 12500, musicSoundEnd: 42500 }, videoOriginalSoundVolume: 100 } } });
+    expect(rows[1]).toEqual({ platform: "tiktok", accountId: "t2", platformSpecificData: { tiktokSettings: { draft: true } } });
+    expect(rows[2]).toEqual({ platform: "tiktok", accountId: "t3" });
+    // The stamp carries the music so a reopened post shows it (Zernio never echoes tiktok_settings).
+    expect((body.metadata as { libi: { targetOptions: Array<{ music?: unknown }> } }).libi.targetOptions[1].music).toEqual({ mode: "draft" });
+  });
+
+  it("TikTok include → a bare row: the song rides in the video, nothing in tiktokSettings", () => {
+    const body = toCreateBody({ ...base, targets: [{ platform: "tiktok", accountId: "t4", options: { platform: "tiktok", tiktok, music: { mode: "include" } } }] }, true);
+    expect((body.platforms as unknown[])[0]).toEqual({ platform: "tiktok", accountId: "t4" });
+  });
+
+  it("Instagram soundName only (generated/owned music) → audioName, no audioConfiguration", () => {
+    const body = toCreateBody({ ...base, targets: [{ platform: "instagram", accountId: "ig", options: { platform: "instagram", instagram: { contentType: "reel" }, music: { mode: "include", soundName: "lofi rain" } } }] }, true);
+    const p = (body.platforms as Array<Record<string, Record<string, unknown>>>)[0].platformSpecificData;
+    expect(p.audioName).toBe("lofi rain");
+    expect(p).not.toHaveProperty("audioConfiguration");
+  });
+
+  it("toUpdateBody carries a target's music on the wire and in the stamp", () => {
+    const music = { mode: "attach" as const, track: { id: "7400000000000000001", title: "Espresso" }, musicVolume: 60, originalVolume: 100, startMs: 0, endMs: 30000 };
+    const body = toUpdateBody({ requestId: "r", targets: [{ platform: "tiktok", accountId: "t1", options: { platform: "tiktok", tiktok, music } }], libi: { pieceId: "p" } });
+    expect((body.platforms as unknown[])[0]).toEqual({
+      platform: "tiktok",
+      accountId: "t1",
+      platformSpecificData: { tiktokSettings: { musicSoundInfo: { musicSoundId: "7400000000000000001", musicSoundVolume: 60, musicSoundStart: 0, musicSoundEnd: 30000 }, videoOriginalSoundVolume: 100 } },
+    });
+    expect((body.metadata as { libi: { targetOptions: Array<{ music?: unknown }> } }).libi.targetOptions[0].music).toEqual(music);
+  });
+  it("catalog track ids: a numeric id is kept as its decimal string, never dropped to \"\"", () => {
+    expect(toInstagramTrack({ audioId: 1234567890123, title: "Espresso" }, "search").id).toBe("1234567890123");
+    expect(toInstagramTrack({ audioId: "987", title: "Espresso" }, "search").id).toBe("987");
+    expect(toTikTokTrack({ id: 7521888697513, name: "Self Aware" }).id).toBe("7521888697513");
+    expect(toTikTokTrack({ id: "7521888697513396241", name: "Self Aware" }).id).toBe("7521888697513396241");
+    expect(toInstagramTrack({ audioId: Number.NaN, title: "x" }, "search").id).toBe("");
   });
 });

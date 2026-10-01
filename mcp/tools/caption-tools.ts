@@ -1,6 +1,6 @@
 // mcp/tools/caption-tools.ts
 import { getAnalysis } from "@/lib/analysis/manager";
-import { buildCaptionCues } from "@/lib/captions/cues";
+import { buildCaptionCues, captionCharsPerLine } from "@/lib/captions/cues";
 import { anchorToRect } from "@/lib/captions/anchor";
 import { addOverlayToManifest, loadManifest, saveManifest } from "@/lib/composition/persistence";
 import type { PersistedAudioClip, PersistedOverlay } from "@/lib/composition/persistence";
@@ -131,12 +131,24 @@ interface CaptionWindow {
  *    every word would be captioned twice.
  *  - A DETACHED clip (`standalone` + `linkedOverlayId` naming a matched video
  *    overlay) is where that video's sound now plays, so the CLIP is the window
- *    and the video overlay it came from is dropped. */
+ *    and the video overlay it came from is dropped.
+ *
+ *  Only what the viewer can HEAR is a window (AUD-1). A video's sound exists
+ *  only as its coupled inline clip — add_overlay creates it when the file has
+ *  audio, `audio_remove_clip` on it is the documented way to mute the video,
+ *  and every export backend takes a video's sound from its clips alone
+ *  (`findBaseInlineAudioClip`). So a video with NO coupled clip is silent, as
+ *  is a HIDDEN video (the eye toggle: its coupled audio is not scheduled,
+ *  `lib/overlays/hidden.ts`) and one whose coupled clips are all muted. A clip
+ *  switched off (`enabled: false`) or at zero volume is silent.
+ *  A detached clip keeps playing when its video is hidden, so it stays a
+ *  window. `silent` counts the windows skipped this way, so a file whose every
+ *  window is silent is told apart from one with no window at all. */
 function captionWindows(
   overlays: PersistedOverlay[],
   audioClips: PersistedAudioClip[],
   fileId: string,
-): CaptionWindow[] {
+): { windows: CaptionWindow[]; silent: number } {
   const videos = overlays.filter(
     (o): o is VideoOverlayEntry => o.kind === "video" && o.fileId === fileId,
   );
@@ -148,15 +160,59 @@ function captionWindows(
       .map((c) => c.linkedOverlayId as string),
   );
   const windows: CaptionWindow[] = [];
+  let silent = 0;
   for (const v of videos) {
     if (detachedFrom.has(v.id)) continue;
+    const coupled = clips.filter((c) => c.kind === "inline" && c.linkedOverlayId === v.id);
+    // Heard only through an audible coupled clip; none (removed) → silent.
+    if (v.hidden === true || !coupled.some(clipIsAudible)) {
+      silent++;
+      continue;
+    }
     windows.push({ startTime: v.startTime, ...visibleSourceRange(v) });
   }
   for (const c of clips) {
     if (c.kind === "inline" && c.linkedOverlayId && videoIds.has(c.linkedOverlayId)) continue;
+    if (!clipIsAudible(c)) {
+      silent++;
+      continue;
+    }
     windows.push({ startTime: c.startTime ?? 0, ts: c.trimStart ?? 0, visible: c.duration ?? 0 });
   }
-  return mergeSameMappingWindows(windows);
+  return { windows: mergeSameMappingWindows(windows), silent };
+}
+
+/** The file's words shifted onto the piece TIMELINE across every audible
+ *  window (`captionWindows`) — the same filter + shift `buildTimelineCaptionCues`
+ *  uses per window. `null` when the file has NO window on the timeline (the
+ *  caller falls back to source time); `[]` when every window is silent. Used by
+ *  `update_overlay { captionFromFileId }`, whose overlay window is on the
+ *  timeline while Whisper's words are source-file seconds. */
+export function wordsOnTimeline(
+  words: SttWord[],
+  overlays: PersistedOverlay[],
+  audioClips: PersistedAudioClip[],
+  fileId: string,
+): SttWord[] | null {
+  const { windows, silent } = captionWindows(overlays, audioClips, fileId);
+  if (windows.length === 0) return silent > 0 ? [] : null;
+  const out: SttWord[] = [];
+  for (const w of windows) out.push(...shiftWindowWords(words, w));
+  return out.sort((a, b) => a.start - b.start);
+}
+
+/** The words a window plays (their source start inside `[ts, ts + visible)`),
+ *  moved to timeline seconds (`+ startTime - ts`). */
+function shiftWindowWords(words: SttWord[], { startTime, ts, visible }: CaptionWindow): SttWord[] {
+  const shift = startTime - ts;
+  return words
+    .filter((w) => w.start >= ts && w.start < ts + visible)
+    .map((w) => ({ ...w, start: w.start + shift, end: w.end + shift }));
+}
+
+/** A clip the viewer hears: switched on, at a volume above zero. */
+function clipIsAudible(c: PersistedAudioClip): boolean {
+  return c.enabled !== false && !((c.volume ?? 1) <= 0);
 }
 
 /** Windows that put the SAME source second at the SAME timeline second
@@ -230,32 +286,35 @@ function buildTimelineCaptionCues(
   fileId: string,
   overlaysAfterReplace: PersistedOverlay[],
   audioClips: PersistedAudioClip[],
-  cueOpts: { maxLines: number },
-): WindowedCaptionCue[] {
-  const windows = captionWindows(overlaysBeforeReplace, audioClips, fileId);
+  cueOpts: { maxLines: number; maxCharsPerLine: number },
+): { cues: WindowedCaptionCue[]; allSilent: boolean } {
+  const { windows, silent } = captionWindows(overlaysBeforeReplace, audioClips, fileId);
+
+  // The file IS on the timeline, but nowhere it can be heard: no cues — never
+  // the raw-source-time fallback below, which would caption silence.
+  if (windows.length === 0 && silent > 0) return { cues: [], allSilent: true };
 
   if (windows.length === 0) {
     const fallback = compositionEndSeconds(overlaysAfterReplace, audioClips);
     const maxEnd = fallback > 0 ? fallback : Number.POSITIVE_INFINITY;
-    return buildCaptionCues(words, { ...cueOpts, maxEnd, minStart: 0 }).map((c) => ({
+    const cues = buildCaptionCues(words, { ...cueOpts, maxEnd, minStart: 0 }).map((c) => ({
       ...c,
       windowIndex: 0,
       maxEnd,
     }));
+    return { cues, allSilent: false };
   }
 
   const allCues: WindowedCaptionCue[] = [];
-  windows.forEach(({ startTime, ts, visible }, windowIndex) => {
-    const shift = startTime - ts;
-    const windowWords = words
-      .filter((w) => w.start >= ts && w.start < ts + visible)
-      .map((w) => ({ ...w, start: w.start + shift, end: w.end + shift }));
+  windows.forEach((window, windowIndex) => {
+    const { startTime, visible } = window;
+    const windowWords = shiftWindowWords(words, window);
     const maxEnd = startTime + visible;
     const windowCues = buildCaptionCues(windowWords, { ...cueOpts, maxEnd, minStart: startTime });
     allCues.push(...windowCues.map((c) => ({ ...c, windowIndex, maxEnd })));
   });
   allCues.sort((a, b) => a.start - b.start);
-  return allCues;
+  return { cues: allCues, allSilent: false };
 }
 
 /** Read the file's full word-level transcript by concatenating the analysis
@@ -320,22 +379,14 @@ export async function generateCaptions(
   // "composition end without captions" fallback excludes any track we are
   // about to replace.
   const existingOverlays = manifest.overlays ?? [];
+  // `cap-<fileId>-custom` is the user's OWN caption (a code/three overlay
+  // attached with `update_overlay { captionFromFileId }`), not a cue of this
+  // track — re-running must never delete it.
   const kept = existingOverlays.filter((o) => {
     const gid = (o as { caption?: { groupId?: string } }).caption?.groupId;
+    if (gid === `${groupId}-custom`) return true;
     return !(gid && gid.startsWith(groupId));
   });
-
-  const cues = buildTimelineCaptionCues(
-    words,
-    existingOverlays,
-    fileId,
-    kept,
-    manifest.audioClips ?? [],
-    { maxLines: params.maxLinesPerCue ?? 2 },
-  );
-
-  const styleId = params.style ?? "cumulative";
-  const revealMode = revealModeForStyle(styleId);
 
   // Canvas-scaled, bottom-safe placement (the "cut off at the bottom" fix).
   // Font scales with frame height (~5.5%) instead of a hardcoded 48px, so a
@@ -343,9 +394,26 @@ export async function generateCaptions(
   // NEW point-text model (anchor + position + maxWidthPct) so `build-composition`
   // never legacy-normalizes them to mid-center — a bottom caption stays at the
   // bottom and multi-line text grows upward.
-  const anchor: CaptionAnchor = (params.anchor ?? "bottom-center") as CaptionAnchor;
+  // The font is fixed BEFORE the cues are split: each cue's line budget comes
+  // from it and the canvas width, so a 9:16 cue (90 px on 1080 wide) never
+  // wraps past its `maxLinesPerCue` lines (the eval's 3-line, 324 px cue).
   const fontSize = Math.max(20, Math.min(90, Math.round(frame.height * 0.055)));
   const maxWidthPct = 0.9;
+  const charsPerLine = captionCharsPerLine(frame.width, fontSize);
+
+  const { cues, allSilent } = buildTimelineCaptionCues(
+    words,
+    existingOverlays,
+    fileId,
+    kept,
+    manifest.audioClips ?? [],
+    { maxLines: params.maxLinesPerCue ?? 2, maxCharsPerLine: charsPerLine },
+  );
+
+  const styleId = params.style ?? "cumulative";
+  const revealMode = revealModeForStyle(styleId);
+
+  const anchor: CaptionAnchor = (params.anchor ?? "bottom-center") as CaptionAnchor;
   const position = anchorSafePoint(anchor, frame);
   // Keep a rect for back-compat readers; the renderer uses anchor+position.
   const size = {
@@ -368,8 +436,15 @@ export async function generateCaptions(
   // full sentence (like the other hints in mcp/tools) so the agent can relay
   // it verbatim instead of translating an enum token for the user.
   if (cues.length === 0) {
-    const hint =
+    const removedNote =
       removedCueCount > 0
+        ? ` The previous caption track (${removedCueCount} ${removedCueCount === 1 ? "cue" : "cues"}) was removed.`
+        : "";
+    const hint = allSilent
+      ? "Every video overlay and audio clip for this file is hidden, muted or has had its audio removed, " +
+        "so nothing of it is heard; no captions were created. Caption the file that IS heard instead " +
+        "(e.g. a replacement voiceover: pass that audio clip's own fileId)." + removedNote
+      : removedCueCount > 0
         ? `No speech falls inside the playing part of any video overlay or audio clip for this file; ` +
           `no captions were created and the previous caption track (${removedCueCount} ` +
           `${removedCueCount === 1 ? "cue" : "cues"}) was removed.`
@@ -443,6 +518,7 @@ export async function generateCaptions(
       revealMode,
       anchor,
       fontSize,
+      charsPerLine,
     },
     "overlay.generate_captions",
   );

@@ -65,6 +65,16 @@ describe("buildAgentStatus", () => {
     });
   });
 
+  it("Windows: an npm .cmd shim's own target rides along as cli.launch, for the printed commands (PRV-4)", async () => {
+    const launch = { command: "C:\\libi\\node.exe", args: ["C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js"] };
+    const terminalLaunch = vi.fn(() => launch);
+    const s = await buildAgentStatus("claude-code", { ...base, terminalLaunch });
+    expect(terminalLaunch).toHaveBeenCalledWith("/u/bin/claude");
+    expect(s.cli).toEqual({ path: "/u/bin/claude", realPath: "/u/bin/claude", version: "2.1.250", meetsMinimum: true, launch });
+    const none = await buildAgentStatus("claude-code", { ...base, terminalLaunch: () => null });
+    expect(none.cli).not.toHaveProperty("launch");
+  });
+
   it("no CLI → cli null, libiTools not-connected (without reading any registration), ready false", async () => {
     const libiRegistration = vi.fn(base.libiRegistration);
     const s = await buildAgentStatus("codex", { ...base, libiRegistration, resolveCli: async () => null });

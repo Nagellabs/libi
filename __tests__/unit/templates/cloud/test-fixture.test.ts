@@ -203,6 +203,35 @@ describe("the seeded catalog", () => {
   });
 });
 
+// TPL-1: the site sends uses30d and lastUsedDay on a template's public shape
+// (libi-site lib/templates/shape.ts#shapePublicTemplate); the fixture used to stop at
+// usesTotal/uses7d, so test mode could never exercise the 30-day usage panel.
+describe("uses30d and lastUsedDay on the template shape", () => {
+  const DAY_MS = 86_400_000;
+  const dayKeyOf = (ms: number) => new Date(ms).toISOString().slice(0, 10).replace(/-/g, "");
+
+  it("a template used 3 and 20 days ago reports uses7d 1, uses30d 2, and the more recent day as lastUsedDay", async () => {
+    const [id] = FIXTURE_CLOUD_IDS;
+    const now = Date.now();
+    const doc = getFixtureCatalog().entries.get(id)!;
+    doc.uses = { total: 2, byDay: { [dayKeyOf(now - 3 * DAY_MS)]: 1, [dayKeyOf(now - 20 * DAY_MS)]: 1 } };
+
+    const t = (jsonOf(await api("GET", id)) as { template: Record<string, unknown> }).template;
+    expect(t.uses7d).toBe(1);
+    expect(t.uses30d).toBe(2);
+    expect(t.lastUsedDay).toBe(new Date(now - 3 * DAY_MS).toISOString().slice(0, 10));
+  });
+
+  it("a never-used template reports uses30d 0 and lastUsedDay null", async () => {
+    const [, , id] = FIXTURE_CLOUD_IDS;
+    const doc = getFixtureCatalog().entries.get(id)!;
+    doc.uses = { total: 0, byDay: {} };
+    const t = (jsonOf(await api("GET", id)) as { template: Record<string, unknown> }).template;
+    expect(t.uses30d).toBe(0);
+    expect(t.lastUsedDay).toBeNull();
+  });
+});
+
 // A15: the skill-eval templates/06 fixture. Applying it must answer `leftOut`, and it must
 // stay off the index so the Public tab's three-card catalog (e2e) is unchanged.
 describe("the unlisted Launch title seed", () => {
@@ -902,6 +931,65 @@ describe("parity with libi-site's refusal codes", () => {
     expect(await reportUse(FIXTURE_CLOUD_IDS[0])).toMatchObject({ ok: false, status: 503, code: "contended", retryAfterMs: 5000 });
     injectFixtureFault({ route: "report", code: "rate_limited" });
     expect(await reportTemplate(FIXTURE_CLOUD_IDS[0], "spam")).toMatchObject({ ok: false, status: 429, code: "rate_limited", retryAfterMs: 60_000 });
+  });
+});
+
+/**
+ * Minor-2 (TPL review): libi-site lib/templates/shape.ts#shapePublicTemplate,
+ * copied verbatim and pinned by the hash of that source text — as the codes
+ * and moderation reasons above are. A site-side field rename, add or removal
+ * would otherwise go undetected: TPL-1 added uses30d/lastUsedDay to the
+ * fixture by hand-comparison against the site only.
+ */
+const SITE_SHAPE_SOURCE = `export function shapePublicTemplate(doc: TemplateDoc, base: string, now: number): PublicTemplate {
+  return {
+    id: doc.id,
+    name: doc.name,
+    description: doc.description,
+    tags: [...doc.tags],
+    nickname: doc.nickname,
+    authorId: doc.authorId,
+    version: doc.version,
+    hasCode: doc.hasCode,
+    canvas: { width: doc.canvas.width, height: doc.canvas.height, fps: doc.canvas.fps },
+    duration: doc.duration,
+    slotCount: doc.slotCount,
+    files: doc.files.map((f) => ({ ...f })),
+    prefix: templatePrefix(doc.id, doc.version),
+    base,
+    poster: doc.example.poster,
+    video: doc.example.video,
+    example: { durationSec: doc.example.durationSec, width: doc.example.width, height: doc.example.height },
+    usesTotal: doc.uses.total,
+    uses7d: uses7d(doc.uses.byDay, now),
+    uses30d: usesInDays(doc.uses.byDay, now, 30),
+    lastUsedDay: doc.lastUsedAt === null ? null : new Date(doc.lastUsedAt).toISOString().slice(0, 10),
+    createdAt: new Date(doc.createdAt).toISOString(),
+    updatedAt: new Date(doc.updatedAt).toISOString(),
+  };
+}`;
+const SITE_SHAPE_SHA256 = "4bacd14058f68dc88a2577c19c6e3be824875176f34301d79777acdf10d0f48b";
+/** Top-level (4-space-indented) property names, `key:` or shorthand `key,`/`key` forms alike. */
+function topLevelKeys(block: string): string[] {
+  return [...block.matchAll(/^ {4}([A-Za-z0-9_]+)(:|,?\s*$)/gm)].map((m) => m[1]);
+}
+const SITE_SHAPE_KEYS = topLevelKeys(SITE_SHAPE_SOURCE);
+
+describe("parity with libi-site's public template shape", () => {
+  it("the copy is the pinned source text", () => {
+    expect(createHash("sha256").update(SITE_SHAPE_SOURCE).digest("hex")).toBe(SITE_SHAPE_SHA256);
+  });
+
+  it.skipIf(!SITE_DIR)("the pin matches the site checkout at LIBI_SITE_DIR", () => {
+    const src = fs.readFileSync(path.join(SITE_DIR!, "lib/templates/shape.ts"), "utf8");
+    const block = /export function shapePublicTemplate\([\s\S]*?\n\}/.exec(src)?.[0] ?? "";
+    expect(createHash("sha256").update(block).digest("hex")).toBe(SITE_SHAPE_SHA256);
+  });
+
+  it("the fixture's public shape (routeGet) has exactly the site's field names", async () => {
+    const [id] = FIXTURE_CLOUD_IDS;
+    const t = (jsonOf(await api("GET", id)) as { template: Record<string, unknown> }).template;
+    expect(Object.keys(t).sort()).toEqual([...SITE_SHAPE_KEYS].sort());
   });
 });
 

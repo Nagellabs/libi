@@ -15,12 +15,14 @@ import { deletePieceCompletely } from "@/lib/pieces/delete-piece";
 import { rewriteFileIds } from "./rewrite-file-ids";
 import { serverLogger as logger } from "@/lib/logger";
 import { alphaRecoverableInPreview } from "@/lib/ffmpeg/alpha";
+import { listEvictedProxies, recordEvictedProxy } from "@/lib/proxy/evicted";
 
 export type DuplicationSource = "draft" | "snapshot";
 
 /**
  * Fully clone the contents of `sourcePieceId` into the already-created shell
- * piece `newPieceId`. Copies file bytes + proxies, the asset-folder tree, files
+ * piece `newPieceId`. Copies file bytes + proxies (with their probed height)
+ * + ready filmstrips, the asset-folder tree, files
  * rows (with folderId remapped into the cloned tree), the manifest (with fileIds
  * rewritten), analysis rows + dirs, and catalog links.
  * On any error, rolls back (deletes the shell piece + its storage) and
@@ -70,6 +72,11 @@ export async function clonePieceInto(
         .run();
     }
 
+    // Proxies the LRU evicted from the source, read once: a copy of an evicted
+    // file is recorded too, or opening the copy never re-makes its proxy
+    // (lib/proxy/ensure.ts re-makes only a recorded file).
+    const evicted = listEvictedProxies();
+
     // 2. files rows + byte copies
     for (const f of srcFiles) {
       const newId = fileIdMap.get(f.id)!;
@@ -92,9 +99,30 @@ export async function clonePieceInto(
         filename: f.filename,
         contentType: f.contentType,
       });
-      if (carryProxy && f.proxyFilename && (await storage.exists(sourcePieceId, f.proxyFilename))) {
-        const pbuf = await storage.read(sourcePieceId, f.proxyFilename);
-        await storage.save(newPieceId, f.proxyFilename, pbuf);
+      // The proxy columns follow the bytes, as the filmstrip's do below: a
+      // ready row whose proxy file is gone clones idle, never as a ready row
+      // pointing at nothing (review FINAL m-B1).
+      const proxyCopied =
+        carryProxy &&
+        !!f.proxyFilename &&
+        (await storage.exists(sourcePieceId, f.proxyFilename));
+      if (proxyCopied) {
+        const pbuf = await storage.read(sourcePieceId, f.proxyFilename!);
+        await storage.save(newPieceId, f.proxyFilename!, pbuf);
+      }
+      // A READY filmstrip rides the same guard: on a VPx-alpha row it may have
+      // been sampled from that alpha-stripped proxy (the runner prefers the
+      // proxy), so the clone regenerates it instead. Anything short of ready
+      // is not worth carrying — the clone starts idle and the timeline asks
+      // for a fresh one.
+      const carryFilmstrip =
+        carryProxy &&
+        f.filmstripStatus === "ready" &&
+        !!f.filmstripFilename &&
+        (await storage.exists(sourcePieceId, f.filmstripFilename));
+      if (carryFilmstrip) {
+        const fbuf = await storage.read(sourcePieceId, f.filmstripFilename!);
+        await storage.save(newPieceId, f.filmstripFilename!, fbuf, "image/jpeg");
       }
       db.insert(files).values({
         id: newId,
@@ -116,10 +144,24 @@ export async function clonePieceInto(
         // as an opaque rectangle and a later rename would regenerate an
         // alpha-stripping proxy (the original B1 defect, reintroduced).
         hasAlpha: f.hasAlpha,
-        proxyFilename: carryProxy ? f.proxyFilename : null,
-        proxyStatus: carryProxy ? f.proxyStatus : "idle",
-        proxyGeneratedAt: carryProxy ? f.proxyGeneratedAt : null,
+        // An "I own this" mark must survive a duplicate; dropping it would
+        // silently re-classify the copy as copyrighted.
+        audioRights: f.audioRights,
+        proxyFilename: proxyCopied ? f.proxyFilename : null,
+        proxyStatus: proxyCopied ? f.proxyStatus : "idle",
+        proxyGeneratedAt: proxyCopied ? f.proxyGeneratedAt : null,
+        // Without the probed height the copy reads as "proxy of unknown size"
+        // and the resolution-aware regen re-makes a proxy that was fine.
+        proxyHeight: proxyCopied ? f.proxyHeight : null,
+        filmstripFilename: carryFilmstrip ? f.filmstripFilename : null,
+        filmstripStatus: carryFilmstrip ? "ready" : "idle",
+        filmstripGeneratedAt: carryFilmstrip ? f.filmstripGeneratedAt : null,
+        filmstripFrames: carryFilmstrip ? f.filmstripFrames : null,
+        filmstripHeight: carryFilmstrip ? f.filmstripHeight : null,
       }).run();
+      // Never for a VPx-alpha row: its proxy is never re-made (the B1 guard).
+      const ev = evicted[f.id];
+      if (carryProxy && !proxyCopied && ev) recordEvictedProxy(newId, ev.bytes);
       done++;
       onProgress?.(done, total);
 

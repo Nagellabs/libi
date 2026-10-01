@@ -14,9 +14,9 @@ import { pickDriver } from "@/lib/export/drivers";
 import { muxAudioIntoRender } from "@/lib/export/render-audio-mux";
 import {
   planRenderChunks,
-  resolveChunkWorkers,
   sumChunkProgress,
 } from "@/lib/export/chunk-plan";
+import { getExportScheduler } from "@/lib/export/scheduler";
 import { concatRenderChunks } from "@/lib/export/concat-renders";
 import { getCurrentPort } from "@/lib/libi-home";
 import { exportLogger } from "@/lib/logger";
@@ -31,8 +31,10 @@ import { exportLogger } from "@/lib/logger";
  * the runner splits the frame range into N chunks (`planRenderChunks`), renders
  * one registry job + one driver page per chunk CONCURRENTLY, ffmpeg-concats the
  * per-chunk video-only files in order, then runs the existing audio mux.
- * JobManager `maxConcurrent` stays 1 (one user export at a time); parallelism is
- * internal to the job. Absent `totalFrames` (old persisted jobs) or a
+ * Several of these jobs run at once (`maxConcurrent: 32`): the export
+ * scheduler (lib/export/scheduler.ts) already admitted the export each one
+ * belongs to, and the chunk pages of every running render share the cores
+ * (`leaseRenderWorkers`). Absent `totalFrames` (old persisted jobs) or a
  * single-chunk plan → the historical single-page path, byte-for-byte unchanged.
  *
  * Limitations (MVP):
@@ -75,12 +77,20 @@ const exportRenderParamsSchema = z.object({
   pieceId: z.string().min(1),
   payload: renderPayloadSchema,
   settings: exportSettingsSchema,
+  renderId: z.string().min(1).optional(),
 });
 
 export type ExportRenderParams = {
   pieceId: string;
   payload: RenderPayload;
   settings: ExportSettings;
+  /**
+   * Makes this render's params hash its own. `enqueue({ forceNew })` replaces
+   * ANY row with the same hash — a running one included, whose cancel would
+   * then find no row. With several exports admitted at once, two renders of
+   * the same piece at the same settings run side by side, so each carries one.
+   */
+  renderId?: string;
 };
 
 export interface ExportRenderResult {
@@ -118,10 +128,12 @@ function mergeDroppedOverlays(
 
 export const exportRenderRunner: JobRunner<ExportRenderParams, ExportRenderResult> = {
   kind: "export_render",
-  // One export at a time — Chromium pages are heavy and the canvas-source
-  // pipeline assumes a single hidden window per host. Chunk parallelism is
-  // INTERNAL to a single export_render job (multiple pages on the one browser).
-  maxConcurrent: 1,
+  // Not a limit any more: the export scheduler (lib/export/scheduler.ts)
+  // admitted the export this render belongs to, by its memory/CPU estimate.
+  // Each render opens its own hidden window (lib/export/drivers/electron.ts)
+  // or page (playwright), and its chunk pages share the cores with the other
+  // renders through `leaseRenderWorkers`.
+  maxConcurrent: 32,
   paramsSchema: exportRenderParamsSchema as unknown as z.ZodSchema<ExportRenderParams>,
   resumable: false,
   // Renders can run for minutes while encoding; keep the JobManager no-progress
@@ -155,30 +167,31 @@ export const exportRenderRunner: JobRunner<ExportRenderParams, ExportRenderResul
       mode = undefined;
     }
 
-    const workers = resolveChunkWorkers(
-      process.env.LIBI_RENDER_CHUNK_WORKERS,
-      mode,
-      os.cpus().length,
-    );
-    const chunks =
-      totalFrames && totalFrames > 0
-        ? planRenderChunks(totalFrames, workers)
-        : [];
+    const scheduler = getExportScheduler();
+    // Remembered so the NEXT export's admission estimate sizes its pages by the real mode.
+    scheduler.noteRenderMode(mode);
+    const lease = scheduler.leaseRenderWorkers(process.env.LIBI_RENDER_CHUNK_WORKERS, mode, os.cpus().length);
+    try {
+      const workers = lease.workers;
+      const chunks =
+        totalFrames && totalFrames > 0
+          ? planRenderChunks(totalFrames, workers)
+          : [];
 
-    exportLogger.info(
-      { event: "render_chunk_plan", mode: mode ?? "gpu", workers, chunks: chunks.length },
-      "export.render_chunk_plan",
-    );
+      exportLogger.info(
+        { event: "render_chunk_plan", mode: mode ?? "gpu", workers, chunks: chunks.length },
+        "export.render_chunk_plan",
+      );
 
-    const result =
-      !totalFrames || chunks.length <= 1
+      // A dropped overlay is logged (warn, op overlay_dropped) by the `export`
+      // runner, under the export job id the agent holds — this inner job's id
+      // means nothing to it.
+      return !totalFrames || chunks.length <= 1
         ? await runSingle(ctx, port)
         : await runChunked(ctx, port, totalFrames, chunks);
-
-    // A dropped overlay is logged (warn, op overlay_dropped) by the `export`
-    // runner, under the export job id the agent holds — this inner job's id
-    // means nothing to it.
-    return result;
+    } finally {
+      lease.release();
+    }
   },
 };
 

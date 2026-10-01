@@ -77,6 +77,8 @@ export function usePieceComposition(pieceId: string, options?: { enabled?: boole
       legacyScenes?: number;
       /** Whether the user has already been told about them (server-side, per piece). */
       legacyScenesNoticed?: boolean;
+      /** Transcripts a boot migration removed, not yet told (lib/analysis/removed-transcripts.ts). */
+      removedTranscripts?: Array<{ fileId: string; name: string }>;
     }> => {
       const res = await fetch(`/api/pieces/${pieceId}/composition`);
       if (!res.ok) {

@@ -36,10 +36,20 @@ import type { ApprovalMode } from "@/lib/approval/mode";
  *     read-only built-ins itself and routes every other tool call (Bash,
  *     Edit, every MCP tool) through canUseTool → libi, which auto-allows on
  *     the spot. Only `auto-with-generations` — the never-prompt mode — pushes
- *     `bypassPermissions`. Under root that id is not advertised, so the push
- *     is skipped (null → `approval.mode.unsupported_by_agent`) and the
- *     session stays in the adapter's own default, `default`: the never-prompt
- *     mode degrades to "auto", and gated extensions still prompt.
+ *     `bypassPermissions`. Under root (no `IS_SANDBOX`) that id is not
+ *     advertised, so the second candidate, `default`, is pushed instead: every
+ *     tool call that needs a permission is then routed to libi's handler,
+ *     which under this mode auto-allows all of them, gated extensions
+ *     included — the never-prompt promise still holds, one hop slower.
+ *
+ *     Without that fallback nothing would be pushed, and the session would NOT
+ *     sit in `default`: a Claude session with no mode pushed runs in the
+ *     user's own `permissions.defaultMode` from `~/.claude/settings.json`
+ *     (full-verification F5 showed a resumed chat doing exactly that), which
+ *     may be `plan`, `acceptEdits` or `auto`. Should a known set ever lack
+ *     both candidates, that is where the chat is left; it is the one quiet
+ *     skip in `pushApprovalModeToSession`, because no mode is more permissive
+ *     than the one the picker asked for.
  *
  *   - codex: libi's extension gate is NOT IMPLEMENTED for codex. This block
  *     used to say it CANNOT be, and that was wrong — corrected 2026-09-09
@@ -96,7 +106,8 @@ const AGENT_MODE_MAP: Record<string, Record<ApprovalMode, readonly string[]>> =
     "claude-code": {
       ask: ["default"],
       auto: ["default"],
-      "auto-with-generations": ["bypassPermissions"],
+      // `default` only when `bypassPermissions` is not advertised (root) — see above.
+      "auto-with-generations": ["bypassPermissions", "default"],
     },
     codex: {
       // `read-only` exists in both the 1.10.0 and the ≤ 1.6.x vocabularies.
@@ -135,4 +146,26 @@ export function acpModeFor(
   if (!availableModes) return null;
   const advertised = new Set(availableModes.map((m) => m.id));
   return candidates.find((id) => advertised.has(id)) ?? null;
+}
+
+/**
+ * Agents whose mapped mode ids exist in every adapter version libi supports, so an id can be
+ * pushed when the advertised set is NOT known — the last resort of `pushApprovalModeToSession`.
+ *
+ * Claude only: `default` is the adapter's base permission mode and always advertised;
+ * `bypassPermissions` is advertised unless the process runs as root. The candidates are tried in
+ * order, so a root refusal of `bypassPermissions` falls through to `default` exactly as the
+ * known-set path does; only when every candidate is refused is it reported as a failure, never
+ * ignored. Codex is deliberately absent — its vocabulary changed between versions
+ * (`auto` → `agent`), and a blind push to it was the -32602 bug.
+ */
+const STABLE_VOCABULARY_AGENTS: ReadonlySet<string> = new Set(["claude-code"]);
+
+/**
+ * The ids to try, in order, for `agentId` and `mode` when its advertised modes are unknown —
+ * empty when the agent's vocabulary is not stable enough to push without knowing them.
+ */
+export function stableAcpModeCandidates(agentId: string, mode: ApprovalMode): readonly string[] {
+  if (!STABLE_VOCABULARY_AGENTS.has(agentId)) return [];
+  return AGENT_MODE_MAP[agentId]?.[mode] ?? [];
 }

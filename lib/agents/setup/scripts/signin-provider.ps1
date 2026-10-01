@@ -14,6 +14,10 @@
 #   provider  higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
+#   -CliScript  optional, Windows npm installs: the JS file the agent's `.cmd`
+#             shim runs. libi passes it with the node the shim would use as
+#             `cli`, so the agent runs without cmd.exe, whose Ctrl+C would stop
+#             at "Terminate batch job (Y/N)?". Without it, `cli` runs as is.
 #   entry     the name the provider's MCP server has in the agent's config
 #
 # What it does:
@@ -24,7 +28,7 @@
 # The entry's name goes after `--`, so a name that starts with `-` is never
 # read as an option.
 
-param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry)
+param([string]$Provider, [string]$Agent, [string]$Cli, [string]$Entry, [string]$CliScript)
 
 # Provider details. A libi test keeps this table the same as the providers in
 # libi's provider catalog (lib/providers/catalog.ts) that you sign in to with
@@ -40,9 +44,13 @@ if ($Agent -cne 'claude' -and $Agent -cne 'codex') {
   exit 2
 }
 if (-not $Cli -or -not $Entry) {
-  [Console]::Error.WriteLine('usage: signin-provider.ps1 <provider> <agent> <cli> <entry>')
+  [Console]::Error.WriteLine('usage: signin-provider.ps1 <provider> <agent> <cli> <entry> [-CliScript <script>]')
   exit 2
 }
+
+# The agent's command: `cli`, or node running the agent's own script (-CliScript).
+$cliPre = @()
+if ($CliScript) { $cliPre = @($CliScript) }
 
 # The agent's own sign-in. The script exits with its exit code. For Claude
 # Code, the two [libi sign-in ...] lines tell libi when the sign-in starts and
@@ -55,7 +63,7 @@ if ($marked) { Write-Host "[libi sign-in start: $Entry]" }
 $code = 0
 try {
   $loginArgs = @('mcp', 'login', '--', $Entry)
-  & $Cli @loginArgs
+  & $Cli @cliPre @loginArgs
   if (-not $?) {
     $code = 1
     if ($LASTEXITCODE) { $code = $LASTEXITCODE }

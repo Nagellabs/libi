@@ -59,6 +59,29 @@ test.beforeEach(async ({ page }) => {
 test.afterEach(() => {
   expect(leaked, "the page asked the real catalog for something").toEqual([]);
 });
+/**
+ * Forget the studio's copy of the catalog, and with it any failure backoff.
+ * The publish's own re-check of the catalog is a NON-forced refresh, which by
+ * design never reads past the 2 min backoff (lib/templates/cloud/catalog-cache.ts);
+ * a spec that ran earlier and left the fixture answering 500 (templates-public.spec.ts
+ * ends on exactly that) made the "the template is in the catalog" wait below fail
+ * 2/2 in the full suite while it passed alone (0.1.16 suites report, W1).
+ */
+async function resetCatalogCache(request: APIRequestContext): Promise<void> {
+  const res = await request.delete("/api/test-mode/catalog-cache");
+  expect(res.ok(), `catalog-cache reset → HTTP ${res.status()}`).toBe(true);
+  expect(await res.json()).toEqual({ ok: true });
+}
+
+test.beforeAll(async ({ playwright }) => {
+  // This spec owns its precondition: a catalog copy with no backoff, whatever ran before.
+  const request = await playwright.request.newContext({ baseURL: `http://127.0.0.1:${process.env.LIBI_E2E_PORT}` });
+  try {
+    await resetCatalogCache(request);
+  } finally {
+    await request.dispose();
+  }
+});
 test.afterAll(async ({ playwright }) => {
   // Later specs (e2e/templates.spec.ts) expect an empty library: no local
   // template, and a creator key that has published nothing ("Your templates"
@@ -68,6 +91,8 @@ test.afterAll(async ({ playwright }) => {
     const res = await request.get("/api/templates?scope=local");
     for (const t of ((await res.json()) as { templates: Array<{ id: string }> }).templates) await request.delete(`/api/templates/${t.id}`);
     await request.put("/api/templates/cloud/key", { data: { key: randomBytes(32).toString("base64url"), replace: true }, headers: asThePage() });
+    // …and no catalog copy of this spec's publishes for the next one to read.
+    await resetCatalogCache(request);
   } finally {
     await request.dispose();
   }
@@ -112,7 +137,7 @@ test.describe("Templates: an agent prepares, only you publish", () => {
     expect(res.ok(), await res.text()).toBe(true);
   });
 
-  test("review → Publish publicly: the job publishes to the fixture catalog, and the panel goes", async ({ page, request }) => {
+  test("review → Publish publicly: the job publishes to the fixture catalog, and the panel goes", async ({ page, request }, testInfo) => {
     const templateId = await makeTemplate(request, "E2E review publish");
     await openTemplates(page);
     await expect(page.getByTestId("publish-reviews")).toHaveCount(0);
@@ -132,6 +157,15 @@ test.describe("Templates: an agent prepares, only you publish", () => {
     await expect(panel.getByTestId("publish-review-example")).toHaveAttribute("src", `${mediaBase}/example.mp4`);
     await expect(panel.getByTestId("publish-review-poster")).toHaveAttribute("src", `${mediaBase}/poster.jpg`);
     const shown = await request.get(`${mediaBase}/example.mp4`);
+    if (shown.status() !== 200) {
+      // Suites W1b: one 404 here, seen once and never explained. Keep what the server
+      // answered (its JSON `not_found` or Next's own HTML 404) and its headers; the
+      // route's `publish_request_media_not_found` line in libi.log says which check refused it.
+      await testInfo.attach("example.mp4 response", {
+        contentType: "application/json",
+        body: JSON.stringify({ status: shown.status(), headers: shown.headers(), body: (await shown.text()).slice(0, 4_000) }, null, 2),
+      });
+    }
     expect(shown.status()).toBe(200);
     const shownMd5 = createHash("md5").update(await shown.body()).digest("base64");
     const poster = await request.get(`${mediaBase}/poster.jpg`);

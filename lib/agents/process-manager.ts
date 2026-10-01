@@ -16,7 +16,7 @@ import { isShellEnvLoaded } from "@/lib/runtime/shell-env-state";
 import type { AgentUnavailableReason } from "@/lib/agents/types";
 import { ensureCodexHome } from "@/lib/codex-config/canonical";
 import { stripHostSessionEnv } from "@/lib/agents/child-env";
-import { agentChildPath, forgetAgentSpawnPath, recordAgentSpawnPath } from "@/lib/agents/agent-path";
+import { agentChildPath, forgetAgentSpawnPath, pathEnvKey, recordAgentSpawnPath, refreshFreshPathDirs } from "@/lib/agents/agent-path";
 import { CODEX_ACP_DISABLE_MCP_FILTER_ENV } from "@/lib/mcp/agent-surface";
 import { LIBI_SERVER_PORT_ENV } from "@/lib/libi-home";
 import {
@@ -343,12 +343,17 @@ export class AgentProcessManager {
     //
     // PATH: this process's, then every login-shell folder it lacks (`lib/agents/agent-path.ts`), so a launcher
     // the user installed after libi booted (`uvx`, `npx`), which the Providers tab reads as found, is on the
-    // PATH of the MCP servers this agent starts.
-    // Set only when it adds a folder: on Windows (none there) the inherited `Path` stays the one key.
+    // PATH of the MCP servers this agent starts. On Windows the fresh folders are the registry's, read now
+    // (bounded 2 s; a failed read keeps this process's PATH).
+    // Set only when it adds a folder, and under the key the environment already has (`Path` on Windows), so
+    // there is never a second PATH key.
+    const pathRefresh = refreshFreshPathDirs();
+    if (pathRefresh) await pathRefresh;
     const childPath = agentChildPath();
+    const pathKey = pathEnvKey(process.env);
     const agentEnv: NodeJS.ProcessEnv = stripHostSessionEnv({
       ...process.env,
-      ...(childPath !== undefined && childPath !== process.env.PATH ? { PATH: childPath } : {}),
+      ...(childPath !== undefined && childPath !== process.env[pathKey] ? { [pathKey]: childPath } : {}),
       ...cliEnv,
       MCP_TIMEOUT: "60000",
       CODEX_HOME: ensureCodexHome(),

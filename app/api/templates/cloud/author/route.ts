@@ -3,6 +3,7 @@ import { TemplatesAuthorChangedError, TemplatesAuthorWriteError, getOrCreateTemp
 import { serverLogger as logger } from "@/lib/logger";
 import { browserOnlyRefusal, crossSiteSubresourceRefusal } from "@/lib/security/request-guard";
 import { parseNickname } from "@/lib/templates/cloud/author-rules";
+import { catalogSource, withCatalogSource } from "@/lib/templates/cloud/catalog-source";
 import { setNickname } from "@/lib/templates/cloud/client";
 import { CREATOR_NOT_APPROVED_RENAME_MESSAGE, CREATOR_STATUS_REFRESH_KEY } from "@/lib/templates/cloud/constants";
 import { navigationEmitter } from "@/lib/navigation-events";
@@ -47,7 +48,8 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ error: "Your nickname is shown only on libi's own page.", code: "cross_site_read" }, { status: 403 });
   }
   try {
-    const a = getOrCreateTemplatesAuthor();
+    // The nickname of the catalog this page is on: each keeps its own (review M4).
+    const a = getOrCreateTemplatesAuthor(catalogSource());
     return NextResponse.json({ nickname: a.nickname, authorId: a.authorId });
   } catch (err) {
     if (err instanceof TemplatesAuthorChangedError) return NextResponse.json({ error: CHANGED }, { status: 409 });
@@ -73,15 +75,18 @@ export async function PUT(req: Request): Promise<Response> {
   const parsed = parseNickname(raw);
   if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 });
 
+  // The catalog renamed on, held across the await: only its own nickname changes (review M4).
+  const source = catalogSource();
   let author;
   try {
-    author = getOrCreateTemplatesAuthor();
+    author = getOrCreateTemplatesAuthor(source);
   } catch (err) {
     if (err instanceof TemplatesAuthorChangedError) return NextResponse.json({ error: CHANGED }, { status: 409 });
     if (err instanceof TemplatesAuthorWriteError) return NextResponse.json({ error: notSaved(err) }, { status: 500 });
     throw err;
   }
-  const r = await setNickname(author.key, parsed.nickname);
+  const key = author.key;
+  const r = await withCatalogSource(source, () => setNickname(key, parsed.nickname));
   if (!r.ok) {
     // By the site's code and status, never its words: those are only shown.
     if (r.code === "rate_limited") return NextResponse.json({ error: "Too many nickname changes. Try again in a minute.", code: r.code }, { status: 429 });
@@ -107,7 +112,7 @@ export async function PUT(req: Request): Promise<Response> {
   // After the await: only while the key is still the one the site just named.
   let wrote: boolean;
   try {
-    wrote = setTemplatesAuthorNickname(author.key, r.nickname);
+    wrote = setTemplatesAuthorNickname(author.key, r.nickname, { source });
   } catch (err) {
     if (err instanceof TemplatesAuthorWriteError) return NextResponse.json({ error: notSaved(err) }, { status: 500 });
     throw err;

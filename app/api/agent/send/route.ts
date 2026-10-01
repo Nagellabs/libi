@@ -51,6 +51,10 @@ export async function POST(request: Request) {
     );
   }
 
+  // The user wrote in this chat, whatever happens to the message next (a held approval mode
+  // included): a dispatch must never pick it up as an untouched chat to retry in.
+  sm.markUserSent(sessionId);
+
   // Known but not attached — switching agents away and back clears the
   // session map and re-lists every persisted session as INACTIVE, while the
   // chat panel keeps displaying one of them. This used to be a dead-end 400
@@ -80,6 +84,24 @@ export async function POST(request: Request) {
         { status: 503 },
       );
     }
+  }
+
+  // The chat's approval mode must be in force before the prompt goes out. Under "Ask each time" or
+  // "Auto", a chat whose mode push hasn't answered within the bound, or failed, is held: sending
+  // would let tools run in the agent's own mode with no card. The send fails instead (the session
+  // manager has already logged it and put a note in the chat) — retryably when a retry re-attempts
+  // the push, otherwise with the way out (another approval mode, or a new chat).
+  const approval = await sm.awaitApprovalMode(sessionId);
+  if (!approval.ok) {
+    return NextResponse.json(
+      {
+        error: approval.retryable
+          ? `${approval.error} Use the retry button on the message.`
+          : approval.error,
+        approvalModeNotApplied: approval.mode,
+      },
+      { status: 503 },
+    );
   }
 
   let messageText = text ?? "";

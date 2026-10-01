@@ -17,9 +17,15 @@ vi.mock("@/mcp/jobs-client", () => ({
 
 /** What ffprobe says about the stored file. */
 let probeOut: { format: Record<string, string>; streams: unknown[] } = { format: {}, streams: [] };
+/** AUD-4 review I2: make the HE-AAC check's own ffprobe time out. */
+let heAacProbeTimesOut = false;
 vi.mock("child_process", () => ({
   execFile: (...callArgs: unknown[]) => {
-    const cb = callArgs[callArgs.length - 1] as (err: Error | null, out: { stdout: string; stderr: string }) => void;
+    const cb = callArgs[callArgs.length - 1] as (err: Error | null, out?: { stdout: string; stderr: string }) => void;
+    const args = callArgs[1] as string[];
+    if (heAacProbeTimesOut && args.includes("stream=profile,extradata")) {
+      return cb(Object.assign(new Error("ffprobe timed out"), { killed: true, signal: "SIGKILL" }));
+    }
     cb(null, { stdout: JSON.stringify(probeOut), stderr: "" });
   },
 }));
@@ -67,6 +73,23 @@ describe("storeFile: an audio file the preview can't play gets a proxy (review r
     probeOut = { format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4" }, streams: [{ index: 0, codec_type: "audio", codec_name: "alac" }] };
     const record = await store("song.m4a", "audio/mp4");
     expect(enqueueJobOnServer).toHaveBeenCalledWith("proxy_gen", { fileId: record.id }, expect.anything());
+  });
+
+  it("AUD-4 review I2: an audio-only AAC whose HE-AAC check times out still gets its proxy", async () => {
+    heAacProbeTimesOut = true;
+    try {
+      probeOut = { format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4" }, streams: [{ index: 0, codec_type: "audio", codec_name: "aac" }] };
+      const record = await store("voice.m4a", "audio/mp4");
+      expect(enqueueJobOnServer).toHaveBeenCalledWith("proxy_gen", { fileId: record.id }, expect.anything());
+    } finally {
+      heAacProbeTimesOut = false;
+    }
+  });
+
+  it("an audio-only AAC-LC file whose check answers: nothing is enqueued", async () => {
+    probeOut = { format: { format_name: "mov,mp4,m4a,3gp,3g2,mj2", duration: "4" }, streams: [{ index: 0, codec_type: "audio", codec_name: "aac", profile: "LC" }] };
+    await store("voice.m4a", "audio/mp4");
+    expect(enqueueJobOnServer).not.toHaveBeenCalled();
   });
 
   it("an ordinary MP3 or Opus Ogg: nothing is enqueued", async () => {

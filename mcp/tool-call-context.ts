@@ -13,6 +13,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export interface ToolCallContext {
   toolName: string;
   args: unknown;
+  /** Claude's `_meta["claudecode/toolUseId"]` — the ACP toolCallId under claude-agent-acp — when
+   *  the engine sent one. Codex sends none; the name + args hint is the fallback. */
+  toolUseId?: string;
 }
 
 const als = new AsyncLocalStorage<ToolCallContext>();
@@ -21,8 +24,9 @@ export function runWithToolCallContext<T>(
   toolName: string,
   args: unknown,
   fn: () => Promise<T>,
+  toolUseId?: string,
 ): Promise<T> {
-  return als.run({ toolName, args }, fn);
+  return als.run({ toolName, args, ...(toolUseId ? { toolUseId } : {}) }, fn);
 }
 
 export function getCurrentToolCall(): ToolCallContext | null {
@@ -38,8 +42,16 @@ export function wrapRegisterToolWithContext(register: RegisterFn): RegisterFn {
   return (...args: unknown[]) => {
     const name = args[0] as string;
     const handler = args[args.length - 1] as (...h: unknown[]) => unknown;
-    const wrappedHandler = (...hargs: unknown[]) =>
-      runWithToolCallContext(name, hargs[0], async () => handler(...hargs));
+    const wrappedHandler = (...hargs: unknown[]) => {
+      const meta = (hargs[1] as { _meta?: Record<string, unknown> } | undefined)?._meta;
+      const toolUseId = meta?.["claudecode/toolUseId"];
+      return runWithToolCallContext(
+        name,
+        hargs[0],
+        async () => handler(...hargs),
+        typeof toolUseId === "string" ? toolUseId : undefined,
+      );
+    };
     const newArgs = [...args];
     newArgs[newArgs.length - 1] = wrappedHandler;
     return register(...newArgs);

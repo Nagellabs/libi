@@ -61,6 +61,9 @@ const realHome = process.env.LIBI_HOME;
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "libi-oauth-routes-"));
   process.env.LIBI_HOME = home;
+  // The studio's own port, as Category B publishes it. The start route reads
+  // it from here, never from `request.url` — see oauth-start-real-port.test.ts.
+  vi.stubEnv("LIBI_SERVER_PORT", "3459");
   settings.providerId = "zernio";
   tracked.calls.length = 0;
   service.resets = 0;
@@ -80,6 +83,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   if (realHome === undefined) delete process.env.LIBI_HOME;
   else process.env.LIBI_HOME = realHome;
 });

@@ -15,7 +15,7 @@
  * These tests are about the boundaries — that it fires, that it fires only
  * there, and that it cannot become a loop.
  */
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /** Recording fake — the log line IS the deliverable for the silent shape. */
 vi.mock("@/lib/logger", () => {
@@ -47,6 +47,8 @@ vi.mock("@/lib/mcp-config", () => ({
     { type: "http", name: "libi-app", url: "http://x/mcp" },
   ]),
   onMcpConfigInvalidated: vi.fn(),
+  TEST_MODE_STDIO_FAKE_NAMES: ["fal-ai", "elevenlabs"],
+  testModeFakesEnabled: vi.fn(() => true),
 }));
 
 vi.mock("@/lib/approval/settings", () => ({ getApprovalMode: vi.fn(() => "auto") }));
@@ -87,6 +89,10 @@ import { SessionManager } from "@/lib/sessions/session-manager";
 import { LIBI_MCP_FALLBACK_ENTRY_NAME } from "@/lib/mcp/agent-surface";
 import { serverLogger } from "@/lib/logger";
 import { __clearCodexMcpListing } from "@/lib/agents/codex-mcp-listing";
+import { getLibiAgentDir } from "@/lib/libi-home";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const CODEX_CLI = { path: "/fixture/codex", realPath: "/fixture/codex", execPath: "/fixture/codex", version: "0.160.0", meetsMinimum: true };
 const LIBI_HTTP = { name: "libi", enabled: true, transport: { type: "streamable_http", url: "http://127.0.0.1:3457/mcp?agent=codex" } };
@@ -246,9 +252,10 @@ describe("newSession falls back to a non-colliding MCP entry name", () => {
     mockConnection.newSession.mockRejectedValue(collisionError());
 
     await expect(sm.createSession()).rejects.toMatchObject({
-      // The ORIGINAL error propagates: it is the one naming `mcp_servers.libi`,
-      // which is what the user has to fix.
-      data: expect.stringContaining("mcp_servers.libi"),
+      // The ORIGINAL error is what gets explained (and kept as the cause): it
+      // is the one naming `mcp_servers.libi`, which is what the user has to fix.
+      message: expect.stringContaining("url is not supported for stdio in `mcp_servers.libi`"),
+      cause: expect.objectContaining({ data: expect.stringContaining("mcp_servers.libi") }),
     });
     expect(mockConnection.newSession).toHaveBeenCalledTimes(2);
   });
@@ -369,5 +376,239 @@ describe("a disabled [mcp_servers.libi] is named in the log", () => {
     await expect(sm.createSession()).resolves.toBeTruthy();
     await settle();
     expect(loggedOps()).not.toContain("libi_mcp_entry_disabled");
+  });
+});
+
+/**
+ * Test mode on Codex (PRV-3): libi's stdio fakes ride under the real servers' names, and a real HTTP entry the
+ * user added under one of those names in their own terminal makes codex refuse its whole config. The chat names
+ * that entry instead of codex's bare "Internal error"; nothing is retried (without the fake, the real paid server
+ * would answer).
+ */
+describe("test mode: a user's Codex entry colliding with a fake is named", () => {
+  let sm: SessionManager;
+  let pm: ReturnType<typeof createMockPm>["pm"];
+  let mockConnection: ReturnType<typeof createMockPm>["mockConnection"];
+
+  /** codex's rejection when a session's stdio fake merges into the user's HTTP `[mcp_servers.<name>]`. */
+  const fakeCollision = (name: string) => ({
+    code: -32603,
+    message: "Internal error",
+    data: `failed to load configuration: url is not supported for stdio\nin \`mcp_servers.${name}\`\n\n\nCheck /tmp/codex-home and project .codex directories, …`,
+  });
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    vi.stubEnv("LIBI_TEST_MODE", "1");
+    const mocks = createMockPm();
+    pm = mocks.pm;
+    mockConnection = mocks.mockConnection;
+    sm = new SessionManager();
+    sm.setProcessManager(mocks.pm);
+    // No standby, so createSession() is the call under test.
+    mockConnection.newSession.mockRejectedValue(new Error("Connection closed"));
+    await sm.switchAgent("codex");
+    mockConnection.newSession.mockClear();
+  });
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("logs test_mode_entry_collision with the entry, and the chat's error says which entry and what to do", async () => {
+    mockConnection.newSession.mockRejectedValue(fakeCollision("fal-ai"));
+    const err = await sm.createSession().then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe(
+      'Test mode: Codex\'s config has its own "fal-ai" MCP server, and libi gives Codex a fake under that same name, ' +
+        'so Codex refused its whole config and this chat can\'t start. Remove that "fal-ai" entry (Agents → Providers), ' +
+        "or run libi outside test mode.",
+    );
+    expect((err as Error & { cause?: unknown }).cause).toMatchObject({ data: expect.stringContaining("mcp_servers.fal-ai") });
+    const call = vi.mocked(serverLogger.error).mock.calls.find((c) => (c[0] as { op?: string })?.op === "test_mode_entry_collision");
+    expect(call?.[0]).toMatchObject({ tag: "session-manager", agentId: "codex", reason: "fresh", entry: "fal-ai" });
+    // No retry: the fake is the point of test mode.
+    expect(mockConnection.newSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("a resumed chat (session/load) names the collision too", async () => {
+    vi.mocked(pm.getCapabilitiesForAgent).mockReturnValue({ canListSessions: true });
+    mockConnection.listSessions.mockResolvedValue({
+      sessions: [
+        { sessionId: "s-load", cwd: "/tmp/libi-test-agent", title: "chat", updatedAt: "2026-09-26T10:00:00.000Z" },
+      ],
+      nextCursor: null,
+    });
+    await sm.loadInitialSessions("codex");
+    mockConnection.loadSession.mockRejectedValue(fakeCollision("fal-ai"));
+
+    const err = await sm.activateSession("s-load").then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe(
+      'Test mode: Codex\'s config has its own "fal-ai" MCP server, and libi gives Codex a fake under that same name, ' +
+        'so Codex refused its whole config and this chat can\'t be opened. Remove that "fal-ai" entry (Agents → Providers), ' +
+        "or run libi outside test mode.",
+    );
+    expect((err as Error & { cause?: unknown }).cause).toMatchObject({ data: expect.stringContaining("mcp_servers.fal-ai") });
+    const call = vi.mocked(serverLogger.error).mock.calls.find((c) => (c[0] as { op?: string })?.op === "test_mode_entry_collision");
+    expect(call?.[0]).toMatchObject({ tag: "session-manager", agentId: "codex", reason: "load", entry: "fal-ai" });
+    // No retry: the fake is the point of test mode.
+    expect(mockConnection.loadSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("names elevenlabs too", async () => {
+    mockConnection.newSession.mockRejectedValue(fakeCollision("elevenlabs"));
+    await expect(sm.createSession()).rejects.toThrow(/"elevenlabs" MCP server/);
+  });
+
+  it("leaves a rejection naming any other entry as it was", async () => {
+    const other = fakeCollision("fal-ai-2");
+    mockConnection.newSession.mockRejectedValue(other);
+    // Not a test-mode collision: codex's own config refusal, explained in its own words.
+    const err = await sm.createSession().then(() => null, (e: unknown) => e as Error & { cause?: unknown });
+    expect(err?.message).toMatch(/^Codex couldn't load its configuration.*mcp_servers\.fal-ai-2/);
+    expect(err?.message).not.toMatch(/^Test mode/);
+    expect(err?.cause).toBe(other);
+  });
+
+  it("outside test mode the same rejection is codex's own", async () => {
+    vi.stubEnv("LIBI_TEST_MODE", "");
+    const err = fakeCollision("fal-ai");
+    mockConnection.newSession.mockRejectedValue(err);
+    const thrown = await sm.createSession().then(() => null, (e: unknown) => e as Error & { cause?: unknown });
+    expect(thrown?.message).toMatch(/^Codex couldn't load its configuration/);
+    expect(thrown?.cause).toBe(err);
+    expect(vi.mocked(serverLogger.error).mock.calls.some((c) => (c[0] as { op?: string })?.op === "test_mode_entry_collision")).toBe(false);
+  });
+});
+
+/**
+ * Codex refusing its OWN configuration — found on 2026-09-29 on a real install: libi's agent
+ * folder still held a project `.codex/config.toml` written by libi ≤ 0.1.13 (a stdio
+ * `[mcp_servers.libi]`), and the user's `~/.codex/config.toml` had gained the url entry. Codex
+ * merged the two, refused the whole config, and every session/new and session/load came back as
+ * a bare "Internal error" — while New chat waited forever on a standby that could never be made.
+ */
+describe("a config Codex refuses on its own is named, recorded, and retryable", () => {
+  let sm: SessionManager;
+  let mockConnection: ReturnType<typeof createMockPm>["mockConnection"];
+  let pm: ReturnType<typeof createMockPm>["pm"];
+  let agentDir: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    agentDir = mkdtempSync(join(tmpdir(), "libi-agent-cfg-"));
+    vi.mocked(getLibiAgentDir).mockReturnValue(agentDir);
+    const mocks = createMockPm();
+    pm = mocks.pm;
+    mockConnection = mocks.mockConnection;
+    sm = new SessionManager();
+    sm.setProcessManager(pm);
+  });
+  afterEach(() => {
+    vi.mocked(getLibiAgentDir).mockReturnValue("/tmp/libi-test-agent");
+    rmSync(agentDir, { recursive: true, force: true });
+  });
+
+  it("with an old libi-written project config in the agent folder: the error names that file and what to remove", async () => {
+    mkdirSync(join(agentDir, ".codex"));
+    writeFileSync(join(agentDir, ".codex", "config.toml"), "");
+    mockConnection.newSession.mockRejectedValue(collisionError());
+    await sm.switchAgent("codex");
+    mockConnection.newSession.mockClear();
+    mockConnection.newSession.mockRejectedValue(collisionError());
+
+    const err = await sm.createSession().then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toBe(
+      "Codex couldn't load its configuration, so it can't start or open a chat. Codex says: url is not supported for stdio in `mcp_servers.libi`. " +
+        `libi's agent folder still has a Codex config written by an older libi version (${join(agentDir, ".codex", "config.toml")}), ` +
+        "and Codex reads it on top of ~/.codex/config.toml. Remove the [mcp_servers.libi] section from that older file " +
+        "(the entry in ~/.codex/config.toml is the current one), then start a new chat.",
+    );
+    expect(sm.getReadiness("codex")).toEqual({ state: "config-error", agentId: "codex", message: err!.message });
+    const calls = vi.mocked(serverLogger.error).mock.calls.filter((c) => (c[0] as { op?: string })?.op === "agent_config_error");
+    expect(calls.at(-1)?.[0]).toMatchObject({ tag: "session-manager", agentId: "codex", reason: "fresh", legacyProjectConfig: true });
+  });
+
+  it("without one: points at the user's own Codex config", async () => {
+    mockConnection.newSession.mockRejectedValue(collisionError());
+    await sm.switchAgent("codex");
+    mockConnection.newSession.mockClear();
+    mockConnection.newSession.mockRejectedValue(collisionError());
+
+    await expect(sm.createSession()).rejects.toThrow(
+      "Codex couldn't load its configuration, so it can't start or open a chat. Codex says: url is not supported for stdio in `mcp_servers.libi`. " +
+        "Fix it in ~/.codex/config.toml (or a project .codex/config.toml), then start a new chat.",
+    );
+  });
+
+  it("a config error that never named libi's entry is explained too, with no retry", async () => {
+    const own = { code: -32603, message: "Internal error", data: "failed to load configuration: /h/config.toml:1:18: unclosed table, expected `]`\n\nCheck …" };
+    mockConnection.newSession.mockRejectedValue(own);
+    await sm.switchAgent("codex");
+    mockConnection.newSession.mockClear();
+    mockConnection.newSession.mockRejectedValue(own);
+
+    await expect(sm.createSession()).rejects.toThrow("Codex says: /h/config.toml:1:18: unclosed table, expected `]`.");
+    expect(mockConnection.newSession).toHaveBeenCalledTimes(1);
+    expect(sm.getReadiness("codex").state).toBe("config-error");
+  });
+
+  it("the standby's failure records it — so New chat can say why instead of waiting forever", async () => {
+    mockConnection.newSession.mockRejectedValue(collisionError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.isStandbyReady()).toBe(false);
+    expect(sm.getReadiness("codex").state).toBe("config-error");
+  });
+
+  it("an old chat that can't be opened says the same, not 'Internal error'", async () => {
+    vi.mocked(pm.getCapabilitiesForAgent).mockReturnValue({ canListSessions: true });
+    mockConnection.listSessions.mockResolvedValue({
+      sessions: [{ sessionId: "s-old", cwd: agentDir, title: "chat", updatedAt: "2026-09-27T10:00:00.000Z" }],
+      nextCursor: null,
+    });
+    await sm.loadInitialSessions("codex");
+    mockConnection.loadSession.mockRejectedValue(collisionError());
+
+    const err = await sm.activateSession("s-old").then(() => null, (e: unknown) => e as Error);
+    expect(err?.message).toMatch(/^Codex couldn't load its configuration, so it can't start or open a chat\./);
+    expect(mockConnection.loadSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("reads session/load's own shape — the text in data.details, not a data string — so the load retries and explains too", async () => {
+    vi.mocked(pm.getCapabilitiesForAgent).mockReturnValue({ canListSessions: true });
+    mockConnection.listSessions.mockResolvedValue({
+      sessions: [{ sessionId: "s-old", cwd: agentDir, title: "chat", updatedAt: "2026-09-27T10:00:00.000Z" }],
+      nextCursor: null,
+    });
+    await sm.loadInitialSessions("codex");
+    // Verbatim from the dev log (codex-acp 1.10.0, 2026-09-29).
+    const loadShape = { code: -32603, message: "Internal error", data: { details: "failed to load configuration: url is not supported for stdio\nin `mcp_servers.libi`\n" } };
+    mockConnection.loadSession.mockRejectedValue(loadShape);
+
+    const err = await sm.activateSession("s-old").then(() => null, (e: unknown) => e as Error & { cause?: unknown });
+    expect(err?.message).toMatch(/Codex says: url is not supported for stdio in `mcp_servers\.libi`\./);
+    expect(err?.cause).toBe(loadShape);
+    // The libi-entry retry now recognises it as well.
+    expect(mockConnection.loadSession).toHaveBeenCalledTimes(2);
+    expect(sm.getReadiness("codex").state).toBe("config-error");
+  });
+
+  it("the next clean session clears it", async () => {
+    mockConnection.newSession.mockRejectedValue(collisionError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.getReadiness("codex").state).toBe("config-error");
+    mockConnection.newSession.mockReset();
+    mockConnection.newSession.mockResolvedValue({ sessionId: "s-fixed" });
+
+    await expect(sm.createSession()).resolves.toBe("s-fixed");
+    expect(sm.getReadiness("codex")).toEqual({ state: "ready" });
+  });
+
+  it("…and brings the standby back, so New chat is not stuck on 'Preparing…' after the fix", async () => {
+    mockConnection.newSession.mockRejectedValue(collisionError());
+    await sm.switchAgent("codex", { awaitStandbyMs: 2000 });
+    expect(sm.isStandbyReady()).toBe(false);
+    mockConnection.newSession.mockReset();
+    mockConnection.newSession.mockResolvedValueOnce({ sessionId: "s-fixed" }).mockResolvedValue({ sessionId: "s-standby" });
+
+    await sm.createSession();
+    await vi.waitFor(() => expect(sm.isStandbyReady()).toBe(true));
+    expect(mockConnection.newSession).toHaveBeenCalledTimes(2);
   });
 });

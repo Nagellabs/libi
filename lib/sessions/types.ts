@@ -1,5 +1,6 @@
 import type { AgentEvent } from "@/lib/agents/types";
 import type { AgentReadiness } from "@/lib/agents/agent-readiness";
+import type { ApprovalMode } from "@/lib/approval/mode";
 import type { AgentMessage } from "@/lib/agents/message-types";
 import type {
   PermissionOption,
@@ -11,6 +12,16 @@ import type {
   SessionUsageState,
   AvailableCommandInfo,
 } from "@/lib/sessions/usage";
+
+/** Which approval-mode push this is — decides the not-applied note's wording and goes in the log. */
+export type ApprovalPushContext = "new" | "standby" | "resume" | "change" | "retry";
+
+/** Why a chat's saved approval mode was not applied (`SessionEntry.approvalModeNotAppliedReason`). */
+export type ApprovalNotAppliedReason =
+  | "modes_unknown"
+  | "unsupported_by_agent"
+  | "set_failed"
+  | "set_timeout";
 
 export interface PendingApproval {
   pendingId: string;
@@ -69,11 +80,45 @@ export interface SessionEntry {
    *  the adapter on new/load/resume, so this recovers on activation. */
   availableCommands: AvailableCommandInfo[];
   /** ACP `result.modes?.availableModes` captured at fresh newSession / standby
-   *  creation. Cached so user-driven mode broadcasts, standby claims, and
-   *  post-loadSession re-pushes never push an unadvertised ACP mode id blind
-   *  (the codex -32602 bug). Undefined until the fresh-newSession path
-   *  captures it. */
+   *  creation, or from the `session/load` response when a chat is resumed
+   *  (both adapters return `modes` there). Cached so user-driven mode
+   *  broadcasts, standby claims, and post-loadSession re-pushes never push an
+   *  unadvertised ACP mode id blind (the codex -32602 bug). Undefined for an
+   *  entry rebuilt from `listSessions` until it is loaded. */
   availableModes?: { id: string }[];
+  /** The saved approval mode libi could NOT apply to this chat's ACP session
+   *  (nothing known about the agent's modes, or the adapter refused the push).
+   *  The chat carries a note saying so; cleared by the next push that lands.
+   *  A silent downgrade to the agent's own mode was full-verification F5. */
+  approvalModeNotApplied?: ApprovalMode;
+  /** Why `approvalModeNotApplied` is set. Under "Ask each time" and "Auto" such a chat's prompts
+   *  are held (`SessionManager.awaitApprovalMode`); cleared with it by the next push that lands. */
+  approvalModeNotAppliedReason?: ApprovalNotAppliedReason;
+  /** The approval-mode push in flight, if any, and which push it is. A prompt waits for it
+   *  (bounded — `SessionManager.awaitApprovalMode`) so a prompt to a chat that just resumed never
+   *  runs ahead of the mode it must run under. */
+  approvalModePush?: {
+    promise: Promise<boolean>;
+    context: ApprovalPushContext;
+    /** Settles once this push AND every push still in flight before it have settled: an older
+     *  push can land after a newer one, so a prompt waits for all of them, not just the latest. */
+    all: Promise<void>;
+    /** Set when the never-prompt gate went on without it (`approvalModePushTimedOut`). It stays in
+     *  the chain: a later push still waits behind it, and only a gate under "Auto, no extension
+     *  prompts" may skip it — a stricter mode never passes while a looser push is outstanding. */
+    waived?: boolean;
+  };
+  /** Bumped by every approval-mode push on this chat. A push that settles when it is no longer the
+   *  latest — or after the saved mode moved on — must not clear the not-applied state: it may have
+   *  landed over a newer mode (`SessionManager.applyApprovalMode`). */
+  approvalModePushGeneration?: number;
+  /** How many times this chat's not-applied state was cleared by a push that landed — each clear
+   *  posts an "applied" note (`note_approval_mode_applied_<sid>_<epoch>`), and a failure after it
+   *  gets a note of its own (id suffixed `_<epoch>`) instead of deduping into the first one. */
+  approvalModeNoteEpoch?: number;
+  /** The user sent (or tried to send) a message in this chat — set before the approval gate, so a
+   *  held message counts too. Such a chat is theirs: `dispatchToAgent` never reuses it. */
+  userSent?: boolean;
   /** True while loadSession() replays history through the event handler.
    *  Replayed tool calls get no timestamps/status — a replay-time
    *  Date.now() would be a lie (QA 2026-07-04: bogus timers after
@@ -90,6 +135,11 @@ export interface SessionEntry {
    *  later activations throw `AgentHistoryMissingError` without asking the agent again. In memory
    *  only, so a transcript the user restores is picked up after libi restarts. */
   historyMissing?: boolean;
+  /** libi's chat index knows this chat but the agent's last listing left it out (SES-4). NOT proof
+   *  the history is gone — Codex's listing filters by provider and hides archived threads — so
+   *  opening it still tries the load: success clears this, the agent's rejection sets
+   *  `historyMissing`. Cleared too when a later listing has it again. */
+  historyUnlisted?: boolean;
 }
 
 /** A group of sessions under a day header for the sidebar UI */

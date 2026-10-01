@@ -11,6 +11,7 @@ import {
 import { pieces } from "@/lib/db/schema/sqlite";
 import { saveManifest } from "@/lib/composition/persistence";
 import { DIAGNOSTIC_MESSAGE_SOURCE as BODY_TEXT, MAX_AGENT_MESSAGE_CHARS } from "@/mcp/tools/snapshot-tools";
+import { mcpLogger } from "@/lib/logger";
 
 describe("MCP snapshot tools", () => {
   // get_piece_state reads render diagnostics from the studio over HTTP; with
@@ -18,7 +19,7 @@ describe("MCP snapshot tools", () => {
   // No test here may reach it.
   const fetchSpy = vi.fn(async () => { throw new Error("no network in unit tests"); });
   beforeEach(() => { createTestDb(); createTempStorageDir(); fetchSpy.mockClear(); vi.stubGlobal("fetch", fetchSpy); });
-  afterEach(() => { resetTestDb(); cleanupTempDir(); vi.unstubAllGlobals(); });
+  afterEach(() => { resetTestDb(); cleanupTempDir(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
   it("getPieceState returns hasDraft + empty history for new piece", async () => {
     const db = createTestDb();
@@ -29,6 +30,49 @@ describe("MCP snapshot tools", () => {
       expect(result.data.hasDraft).toBe(false);
       expect(result.data.recentSnapshots).toEqual([]);
     }
+  });
+
+  it("getPieceState lists the piece's pendingMusic (where libi.fetch_template_music points), labelled as the author's text", async () => {
+    const db = createTestDb();
+    const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
+    const noDiags = { fetchDiagnostics: async () => ({ diagnostics: [], unattributed: [] }), readAudioRights: async () => [] };
+    const empty = await getPieceStateTool({ pieceId: piece.id }, noDiags);
+    expect(empty.success && empty.data.pendingMusic).toEqual([]);
+    expect(empty.success && "pendingMusicNote" in empty.data).toBe(false);
+
+    const entry = { assetId: "tpl-1-music-1", templateId: "t1", track: { title: "Espresso", artist: "Sabrina Carpenter" }, clips: [{ startTime: 0, duration: 5, trimStart: 0, volume: 1 }] };
+    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [], pendingMusic: [entry] });
+    const r = await getPieceStateTool({ pieceId: piece.id }, noDiags);
+    expect(r.success && r.data.pendingMusic).toEqual([entry]);
+    expect(r.success && r.data).toMatchObject({ pendingMusicNote: expect.stringContaining("libi.fetch_template_music"), pendingMusicSource: "template author (untrusted)" });
+  });
+
+  it("getPieceState reports audioRights from the injected reader", async () => {
+    const db = createTestDb();
+    const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
+    const result = await getPieceStateTool(
+      { pieceId: piece.id },
+      { fetchDiagnostics: async () => ({ diagnostics: [], unattributed: [] }), readAudioRights: async () => [{ fileId: "f1", name: "Track", class: "copyrighted" as const }] },
+    );
+    expect(result.success && result.data.audioRights).toEqual([{ fileId: "f1", name: "Track", class: "copyrighted" }]);
+  });
+
+  it("getPieceState logs and reports an empty audioRights list when the reader throws (mirrors fetchRenderDiagnostics)", async () => {
+    const db = createTestDb();
+    const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
+    const warn = vi.spyOn(mcpLogger, "warn").mockImplementation(() => {});
+    const result = await getPieceStateTool(
+      { pieceId: piece.id },
+      {
+        fetchDiagnostics: async () => ({ diagnostics: [], unattributed: [] }),
+        readAudioRights: async () => { throw new Error("db down"); },
+      },
+    );
+    expect(result.success && result.data.audioRights).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({ tag: "social-music", op: "piece_rights_read_failed", pieceId: piece.id, err: "db down" }),
+      expect.any(String),
+    );
   });
 
   it("getPieceState carries renderDiagnostics from the studio, and empty lists when it cannot be reached", async () => {

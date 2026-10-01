@@ -13,6 +13,10 @@
 #   provider  fal, higgsfield, zernio or elevenlabs
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
+#   -CliScript  optional, Windows npm installs: the JS file the agent's `.cmd`
+#             shim runs. libi passes it with the node the shim would use as
+#             `cli`, so the agent runs without cmd.exe, whose Ctrl+C would stop
+#             at "Terminate batch job (Y/N)?". Without it, `cli` runs as is.
 #
 # What it does:
 #   1. fal.ai: asks for your provider key without showing it as you type.
@@ -28,7 +32,7 @@
 #
 # The key is never printed, and it exists only inside this script's process.
 
-param([string]$Provider, [string]$Agent, [string]$Cli)
+param([string]$Provider, [string]$Agent, [string]$Cli, [string]$CliScript)
 
 # Provider details. A libi test keeps this table, and the `mcp add` commands
 # below, the same as libi's provider catalog (lib/providers/catalog.ts).
@@ -45,9 +49,13 @@ if ($Agent -cne 'claude' -and $Agent -cne 'codex') {
   exit 2
 }
 if (-not $Cli) {
-  [Console]::Error.WriteLine('usage: add-provider.ps1 <provider> <agent> <cli>')
+  [Console]::Error.WriteLine('usage: add-provider.ps1 <provider> <agent> <cli> [-CliScript <script>]')
   exit 2
 }
+
+# The agent's command: `cli`, or node running the agent's own script (-CliScript).
+$cliPre = @()
+if ($CliScript) { $cliPre = @($CliScript) }
 
 # The key, read as a SecureString so typing is hidden. A provider you sign in
 # to with your account has no key, so nothing is asked for.
@@ -94,13 +102,13 @@ if ($signsIn) {
 }
 $code = 0
 try {
-  & $Cli @addArgs
+  & $Cli @cliPre @addArgs
   if (-not $?) {
     $code = 1
     if ($LASTEXITCODE) { $code = $LASTEXITCODE }
   } elseif ($signsIn) {
     $loginArgs = @('mcp', 'login', '--', $Provider)
-    & $Cli @loginArgs
+    & $Cli @cliPre @loginArgs
     if (-not $?) {
       $code = 1
       if ($LASTEXITCODE) { $code = $LASTEXITCODE }

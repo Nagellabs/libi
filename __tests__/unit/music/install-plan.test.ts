@@ -15,6 +15,11 @@ describe("local-music install plan", () => {
     // stale number. The figure is what the user consents to — it has to be one
     // value, defined once.
     expect(md).toContain(ACESTEP_DOWNLOAD_SIZE_HUMAN);
+    // The total the user consents to can't be smaller than the model alone
+    // (it said "~7–8 GB" beside the ~8.3 GB model: review FINAL copy fix).
+    const total = /Total disk hit is ~(\d+(?:\.\d+)?)/.exec(md);
+    expect(total).not.toBeNull();
+    expect(Number(total![1])).toBeGreaterThan(Number(/[\d.]+/.exec(ACESTEP_DOWNLOAD_SIZE_HUMAN)![0]));
     expect(md).toContain("libi.music_download_model");
     expect(md).toContain('update_dep_status({ mcpId: "local-music"');
     expect(md).toContain("libi.generate_music");

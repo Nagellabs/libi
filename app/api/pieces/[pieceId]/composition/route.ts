@@ -1,5 +1,6 @@
 import { loadComposition } from "@/lib/composition/persistence";
 import { isLegacyScenesNoticed } from "@/lib/db/settings";
+import { pendingRemovedTranscripts } from "@/lib/analysis/removed-transcripts";
 
 interface RouteParams {
   params: Promise<{ pieceId: string }>;
@@ -18,6 +19,10 @@ export async function GET(_req: Request, { params }: RouteParams) {
       // says so once per piece (hooks/editor/use-legacy-scenes-notice.ts).
       legacyScenes,
       legacyScenesNoticed: legacyScenes > 0 && isLegacyScenesNoticed(pieceId),
+      // Transcripts of this piece's (or the library's) files that a boot
+      // migration removed, not yet told: the editor says so once
+      // (hooks/editor/use-removed-transcripts-notice.ts).
+      removedTranscripts: pendingRemovedTranscripts(pieceId),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";

@@ -81,10 +81,25 @@ export { startNextServer } from "@/lib/server/next-server";
  * persisted in the clear on a machine that has a keychain — and an existing
  * encrypted grant reads as "not connected" for the same window.
  *
+ * Registering must not read the keychain: the shell's cipher answers
+ * `available()` lazily (electron/secret-cipher.ts), and the runtime asks it
+ * only when a grant is about to be written (`cipherForWrite`).
+ *
  * ADDITIVE (no version bump): an older shell never calls it and the runtime
  * falls back to a private 0600 file — see lib/social/token-store.ts.
  */
 export { registerSecretCipher } from "@/lib/social/secret-cipher";
+/**
+ * The desktop quit runs libi's shutdown, and SIGINT/SIGTERM go through
+ * Electron's quit (EL-2, lib/server/lifecycle/quit.ts). The shell calls
+ * `claimQuitSignals` BEFORE `startNextServer` — Category B then installs no
+ * SIGINT/SIGTERM listener, which would replace Electron's own quit — and
+ * awaits `shutdownForQuit` from `before-quit`.
+ *
+ * ADDITIVE (no version bump): the shell feature-detects both; an older shell
+ * never claims, so the runtime keeps its own signal listeners exactly as before.
+ */
+export { claimQuitSignals, shutdownForQuit } from "@/lib/server/lifecycle/quit";
 
 export type { LifecycleAdapter, LifecycleEvent } from "@/lib/server/lifecycle";
 export type { ShellUpdater, ShellUpdateStatus } from "@/lib/runtime/shell-update";
