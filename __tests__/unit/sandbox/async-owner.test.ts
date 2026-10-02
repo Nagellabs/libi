@@ -143,7 +143,9 @@ describe("async ownership — what the worker announces", () => {
     const r = runtime();
     await r.load("a", "__t.setTimeout(() => { __t.setTimeout(() => {}, 0); __t.setTimeout(() => {}, 0); }, 2);");
     r.render("a");
-    await new Promise((res) => setTimeout(res, 30));
+    // Wait for the four async events, not a fixed 30 ms (a loaded CI runner
+    // had not fired the 2 ms timer by then, 2026-10-02).
+    await vi.waitFor(() => expect(r.trace().slice(3)).toHaveLength(4), { timeout: 5000, interval: 5 });
     const t = r.trace();
     expect(t.filter((x) => x.startsWith("async")).every((x) => x.endsWith(":a"))).toBe(true);
     // One window for the parent, then (after its close task) one for the two
@@ -155,7 +157,15 @@ describe("async ownership — what the worker announces", () => {
     const r = runtime();
     await r.load("a", "let n = 0; const h = __t.setInterval(() => { if (++n === 3) clearInterval(h); }, 5);");
     r.render("a");
-    await new Promise((res) => setTimeout(res, 60));
+    // Until the third tick has run and its window closed, not a fixed 60 ms.
+    await vi.waitFor(
+      () => {
+        const done = r.trace().slice(3);
+        expect(done.filter((x) => x === "async:a")).toHaveLength(3);
+        expect(done.at(-1)).toBe("asyncDone:a");
+      },
+      { timeout: 5000, interval: 5 },
+    );
     const t = r.trace().slice(3);
     expect(t.filter((x) => x === "async:a")).toHaveLength(3);
     expect(t.at(-1)).toBe("asyncDone:a");

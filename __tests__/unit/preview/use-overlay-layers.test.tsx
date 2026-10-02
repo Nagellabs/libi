@@ -674,13 +674,17 @@ describe("useOverlayLayers", () => {
 
   it("a render timeout says 'timed out after 2 s', frees every other render, and blames no rejected load (minor 7)", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    // Ten turns at least; up to 500 while `until` is false. A load waits on
-    // an async sha256, which a loaded CI runner can take more than ten turns
-    // to finish (both release-npm gate runs for 0.1.16 saw a load missing).
+    // Ten turns at least; while `until` is false, keep turning for up to 10 s
+    // of REAL time. A load waits on an async sha256 (crypto.subtle's thread
+    // pool), which a loaded CI runner can take more than ten turns — and on
+    // 2026-10-02, more than 500 — to finish. Only setTimeout is faked, so
+    // setImmediate and performance.now() are real here.
     const tick = async (until?: () => boolean) => {
+      const deadline = performance.now() + 10_000;
       await act(async () => {
-        for (let i = 0; i < 500; i++) {
+        for (let i = 0; ; i++) {
           if (i >= 10 && (!until || until())) break;
+          if (i >= 10 && performance.now() > deadline) break;
           await new Promise((r) => setImmediate(r));
         }
       });

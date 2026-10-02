@@ -215,8 +215,10 @@ describe("editor page — a navigate event during a cold load vs the last-piece 
     // The restore awaits a fetch and a render; under a loaded full run that can outlast
     // waitFor's 1 s default, so give it room without changing what is asserted.
     await waitFor(() => expect(page.getByTestId("asset-preview")).toBeTruthy(), { timeout: 5000 });
+    // The saved id is written from an effect that can land a turn after the
+    // preview shows (a loaded CI runner caught it between, 2026-10-02).
+    await waitFor(() => expect(setLastAssetId).toHaveBeenLastCalledWith("a-last"), { timeout: 5000 });
     expect(setLastAssetId).not.toHaveBeenCalledWith(null);
-    expect(setLastAssetId).toHaveBeenLastCalledWith("a-last");
   });
 
   it("a folder reveal before the pieces list arrives still honours a ?piece= deep link, and strips it", () => {
