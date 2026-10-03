@@ -12,6 +12,7 @@ import { LocalFileStorage } from "@/lib/storage/local";
 import { files, folders, pieces } from "@/lib/db/schema/sqlite";
 import { eq } from "drizzle-orm";
 import { parseAudioRights } from "@/lib/audio-rights/types";
+import { hasFfmpeg } from "@/__tests__/helpers/media";
 import * as fs from "fs";
 import * as path from "path";
 
@@ -104,7 +105,9 @@ describe("libi.upload_file into several pieces, then libi.apply_ops with its per
       const row = testDb.select().from(files).where(eq(files.id, f.fileId)).get()!;
       expect(row.pieceId).toBe(f.pieceId);
       expect(fs.existsSync(path.join(tempDir, f.pieceId, "dreams.wav"))).toBe(true);
-      expect(row.mediaDuration).toBeCloseTo(2, 1);
+      // The probed length needs ffprobe; the publish job runs this suite without ffmpeg (hasFfmpeg skips there,
+      // and throws in the gates, where LIBI_REQUIRE_FFMPEG=1 says it must be present).
+      if (hasFfmpeg()) expect(row.mediaDuration).toBeCloseTo(2, 1);
       expect(parseAudioRights(row.audioRights)).toMatchObject({ class: "owned" });
     }
 
