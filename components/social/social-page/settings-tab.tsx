@@ -40,7 +40,7 @@ const TOKEN_WHERE_LABEL: Record<"keychain" | "file", string> = {
 const INSTAGRAM_TYPES: InstagramPostType[] = ["reel", "feed", "story"];
 const INSTAGRAM_TYPE_LABEL: Record<InstagramPostType, string> = { reel: "Reel", feed: "Feed", story: "Story" };
 
-export function SettingsTab() {
+export function SettingsTab({ focusAccountId = null }: { focusAccountId?: string | null } = {}) {
   const status = useSocialStatus();
   const providers = useProviders();
   const update = useUpdateSocialSettings();
@@ -246,7 +246,7 @@ export function SettingsTab() {
       {st.connected && (
         <section className="space-y-2" data-testid="social-accounts-section">
           <h2 className="text-sm font-medium">Connected accounts</h2>
-          <AccountsStrip />
+          <AccountsStrip focusAccountId={focusAccountId} />
         </section>
       )}
 

@@ -10,12 +10,13 @@ vi.mock("@/lib/approval/settings", () => ({
 }));
 
 import { getApprovalMode } from "@/lib/approval/settings";
-import { decidePermissionAction, SessionEventHandler } from "@/lib/agents/session-event-handler";
+import { decidePermissionAction, extractToolMeta, nameToolCall, SessionEventHandler, withholdAllowAlways } from "@/lib/agents/session-event-handler";
+import { formatToolId } from "@/lib/agents/format-tool-name";
 import {
   isApprovalRequiredExtensionTool,
   isExtensionInstallTool,
 } from "@/lib/approval/extensions";
-import { makeMcpToolId } from "@/lib/agents/mcp-tool-id";
+import { fromAnyToolName, makeMcpToolId } from "@/lib/agents/mcp-tool-id";
 
 /**
  * Build a `RequestPermissionRequest` shaped the way claude-agent-acp
@@ -311,7 +312,7 @@ describe("extension approval gate", () => {
     expect(await decidePermissionAction("claude-code", req("mcp__libi-tracking__libi_verify_install")))
       .toEqual({ kind: "auto-allow", optionId: "opt-0-allow_once" });
     // …while a real tracking tool on the same server is still gated.
-    expect(await decidePermissionAction("claude-code", req("mcp__libi-tracking__libi_compute_object_track")))
+    expect(await decidePermissionAction("claude-code", req("mcp__libi-tracking__libi_track")))
       .toEqual({ kind: "prompt", reason: "extension" });
   });
 
@@ -354,7 +355,16 @@ describe("isApprovalRequiredExtensionTool", () => {
 
   it("gates a tracking-server tool by the libi-tracking row", () => {
     seedExtensionRow("libi-tracking", true);
-    expect(isApprovalRequiredExtensionTool(makeMcpToolId("libi-tracking", "libi.compute_object_track"))).toBe(true);
+    // Both merged tracking tools (every action of them) sit under the extension, on either server.
+    for (const server of ["libi-tracking", "libi"]) {
+      expect(isApprovalRequiredExtensionTool(makeMcpToolId(server, "libi.track")), `${server} libi.track`).toBe(true);
+      expect(isApprovalRequiredExtensionTool(makeMcpToolId(server, "libi.tracked_overlay")), `${server} libi.tracked_overlay`).toBe(true);
+    }
+    // …and the cutout tool, which stays a separate tool of the same extension.
+    expect(isApprovalRequiredExtensionTool(makeMcpToolId("libi-tracking", "libi.remove_background"))).toBe(true);
+    // The prefixes claim no more than they did: overlay tools without a tracking name are untouched.
+    expect(isApprovalRequiredExtensionTool(makeMcpToolId("libi", "libi.add_overlay"))).toBe(false);
+    expect(isApprovalRequiredExtensionTool(makeMcpToolId("libi", "libi.analysis_save"))).toBe(false);
   });
 
   it("never returns true for an install tool, whatever the row says", () => {
@@ -380,7 +390,8 @@ describe("isExtensionInstallTool", () => {
     }
     expect(isExtensionInstallTool("libi.generate_music")).toBe(false);
     expect(isExtensionInstallTool("libi.music_list_styles")).toBe(false);
-    expect(isExtensionInstallTool("libi.compute_object_track")).toBe(false);
+    expect(isExtensionInstallTool("libi.track")).toBe(false);
+    expect(isExtensionInstallTool("libi.tracked_overlay")).toBe(false);
   });
 });
 
@@ -440,6 +451,200 @@ describe("a permission request for a session libi cannot look up", () => {
 
   it("still picks the first allow option for an ordinary tool", async () => {
     const r = await handlerWithNoSessions().handlePermissionRequest(req("mcp__libi__libi_apply_template", ["reject_once", "allow_once"]));
+    expect(r).toEqual({ outcome: { outcome: "selected", optionId: "opt-1-allow_once" } });
+  });
+});
+
+/**
+ * A merged libi tool is remembered per tool NAME by the agent ("don't ask again" /
+ * "Allow for this session"), so one "always" on a harmless action would cover its destructive
+ * siblings. `MERGED_TOOL_RISK` declares which merged tools may keep the option.
+ */
+describe("a merged libi tool is never offered 'don't ask again' when it has a changing action", () => {
+  const ALL = ["allow_always", "allow_once", "reject_once"] as const;
+  const kindsOf = (r: RequestPermissionRequest) => r.options.map((o) => o.kind);
+
+  const prompted = async (request: RequestPermissionRequest, session: Record<string, unknown> = {}) => {
+    setApprovalMode("claude-code", "ask");
+    const emit = vi.fn();
+    const entry = { agentId: "claude-code", pendingApprovals: new Map(), messageCache: [], ...session };
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      emit,
+      (() => entry) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+    void handler.handlePermissionRequest(request);
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    const event = emit.mock.calls[0][1] as { options: Array<{ kind: string }> };
+    return { kinds: event.options.map((o) => o.kind), entry };
+  };
+
+  it("withholdAllowAlways drops allow_always for a mixed merged tool, on either libi server", () => {
+    for (const wire of ["mcp__libi__libi_snapshot", "mcp__libi-app__libi_snapshot", "mcp__libi-tracking__libi_track", "mcp__libi__libi_tracked_overlay"]) {
+      const r = req(wire, [...ALL]);
+      const toolId = extractToolMeta(r).toolId;
+      expect(kindsOf(withholdAllowAlways(r, toolId)), wire).toEqual(["allow_once", "reject_once"]);
+    }
+  });
+
+  it("keeps it for a merged tool whose every action only reads, and for every non-merged tool", () => {
+    for (const wire of ["mcp__libi__libi_analysis_query", "mcp__libi__libi_show", "mcp__libi__libi_delete_piece", "mcp__fal-ai__run_model", "Edit"]) {
+      const r = req(wire, [...ALL]);
+      expect(withholdAllowAlways(r, extractToolMeta(r).toolId), wire).toBe(r);
+    }
+  });
+
+  it("does not touch a same-named tool of another server", () => {
+    const r = req("mcp__other__libi_snapshot", [...ALL]);
+    expect(withholdAllowAlways(r, extractToolMeta(r).toolId)).toBe(r);
+  });
+
+  it("the card for a mixed tool carries no remember option; the read-only and ordinary ones keep theirs", async () => {
+    expect((await prompted(req("mcp__libi__libi_snapshot", [...ALL]))).kinds).toEqual(["allow_once", "reject_once"]);
+    expect((await prompted(req("mcp__libi__libi_analysis_query", [...ALL]))).kinds).toEqual([...ALL]);
+    expect((await prompted(req("mcp__libi__libi_list_pieces", [...ALL]))).kinds).toEqual([...ALL]);
+  });
+
+  it("an option the card never showed cannot be answered: the stored options are the trimmed ones", async () => {
+    const { entry } = await prompted(req("mcp__libi__libi_snapshot", [...ALL]));
+    const [pending] = [...(entry.pendingApprovals as Map<string, { options: Array<{ kind: string }> }>).values()];
+    expect(pending.options.map((o) => o.kind)).toEqual(["allow_once", "reject_once"]);
+  });
+
+  it("an auto mode never picks the withheld option (the extension gate's tracking tool included)", async () => {
+    setApprovalMode("claude-code", "auto");
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      vi.fn(),
+      (() => ({ agentId: "claude-code", pendingApprovals: new Map(), messageCache: [] })) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+    // allow_always listed FIRST, as claude-agent-acp lists its remember option
+    const r = await handler.handlePermissionRequest(req("mcp__libi__libi_snapshot", ["allow_always", "allow_once", "reject_once"]));
+    expect(r).toEqual({ outcome: { outcome: "selected", optionId: "opt-1-allow_once" } });
+  });
+
+  it("an extension-gated tracking call in auto mode asks without a remember option", async () => {
+    seedExtensionRow("libi-tracking", true);
+    setApprovalMode("claude-code", "auto");
+    const emit = vi.fn();
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      emit,
+      (() => ({ agentId: "claude-code", pendingApprovals: new Map(), messageCache: [] })) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+    void handler.handlePermissionRequest(req("mcp__libi-tracking__libi_track", [...ALL]));
+    await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+    const event = emit.mock.calls[0][1] as { reason: string; options: Array<{ kind: string }> };
+    expect(event.reason).toBe("extension");
+    expect(event.options.map((o) => o.kind)).toEqual(["allow_once", "reject_once"]);
+  });
+
+  it("a Codex approval is nameless: the tool comes from the tool_call cached under the same toolCallId", async () => {
+    const nameless: RequestPermissionRequest = {
+      sessionId: "s1",
+      toolCall: { toolCallId: "codex-call-1", kind: "execute", status: "pending" } as RequestPermissionRequest["toolCall"],
+      options: ALL.map((kind, i) => ({ optionId: `o${i}`, name: kind, kind })),
+    };
+    const cached = (toolId: string) => ({
+      messageCache: [{ role: "agent", parts: [{ type: "tool-call", toolCallId: "codex-call-1", toolId, rawTitle: "", args: {} }] }],
+    });
+    expect((await prompted(nameless, cached("libi:libi.snapshot"))).kinds).toEqual(["allow_once", "reject_once"]);
+    expect((await prompted(nameless, cached("libi:libi.list_pieces"))).kinds).toEqual([...ALL]);
+    // nothing cached: unchanged (the card cannot say what it is either)
+    expect((await prompted(nameless)).kinds).toEqual([...ALL]);
+  });
+
+  /**
+   * Fix-wave re-run 2026-10-02: the Codex card for `libi.snapshot` discard read only "Permission required",
+   * because the request is nameless. The same recovery that withholds allow-always now names the card.
+   */
+  describe("a Codex approval's card is named from the cached tool_call", () => {
+    const ONCE = ["allow_once", "reject_once"] as const;
+    const nameless = (id = "exec-1"): RequestPermissionRequest => ({
+      sessionId: "s1",
+      toolCall: { toolCallId: id, kind: "execute", status: "pending" } as RequestPermissionRequest["toolCall"],
+      options: ONCE.map((kind, i) => ({ optionId: `o${i}`, name: kind, kind })),
+    });
+    const withCall = (part: Record<string, unknown>) => ({
+      messageCache: [{ role: "agent", parts: [{ type: "tool-call", toolCallId: "exec-1", ...part }] }],
+    });
+    const shown = async (request: RequestPermissionRequest, session: Record<string, unknown> = {}) => {
+      setApprovalMode("codex", "ask");
+      const emit = vi.fn();
+      const entry = { agentId: "codex", pendingApprovals: new Map(), messageCache: [] as unknown[], ...session };
+      const handler = new SessionEventHandler(
+        { next: () => 1 },
+        emit,
+        (() => entry) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+      );
+      void handler.handlePermissionRequest(request);
+      await vi.waitFor(() => expect(emit).toHaveBeenCalled());
+      const event = emit.mock.calls[0][1] as { toolCall: { title?: string; rawInput?: unknown } };
+      const [pending] = [...(entry.pendingApprovals as Map<string, { toolCall: { title?: string } }>).values()];
+      return { event, pending };
+    };
+    const SNAPSHOT_ARGS = { server: "libi", tool: "libi.snapshot", arguments: { action: "discard", pieceId: "p", confirm: true } };
+
+    it("carries the cached title and arguments on the event, so every renderer can name the action", async () => {
+      const { event, pending } = await shown(
+        nameless(),
+        withCall({ toolId: "libi:libi.snapshot", rawTitle: "mcp.libi.libi.snapshot", args: SNAPSHOT_ARGS }),
+      );
+      expect(event.toolCall).toMatchObject({ toolCallId: "exec-1", title: "mcp.libi.libi.snapshot", rawInput: SNAPSHOT_ARGS });
+      // the stored copy (what a reload serves) is named too
+      expect(pending.toolCall.title).toBe("mcp.libi.libi.snapshot");
+      // and the title formats like the Claude card's: "Libi Snapshot · discard"
+      expect(fromAnyToolName(event.toolCall.title!)).toBe("libi:libi.snapshot");
+      expect(formatToolId(fromAnyToolName(event.toolCall.title!)!, event.toolCall.rawInput)).toBe("Libi Snapshot · discard");
+    });
+
+    it("falls back to the canonical tool id when the cached part has no title", async () => {
+      const { event } = await shown(nameless(), withCall({ toolId: "libi:libi.list_pieces", rawTitle: "", args: {} }));
+      expect(event.toolCall.title).toBe("libi:libi.list_pieces");
+      expect(formatToolId(fromAnyToolName(event.toolCall.title!)!, event.toolCall.rawInput)).toBe("Libi List pieces");
+    });
+
+    it("names a built-in call by its cached title", async () => {
+      const { event } = await shown(nameless(), withCall({ toolId: null, rawTitle: "Read file '/tmp/a.md'" }));
+      expect(event.toolCall.title).toBe("Read file '/tmp/a.md'");
+    });
+
+    it("leaves the request untouched when nothing is cached under its toolCallId, or the call is for another id", async () => {
+      expect((await shown(nameless())).event.toolCall.title).toBeUndefined();
+      const other = withCall({ toolId: "libi:libi.snapshot", rawTitle: "mcp.libi.libi.snapshot", args: SNAPSHOT_ARGS });
+      expect((await shown(nameless("exec-2"), other)).event.toolCall.title).toBeUndefined();
+    });
+
+    it("never overwrites a title the agent sent (Claude's request)", async () => {
+      const claude = req("mcp__libi__libi_snapshot", [...ONCE]);
+      const { event } = await shown(claude, withCall({ toolId: "libi:libi.list_pieces", rawTitle: "mcp.libi.libi.list_pieces", args: {} }));
+      expect(event.toolCall.title).toBe("mcp__libi__libi_snapshot");
+    });
+
+    it("naming the card changes no decision: an auto mode still runs it as the agent sent it", async () => {
+      setApprovalMode("codex", "auto");
+      const handler = new SessionEventHandler(
+        { next: () => 1 },
+        vi.fn(),
+        (() => ({ agentId: "codex", pendingApprovals: new Map(), ...withCall({ toolId: "libi:libi.list_pieces", rawTitle: "mcp.libi.libi.list_pieces", args: {} }) })) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+      );
+      expect(await handler.handlePermissionRequest(nameless())).toEqual({ outcome: { outcome: "selected", optionId: "o0" } });
+    });
+
+    it("nameToolCall: untouched without a title to give, keeps an existing rawInput", () => {
+      const tc = nameless().toolCall;
+      expect(nameToolCall(tc, { toolId: null, rawTitle: "" })).toBe(tc);
+      expect(nameToolCall({ ...tc, rawInput: { keep: 1 } } as typeof tc, { toolId: null, rawTitle: "Bash", args: { x: 1 } })).toMatchObject({ title: "Bash", rawInput: { keep: 1 } });
+    });
+  });
+
+  it("the unknown-session fallback never selects a withheld option", async () => {
+    const handler = new SessionEventHandler(
+      { next: () => 1 },
+      vi.fn(),
+      (() => undefined) as unknown as ConstructorParameters<typeof SessionEventHandler>[2],
+    );
+    const r = await handler.handlePermissionRequest(req("mcp__libi__libi_snapshot", ["allow_always", "allow_once"]));
     expect(r).toEqual({ outcome: { outcome: "selected", optionId: "opt-1-allow_once" } });
   });
 });

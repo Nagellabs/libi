@@ -8,7 +8,7 @@ title: Music-video AI visuals are built THROUGH the storyboard (card=clip), musi
 # `covers` used to claim `music-video`, which made the index read as agent-level
 # coverage for a skill this scenario has never once loaded. The scenario that actually
 # loads it is `02-local-extension-is-the-provider.md`.
-skills: [music-video-creation, using-storyboard, ai-asset-generation, ai-video-models, realistic-image-generation]
+skills: [music-video-creation, using-storyboard, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -39,12 +39,12 @@ assertions:
 ## Behavioral expectations
 - **Built the visuals THROUGH the storyboard, by default** — invoked `using-storyboard`, created a
   card per scene with `libi.add_storyboard_card`, authored schematics, and showed the board with
-  `libi.show_storyboard` before spending. Did NOT run an ad-hoc generate loop that bypasses the
+  `libi.show({ target: "storyboard" })` before spending. Did NOT run an ad-hoc generate loop that bypasses the
   board.
-- **Authored each card's generation spec through the model-schema cache** — `get_model_schema_cache`
-  → (on miss) `save_model_schema_cache` → `set_storyboard_generation`, rather than generating blind.
+- **Authored each card's generation spec through the model-schema cache** — `libi.model_schema_cache` action `get`
+  → (on miss) `libi.model_schema_cache` action `save` → `set_storyboard_generation`, rather than generating blind.
 - **Respected card = clip, not card = beat** — three scenes ⇒ ~three cards (one generated clip
-  each), placed via `libi.attach_storyboard_clip` + `libi.select_storyboard_take`; did not fragment
+  each), placed via `libi.storyboard_take` action `attach_clip` + `libi.storyboard_take` action `select`; did not fragment
   a single scene into many tiny per-beat cards, and did not collapse all three into one.
 - **Deferred the music as instructed** — did not generate a track (no local ACE-Step / `music`
   endpoint), and did not block on it; built the visuals and left audio to the user.

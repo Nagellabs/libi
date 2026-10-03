@@ -65,7 +65,7 @@ export async function applyLayerEffect(params: {
       success: false,
       error: "unknown_effect",
       data: {
-        hint: `Unknown effectId "${params.effectId}". Call libi.list_effects.`,
+        hint: `Unknown effectId "${params.effectId}". Call libi.effect({ action: "list" }).`,
         validIds: ALL_IDS(),
       },
     };
@@ -145,7 +145,7 @@ export async function highlightEffect(params: {
       success: false,
       error: "unknown_effect",
       data: {
-        hint: `Unknown effectId "${params.target.effectId}". Call libi.list_effects.`,
+        hint: `Unknown effectId "${params.target.effectId}". Call libi.effect({ action: "list" }).`,
         validIds: ALL_IDS(),
       },
     };

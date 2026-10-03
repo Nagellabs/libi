@@ -35,7 +35,7 @@
  *   approval mode (`PATCH /api/sessions/permission-modes`) and an extension's
  *   `requireApproval` (`PATCH /api/settings/mcp-servers/:id`) take the same
  *   checks, the general `PATCH /api/settings` ignores `agentApprovalModes`
- *   rather than being a second, unguarded way in, and the agent's own tool for the flag, `libi.update_mcp_server`,
+ *   rather than being a second, unguarded way in, and the agent's own tool for the flag, `libi.extension({ action: "update" })`,
  *   may only turn it ON — `requireApproval: false` is refused, because that
  *   core tool raises no card of its own in `auto` mode and would otherwise
  *   switch off the very prompt meant to stop it. Lowering a gate is the

@@ -92,6 +92,10 @@ describe("startStudio — the browser handoff", () => {
     // otherwise make this suite behave differently on a CI runner.
     vi.stubEnv("CI", "");
     vi.stubEnv("LIBI_OPEN", "");
+    // ...and the test-run guard (vitest sets both), which is what keeps every OTHER startStudio test
+    // from opening a browser; this suite mocks the opener, so it can look at the real default.
+    vi.stubEnv("VITEST", "");
+    vi.stubEnv("NODE_ENV", "production");
     printed = "";
     writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((chunk: string) => {
       printed += chunk;
@@ -127,6 +131,17 @@ describe("startStudio — the browser handoff", () => {
     // The fallback the user acts on when nothing appears.
     expect(printed).toContain("If it doesn't open by itself, visit http://localhost:3456");
     expect(openStudioInBrowser).toHaveBeenCalledWith("http://localhost:3456");
+    expect(openStudioWhenReady).not.toHaveBeenCalled();
+  });
+
+  it("launches nothing by default inside a test run (no real browser tab on the developer's machine)", async () => {
+    vi.stubEnv("VITEST", "true");
+    vi.stubEnv("NODE_ENV", "test");
+    await startStudio("3456", { dirname: installedLayout() });
+
+    expect(printed).toContain("[libi] Open http://localhost:3456");
+    expect(printed).not.toContain("Opening http://localhost:3456");
+    expect(openStudioInBrowser).not.toHaveBeenCalled();
     expect(openStudioWhenReady).not.toHaveBeenCalled();
   });
 

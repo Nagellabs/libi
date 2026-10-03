@@ -1,7 +1,7 @@
 ---
 id: storyboard-sketch-slots
 title: Card built with start + end sketch slots — an image generated per sketch before the clip
-skills: [using-storyboard, ai-asset-generation, ai-video-models, realistic-image-generation]
+skills: [using-storyboard, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -25,10 +25,12 @@ assertions:
   - { endpoint_id: openai/gpt-image-2*, count: ">=2" }
   - { endpoint_id: "fal-ai/nano-banana*", expect: absent }
   # The clip is Seedance IMAGE-to-video (animated between the keyframes), not text-to-video.
-  - { tool: run_model, endpoint_id: "*seedance*image-to-video*", expect: present }
+  # Endpoint-scoped, not tool-scoped: a video goes out through run_model OR submit_job (the fal reference
+  # says submit_job for long jobs), and `input.prompt exists` keeps schema lookups out of the count.
+  - { endpoint_id: "*seedance*image-to-video*", where: "input.prompt exists", expect: present }
   - { endpoint_id: "*seedance*text-to-video*", expect: absent }
   # One ~8s clip is ONE card — the rotation is one motion, must not fragment into many clips.
-  - { tool: run_model, endpoint_id: "*seedance*", count: "<=2" }
+  - { endpoint_id: "*seedance*", where: "input.prompt exists", count: "<=2" }
 ```
 
 ## Behavioral expectations
@@ -51,8 +53,8 @@ assertions:
   generate an image the clip can't consume.
 - **Respected card = clip** — one card, one ~8s clip; the front→side rotation is one motion,
   not two per-beat cards, and not a flood of extra generations.
-- **Authored the clip spec through the schema-cache gate** — `get_model_schema_cache` →
-  (on miss) `save_model_schema_cache` → `set_storyboard_generation`, not a blind/hand-written spec.
-- **Placed via the storyboard** — `libi.attach_storyboard_clip` then `libi.select_storyboard_take`
+- **Authored the clip spec through the schema-cache gate** — `libi.model_schema_cache` action `get` →
+  (on miss) `libi.model_schema_cache` action `save` → `set_storyboard_generation`, not a blind/hand-written spec.
+- **Placed via the storyboard** — `libi.storyboard_take` action `attach_clip` then `libi.storyboard_take` action `select`
   to put the scene on the timeline (not a bare `create_video_scene`).
 - Disclosed cost before spending; did not over-generate.

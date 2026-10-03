@@ -30,7 +30,7 @@ const matteGenParamsSchema = z.object({
   engine: z.literal("local"),
   subject: z.object({
     kind: z.enum(["auto", "box"]),
-    // [x, y, w, h] frame pixels (a libi.ground_target candidate bbox).
+    // [x, y, w, h] frame pixels (a libi.track({ action: "ground_target" }) candidate bbox).
     box: z.tuple([z.number(), z.number(), z.number(), z.number()]).optional(),
   }),
   range: z
@@ -133,7 +133,7 @@ export const matteGenRunner: JobRunner<MatteGenParams, MatteGenResult> = {
         throw new Error(
           matte.error === "no_seed_instance"
             ? "no_seed_instance: the seed step found no subject at the range start — " +
-              "pass a subject box from libi.ground_target, or use the fal engine"
+              "pass a subject box from libi.track({ action: 'ground_target' }), or use the fal engine"
             : "matte produced no frames",
         );
       }
@@ -147,7 +147,7 @@ export const matteGenRunner: JobRunner<MatteGenParams, MatteGenResult> = {
           matte.flags.includes("empty_matte")
             ? `empty_matte: the matte kept only ${pct}% of the frame — the subject was lost, ` +
               "so the cutout would render as nothing. Re-seed with a subject box from " +
-              "libi.ground_target, start the range where the subject is clearly visible, " +
+              "libi.track({ action: 'ground_target' }), start the range where the subject is clearly visible, " +
               "or use the paid fal engine."
             : `full_frame_matte: the matte kept ${pct}% of the frame — nothing was removed, ` +
               "so compositing this over a new background would silently show the original " +

@@ -160,7 +160,7 @@ describe("libi extensions — the libi card", () => {
     expect(within(row).getByRole("button", { name: /download/i })).toBeInTheDocument();
   });
 
-  it("keeps the #mcp-<id> anchor on the card and every nested row so show_extension can scroll", () => {
+  it("keeps the #mcp-<id> anchor on the card and every nested row so libi.show (extension) can scroll", () => {
     wrap(<McpServersView />);
     expect(document.querySelector("#mcp-libi")).not.toBeNull();
     expect(document.querySelector("#mcp-local-music")).not.toBeNull();
@@ -233,13 +233,13 @@ describe("libi extensions — the libi card", () => {
 });
 
 /**
- * `libi.show_extension` with an extensionId. The live CustomEvent covers the case
+ * `libi.show({ target: "extension" })` with an extensionId. The live CustomEvent covers the case
  * where this tab is already open; the parked intent covers the one that used
  * to be a dead end — the user is on another tab, so this view
  * is UNMOUNTED (base-ui Tabs.Panel keepMounted:false), the event reaches no
  * listener, and the agent's "I've opened the card for you" was a lie.
  */
-describe("show_extension — scrolling to a card", () => {
+describe("libi.show (extension) — scrolling to a card", () => {
   beforeEach(() => {
     // jsdom implements no scrollIntoView at all.
     Element.prototype.scrollIntoView = vi.fn();

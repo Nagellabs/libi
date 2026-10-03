@@ -190,7 +190,7 @@ export function streamCopyPreservesFraming(base: ExportBase, comp: Composition):
  * The inline AudioClip that represents the BASE layer's own audio track, if any.
  * Matched by `linkedOverlayId`.
  *
- * Muting a base video REMOVES its inline clip (`libi.audio_remove_clip`), so
+ * Muting a base video REMOVES its inline clip (`libi.audio_clip` action `remove`), so
  * "no clip" means "no base audio" — not "keep whatever the source had". Both
  * ffmpeg backends must drop the source's audio track in that case.
  */

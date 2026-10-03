@@ -144,7 +144,7 @@ async function runTrack({ jobId, token }: { jobId: string; token: string }) {
     if (isFace && anchors.length === 0) {
       throw new Error(
         "face mode requires at least one anchor — none provided by runner. " +
-          "Pass anchors[] when calling compute_object_track.",
+          "Pass anchors[] when calling libi.track compute.",
       );
     }
 

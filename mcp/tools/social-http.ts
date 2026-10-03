@@ -1,6 +1,6 @@
 /**
  * The social tools' one way to reach the studio: `libi.social_status`,
- * `libi.post_piece`, `libi.social_link_post` (social-tools.ts) and
+ * `libi.post_piece`, `libi.social_link` (social-tools.ts) and
  * `libi.social_music_search` (social-music-tools.ts) all run in the MCP child,
  * which may import neither `lib/social/service` nor `lib/jobs` — so every read
  * and write goes over the studio's own HTTP routes, through `api`.

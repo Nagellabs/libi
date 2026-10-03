@@ -1,7 +1,7 @@
 ---
 id: stitch-source-voice-carry
 title: Stitch (preserve-creator branch) carries the source creator's voice into faceless AI inserts via @Audio1 (no ElevenLabs)
-skills: [stitching-multi-clip, ugc-product-video, voiceover-production, ai-asset-generation, ai-video-models, realistic-image-generation]
+skills: [stitching-multi-clip, ugc-product-video, video-generation-craft, ai-asset-generation]
 mcps: [fal-ai, elevenlabs]
 agent: claude-code
 runs: 1
@@ -43,13 +43,13 @@ assertions: []
   different person. (This is the ALTERNATIVE to the variation default, where the character-driven
   surrounding is *replaced* and the product demo is reused — see scenario `02`.)
 - **Loaded the sub-skills BEFORE authoring the plan (ordering gate, 2026-06-08).** Loaded
-  `stitching-multi-clip` + `voiceover-production` *before* presenting any beat/voice plan — did
+  `stitching-multi-clip` + `video-generation-craft` *before* presenting any beat/voice plan — did
   NOT draft a plan from general knowledge first and reconcile it afterward. The presented plan
   already uses the `reference-to-video` `@Audio1` carry (never a "lay source audio under the AI
   clip as a separate track" plan) and consolidates contiguous faceless beats into ONE model-max
   multi-beat clip (never fragmented 8s+4s+3s short inserts). When recreating a source (the
   `mimic-video` entry), the router does NOT self-author the beat/voice plan — it loads the
-  creation sub-skill + `voiceover-production` first and lets them shape it.
+  creation sub-skill + `video-generation-craft` first and lets them shape it.
 - **DEFAULT audio = source-voice carry, NOT cloning.** Identified the main speaker, then
   extracted ONE clean **≤15s MP3/WAV** sample of that speaker's voice via
   `libi.extract_audio({ format: "mp3", startSeconds, endSeconds })` (the new transcode+range path).

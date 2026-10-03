@@ -1,7 +1,7 @@
 ---
 id: stitch-variation-replace-surrounding
 title: UGC stitch DEFAULT — replace the character-driven surrounding with new AI, reuse the identity-neutral product demo
-skills: [stitching-multi-clip, ugc-product-video, voiceover-production, ai-asset-generation, ai-video-models, using-character-library, realistic-image-generation]
+skills: [stitching-multi-clip, ugc-product-video, video-generation-craft, ai-asset-generation, using-character-library]
 mcps: [fal-ai, elevenlabs]
 agent: claude-code
 runs: 1
@@ -40,7 +40,7 @@ bookends — the middle demo is hands-only with my voice over it). I talk really
 high-energy — kind of a rapid, excited TikTok delivery.
 
 Treat this as a real libi stitch job and **load + follow your `ugc-product-video`,
-`stitching-multi-clip`, and `voiceover-production` skills** before you answer. Then plan how
+`stitching-multi-clip`, and `video-generation-craft` skills** before you answer. Then plan how
 you'd turn this into variations (new creator, new hook, new script) — tell me which parts you'd
 reuse from my source and which you'd regenerate, how you'd keep the new creator visually and
 vocally consistent with the reused footage, and how you'd handle the voice — BEFORE we generate

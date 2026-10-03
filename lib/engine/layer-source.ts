@@ -15,7 +15,8 @@ export interface LayerRequest {
   /** `canvas.width / composition.width` — the layer renders at size × this. */
   pixelRatio: number;
   fps: number;
-  /** Element-local timing (`elementTiming`). */
+  /** Element-local timing (`elementTiming`) plus the piece clock a body may read
+   *  (`compositionTime`, `overlayStart`, `pieceDuration`). */
   time: FrameTiming;
   words?: CaptionCueWord[];
   /** Code only, while the rect's SIZE is keyframed: the sizes at the ends of
@@ -97,7 +98,10 @@ export function sameLayerRequest(a: LayerRequest, b: LayerRequest): boolean {
     ta.time !== tb.time ||
     ta.totalFrames !== tb.totalFrames ||
     ta.duration !== tb.duration ||
-    ta.progress !== tb.progress
+    ta.progress !== tb.progress ||
+    ta.compositionTime !== tb.compositionTime ||
+    ta.overlayStart !== tb.overlayStart ||
+    ta.pieceDuration !== tb.pieceDuration
   ) {
     return false;
   }

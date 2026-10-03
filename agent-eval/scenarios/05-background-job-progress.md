@@ -12,7 +12,7 @@ cost: subscription-tokens
   run in-process by the MCP child. It does NOT touch the JobManager async SSE
   bridge. Use Part A below to prove the simple ffmpeg-tool round-trip.
 - **The async jobs HTTP+SSE bridge (`runJobViaServer`) is exercised only by
-  `compute_object_track`** (tracking). That requires the tier-2 libi-tracking
+  `libi.track` action `compute`** (tracking). That requires the tier-2 libi-tracking
   engine to be installed. Use Part B for the true bridge test.
 - The JobManager is also exercised indirectly by scenario 04's upload, whose
   proxy generation runs through the `proxy_gen` runner (fire-and-forget enqueue).
@@ -36,7 +36,7 @@ cost: subscription-tokens
 > Track the main subject in the imported clip across the whole clip.
 
 ### Expected behavior
-- Agent calls `libi.compute_object_track`, which goes
+- Agent calls `libi.track` action `compute`, which goes
   MCP child → `POST /api/jobs` → SSE `/api/jobs/<id>/events` → result via
   `runJobViaServer`, forwarding live progress to the chat/terminal.
 
@@ -56,7 +56,7 @@ cost: subscription-tokens
 - [ ] Re-issuing the same trim attaches/dedupes rather than blindly re-running
       (agent reports a previous result or the server returns
       `matching_completed` — see Long-running tool dedup policy).
-- [ ] `libi.get_job_status` on the reported jobId returns a snapshot.
+- [ ] `libi.job({ action: "status" })` on the reported jobId returns a snapshot.
 
 ## Notes
 - If this fails with `libi_server_unavailable` while scenario 02 passed,

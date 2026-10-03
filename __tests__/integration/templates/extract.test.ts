@@ -5,6 +5,7 @@ import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-s
 import { LocalFileStorage } from "@/lib/storage/local";
 import { seedTemplateFixturePiece, type FixtureIds } from "@/__tests__/helpers/template-fixture-piece";
 import { validateScaffold } from "@/lib/templates/scaffold";
+import { loadManifest, saveManifest } from "@/lib/composition/persistence";
 import { eq } from "drizzle-orm";
 import { files } from "@/lib/db/schema/sqlite";
 import { effectiveRights } from "@/lib/audio-rights/read";
@@ -167,6 +168,61 @@ describe("extractScaffold", () => {
     expect((r.scaffold.overlays.find((o) => o.key === "background") as { source: unknown }).source).toEqual({ slot: expect.any(String) });
     expect(r.warnings).toContain("music not included: Espresso — Sabrina Carpenter; applying the template leaves it out until the agent fetches it");
     expect(r.warnings.some((w) => /bg\.mp4 carries copyrighted audio; video overlay "background" is now the unfilled slot/.test(w))).toBe(true);
+  });
+
+  describe("a clip's gain, volume envelope and crossfade", () => {
+    const ENV = { keyframes: [{ t: 0, value: 0 }, { t: 1, value: -18, easing: "ease-in" }, { t: 3, value: 3 }] };
+    async function shape() {
+      const m = await loadManifest(pieceId);
+      const music = m.audioClips!.find((c) => c.id === ids.clipB)!;
+      Object.assign(music, { gainDb: -6, volumeKeyframes: ENV });
+      m.audioClips!.find((c) => c.id === ids.clipA)!.crossfadeMs = 500;
+      await saveManifest(pieceId, m);
+    }
+
+    it("travel on a created clip through extract and the scaffold schema", async () => {
+      await shape();
+      const r = await extractScaffold(pieceId);
+      const v = validateScaffold(r.scaffold);
+      expect(v.ok).toBe(true);
+      const clips = v.ok ? v.scaffold.audioClips : [];
+      expect(clips.find((c) => c.key === "music")).toMatchObject({ gainDb: -6, volumeKeyframes: ENV });
+      expect(clips.find((c) => c.key === "background-audio")?.crossfadeMs).toBe(500);
+      // A clip with none carries none.
+      expect(clips.find((c) => c.key === "music")?.crossfadeMs).toBeUndefined();
+    });
+
+    it("travel on a clip left pending as a music link", async () => {
+      await shape();
+      testDb.update(files).set({ audioRights: COPYRIGHTED_NO_TRACK }).where(eq(files.id, ids.audioFileId)).run();
+      const r = await extractScaffold(pieceId);
+      const v = validateScaffold(r.scaffold);
+      expect(v.ok).toBe(true);
+      const music = (v.ok ? v.scaffold.audioClips : []).find((c) => c.key === "music")!;
+      expect(music.source).toEqual({ musicRef: "music" });
+      expect(music).toMatchObject({ gainDb: -6, volumeKeyframes: ENV });
+    });
+
+    it("are refused by the scaffold schema when out of range", async () => {
+      await shape();
+      const { scaffold } = await extractScaffold(pieceId);
+      const withClip = (patch: Record<string, unknown>) => ({
+        ...scaffold,
+        audioClips: scaffold.audioClips.map((c) => (c.key === "music" ? { ...c, ...patch } : c)),
+      });
+      for (const patch of [
+        { gainDb: 13 },
+        { gainDb: -61 },
+        { crossfadeMs: 5001 },
+        { crossfadeMs: -1 },
+        { volumeKeyframes: { keyframes: [{ t: 0, value: 13 }] } },
+        { volumeKeyframes: { keyframes: [{ t: -1, value: 0 }] } },
+        { volumeKeyframes: { keyframes: [{ t: 0, value: 0, easing: "x".repeat(41) }] } },
+        { volumeKeyframes: { keyframes: Array.from({ length: 201 }, (_, i) => ({ t: i, value: 0 })) } },
+      ]) {
+        expect(validateScaffold(withClip(patch)).ok, JSON.stringify(patch).slice(0, 60)).toBe(false);
+      }
+    });
   });
 
   // Owner decision 2026-09-28: an unstamped file is the user's own upload, so

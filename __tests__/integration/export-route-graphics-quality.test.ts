@@ -208,4 +208,61 @@ describe("POST /api/export — graphics resolution", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/graphicsQuality must be one of 1080p, 1440p, 4k/);
   });
+
+  // agent-speed A4: a social export that names no size is fitted to 1080x1920.
+  async function seed4kPortraitWithText(): Promise<void> {
+    const m = await loadManifest(PIECE_ID);
+    m.width = 2160;
+    m.height = 3840;
+    m.fps = 30;
+    await saveManifest(PIECE_ID, m);
+    await addOverlayToManifest(PIECE_ID, {
+      id: "o-text", kind: "text", content: "hi", font: "800 60px Inter", color: "#fff", align: "center",
+      rect: { x: 0, y: 0, width: 200, height: 80 }, startTime: 0, duration: 2, z: 0, opacity: 1,
+    });
+  }
+  type Enq = { settings: { width: number; height: number; quality: string; graphicsQuality: string; socialFit: boolean } };
+
+  it("a social export that names no size comes out 1080x1920, not the piece's 4K", async () => {
+    await seed4kPortraitWithText();
+    const body = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "social" }))).json()) as Enq;
+    expect([body.settings.width, body.settings.height]).toEqual([1080, 1920]);
+    expect(body.settings.socialFit).toBe(true);
+  });
+
+  it("a social export ignores a stored 4K default (4K is opt-in, per request)", async () => {
+    await seed4kPortraitWithText();
+    const { setExportDefaults } = await import("@/lib/db/settings");
+    setExportDefaults({ format: "mp4", quality: "4k", graphicsQuality: "4k" });
+    const body = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "social" }))).json()) as Enq;
+    expect([body.settings.width, body.settings.height]).toEqual([1080, 1920]);
+  });
+
+  it("naming a size keeps the 4K: quality, graphicsQuality or custom dimensions", async () => {
+    await seed4kPortraitWithText();
+    for (const size of [{ quality: "source" }, { quality: "4k" }, { graphicsQuality: "4k" }]) {
+      const body = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "social", ...size }))).json()) as Enq;
+      expect([body.settings.width, body.settings.height], JSON.stringify(size)).toEqual([2160, 3840]);
+      expect(body.settings.socialFit).toBe(false);
+    }
+    const custom = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "social", quality: "custom", customWidth: 3840, customHeight: 2160 }))).json()) as Enq;
+    expect([custom.settings.width, custom.settings.height]).toEqual([3840, 2160]);
+  });
+
+  it("a personal export is unchanged", async () => {
+    await seed4kPortraitWithText();
+    const body = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "personal" }))).json()) as Enq;
+    expect([body.settings.width, body.settings.height]).toEqual([2160, 3840]);
+    expect(body.settings.socialFit).toBe(false);
+  });
+
+  it("a small piece is not upscaled to fit: a 720x1280 piece with no graphics stays 720x1280", async () => {
+    const m = await loadManifest(PIECE_ID);
+    m.width = 720;
+    m.height = 1280;
+    m.fps = 30;
+    await saveManifest(PIECE_ID, m);
+    const body = (await (await POST(makeRequest({ pieceId: PIECE_ID, purpose: "social" }))).json()) as Enq;
+    expect([body.settings.width, body.settings.height]).toEqual([720, 1280]);
+  });
 });

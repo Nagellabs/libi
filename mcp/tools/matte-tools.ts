@@ -32,8 +32,9 @@ const FAL_REDIRECT_HINT =
   "references/providers/fal.md (the endpoints, their required params and the " +
   "endpoints NOT to use): disclose the price and get user approval, put the " +
   "source on fal's CDN with the fal MCP's own upload tool, run the endpoint the " +
-  "reference names on your fal MCP, then import the transparent result with " +
-  "libi.import_remote_files and append a libi.update_file_notes lineage line.";
+  "reference names on your fal MCP, then download the transparent result with " +
+  "libi.import_remote_files (autoUpload: false) and import it with libi.upload_file and aiGeneration " +
+  "(so it carries provenance), and append a libi.update_file_notes lineage line.";
 
 /**
  * libi.remove_background — produce an alpha cutout asset (subject isolated,
@@ -58,7 +59,7 @@ export async function removeBackground(
       data: {
         hint:
           "subject.kind 'box' needs subject.box [x, y, w, h] — get it from a " +
-          "libi.ground_target candidate; never hand-guess pixel coordinates.",
+          "libi.track({ action: 'ground_target' }) candidate; never hand-guess pixel coordinates.",
       },
     };
   }

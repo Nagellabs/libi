@@ -36,7 +36,7 @@ async function sendAgentSaveMessage(sessionId: string): Promise<boolean> {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         sessionId,
-        text: "Save the current draft as a snapshot. Use libi.compare_states to review what changed, then call libi.commit_draft with a meaningful one-line summary describing the changes.",
+        text: "Save the current draft as a snapshot. Use libi.snapshot with action compare to review what changed, then call it with action commit and a meaningful one-line summary describing the changes.",
       }),
     });
     return res.ok;
@@ -61,7 +61,7 @@ export function SnapshotDraftSwitcher({ pieceId }: Props) {
   /**
    * Primary Save action:
    *  1. If an active session exists → send a programmatic chat message asking
-   *     the agent to compare states and commit_draft with a real summary.
+   *     the agent to compare states and commit (libi.snapshot) with a real summary.
    *  2. Fallback → commit directly with "Manual edits" and show a console note.
    *
    * Debounced: a second click while in-flight is a no-op.
@@ -78,7 +78,7 @@ export function SnapshotDraftSwitcher({ pieceId }: Props) {
           // Agent send failed — fall back to direct commit
           commit.mutate({ pieceId, summary: "Manual edits" });
         }
-        // If sent OK, the snapshot saves when the agent calls commit_draft.
+        // If sent OK, the snapshot saves when the agent commits (libi.snapshot, action commit).
         // The SSE refresh will update the UI automatically.
       } else {
         // No active session — direct commit
@@ -193,7 +193,7 @@ export function SnapshotDraftSwitcher({ pieceId }: Props) {
             disabled={!hasDraft}
             onClick={() => setDiscardOpen(true)}
             className="cursor-pointer text-destructive"
-            title="Throw away all unsaved changes and revert to the current snapshot. Can't be undone."
+            title="Throw away all unsaved changes and revert to the current snapshot. The draft is kept for 7 days in Version history."
           >
             Discard draft
           </DropdownMenuItem>
@@ -218,7 +218,8 @@ export function SnapshotDraftSwitcher({ pieceId }: Props) {
           <AlertDialogHeader>
             <AlertDialogTitle>Discard draft?</AlertDialogTitle>
             <AlertDialogDescription>
-              Your unsaved changes will be replaced with the snapshot. This can&apos;t be undone.
+              Your unsaved changes will be replaced with the snapshot. libi keeps the discarded draft for 7 days:
+              Version history → Recoverable drafts brings it back.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

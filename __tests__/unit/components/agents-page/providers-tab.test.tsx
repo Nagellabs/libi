@@ -283,15 +283,24 @@ beforeEach(() => {
 });
 
 describe("Providers tab — rows and chips", () => {
-  it("lists fal.ai, Higgsfield, Zernio and ElevenLabs only — on-device extensions live on the libi MCP tab", () => {
+  it("lists fal.ai, Higgsfield, Zernio, ElevenLabs and Playwright only — on-device extensions live on the libi MCP tab", () => {
     renderTab();
     expect(screen.getAllByTestId(/^provider-row-/).map((e) => e.getAttribute("data-testid"))).toEqual([
       "provider-row-fal",
       "provider-row-higgsfield",
       "provider-row-zernio",
       "provider-row-elevenlabs",
+      "provider-row-playwright",
     ]);
     expect(screen.queryByTestId("provider-row-ace-step")).not.toBeInTheDocument();
+  });
+
+  it("Playwright's row says it needs no key or sign-in and runs locally with npx", () => {
+    renderTab({ provider: "playwright" });
+    const row = screen.getByTestId("provider-row-playwright");
+    expect(row).toHaveTextContent("Browser automation");
+    expect(row).toHaveTextContent(/No key or sign-in: it runs on your computer with npx \(needs Node\.js\)/);
+    expect(row).not.toHaveTextContent(/sign in with your Playwright account/);
   });
 
   it("shows one chip per READY agent; a not-ready agent says Set up <Agent> first and links to the Agents tab", () => {
@@ -321,7 +330,7 @@ describe("Providers tab — rows and chips", () => {
     connected = [{ agent: "codex", name: "my-thing", providerId: null, transport: "stdio", status: "connected" }];
     renderTab();
     expect(screen.queryByText("my-thing")).toBeNull();
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(5);
     showAgent("codex");
     expect(screen.queryByText("my-thing")).toBeNull();
     expect(screen.getByTestId("chip-fal-codex")).toHaveTextContent("Not added");
@@ -546,13 +555,13 @@ describe("Providers tab — rows and chips", () => {
     expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(1);
     expect(screen.getByTestId("provider-row-elevenlabs").className).toMatch(/ring-2/);
     fireEvent.click(screen.getByRole("button", { name: /show all providers/i }));
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(5);
     expect(screen.queryByRole("button", { name: /show all providers/i })).toBeNull();
   });
 
   it("a ?provider= that names no third-party provider shows every row, unhighlighted", () => {
     renderTab({ provider: "ace-step" });
-    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(4);
+    expect(screen.getAllByTestId(/^provider-row-/)).toHaveLength(5);
     expect(screen.queryByRole("button", { name: /show all providers/i })).toBeNull();
     for (const row of screen.getAllByTestId(/^provider-row-/)) expect(row.className).not.toMatch(/ring-2/);
   });

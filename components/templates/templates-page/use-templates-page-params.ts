@@ -9,7 +9,7 @@ import { trackEvent } from "@/lib/analytics/client";
  * of sub-project 3 exists — it renders its own coming-soon state rather than
  * an empty grid, so "no public templates" never reads as a failure.
  *
- * `?template=` is a deep link from `libi.show_templates`; the grid scrolls
+ * `?template=` is a deep link from `libi.show({ target: "templates" })`; the grid scrolls
  * that card into view once. `?review=` is the chat's "Review and publish"
  * link: the publish request's review panel is scrolled to and outlined.
  */
@@ -122,7 +122,7 @@ function subscribeStoredView(l: () => void): () => void {
 /**
  * URL ↔ state sync for the Templates page's tab and the `?template=` deep
  * link. The URL is the source of truth for back/forward and for what
- * `libi.show_templates` pushes; a tab click writes it back with
+ * `libi.show({ target: "templates" })` pushes; a tab click writes it back with
  * `router.replace`.
  */
 export function useTemplatesPageParams(): Omit<TemplatesPageParams, "view"> & {

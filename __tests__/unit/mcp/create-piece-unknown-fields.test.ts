@@ -100,6 +100,6 @@ describe("libi.create_piece refuses unknown fields", () => {
     const t = tools.find((x) => x.name === "libi.create_piece")!;
     expect((t.inputSchema as { additionalProperties?: boolean }).additionalProperties).toBe(false);
     expect(Object.keys(t.inputSchema.properties ?? {}).sort()).toEqual(["description", "name"]);
-    expect(tools.length).toBeGreaterThan(150); // a zod/v4 slip empties tools/list silently
+    expect(tools.length).toBeGreaterThan(100); // a zod/v4 slip empties tools/list silently
   });
 });

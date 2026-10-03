@@ -57,8 +57,7 @@ describe("MediaPlaybackController", () => {
     const { el, getPaused } = makeFakeMedia();
     const c = new MediaPlaybackController(el);
     c.setState({ playing: true, time: 0, volume: 1 });
-    await new Promise((r) => setTimeout(r, 10));
-    expect(getPaused()).toBe(false);
+    await vi.waitFor(() => expect(getPaused()).toBe(false));
   });
 
   it("setState({playing:true}) then setState({playing:false}) before play resolves ends paused", async () => {

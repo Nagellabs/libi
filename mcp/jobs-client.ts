@@ -378,7 +378,7 @@ export async function runJobViaServer<R = unknown>(
   // dependency not installed yet, a server that was down). Replaying it makes
   // the identical call fail forever no matter what the user fixes in between.
   //
-  // Observed end to end on a clean install: `libi.ground_target` failed once
+  // Observed end to end on a clean install: `libi.track({ action: "ground_target" })` failed once
   // with `tracking_engine_not_installed`, the user then installed the tracking
   // engine and `libi.verify_install` returned `ok:true` — and the retry STILL
   // reported "not installed", because it attached to that failed row and never
@@ -660,7 +660,7 @@ export function legacyTripleFromRunJobResult<R>(
 /**
  * GET /api/jobs/${jobId} — fetch a single job's full status snapshot.
  *
- * Used by `libi.get_job_status`. The MCP child does NOT call JobManager
+ * Used by `libi.job({ action: "status" })`. The MCP child does NOT call JobManager
  * directly — it goes over HTTP to keep the runner registry out of this
  * process.
  *
@@ -750,7 +750,7 @@ export async function listJobsFromServer(opts: {
 /**
  * DELETE /api/jobs/${jobId} — request cooperative cancellation.
  *
- * Used by `libi.cancel_job`. Returns once the server accepts the cancel
+ * Used by `libi.job({ action: "cancel" })`. Returns once the server accepts the cancel
  * request; the actual termination is driven by the runner's `shouldCancel()`
  * poll.
  *

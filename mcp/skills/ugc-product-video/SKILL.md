@@ -1,7 +1,6 @@
 ---
 name: ugc-product-video
-description: Walks the user through creating a UGC-style AI product video — brief, ad format + production route, character + product references, a real scripted ad, per-clip generation on your provider's recommended video model, validation, audio, captions, end card. Thin router over the prompt files in `prompts/`. Use when the user wants to create a product ad, demo video, or social UGC. Default to ONE full-length multi-beat clip (15s with in-prompt jump-cut beats), not one short clip per beat.
-when_to_use: Triggers on "make a UGC video", "create a product ad", "TikTok-style video", "demo video for my product", or any request to film a person showing or using a product.
+description: "Make a UGC-style product video or ad: 'make a UGC video', 'create a product ad', 'TikTok-style video', 'demo video for my product', any request to film a person showing or using a product. Defaults to one full-length multi-beat clip. Not for other genres (generic-video) or music videos (music-video-creation)."
 tags:
   - ugc
   - generation
@@ -9,413 +8,54 @@ tags:
 
 # UGC Product Video
 
-## Provider gate — read this first
-
-You need a **video** provider. libi generates no media itself.
-
-1. **Check your tool list.** If you already have a provider that can do video, use it.
-   If this skill ships a reference for it — `references/providers/<id>.md` under this
-   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
-   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
-   reference file for your provider, use the provider's own tool docs (its
-   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
-   constraint rules in this skill. **libi's own extension tools count as a provider**
-   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
-   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
-   not generation). Prefer them by default: they are free and on-device. If one answers
-   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
-   tools) instead of switching provider.
-2. **If you have none** — no remote provider tool and no libi extension for video — call
-   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
-   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
-   back to a tool that cannot do video.
-   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
-   for video is already connected or already installed, and its `covered` list names it.
-   Do not open anything or ask for a key — use what `covered` names, or, if that
-   cannot do what was asked, say plainly what libi cannot do.
-
-`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
-for a general "what's connected?". When the user asks about a provider that is not in your tool
-list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
-
-This skill is a **thin router**. It owns the stage order and the hard gates; all
-deep craft (brief questions, ad-format beat frameworks, script tone + pacing,
-copywriting angles, the per-model prompt formulas, the footage-route flows) lives
-in the prompt files under `prompts/`. Move through the stages in order. Hit every
-gate before you spend credits.
-
-When you call generation tools, do it via the **`ai-asset-generation`** skill —
-never call provider tools directly. When you stitch clips or extract frames, use
-Libi's ffmpeg tools (`libi.concat_videos`, `libi.generate_thumbnails`).
-
-## The Storyboard is the build spine (default — not optional)
-
-You build the ad **through the Storyboard**. It is NOT a planning step you can swap for an
-ad-hoc generate loop — it *is* how a UGC ad is built, and it is the default for **every** ad
-(including a single-clip one). Invoke **`using-storyboard`** and follow it; the brief,
-references, beats, and gates this skill produces all feed into it. The Stage map below is the
-UGC *craft + gates*; the Storyboard is the *mechanism* that realizes it.
-
-**Card = a generated clip = a timeline scene. A beat is a jump-cut INSIDE a card.** This one
-mapping keeps the "don't fragment the ad" rule intact while putting everything on the board:
-- A single multi-beat 15s ad is **ONE card** — its schematic is the beat strip, its prompt
-  carries the in-prompt jump-cuts. Do **NOT** make one card per beat.
-- An **extend chain** is **ONE card** — the extend versions are the card's *takes*, the final
-  extend is the selected take, and a rollback is just selecting a prior take.
-- A **stitch** (source + AI, or multi-clip) is **N cards** — a reused beat is a card whose
-  take is the trimmed source file; an AI beat is a card whose take is generated. Use a live
-  `reference_video` link between consecutive cards (`set_storyboard_reference`) for continuity.
-
-**How each card is built:** author its schematic (free blocking review — character + product +
-camera) → author its generation spec (the Stage 1 character reference is the keyframe on EVERY
-card; the clip is produced by the path's craft in [production-routes](prompts/production-routes.md))
-→ `libi.show_storyboard` → get the user's schematic approval (the free pre-spend gate) →
-generate the take → validate it (Stage 4.5) → `libi.select_storyboard_take` to place it as the
-scene. Because select-take places the scene, the timeline fills in front of the user as each
-card validates — the "empty piece" rule (Stage 4.5) is satisfied automatically.
-
-**Opt-off is a rare, explicit user exception.** ONLY if the user directly says "skip the
-storyboard / just generate" do you drop to direct generation and place clips with
-`libi.add_overlay({ kind: "video" })`. It is never your default and never something you offer proactively.
-Either way, the hard cost / dialogue / validation / audio gates still apply.
-
-## Recommended model
-
-The one tunable default this skill has lives HERE, in `SKILL.md` — because
-`libi.update_skill` is the only write path that both exists and re-syncs the agent
-workspace (see the fork section below).
-
-```
-RECOMMENDED_VIDEO_MODEL = provider-default   (maintainer-updated 2026-09-09)
-```
-
-`provider-default` resolves through your provider reference: read
-`references/providers/<id>.md` under this skill before Stage 3 and use the endpoint it
-marks **RECOMMENDED**. A user's own fork may replace `provider-default` with a literal
-endpoint id — that copy is theirs; what libi *ships* names no vendor. Either way it is a
-default, not a mandate.
-
-## Model-selection policy
-
-For **any** UGC video, SUGGEST the recommended default above first, with a one-line why. Then:
-
-- **Honor explicit per-project overrides.** If the user says "use Kling this time" or "do
-  this one on Veo", do exactly what they ask for that project — don't re-pitch the default.
-  A one-off override is not a standing preference (see the fork section below).
-- **Always verify the chosen model at runtime.** NEVER trust a written-down id as ground
-  truth — availability, schemas and pricing drift. Before generating, confirm with your
-  provider's own tools: sanity-check the pick, confirm inputs/FLF support against the
-  schema, and read the price so the cost gate can disclose it. Your provider reference
-  names those tools.
-- **Route to the matching model guide + use-case formula** once the model is chosen:
-  - Load the engine's prompting guide from the **`ai-video-models`** skill —
-    Seedance 2.0 → `model-seedance-2`, Veo 3.1 → `model-veo-3-1`, Kling → `model-kling`.
-  - Then load the matching UGC use-case formula from THIS skill's prompts (selected via
-    [ad-formats](prompts/ad-formats.md)): [ugc](prompts/model-seedance-2-ugc.md) ·
-    [product-hero](prompts/model-seedance-2-product-hero.md) ·
-    [feature-walkthrough](prompts/model-seedance-2-feature-walkthrough.md) ·
-    [premium-reveal](prompts/model-seedance-2-premium-reveal.md) ·
-    [studio-lookbook](prompts/model-seedance-2-studio-lookbook.md).
-
-## Permanent-override (fork) instruction
-
-When the user states a **standing** preference ("always use X", "make Y my default", "I
-never want Seedance"), do NOT just comply for this one project — offer forking: *"I can make
-that your permanent default by creating your own editable copy of this skill with the
-recommended model changed; it'll apply to every future UGC video (or I can write a fresh
-skill, or adapt one you found online)."* If they take it: drive `libi.fork_skill` on this
-skill's id, then rewrite the `RECOMMENDED_VIDEO_MODEL` line in the user copy's
-**`SKILL.md`** with `libi.update_skill` (pass the whole edited body) — put the literal
-endpoint id they asked for on that line. `libi.update_skill` is the only write path that
-reaches a forked skill AND re-syncs the agent workspace, and name-keyed lookups resolve
-the **user** row. **Never hand-edit anything under `references/`**: no `libi.*` tool
-writes there (`libi.add_skill_prompt` / `libi.update_skill_prompt` are scoped to
-`prompts/`), and a raw filesystem edit triggers no workspace sync, so the agent would keep
-reading the stale copy. Reverting = delete the user copy (re-tracks the bundled default).
-
-## Load the `ugc-craft` skill first
-
-Before composing ANY prompt, load the **`ugc-craft`** skill — it owns the UGC
-craft (the 9-layer formula, the clip-duration methodology, pacing / natural-motion
-/ skin-realism cue banks, character-consistency phrasing, the negative-prompt +
-forbidden-word lists). The model files under `prompts/` carry only the
-model-specific caps and params; the *craft* lives in `ugc-craft`. Do not
-re-derive it from memory.
-
-Load the **`voiceover-production`** skill before deciding any audio/voice: it owns
-native-audio + the `reference-to-video` voice carry. Changing the voice on a finished
-video is the separate, user-triggered **`voice-replacement`** skill — not generation.
-
-Load the **`video-planning`** skill before authoring the beat sheet: it owns the
-senior-editor decomposition (building blocks, source-vs-AI, combine-vs-split, style
-inheritance) that the beat sheet in Stage 0 should express. Plan the ad into blocks
-first, then build those blocks as cards.
-
-## Mandatory rule — read the prompt file before composing
-
-**Never wing a prompt from memory.** Before composing ANY prompt, load the chosen engine's guide
-from **`ai-video-models`** (`model-seedance-2` / `model-veo-3-1` / `model-kling`), the matching UGC
-use-case formula from this skill's `prompts/`, the [ad-formats](prompts/ad-formats.md) formula, and
-the banned-token list ([forbidden-words](prompts/forbidden-words.md)) — they carry the prompt order,
-motion specificity, and consistency anchors that keep the output on-model.
-
-## Stage map
-
-**Stage 0 — Frame the project.** Run the brief intake
-([brief-intake](prompts/brief-intake.md)) — the six questions that turn a slideshow
-of test shots into an actual ad. Pick an **ad format** ([ad-formats](prompts/ad-formats.md))
-and, if a source video exists, a **production route** ([production-routes](prompts/production-routes.md)).
-Reference [platform-specs](prompts/platform-specs.md) for target aspect ratio and
-safe-zones. **Decompose the ad into building blocks via `video-planning`** (each block's
-content, source-vs-AI, combine-vs-split, and style inheritance) — that block plan IS the
-beat sheet. Record the chosen settings (format, route, model, approval mode/cap,
-voice/script-analysis opt-ins) on the piece — put the short human-facing summary in
-the piece **description** (capped at 500 chars), and keep the durable beat sheet (the
-block plan) + handoff notes in the storyboard **overview** (set via
-`libi.add_storyboard_card({ overview })`).
-
-**Stage 0.5 / 0.6 — Source analysis (MIMIC route only).** Only when a source video
-exists. **Invoke the `video-analysis` skill** to analyze the source — it owns the whole
-flow (keyframe density, the per-frame vision pass, transcript, structured summary, and
-the optional paid full-video script pass). Don't re-implement analysis here. Your
-UGC-specific job is to read its output for what you need to *mimic*: the beat structure
-and timing, the spoken hook + pacing, the presenter's look/energy, the product moments,
-and the shot grammar (framing, lighting, cuts). The paid full-video script pass adds
-per-shot camera/lighting/mood + audio/music descriptors — worth surfacing (with its cost)
-for the stitch route and from-scratch-with-source, where threading those descriptors into
-Stage 4 prompts tightens the match. See [production-routes](prompts/production-routes.md)
-for the per-route reuse plan. **For a STITCH you MUST `Skill`-launch `stitching-multi-clip` BEFORE
-the intake/script** — it owns the partition, the no-reusable-section gate, the voice always-ask, AND
-the physical-continuity gate (the new character must match the reused body parts). Don't plan it here.
-
-**Stage 1 — Character.** Ask who's in the video (demographics, look, energy).
-Delegate to `realistic-image-generation` (the gpt-image-2 realism picker) to
-produce 1–3 candidate portrait references — front-facing, neutral-lit, clean
-background. Save the pick as the character reference. **STITCH: the character is constrained
-by the reused footage — match its visible body parts (skin tone non-negotiable, age, build)
-per `stitching-multi-clip`'s continuity gate.** **Approval gate** before moving on.
-
-**Stage 2 — Product.** Ask the user to upload product references
-(`libi.upload_file`). **Read the pixels** — vision-Read each reference image and
-write a structured summary (name, category, color/finish, key features, packaging,
-distinguishing details). If they only described the product, generate references
-via `ai-asset-generation` FIRST, then read those. Confirm the summary with the user
-before continuing.
-
-**Stage 3 — Script.** Write a GOOD ad first; feasibility comes second. Flow:
-[brief-intake](prompts/brief-intake.md) → the beat framework for the chosen format
-([ad-formats](prompts/ad-formats.md), including the ≥1 silent-action-beat rule) →
-[script-craft](prompts/script-craft.md) (tone bank, mandatory pacing cue,
-read-aloud word-count→duration timing) → [copywriting-angles](prompts/copywriting-angles.md)
-(generate genuinely different hook variants for A/B). Then run the
-[dialogue-gate](prompts/dialogue-gate.md). **Approval gate** — the user edits the
-beats inline before any generation.
-
-**Stage 4 — Generation.** Each clip you generate here is a Storyboard **card's take** —
-[production-routes](prompts/production-routes.md) tells you HOW to produce it; you then
-`libi.attach_storyboard_clip` it to its card and `libi.select_storyboard_take` after Stage 4.5
-passes (see "The Storyboard is the build spine" above for the card↔clip↔beat mapping). Dispatched
-by the production route and the chosen model's prompting guide
-(loaded from the `ai-video-models` skill) plus the matching use-case formula. **No in-video
-text** on any path — every prompt carries the no-text rule from `ai-asset-generation`
-**Step 6.6**; text the script needs is added in Stage 7, never baked in. Physical-
-manipulation beats (applying / peeling / pressing / pouring) follow the
-`physical-action-video` FLF ladder and are isolated from any continuous
-extend chain — `production-routes` carries the full isolation rule. On the default Seedance path, generate the whole ad as ONE multi-beat clip (beats = in-prompt jump cuts); use separate per-beat clips ONLY when the chosen model can't do multi-beat or a beat hits the editorial fallback. Do NOT fragment a 15s ad into four 3–4s clips.
-
-**Stage 4.5 — Validate every clip (HARD GATE — inline below).**
-
-**Stage 5 — Build to target length.** **Default to ONE full-length multi-beat
-clip** — favor the longest single clip the chosen model can produce (a native
-multi-beat model like Seedance renders the jump-cut beats inside one ≤15s prompt;
-an extend-capable model chains to length as one unified clip). Only stitch
-multiple SEPARATE clips when the script exceeds the model's single-clip max, hits
-36+ spoken words, or a manipulation beat falls back to the editorial split. Do
-NOT fragment the ad into many 3–4s clips. See `ugc-craft` (duration methodology)
-and [production-routes](prompts/production-routes.md) Stage 5.
-
-**Stage 6 — Audio (path-aware).** Every route keeps its **native audio**
-(`generate_audio = true`) by default — fully-AI clips speak their native voice; a Path C
-stitch keeps the source voice / `@Audio1` carry. Never mute to lay a separate VO during
-generation; a DIFFERENT voice on the finished video is the user-triggered
-**`voice-replacement`** skill. Policy: [production-routes](prompts/production-routes.md) Stage 6.
-
-**Stage 7 — Captions + end card.** Text comes from `libi.add_overlay({ kind: "text" })` (captions,
-lower-thirds, CTA), end-card title from `libi.add_overlay({ kind: "image" })`. **Text is single-line and
-does NOT wrap — size each caption to the canvas `width`** (`maxChars ≈ 0.84×width/(0.6×fontPx)`;
-split long lines, never overflow — see `speech-captions` `prompts/readability.md`). Add a
-product-name lower-third on the first reveal beat; build a 2s canvas end-card holder if none.
-
-**Stage 8 — Verify-before-commit (HARD GATE — inline below).**
-
-**Stage 9 — Lessons capture.** Append a structured "lessons" note to the piece
-(storyboard **overview** / description): what worked, which model + prompt patterns
-produced the best beats, what to avoid next time. Future runs reference it.
-
----
-
-## Stage 4.5 — Validate every clip (REQUIRED gate)
-
-**For the extend-chain route:** validate ONLY the final (latest) extend output — the
-intermediate versions are rollback points, not on the timeline. **For every other
-route:** validate every saved clip (each maps to a timeline scene). REUSE beats
-(trimmed source) skip this gate — source footage is already validated.
-
-Every AI-generated clip MUST pass this before it counts as part of the piece — and the
-validation must produce a REAL analysis record, not a note claiming a pass. Skipping it,
-or faking it, is a skill bug.
-
-**Run the validation through the `video-analysis` skill** — invoke it on the clip and let
-it own the mechanics (extract a few keyframes → look at the actual pixels → persist a
-frame/summary analysis record). Don't re-implement that flow here. A short clip only needs
-a handful of frames.
-
-Your UGC-specific responsibility is the **grading**. When you look at each frame, score it
-for the AI-generation failure modes — be specific, say "none" if clean:
-- extra / missing fingers, malformed hands;
-- illegible text masquerading as real words;
-- broken physics (gravity, motion continuity, inter-frame jumps);
-- off-model character drift vs the Stage 1 reference.
-
-Record your findings **and an overall severity** in the saved analysis so the record is
-durable, and append that severity to the file's notes lineage. Derive severity: any
-extra-fingers or fake-text finding = `reject`; minor blur / palette drift = `minor`;
-otherwise `ok`. Then branch:
-- **`ok`** — attach the clip to its card as a take (`libi.attach_storyboard_clip`) and
-  `libi.select_storyboard_take` to place the scene NOW, so the preview builds up in front of the
-  user. (Opt-off direct-generation run only: `libi.add_overlay({ kind: "video" })` instead.)
-- **`minor`** — tell the user the issues, ask keep-or-regen (default keep). **The moment it's
-  kept, attach + select the take NOW, exactly as for `ok`** — do not wait. A `minor` grade is the
-  common case for real generation; if placement only happened on a perfect `ok`, the piece would
-  sit visibly EMPTY through the whole multi-minute generation and only get scenes in a final batch
-  assembly. That's the bug to avoid.
-- **`reject`** — tell the user the issues; regen with a prompt patch targeting the specific
-  failure (e.g. "anatomically-correct hands, five fingers"; "no on-screen text"), bump the retry
-  counter, fire again. Attach each regen as a NEW take on the same card so the versions are kept;
-  select the good one. Each retry counts against the batch cap.
-
-**Incremental build is REQUIRED, not optional (the "empty piece" rule).** Every clip that is
-KEPT (whether graded `ok` or `minor`-kept) is **selected onto its card immediately after it
-validates** (`libi.select_storyboard_take` — `libi.add_overlay({ kind: "video" })` only on an opt-off direct
-run) — never batch all placement to the end. The piece must build up visibly as each clip lands:
-after card 1's take is selected the timeline shows 1 scene, after card 2 it shows 2, and so on.
-Leaving generated-and-kept clips as unselected takes (or loose files) while the composition stays
-empty is a defect — the user sees a piece with no video even though clips exist. By Stage 8 every
-kept clip MUST already be a scene on the timeline (Stage 8 verifies the scene shape; it does not
-place the takes for you).
-
-**Video-understanding pass (for physical-manipulation beats).** For any clip whose beat
-manipulates a product (applying / peeling / pressing / pouring), also run the
-`physical-action-video` video-understanding check — a YES/NO/UNCLEAR pass on the six
-universal physical-plausibility questions plus 2–4 beat-specific ones. All YES → accept;
-1–2 UNCLEAR → accept-with-notes; 3+ UNCLEAR or any NO → regenerate targeting the failing
-question.
-
-**The commit gate backs this up.** When you commit the draft, libi hard-refuses (error
-`unvalidated_generated_clips`) any commit where an AI-generated clip on the timeline lacks a
-completed analysis record — a claim in a note is not a substitute. So a skipped or faked
-validation surfaces at commit time; validate the offending clips, then retry.
-
----
-
-## Stage 8 — Verify-before-commit gate (REQUIRED)
-
-Before you commit the draft, verify the composition actually matches the route's plan.
-This catches "I claimed I added the VO but didn't" bugs.
-
-> **HARD RULE — not optional, not skippable.** Do NOT commit unless you have just read
-> the composition back (with the composition-read tool) in the same turn and walked the
-> checks below. The server commit gate only enforces *clip validation* — it does NOT
-> catch audio-shape, scene-count, or overlay mismatches, so those are entirely on you.
-> (Observed QA failure, 2026-05-30: a stitch shipped with the source audio still playing
-> under the VO because this step was skipped.)
-
-Read the composition back, then confirm — against the route you actually ran:
-
-1. **Audio shape.** Does the audio match the route's policy (the per-route table in
-   [production-routes](prompts/production-routes.md) Stage 6)? The critical stitch-route
-   check: **no source/inline audio may remain on any scene** — only the single voiceover
-   should be audible. A muted scene that still carries its auto-created inline audio clip
-   is the doubled-audio bug; clear it before committing. (Reminder: adding a video overlay
-   from a file with sound auto-creates an inline audio clip — muting a layer means removing
-   that clip.)
-2. **Scene shape.** Scene count + order match the beat plan? Keep stitched clips as
-   SEPARATE per-beat scenes (the playback engine smooths seams) — don't collapse into one
-   concatenated clip; concatenation is FINAL-EXPORT only. **STITCH face-check (applied-edge
-   re-verify, per `stitching-multi-clip`): EXTRACT FRESH frames at each reused scene's
-   COMMITTED-trim edges (≤0.5s step — sparse keyframes miss them), tighten via `update_overlay` + re-extract until clean. A described-but-unwritten trim shipped the 0:13/0:55 face leaks.**
-3. **Overlays.** Every beat that planned on-screen text has a matching text overlay; no
-   planned caption is missing AND no caption overflows — each line's `chars × 0.6 × fontPx ≤ 0.84 × width`.
-4. **On mismatch:** do NOT commit. Tell the user the exact gap and the fix you'd apply
-   (mute a scene's audio, add the missing VO / overlay, rejoin scenes), and get their OK —
-   or let them say "commit anyway" to override intentionally.
-5. **On match:** show the user the timeline (navigate them to the piece) — length, scene
-   count, audio shape, cost. **STITCH — before commit, run `stitching-multi-clip`'s
-   director's continuity review** (fresh-eyes/subagent pass over the spoken-script-in-order +
-   seam frames; fix any repeated line, mid-sentence cut, or unmotivated time jump). Then
-   commit — validate Stage 4.5 clips first if it reports `unvalidated_generated_clips`.
-
----
-
-## The four hard gates
-
-1. **Cost disclosure** — disclose the TOTAL estimated cost — from your provider's pricing tool, see `references/providers/<id>.md` — before any spend; respect the approval mode + batch cap.
-2. **Dialogue confirmation** — run the [dialogue-gate](prompts/dialogue-gate.md) before any speaking clip (exact words + count + natural-pace fit; explicit `yes`). Separate from cost approval; re-run when the dialogue changes.
-3. **Stage 4.5 validation + commit refusal** — every AI clip gets a real analysis record (frame vision-Read + video-understanding for manipulation beats); `commit_draft` hard-refuses unvalidated clips. (Inline above.)
-4. **Verify-before-commit audio-shape** — the Stage 8 audio-shape + scene-count + text-overlay invariants must pass before `commit_draft`. (Inline above.)
-
----
-
-## Naming + lineage
-
-Every generated file is its own libi asset; multi-take variants of one beat are
-separate assets grouped in **one folder** named after the beat (see
-`using-asset-folders`). Name files descriptively (`hook.mp4`, `hook-v2.mp4`,
-`body-2-ext1.mp4`) but treat the truth as the **notes field**, not the filename.
-
-After EVERY save (generation, upload, extension, retry, rename), append a lineage
-line to `files.notes` via `libi.update_file_notes`:
-
-```
-<ISO timestamp> | model=<id> | retry=<n> | parent=<fileId|null> | prompt-hash=<8 hex> | validation=<ok|minor|reject> [| issues=<n>]
-```
-
-`prompt-hash` is the first 8 hex of `sha256(prompt)` — a fingerprint you compute in
-reasoning. Before reusing a prior take of a beat, read its notes and prefer the latest
-`validation=ok` entry. On every AI upload, pass the FULL `aiGeneration` block (provider,
-model, full prompt, `costEstimate`, `startedAt`/`completedAt`, `durationMs`,
-`providerJobId`, `attemptNumber`) — it's the provenance `commit_draft` checks.
-
----
-
-## Cross-skill references
-
-- **`using-storyboard`** — the build spine (see "The Storyboard is the build spine" above). The
-  schematic + generation-spec + take/select mechanics that realize the ad live there; this skill
-  owns the UGC craft + gates that feed it. The ad's beat sheet / copy (Stage 3 — see
-  [script-craft](prompts/script-craft.md)) becomes the Storyboard cards; get sign-off before
-  materializing them.
-- **`ai-asset-generation`** — the call + save mechanics (provider/model/schema/cost, prompt
-  build, run/poll, import + provenance) plus the universal video invariants (no in-video text;
-  native audio on). Never call provider tools directly.
-- **`realistic-image-generation`** — the keyframe / creator-portrait image craft (gpt-image-2
-  picker, anti-AI-look tokens, selfie/demographic templates, anatomy plausibility + validation).
-- **`physical-action-video`** — manipulation-beat craft (FLF-first, prompt decomposition, the
-  model-escalation ladder, editorial fallback, keep-isolated-clips-consistent).
-- **`using-asset-folders`** — group multi-take variants + extend-chain clips.
-- **`stitching-multi-clip`** — keep multi-clip routes as separate per-beat scenes;
-  the editor's playback engine smooths the seams. Concatenation is only for FINAL
-  EXPORT, not for the timeline.
-- **`using-character-library`** — the general cross-piece objects catalog (characters + items) + disambiguation; proactively check it for the product/creator before generating fresh, and auto-catalog them from analysis if they're not there yet. This UGC skill's own local character/product references (Stages 1–2) are piece-scoped — promote a recurring one to the catalog when it's likely to come back in a future piece.
-- **`using-snapshot-draft`** — the snapshot/draft model (see Rule 10 below).
-- **`using-object-tracking`** — follow / blur / label a moving subject across a clip.
-
----
-
-## Rule 10 — Snapshot/Draft awareness
-
-Before starting, call `libi.get_piece_state` for the piece and check `hasDraft`. If a
-draft exists with unrelated work, follow `using-snapshot-draft` Rule 2 (ask about
-commit / discard / fold). After each major phase (character saved, scenes built,
-overlays placed), suggest committing: *"Want me to save this as a snapshot before we
-move on?"*
+Needs a **video** provider: one in your tool list, or a libi extension (those count). Read the `references/providers/<id>.md` here for the provider you use before your first call. With none, call `libi.suggest_provider({ kind: "video" })` and stop; the full rule is `libi.read_manual({ section: "providers" })`.
+
+Done looks like: a UGC-style ad the user approved at the script, built through the storyboard, every AI clip validated, voiced, captioned and verified against the plan before commit. This skill owns that shape and the gates; `prompts/` holds the craft and is read as the flow reaches it. Generate through `ai-asset-generation`, never with provider tools directly.
+
+## The default shape: one full-length clip
+
+Generate the ad as **one multi-beat clip at the chosen model's own per-clip max** (verify it in the schema; the default model allows 15 s). Hook, Show, Demo and Verdict are jump cuts the model renders inside one prompt, not separate generations: a clip per beat is what makes pacing fast and incoherent, and the worry that short clips avoid drift applies to one continuous long take, not to cuts inside a prompt.
+
+Use more than one clip only when the script exceeds the model's single-clip max, has 36 or more spoken words, or a manipulation beat keeps failing and falls back to the editorial split (`video-generation-craft`). Then use the fewest clips, about the target divided by the model's max, each still multi-beat: a 30 s ad is two 15 s clips, not eight short ones. A recreation packs the source's shots into the fewest clips and never maps one source shot to one clip.
+
+## Built through the storyboard
+
+Build the ad through `using-storyboard`, for every ad, even a one-clip one. A card is one generated clip and a beat is a cut inside a card: a multi-beat ad is ONE card, an extend chain is ONE card (its versions are the takes), a stitch is N cards (a reused beat's take is the trimmed source) linked with `libi.set_storyboard_reference`. Author each card's schematic and generation spec, get the schematic approved (the free gate before spending), generate, validate, then `libi.storyboard_take` action `select`. Skip the storyboard only if the user says to, and place clips with `libi.add_overlay({ kind: "video" })`; the gates hold either way.
+
+## The flow
+
+1. **Frame it.** [brief-intake](prompts/brief-intake.md); a format ([ad-formats](prompts/ad-formats.md)); a route if a source video exists ([production-routes](prompts/production-routes.md)); aspect and safe zones ([platform-specs](prompts/platform-specs.md)). Load `video-planning` to break the ad into blocks: that plan is the beat sheet. Record format, route, model and opt-ins on the piece (summary in the description, durable plan in the storyboard overview).
+2. **Source analysis** (mimicking a source only): the `video-analysis` skill, read for what to reproduce. A stitch loads `stitching-multi-clip` before the script; it owns the partition, the voice question and the continuity check.
+3. **Character.** Ask who is in the video, make one to three candidate portraits with the realistic-images reference of `video-generation-craft`, and get the pick approved: it is the keyframe of every card. For a stitch it is constrained by the reused footage (skin tone, age, build).
+4. **Product.** The user uploads references (`libi.upload_file`); look at each and write a structured summary (name, category, colour and finish, features, packaging); if they only described it, generate references first. Confirm the summary.
+5. **Script.** A good ad first, then feasibility: the format's beats, [script-craft](prompts/script-craft.md), two or three [angles](prompts/copywriting-angles.md). The dialogue gate applies. The user approves the beats before any generation.
+6. **Generate** each clip from the format's formula ([model-seedance-2-formulas](prompts/model-seedance-2-formulas.md)), the engine's rules in `video-generation-craft` and the craft in [craft](references/craft.md). No readable text in any prompt (`ai-asset-generation` owns the rule). Manipulation beats follow the physical-action reference of `video-generation-craft` and are isolated from any extend chain.
+7. **Validate** every clip, then place it (gate below).
+8. **Audio.** Native audio stays on in every route. One voice across clips and the stitch voice question: the voice reference of `video-generation-craft`. A different voice on the finished video is `voice-replacement`.
+9. **Captions and end card.** Text overlays (`libi.add_overlay({ kind: "text" })`) for captions, lower-thirds and CTA, an image overlay for the end card; a product-name lower-third on the first reveal beat, a 2 s end-card holder if none exists. Text is single-line and does not wrap, so size each caption to the canvas width (`maxChars` about 0.84 × width / (0.6 × fontPx); `speech-captions` has the readability rules).
+10. **Verify**, then commit (gate below). Add a short lessons note to the storyboard overview: which model and prompt patterns worked, what to avoid.
+
+## The gates
+
+Each is stated once, here.
+
+- **Cost.** Before any spend, disclose the total estimated cost from the provider's pricing tool and wait for a yes.
+- **Dialogue.** Before any clip that speaks, show the exact words, the word count and whether they fit the duration, and get an explicit yes: [dialogue-gate](prompts/dialogue-gate.md). It is separate from cost approval and re-runs when the words change. Whether there is a spoken line at all was settled once at the voice-line intake in `ai-asset-generation`.
+- **Validation.** Every AI clip needs a real analysis record before it counts: run it through the `video-analysis` skill (look at the actual frames, persist the record) and grade it. Extra or missing fingers, fake text or readable gibberish: `reject`. Broken physics, motion jumps, character drift against the reference: `minor` or `reject` by severity. Blur or palette drift only: `minor`. Otherwise `ok`. Record the grade in the analysis and in the file's notes (`validation=<ok|minor|reject>` on the lineage line). `ok`: place the clip now. `minor`: tell the user, ask keep or regenerate (default keep), and place it the moment it is kept. `reject`: say why, regenerate with a prompt patch aimed at the failure, attach the retry as a new take on the same card, and count it against the approved spend. Place every kept clip immediately after it validates, so the timeline builds up in front of the user; a piece with generated clips but an empty timeline is a defect. For a manipulation beat, also run the paid video-understanding questions in `video-generation-craft`'s physical-action reference; that pass belongs in the beat's cost disclosure. A reused source beat skips validation, and an extend chain validates only its final output. `libi.snapshot` action `commit` refuses (`unvalidated_generated_clips`) any draft with an AI clip that has no completed analysis.
+- **Verify before commit.** Read the composition back in the same turn and check it against the route you ran: the audio shape matches the route (a clip placed from a file with sound gets an inline audio clip, so a muted layer means removing that clip, and no clip may carry two voices); the clip count and order match the beat plan, kept as separate overlays and never concatenated (joining is an export concern: `stitching-multi-clip`); every planned text overlay exists and none overflows. For a stitch, re-extract fresh frames at each reused clip's committed trim edges and run `stitching-multi-clip`'s director review. On a mismatch do not commit: tell the user the gap and the fix and let them say "commit anyway". On a match, show the timeline (length, clip count, audio shape, cost) and commit.
+
+The commit gate checks only clip validation; the audio, clip-count and text checks are yours.
+
+## Model and overrides
+
+`RECOMMENDED_VIDEO_MODEL = provider-default`
+
+`provider-default` resolves through your provider reference: read `references/providers/<id>.md` and use the endpoint it marks RECOMMENDED. Suggest it with a one-line reason, and honour a per-project override ("use a different model this time") without re-pitching it. Always verify the chosen model at runtime with the provider's schema and pricing tools before generating; a written-down id is a hint, and availability and inputs drift.
+
+When the user states a standing preference ("always use X", "make Y my default"), offer to make it permanent rather than just complying once: fork this skill with `libi.skill` action `fork` and rewrite the `RECOMMENDED_VIDEO_MODEL` line of the user copy's `SKILL.md` with `libi.skill` action `update` (pass the whole edited body), using the literal endpoint id they want. That is the only write path that reaches a forked skill and re-syncs the workspace. Never hand-edit anything under `references/`: no `libi.*` tool writes there and a raw edit triggers no sync. Reverting is deleting the user copy.
+
+## Files, lineage, drafts
+
+Each generated file is its own asset; group the takes of one beat in a folder named after it. Provenance (`aiGeneration`) and the notes lineage line follow `ai-asset-generation`; add the validation grade to the line once graded. Before starting, call `libi.get_piece_state`; if `hasDraft` holds unrelated work, ask whether to commit, discard or fold it in first, and offer a snapshot after each major phase (character saved, clips placed, overlays added).
+
+Related: `using-character-library` (check it for the creator or product before generating fresh, and promote recurring ones), `using-object-tracking` (follow, blur or label a moving subject), `video-planning`, `using-storyboard`, `stitching-multi-clip`, `video-generation-craft`.

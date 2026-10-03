@@ -59,7 +59,7 @@ test.describe("Agents — libi MCP tab", () => {
     await expect(page.getByText("npx @nagellabs/libi connect", { exact: true })).toBeVisible({ timeout: 15_000 });
   });
 
-  test("libi.show_extension still scrolls to a nested extension row", async ({ page }) => {
+  test("libi.show({ target: 'extension' }) still scrolls to a nested extension row", async ({ page }) => {
     await page.goto("/agents?tab=libi-mcp");
     await expect(page.getByTestId("extension-row-local-music")).toBeVisible({ timeout: 15_000 });
     // The same DOM event the SSE bridge dispatches for a navigate_agents

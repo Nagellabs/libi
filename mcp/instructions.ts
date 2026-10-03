@@ -4,6 +4,7 @@ import { loadBundledTemplate } from "@/lib/instructions/bundled-template";
 import { readInstructionsOverride } from "@/lib/instructions/override";
 import { readMemories } from "@/lib/instructions/memories";
 import { renderDialect, type AgentDialect } from "@/lib/instructions/dialect";
+import { renderMergedToolMap } from "@/mcp/merged-tool-map";
 
 const START_MARKER = "<!-- libi-instructions-start";
 const END_MARKER = "<!-- libi-instructions-end -->";
@@ -88,6 +89,19 @@ function resolveTemplate(): string {
 }
 
 /**
+ * The merged-tool map (`mcp/merged-tool-map.ts`) is GENERATED from `lib/agents/merged-tools.ts`, never typed
+ * into the template, so it cannot drift from the tools the server registers. It is spliced in before the end
+ * marker (appended when an override dropped the markers), for BOTH dialects alike: it is not dialect text.
+ */
+function withMergedToolMap(text: string): string {
+  const map = renderMergedToolMap();
+  const endIdx = text.indexOf(END_MARKER);
+  return endIdx !== -1
+    ? `${text.slice(0, endIdx)}\n${map}\n\n${text.slice(endIdx)}`
+    : `${text}\n\n${map}\n`;
+}
+
+/**
  * Build the full instruction block for a given agent dialect. The template is
  * rendered for the dialect FIRST (`claude` → CLAUDE.md, `codex` → AGENTS.md),
  * then the dialect-NEUTRAL injections run unchanged: the TEST MODE banner and
@@ -99,7 +113,7 @@ function resolveTemplate(): string {
  * dropped. A marker-free user override renders identically for both dialects.
  */
 export function getInstructions(dialect: AgentDialect = "claude"): string {
-  let working = renderDialect(resolveTemplate(), dialect);
+  let working = withMergedToolMap(renderDialect(resolveTemplate(), dialect));
 
   if (isTestMode()) {
     // Inject banner right after the START_MARKER line so it's visible early —

@@ -62,7 +62,7 @@ assertions:
   # The loop was entered: a tracking tool's own error RESULT (escaped JSON, no space after the
   # colon — the plan's code block quotes it as `{ \"error\": \"…\"` WITH one, so reading the
   # plan cannot satisfy this), or the installer itself (a pre-emptive plan read is a legit route).
-  # `\\+`: ground_target returns the gate's error as a JSON STRING inside `error`, so there it
+  # `\\+`: libi.track ground_target returns the gate's error as a JSON STRING inside `error`, so there it
   # is escaped twice (`\\\"error\\\":\\\"tracking_engine_not_installed`) — seen 2026-09-27.
   - transcript_matches: '\\+"error\\+":\\+"tracking_engine_not_installed|\[tool-call mcp__libi__libi_install_tracking_engine\]'
     expect: present

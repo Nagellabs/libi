@@ -17,13 +17,32 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
-const { addOverlay, trimVideo } = vi.hoisted(() => {
+const { addOverlay, trimVideo, listTemplatesTool, deleteTemplateTool, applyLayerEffect, addEffectTool, removeEffectTool } = vi.hoisted(() => {
   type Handler = (params: Record<string, unknown>) => Promise<{ success: boolean; data: unknown }>;
   return {
     addOverlay: vi.fn<Handler>(async () => ({ success: true, data: { overlayId: "vid-1" } })),
     trimVideo: vi.fn<Handler>(async () => ({ success: true, data: { fileId: "f2" } })),
+    listTemplatesTool: vi.fn<Handler>(async () => ({ success: true, data: { templates: [] } })),
+    deleteTemplateTool: vi.fn<Handler>(async () => ({ success: true, data: { deleted: true } })),
+    applyLayerEffect: vi.fn<Handler>(async () => ({ success: true, data: { applied: true } })),
+    addEffectTool: vi.fn<Handler>(async () => ({ success: true, data: { id: "e2e-shift" } })),
+    removeEffectTool: vi.fn<Handler>(async () => ({ success: true, data: {} })),
   };
 });
+vi.mock("@/mcp/tools/effect-package-tools", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/mcp/tools/effect-package-tools")>()),
+  addEffectTool,
+  removeEffectTool,
+}));
+vi.mock("@/mcp/tools/effect-tools", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/mcp/tools/effect-tools")>()),
+  applyLayerEffect,
+}));
+vi.mock("@/mcp/tools/template-tools", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/mcp/tools/template-tools")>()),
+  listTemplatesTool,
+  deleteTemplateTool,
+}));
 vi.mock("@/mcp/tools/overlay-tools", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/mcp/tools/overlay-tools")>()),
   addOverlay,
@@ -37,7 +56,9 @@ vi.mock("@/lib/security/test-routes", () => ({ testRoutesEnabled: () => gate.ena
 vi.mock("@/mcp/notify", () => ({ notify: { refreshQuery: vi.fn() } }));
 
 import { POST } from "@/app/api/e2e/run-tool/route";
+import { notify } from "@/mcp/notify";
 import { createLibiMcpServer } from "@/mcp/server";
+import { installToolsListShaping } from "@/mcp/tools-list-shape";
 import { coerceInputSchema, installArgCoercion } from "@/mcp/tools/coerce-args";
 import { RUN_TOOL_INPUT_SCHEMAS, parseErrorMessage, toObjectSchema } from "@/lib/e2e/run-tool-input";
 // The SDK's own helpers, which lib/e2e/run-tool-input.ts vendors (they are not a
@@ -87,6 +108,11 @@ beforeEach(() => {
   gate.enabled = true;
   addOverlay.mockClear();
   trimVideo.mockClear();
+  listTemplatesTool.mockClear();
+  deleteTemplateTool.mockClear();
+  applyLayerEffect.mockClear();
+  addEffectTool.mockClear();
+  removeEffectTool.mockClear();
 });
 
 describe("/api/e2e/run-tool refuses bad arguments the way the MCP endpoint does", () => {
@@ -151,6 +177,68 @@ describe("/api/e2e/run-tool refuses bad arguments the way the MCP endpoint does"
     expect(addOverlay).not.toHaveBeenCalled();
   });
 
+  it("a merged tool runs the family's own action: libi.template list / delete", async () => {
+    const list = await runTool("libi.template", { action: "list" });
+    expect(list.status).toBe(200);
+    expect(list.body).toEqual({ success: true, data: { templates: [] } });
+    expect(listTemplatesTool).toHaveBeenCalledWith({});
+
+    const del = await runTool("libi.template", { action: "delete", templateId: "t1" });
+    expect(del.status).toBe(200);
+    expect(deleteTemplateTool).toHaveBeenCalledWith({ templateId: "t1" });
+  });
+
+  it("libi.layer_effect (what e2e/overlay-sandbox drives) runs the family's apply action with the parsed args", async () => {
+    const apply = await runTool("libi.layer_effect", { action: "apply", pieceId: "p", layerId: "o", phase: "loop", effectId: "e2e-shift" });
+    expect(apply.status).toBe(200);
+    expect(apply.body).toEqual({ success: true, data: { applied: true } });
+    expect(applyLayerEffect).toHaveBeenCalledWith({ pieceId: "p", layerId: "o", phase: "loop", effectId: "e2e-shift" });
+    const bad = await runTool("libi.layer_effect", { action: "apply", pieceId: "p", layerId: "o", phase: "sideways", effectId: "x" });
+    expect(bad.status).toBe(400);
+    expect(applyLayerEffect).toHaveBeenCalledOnce();
+    // the per-verb name is gone
+    expect((await runTool("libi.apply_layer_effect", {})).status).toBe(404);
+  });
+
+  it("libi.effect (add / remove, what e2e/overlay-sandbox seeds) runs the family's action and sends its own effects-custom refresh", async () => {
+    const args = { id: "e2e-shift", name: "E2E shift", family: "animation", phases: ["loop"], supports: ["text"], source: "return { dx: 1 };" };
+    const add = await runTool("libi.effect", { action: "add", ...args });
+    expect(add.status).toBe(200);
+    expect(add.body).toEqual({ success: true, data: { id: "e2e-shift" } });
+    expect(addEffectTool).toHaveBeenCalledWith(args);
+    expect(notify.refreshQuery).toHaveBeenCalledWith({ queryKey: "effects-custom" });
+    const bad = await runTool("libi.effect", { action: "add", id: "x" });
+    expect(bad.status).toBe(400);
+    expect(addEffectTool).toHaveBeenCalledOnce();
+    expect((await runTool("libi.effect", { action: "remove", id: "e2e-shift" })).status).toBe(200);
+    expect(removeEffectTool).toHaveBeenCalledWith({ id: "e2e-shift" });
+    // the per-verb names are gone
+    expect((await runTool("libi.add_effect", args)).status).toBe(404);
+  });
+
+  it("a merged tool refuses a missing or unknown action, and a bad argument for the action, before anything runs", async () => {
+    const none = await runTool("libi.template", { templateId: "t1" });
+    expect(none.status).toBe(400);
+    expect(none.body.error).toMatch(/needs `action`: one of list, delete\./);
+
+    const unknown = await runTool("libi.template", { action: "publish", templateId: "t1" });
+    expect(unknown.status).toBe(400);
+
+    // a REAL action of the tool that no spec drives is not exposed either
+    const notExposed = await runTool("libi.template", { action: "update", templateId: "t1" });
+    expect(notExposed.status).toBe(400);
+    expect(notExposed.body.error).toMatch(/one of list, delete\./);
+    const clone = await runTool("libi.effect", { action: "install_from_git", url: "https://example.com/x.git" });
+    expect(clone.status).toBe(400);
+    expect(clone.body.error).toMatch(/one of add, remove\./);
+
+    const bad = await runTool("libi.template", { action: "delete" });
+    expect(bad.status).toBe(400);
+    expect(String(bad.body.error)).toContain('action: "delete"');
+    expect(String(bad.body.error)).toContain("templateId");
+    expect(deleteTemplateTool).not.toHaveBeenCalled();
+  });
+
   it("an unknown tool is still a 404", async () => {
     const { status } = await runTool("libi.add_text_overlay", {});
     expect(status).toBe(404);
@@ -171,6 +259,8 @@ describe("the route's schema table is the MCP endpoint's", () => {
     for (const [name, schema] of Object.entries(RUN_TOOL_INPUT_SCHEMAS)) {
       register(name, { inputSchema: schema }, async () => ({ content: [] }));
     }
+    // The real server's tools/list is shaped (no $schema, legacy fields hidden); the mirror must be too.
+    installToolsListShaping(mirror);
     const ours = await withClient(mirror, (c) => c.listTools());
     const byName = new Map(real.tools.map((t) => [t.name, t.inputSchema]));
     expect(ours.tools.length).toBe(Object.keys(RUN_TOOL_INPUT_SCHEMAS).length);
@@ -189,7 +279,7 @@ describe("the vendored SDK helpers match the SDK's own", () => {
     ["libi.trim_video", { pieceId: "p1", fileId: "f1" }],
     ["libi.trim_video", { pieceId: "p1", fileId: "f1", startSeconds: 0, endSeconds: 1 }],
     ["libi.get_piece_state", {}],
-    ["libi.delete_template", { templateId: 7 }],
+    ["libi.publish_template", { templateId: 7 }],
   ];
 
   it.each(samples)("%s %j: same object schema, same parse, same wording", async (tool, args) => {

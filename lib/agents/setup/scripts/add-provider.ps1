@@ -10,7 +10,7 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider  fal, higgsfield, zernio or elevenlabs
+#   provider  fal, higgsfield, zernio, elevenlabs or playwright
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   -CliScript  optional, Windows npm installs: the JS file the agent's `.cmd`
@@ -21,7 +21,8 @@
 # What it does:
 #   1. fal.ai: asks for your provider key without showing it as you type.
 #      Higgsfield, Zernio and ElevenLabs have no key: you sign in with your
-#      account for that provider in your browser instead.
+#      account for that provider in your browser instead. Playwright needs
+#      neither: it runs on your computer with npx (Node.js).
 #   2. Codex with fal.ai only: saves the key as FAL_KEY in your Windows user
 #      environment, because Codex reads that key from its environment when it
 #      starts.
@@ -42,6 +43,7 @@ switch -CaseSensitive ($Provider) {
   'higgsfield' { $name = 'Higgsfield'; $auth = 'oauth'; $codexKeyEnv = '' }
   'zernio'     { $name = 'Zernio'; $auth = 'oauth'; $codexKeyEnv = '' }
   'elevenlabs' { $name = 'ElevenLabs'; $auth = 'oauth'; $codexKeyEnv = '' }
+  'playwright' { $name = 'Playwright'; $auth = 'none'; $codexKeyEnv = '' }
   default      { [Console]::Error.WriteLine("add-provider.ps1: unknown provider '$Provider'"); exit 2 }
 }
 if ($Agent -cne 'claude' -and $Agent -cne 'codex') {
@@ -84,6 +86,9 @@ switch -CaseSensitive ("$Provider/$Agent") {
   'zernio/codex'      { $addArgs = @('mcp', 'add', 'zernio', '--url', 'https://mcp.zernio.com/mcp') }
   'elevenlabs/claude' { $addArgs = @('mcp', 'add', '--transport', 'http', '--scope', 'user', 'elevenlabs', 'https://api.us.elevenlabs.io/v1/mcp') }
   'elevenlabs/codex'  { $addArgs = @('mcp', 'add', 'elevenlabs', '--url', 'https://api.us.elevenlabs.io/v1/mcp') }
+  # Claude Code on Windows cannot start npx directly; its docs wrap a local server in `cmd /c`.
+  'playwright/claude' { $addArgs = @('mcp', 'add', '--scope', 'user', 'playwright', '--', 'cmd', '/c', 'npx', '@playwright/mcp@latest') }
+  'playwright/codex'  { $addArgs = @('mcp', 'add', 'playwright', '--', 'npx', '@playwright/mcp@latest') }
 }
 # Codex's add starts the browser sign-in itself. Claude Code's add finishes
 # before any sign-in, so its own `mcp login` follows, only when the add worked.

@@ -16,8 +16,8 @@ describe("Runner mcpToolId coverage", () => {
   it("UI-facing runners declare expected mcpToolId(s)", () => {
     const expected: Record<string, string | string[]> = {
       tracking: [
-        makeMcpToolId("libi", "libi.compute_object_track"),
-        makeMcpToolId("libi-tracking", "libi.compute_object_track"),
+        makeMcpToolId("libi", "libi.track"),
+        makeMcpToolId("libi-tracking", "libi.track"),
       ],
       matte_gen: [
         makeMcpToolId("libi", "libi.remove_background"),
@@ -33,6 +33,7 @@ describe("Runner mcpToolId coverage", () => {
       ),
       remote_fetch: makeMcpToolId("libi", "libi.import_remote_files"),
       dev_slow: makeMcpToolId("libi", "libi.dev_slow_job"),
+      audio_measure: makeMcpToolId("libi", "libi.audio_analyze"),
     };
 
     for (const [kind, want] of Object.entries(expected)) {
@@ -50,7 +51,7 @@ describe("Runner mcpToolId coverage", () => {
     expect(getRunner("analysis_describe_frame")?.mcpToolId).toBeUndefined();
     expect(getRunner("export_render")?.mcpToolId).toBeUndefined();
     // piece_dup is fire-and-forget: duplicate_piece returns a jobId immediately
-    // and the agent polls get_job_status — no chat-progress surface.
+    // and the agent polls libi.job (status) — no chat-progress surface.
     expect(getRunner("piece_dup")?.mcpToolId).toBeUndefined();
   });
 

@@ -29,6 +29,11 @@ vi.mock("@/lib/composition/persistence", () => ({
 }));
 
 import { POST } from "@/app/api/render/frames/route";
+import { __resetRenderDiagnosticsForTests, mergeRenderDiagnostics } from "@/lib/render/render-diagnostics-store";
+import { bodyHashesOf } from "@/lib/render/body-hashes";
+vi.mock("@/lib/overlays/code-files", () => ({
+  overlayCodeFilePath: async (_pieceId: string, o: { id: string }) => `/abs/${o.id}/draw.jsx`,
+}));
 
 const FRAME_W = 320;
 const FRAME_H = 180;
@@ -201,5 +206,96 @@ describe("POST /api/render/frames — the frame each time drew (Task 12b re-revi
 
     const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [4.99] }))).json();
     expect(json.unresolvedFonts).toEqual(["GhostOnDrawnFrame"]);
+  });
+});
+
+describe("POST /api/render/frames — body failures and blank frames (agent-speed A2)", () => {
+  async function writeFlatFrame(name: string): Promise<string> {
+    const canvas = createCanvas(FRAME_W, FRAME_H);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, FRAME_W, FRAME_H);
+    const p = path.join(dir, name);
+    await fs.writeFile(p, await canvas.encode("png"));
+    return p;
+  }
+
+  function codeOverlay(id: string, startTime: number, duration: number) {
+    return {
+      id,
+      kind: "code" as const,
+      drawFunction: "ctx.fillStyle = heart;",
+      startTime,
+      duration,
+      z: 1,
+      opacity: 1,
+      rect: { x: 0, y: 0, width: 100, height: 40 },
+    };
+  }
+
+  beforeEach(() => __resetRenderDiagnosticsForTests());
+
+  it("flags an empty frame `blank: true` and leaves a drawn frame unflagged", async () => {
+    const flat = await writeFlatFrame("flat.png");
+    const drawn = await writeTestFrame("drawn.png"); // one flat #336699 too: paint something on it
+    const canvas = createCanvas(FRAME_W, FRAME_H);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, FRAME_W, FRAME_H);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(60, 60, 200, 60);
+    await fs.writeFile(drawn, await canvas.encode("png"));
+    renderCompositionFrames.mockResolvedValue([captured(0, flat), captured(1, drawn)]);
+    loadComposition.mockResolvedValue({ manifest: { overlays: [] } });
+
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [0, 1] }))).json();
+    expect(json.frames[0].blank).toBe(true);
+    expect(json.frames[1].blank).toBeUndefined();
+  });
+
+  it("returns the body failure of an overlay drawn on the frames, with its code file; always an array", async () => {
+    const p = await writeFlatFrame("f.png");
+    const ov = codeOverlay("heart", 0, 4);
+    renderCompositionFrames.mockResolvedValue([captured(1, p)]);
+    loadComposition.mockResolvedValue({ manifest: { overlays: [ov] } });
+
+    const clean = await (await POST(jsonReq({ pieceId: "p1", atTimes: [1] }))).json();
+    expect(clean.renderDiagnostics).toEqual([]);
+
+    const hash = (await bodyHashesOf([ov as never])).get("heart")!;
+    mergeRenderDiagnostics("p1", [
+      { overlayId: "heart", kind: "code", phase: "render", message: "heart is not defined", time: 1, frame: 30, at: 5, sourceHash: hash },
+      // a failure on another frame this pass did not draw
+      { overlayId: "gone", kind: "code", phase: "render", message: "x", frame: 3, at: 5 },
+    ]);
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [1] }))).json();
+    expect(json.renderDiagnostics).toEqual([
+      expect.objectContaining({ overlayId: "heart", phase: "render", message: "heart is not defined", frame: 30 }),
+    ]);
+  });
+
+  it("a failure recorded against a body the agent has since replaced is not reported", async () => {
+    const p = await writeFlatFrame("f.png");
+    const ov = codeOverlay("heart", 0, 4);
+    renderCompositionFrames.mockResolvedValue([captured(1, p)]);
+    loadComposition.mockResolvedValue({ manifest: { overlays: [ov] } });
+    mergeRenderDiagnostics("p1", [
+      { overlayId: "heart", kind: "code", phase: "render", message: "old", frame: 30, at: 5, sourceHash: "an-older-body" },
+    ]);
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [1] }))).json();
+    expect(json.renderDiagnostics).toEqual([]);
+  });
+
+  it("a snapshot render reports no draft diagnostics", async () => {
+    const p = await writeFlatFrame("f.png");
+    const ov = codeOverlay("heart", 0, 4);
+    renderCompositionFrames.mockResolvedValue([captured(1, p)]);
+    loadComposition.mockResolvedValue({ manifest: { overlays: [ov] } });
+    const hash = (await bodyHashesOf([ov as never])).get("heart")!;
+    mergeRenderDiagnostics("p1", [
+      { overlayId: "heart", kind: "code", phase: "render", message: "x", frame: 30, at: 5, sourceHash: hash },
+    ]);
+    const json = await (await POST(jsonReq({ pieceId: "p1", atTimes: [1], source: "snapshot" }))).json();
+    expect(json.renderDiagnostics).toEqual([]);
   });
 });

@@ -92,7 +92,7 @@ assertions:
 
 ## Behavioral expectations
 - Treated `libi.generate_music` as the music provider — free, on-device, no key — rather
-  than reporting "no music provider is connected". Stage 6's "if the user has no provider
+  than reporting "no music provider is connected". the Provider section's "if the user has no provider
   opinion, pick local ACE-Step".
 - Ran enough of the interview to have something to generate (at minimum a genre/vibe and a
   length) instead of demanding a full spec or inventing one silently.

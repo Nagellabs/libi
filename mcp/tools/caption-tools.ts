@@ -135,7 +135,7 @@ interface CaptionWindow {
  *
  *  Only what the viewer can HEAR is a window (AUD-1). A video's sound exists
  *  only as its coupled inline clip — add_overlay creates it when the file has
- *  audio, `audio_remove_clip` on it is the documented way to mute the video,
+ *  audio, `libi.audio_clip` action `remove` on it is the documented way to mute the video,
  *  and every export backend takes a video's sound from its clips alone
  *  (`findBaseInlineAudioClip`). So a video with NO coupled clip is silent, as
  *  is a HIDDEN video (the eye toggle: its coupled audio is not scheduled,

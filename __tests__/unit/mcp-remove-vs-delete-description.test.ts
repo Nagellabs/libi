@@ -4,17 +4,16 @@
  * distinction, this catches it.
  */
 import { describe, it, expect } from "vitest";
+import { listLibiTools } from "./../helpers/tool-surface";
 
 describe("MCP tool descriptions enforce Remove-vs-Delete", () => {
-  it("audio_remove_clip description says file is NOT deleted", async () => {
-    // Parse the server.ts source to pull the description string — avoids
-    // spinning up the whole MCP server just for a string assertion.
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync("mcp/server.ts", "utf-8");
-    const match = src.match(/"libi\.audio_remove_clip"[\s\S]*?description:\s*"([^"]+)"/);
-    expect(match).toBeTruthy();
-    expect(match![1]).toMatch(/NOT deleted/i);
-    expect(match![1]).toMatch(/stays in resources/i);
+  it("audio_clip's remove action says the file is NOT deleted", async () => {
+    const tool = (await listLibiTools()).find((t) => t.name === "libi.audio_clip");
+    expect(tool).toBeTruthy();
+    const action = (tool!.inputSchema as { properties: { action: { description: string } } }).properties.action.description;
+    const remove = action.split("; ").find((p) => p.startsWith("remove = "));
+    expect(remove).toBeTruthy();
+    expect(remove).toMatch(/NOT deleted/i);
+    expect(remove).toMatch(/stays in resources/i);
   });
-
 });

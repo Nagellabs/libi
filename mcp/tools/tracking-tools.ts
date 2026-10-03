@@ -70,6 +70,7 @@ import { isTestMode } from "@/lib/test-mode";
 // but NOT re-exported — the barrel must expose only one `ToolResult`
 // (the loose `./types` one), which killed the prior dual-declaration collision.
 import type { ToolResultOf as ToolResult } from "./types";
+import { INSTALL_ATTACHED_NOTE, matchedDownloadNote } from "./job-notes";
 
 /** Shared fallback for every generic MCP-tool catch below: parse the caught
  *  error for the `tracking_engine_not_installed` contract a job runner throws
@@ -132,8 +133,8 @@ export function engineMissWarning(
   if (engineMiss) {
     return (
       "ENGINE PRODUCED NO TRACK — the pipeline bound the subject in 0 frames across all shots. Do NOT " +
-      "add_tracked_overlay and do NOT hand-animate a keyframe overlay as a fallback. Isolate the cause: run " +
-      "ground_target at 2-3 in-clip timestamps. If it returns the subject at high confidence, this is a LOCAL " +
+      "libi.tracked_overlay add and do NOT hand-animate a keyframe overlay as a fallback. Isolate the cause: run " +
+      "libi.track ground_target at 2-3 in-clip timestamps. If it returns the subject at high confidence, this is a LOCAL " +
       "ENGINE failure on this footage — tell the user and offer method:'sot' (single-object template tracking, " +
       "bypasses the detector/associate path). See the " +
       "using-object-tracking skill's 'zero output' rule."
@@ -141,11 +142,11 @@ export function engineMissWarning(
   }
   if (summary.issues.length > 0) {
     return (
-      "TRACK QUALITY ISSUES DETECTED — do NOT add_tracked_overlay yet. For each entry in " +
-      "summary.issues, repair that exact `range`: ground_target in-range then " +
-      "compute_track_segment with a tight anchor, or skip_segment if the subject is genuinely " +
+      "TRACK QUALITY ISSUES DETECTED — do NOT libi.tracked_overlay add yet. For each entry in " +
+      "summary.issues, repair that exact `range`: libi.track ground_target in-range then " +
+      "libi.track compute_segment with a tight anchor, or libi.track skip_segment if the subject is genuinely " +
       "gone. Re-check until summary.issues is empty. Tip: a single anchor is fragile — prefer " +
-      "compute_object_track with derivedFromSubjectName for dense analysis-derived anchors."
+      "libi.track compute with derivedFromSubjectName for dense analysis-derived anchors."
     );
   }
   return undefined;
@@ -439,7 +440,7 @@ async function runTrackingCommon(opts: TrackingCommonOpts): Promise<
       // Cached terminal row — we re-persist the cached samples under the
       // freshly-generated trackId so that the trackId returned to the caller
       // points to a real row + JSON sidecar. Without this, the agent would
-      // immediately hit "track not found" when calling add_tracked_overlay.
+      // immediately hit "track not found" when calling libi.tracked_overlay add.
       const cached =
         (resp.existingJob.result ?? {}) as {
           samples?: TrackSample[];
@@ -512,7 +513,7 @@ async function runTrackingCommon(opts: TrackingCommonOpts): Promise<
  *     single segmented Track (ids never bleed across shot boundaries)
  *  3. summarize the stitched track
  *
- * A bad window can be recomputed later with `libi.compute_track_segment`.
+ * A bad window can be recomputed later with `libi.track({ action: "compute_segment" })`.
  * Returns `{ trackId, segments, summary }`.
  */
 export async function computeObjectTrack(
@@ -670,11 +671,11 @@ export async function computeObjectTrack(
           label: params.label,
           subjectId: params.subjectId,
           // Shot fan-out lays down the lowest-tier engine SEED. An explicit
-          // agent repair (standalone compute_track_segment, default "agent")
+          // agent repair (standalone libi.track compute_segment, default "agent")
           // must be able to authoritatively replace any of these windows.
           provenance: "engine",
           progressLabel: `segment ${shotIndex}/${shots.length}`,
-          // MUST propagate. Without it `compute_object_track({ forceNew: true })`
+          // MUST propagate. Without it `libi.track compute` with forceNew: true
           // creates a fresh trackId but every per-shot job still dedupes on its
           // unchanged paramsHash and replays the previous run's CACHED samples.
           // Measured 2026-08-02: a 3-shot fan-out that takes ~29s of real engine
@@ -818,7 +819,7 @@ export async function addTrackedOverlay(
             success: false,
             error:
               `Refusing to attach: track ${params.trackId} has blocking quality issues ` +
-              `[${blocking.join(", ")}]. Fix the flagged ranges (compute_track_segment / skip_segment) ` +
+              `[${blocking.join(", ")}]. Fix the flagged ranges (libi.track compute_segment / libi.track skip_segment) ` +
               `then retry, or pass acknowledgeQualityIssues:true if you have deliberately decided to attach anyway.`,
             data: { summary },
           };
@@ -831,7 +832,7 @@ export async function addTrackedOverlay(
             error:
               `Refusing to attach: track ${params.trackId} mixes face (head-box) and object (body-box) ` +
               `segments — one fit cannot be correct for both. Recompute the body-box windows with ` +
-              `objectKind:"face" (compute_track_segment), or attach separate overlays per range with the right fit.`,
+              `objectKind:"face" (libi.track compute_segment), or attach separate overlays per range with the right fit.`,
             data: { summary },
           };
         }
@@ -840,7 +841,7 @@ export async function addTrackedOverlay(
   } else {
     logger.warn(
       { trackId: params.trackId, fileId: row.fileId },
-      "add_tracked_overlay quality gate skipped: file has no pieceId",
+      "libi.tracked_overlay add quality gate skipped: file has no pieceId",
     );
   }
 
@@ -891,7 +892,7 @@ export async function updateTrackedOverlay(
 
 export async function computeTrackSegment(
   // `provenance` is an INTERNAL stitch-precedence concern, deliberately NOT on
-  // the agent-facing Zod schema: a standalone `libi.compute_track_segment`
+  // the agent-facing Zod schema: a standalone `libi.track({ action: "compute_segment" })`
   // call is a corrective repair and must authoritatively outrank the engine
   // seed (default "agent"); only the `computeObjectTrack` shot fan-out passes
   // "engine" so its per-shot seed segments stay the lowest tier. Without this,
@@ -975,8 +976,9 @@ export async function computeTrackSegment(
         ...(params.progressLabel
           ? {
               toolHint: {
-                toolName: "libi.compute_object_track",
-                toolArgs: {},
+                // The shot fan-out belongs to the `libi.track` call whose action is `compute`.
+                toolName: "libi.track",
+                toolArgs: { action: "compute" },
                 progressLabel: params.progressLabel,
               },
             }
@@ -1037,7 +1039,7 @@ export async function computeTrackSegment(
   // row, shots 2..N then hit the skip and vanish — the portrait "seven empty
   // tracks" bug, round 2). In every other all-lost case — fresh window, or
   // an overlapping prior that is itself lost/empty — persist the honest
-  // `lost` segment so list_track_segments shows reality.
+  // `lost` segment so libi.track list_segments shows reality.
   const priorTrack = await readTrack(file.pieceId, trackId);
   let appliedSegmentId: string;
   let summary: ReturnType<typeof summarizeTrack>;
@@ -1103,7 +1105,7 @@ export async function skipSegment(
       reason: params.reason,
       // A skip is a deliberate agent decision — it must replace an engine
       // segment's window at write time (upsertSegment overlap resolution)
-      // and win the stitch, exactly like a compute_track_segment repair.
+      // and win the stitch, exactly like a libi.track compute_segment repair.
       provenance: "agent",
       createdAt: Date.now(),
     });
@@ -1598,7 +1600,7 @@ export async function pickCandidate(
 }
 
 // ---------------------------------------------------------------------------
-// verify_tracked_overlay — render spot-check frames via Next.js route
+// libi.tracked_overlay verify — render spot-check frames via Next.js route
 // ---------------------------------------------------------------------------
 
 interface VerifyFramePayload {
@@ -1688,6 +1690,7 @@ interface InstallTrackingEngineData {
   matchedExisting?: boolean;
   existingJob?: unknown;
   hint?: string;
+  note?: string;
 }
 
 export async function installTrackingEngine(
@@ -1771,13 +1774,14 @@ export async function installTrackingEngine(
             clientKey: resp.clientKey,
             attachedToRunning: true,
             existingJob: resp.existingJob,
+            note: INSTALL_ATTACHED_NOTE,
             hint:
               (force
                 ? // A forced request that lands here was NOT honoured as a
                   // restart, and saying so is the point: restarting would
                   // have destroyed the running install's progress.
                   "An install was already in progress — attached to it instead of restarting. " +
-                  "To genuinely start over, call libi.cancel_job on this jobId first, then re-run with force. "
+                  "To genuinely start over, call libi.job({ action: \"cancel\", jobId }) first, then re-run with force. "
                 : "") + INSTALL_NEXT_STEP_HINT,
           },
         };
@@ -1794,6 +1798,7 @@ export async function installTrackingEngine(
             status: installed ? "installed" : "not_installed",
             matchedExisting: true,
             existingJob: resp.existingJob,
+            note: matchedDownloadNote({ restartArg: "force:true" }),
             hint: installed
               ? INSTALL_NEXT_STEP_HINT
               : "A previous install attempt left no usable engine. " +

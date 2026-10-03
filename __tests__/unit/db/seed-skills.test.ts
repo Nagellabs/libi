@@ -7,6 +7,11 @@ import { getDb } from "@/lib/db/client";
 import { skills } from "@/lib/db/schema";
 import { seedDatabase } from "@/lib/db/init";
 import { BUNDLED_SKILLS } from "@/mcp/skills/registry";
+import { parseSkillBody } from "@/mcp/skills/frontmatter";
+import { readFileSync } from "node:fs";
+
+const frontmatterOf = (name: string) =>
+  parseSkillBody(readFileSync(resolve(__dirname, "../../../mcp/skills", name, "SKILL.md"), "utf-8")).frontmatter;
 describe("seedDatabase bundled skills", () => {
   beforeEach(() => createTestDb());
   afterEach(() => resetTestDb());
@@ -32,7 +37,17 @@ describe("seedDatabase bundled skills", () => {
     expect(row!.enabled).toBe(false);
   });
 
-  it("updates description on re-seed (refreshes registry changes)", () => {
+  it("seeds every bundled skill's description from its SKILL.md frontmatter, the one source", () => {
+    seedDatabase(getDb() as never);
+    for (const def of BUNDLED_SKILLS) {
+      const row = getDb().select().from(skills).where(eq(skills.id, def.id)).get();
+      expect(row!.description, def.name).toBe(frontmatterOf(def.name).description);
+    }
+    // The registry names folders only: there is no second description to drift.
+    for (const def of BUNDLED_SKILLS) expect(Object.keys(def).sort(), def.id).toEqual(["id", "name"]);
+  });
+
+  it("updates description on re-seed (refreshes it from the frontmatter)", () => {
     seedDatabase(getDb() as never);
     const def = BUNDLED_SKILLS[0];
     // Mutate description in DB to simulate stale row
@@ -40,7 +55,7 @@ describe("seedDatabase bundled skills", () => {
     // Re-seed
     seedDatabase(getDb() as never);
     const row = getDb().select().from(skills).where(eq(skills.id, def.id)).get();
-    expect(row!.description).toBe(def.description);
+    expect(row!.description).toBe(frontmatterOf(def.name).description);
   });
 
   it("seeds bundled skill tags from their SKILL.md frontmatter", () => {
@@ -61,6 +76,26 @@ describe("seedDatabase bundled skills", () => {
     seedDatabase(getDb() as never);
     const row = getDb().select().from(skills).where(eq(skills.name, "ai-asset-generation")).get();
     expect(JSON.parse(row!.tags)).toEqual(["custom-override"]);
+  });
+
+  // A skill merged or folded away leaves BUNDLED_SKILLS; its row must not outlive it, or `libi.skill` list and the
+  // Skills page keep listing a skill with no folder behind it.
+  it("drops a bundled row whose skill left the registry, and keeps user skills and forks", () => {
+    seedDatabase(getDb() as never);
+    const retired = "retired-bundled-skill";
+    expect(BUNDLED_SKILLS.map((d) => d.id)).not.toContain(retired);
+    getDb().insert(skills).values({ id: retired, name: retired, description: "gone", source: "bundled", enabled: true }).run();
+    // The user's fork of the retired skill, and a skill of their own, are theirs and stay.
+    getDb().insert(skills).values({ id: "fork-1", name: retired, description: "my fork", source: "user", enabled: true, body: "b" }).run();
+    getDb().insert(skills).values({ id: "mine-1", name: "my-own", description: "mine", source: "user", enabled: true, body: "b" }).run();
+
+    seedDatabase(getDb() as never);
+
+    const names = getDb().select().from(skills).all().map((r) => `${r.source}:${r.name}`);
+    expect(names).not.toContain(`bundled:${retired}`);
+    expect(names).toContain(`user:${retired}`);
+    expect(names).toContain("user:my-own");
+    for (const def of BUNDLED_SKILLS) expect(names).toContain(`bundled:${def.name}`);
   });
 
   // Regression guard: a bundled skill folder that exists on disk but is missing

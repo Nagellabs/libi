@@ -81,11 +81,19 @@ the upload's own URL** (libi stamps it at `metadata.libi.mediaUrl`) and re-send 
 ## Status lifecycle
 
 `draft` → `scheduled` → `published` (or `failed` per target). `posts_update_post` is the whole
-lifecycle; there is no separate schedule or cancel op:
+lifecycle; there is no separate schedule or cancel op. **This is what the provider does, written down so
+you can read it — not a path for you to use:** publishing, scheduling and the TikTok inbox are the user's,
+on the Posting tab (`SKILL.md` §3), never a call you make:
 
 - schedule: `{ post_id, is_draft: false, scheduled_for, timezone, media_items, platforms }`;
 - publish now: `{ post_id, is_draft: false, publish_now: true }`;
 - cancel back to a draft: `{ post_id, is_draft: true }`.
+
+**A TikTok inbox upload reads as published.** A TikTok target sent with `tiktokSettings.draft: true` goes to
+the account's inbox, not to the feed: the row shows `status: "uploading"` and a `tiktokBusinessPublishId`
+of `v_inbox_url~…`, then `published` with `platformPostId: "v_inbox_url~…"`, and the post carries the
+account's `privacy_level` (`PUBLIC_TO_EVERYONE`). None of that means public. libi says "Sent to your TikTok
+inbox" for it; so do you. TikTok has no deep link to the inbox: the user opens the TikTok app's notification.
 
 `scheduled_for` accepts a local `datetime-local` value with or without seconds; `timezone` is preserved
 and the conversion is correct. **A draft keeps whatever `scheduledFor` it had** (and its platform rows
@@ -106,7 +114,7 @@ expiry a few hours out is the steady state, not a warning — which is why libi 
 countdown in its UI and why `libi.social_status` strips the field before you see it. Reconnect advice
 comes from `needsReconnection` (per account) or libi's `needsReconnect`, both set from an OBSERVED
 refusal. Saying "the TikTok connection expires today, you'll need to reconnect" is wrong, and it
-happened: a real chat turn said it twice off this field (QA 2026-09-21).
+happened: a real chat turn said it twice off this field.
 
 `platforms[].accountId` is an **object** on the posts endpoints and a **string** on analytics — handle
 both. Analytics rows carry `syncStatus` and `overview.dataStaleness`: "still syncing" is signalled
@@ -122,7 +130,7 @@ paid service: it bills the user per connected social account (a free-tier credit
 setup today) and meters some platforms separately (its usage report has an `xApi` line for X).
 Never call social posting "free" without that qualifier, never quote a Zernio price from memory
 (it is Zernio's to change — point the user at Zernio's pricing), and remember that ad spend goes
-to the ad network and your own turns use the user's own Claude Code / Codex plan.
+to the ad network and your own turns use the user's own agent plan.
 
 ## Ads
 

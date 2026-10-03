@@ -18,8 +18,8 @@ describe("getJobKindToToolIdsMap", () => {
       makeMcpToolId("libi", "libi.generate_music"),
     ]);
     expect(map.get("tracking")).toEqual([
-      makeMcpToolId("libi", "libi.compute_object_track"),
-      makeMcpToolId("libi-tracking", "libi.compute_object_track"),
+      makeMcpToolId("libi", "libi.track"),
+      makeMcpToolId("libi-tracking", "libi.track"),
     ]);
     expect(map.get("whisper_model_download")).toEqual([
       makeMcpToolId("libi", "libi.whisper_download_model"),

@@ -1,7 +1,7 @@
 ---
 id: ugc-multiclip-voice-carry
 title: 25s UGC carries one voice across clips via reference-to-video
-skills: [ugc-product-video, ai-asset-generation, ai-video-models, stitching-multi-clip, voiceover-production, realistic-image-generation]
+skills: [ugc-product-video, ai-asset-generation, video-generation-craft, stitching-multi-clip]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -17,7 +17,7 @@ covers: [seedance-2.0, reference-to-video, voice-carry, native-audio, no-kokoro,
 > clips via `reference-to-video` (`audio_urls`/`@Audio1`), keeps native audio on
 > every seedance clip (0 muted), and generates NO separate ElevenLabs/TTS/Kokoro
 > voiceover. Before C it muted the clips and layered an ElevenLabs VO; the new
-> `voiceover-production` authority skill + the deleted escape hatch fixed it.
+> `video-generation-craft` voice reference + the deleted escape hatch fixed it.
 > Do not "fix" this by loosening the matchers — the matchers are correct; this
 > scenario is the regression guard for the carry behavior.
 >

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { UpdateTrackResultSchema } from "@/mcp/tools/schemas";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 const baseSample = { t: 0, x: 10, y: 20, w: 30, h: 40, visible: true };
 
@@ -14,15 +14,15 @@ const validParams = {
 };
 
 describe("update_track_result MCP surface", () => {
-  it("libi.update_track_result is registered on the libi-tracking MCP", () => {
+  it("libi.track update_result is registered on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.update_track_result");
+    expectTrackingAction(names, "libi.track", "update_result");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("libi.update_track_result IS registered on the core libi MCP (always-on)", () => {
+  it("libi.track update_result IS registered on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.update_track_result");
+    expectTrackingAction(names, "libi.track", "update_result");
   });
 });
 

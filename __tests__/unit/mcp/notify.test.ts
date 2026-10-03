@@ -64,10 +64,8 @@ describe("mcp/notify", () => {
 
     notify.navigate({ target: "preview", pieceId: "p1" });
 
-    // Give the fire-and-forget fetch time to settle
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(fetchMock).toHaveBeenCalledOnce();
+    // The fetch is fire-and-forget: wait for it to be issued.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://127.0.0.1:19999/api/notify");
     expect(init?.method).toBe("POST");
@@ -127,9 +125,7 @@ describe("mcp/notify", () => {
 
     notify.refreshQuery({ queryKey: "composition", pieceId: "p1" });
 
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(fetchMock).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("http://127.0.0.1:19999/api/notify");
     expect(init?.method).toBe("POST");

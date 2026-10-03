@@ -22,6 +22,12 @@ import {
   LibiServerUnavailableError,
 } from "@/mcp/jobs-client";
 import type { ToolResult } from "./types";
+import {
+  attachedDownloadNote,
+  matchedDownloadNote,
+  GENERATE_MUSIC_ATTACHED_NOTE,
+  GENERATE_MUSIC_MATCHED_NOTE,
+} from "./job-notes";
 import type {
   MusicListStylesParams,
   MusicDownloadModelParams,
@@ -91,12 +97,13 @@ export async function musicDownloadModel(
             clientKey: resp.clientKey,
             attachedToRunning: true,
             existingJob: resp.existingJob,
+            note: attachedDownloadNote({ what: "a download of this model", restartArg: "force:true, which discards what is on disk" }),
             ...(force
               ? {
                   // A forced request that lands here was NOT honoured as a
                   // restart, and saying so is the point: restarting would have
                   // destroyed the running download's progress.
-                  hint: "A download is already in progress — attached to it instead of restarting. To genuinely start over, call libi.cancel_job on this jobId first, then re-run with force.",
+                  hint: "A download is already in progress — attached to it instead of restarting. To genuinely start over, call libi.job({ action: \"cancel\", jobId }) first, then re-run with force.",
                 }
               : {}),
           },
@@ -114,6 +121,7 @@ export async function musicDownloadModel(
             status: installed ? "installed" : "not_installed",
             matchedExisting: true,
             existingJob: resp.existingJob,
+            note: matchedDownloadNote({ restartArg: "force:true" }),
             ...(installed
               ? {}
               : {
@@ -280,8 +288,8 @@ export async function generateMusic(
   }
 
   // Real path: enqueue (or attach) a `music_generate` job and surface the
-  // 4-shape response to the agent. The CLAUDE.md heuristic (T24) tells the
-  // agent how to react to `attachedToRunning` / `matchedExisting`.
+  // 4-shape response to the agent. `note` tells it how to react to
+  // `attachedToRunning` / `matchedExisting` (job-notes.ts).
   const clientKey = randomUUID();
   try {
     const resp = await runJobViaServer<GenerationResult>(
@@ -321,9 +329,9 @@ export async function generateMusic(
       case "attached_running": {
         // The SSE wait completed — we got the runner's result. The wav file
         // is on disk now exactly like the `new` case, so we still store it.
-        // The `attachedToRunning` marker tells the agent to inform the user
-        // we joined an in-flight run (mention elapsed time + ask if they
-        // want a brand-new one with forceNew:true).
+        // The `attachedToRunning` marker (and its note) tells the agent to
+        // inform the user we joined an in-flight run and ask if they want a
+        // brand-new one with forceNew:true.
         const stored = await persistAndDelete(params, resp.result);
         return {
           success: true,
@@ -333,6 +341,7 @@ export async function generateMusic(
             clientKey: resp.clientKey,
             attachedToRunning: true,
             existingJob: resp.existingJob,
+            note: GENERATE_MUSIC_ATTACHED_NOTE,
           },
         };
       }
@@ -340,8 +349,7 @@ export async function generateMusic(
         // The server returned a cached terminal row instead of running the
         // job — the wav tempfile from that prior run is long gone, so we
         // CANNOT store a file here. Surface the markers + cached metadata
-        // so the agent can apply the CLAUDE.md dedup heuristic and decide
-        // whether to re-run with forceNew:true.
+        // and the note that says whether to re-run with forceNew:true.
         const cached =
           (resp.existingJob.result ?? {}) as Partial<GenerationResult>;
         return {
@@ -353,6 +361,7 @@ export async function generateMusic(
             seed: cached.seed,
             matchedExisting: true,
             existingJob: resp.existingJob,
+            note: GENERATE_MUSIC_MATCHED_NOTE,
           },
         };
       }

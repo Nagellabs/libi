@@ -15,6 +15,11 @@ const KIND_LABEL: Record<string, string> = {
   social: "social posts",
 };
 
+/** Kinds that make no media read as a tool you need, not a thing to make. */
+const TOOL_HEADING: Record<string, string> = {
+  browser: "This needs a browser I can drive",
+};
+
 /**
  * The in-chat answer to `libi.suggest_provider`: one button per suggestion.
  * An on-device extension offers Install (with its download size) and opens its
@@ -35,7 +40,7 @@ export function ProviderSuggestionCard({
       className="my-1.5 w-full max-w-[420px] rounded-lg border border-border bg-card p-3"
     >
       <p className="text-sm font-medium">
-        To make {KIND_LABEL[payload.kind] ?? payload.kind} you need a provider
+        {TOOL_HEADING[payload.kind] ?? <>To make {KIND_LABEL[payload.kind] ?? payload.kind} you need a provider</>}
       </p>
       <p className="mt-1 text-xs text-muted-foreground">
         libi needs a provider for this. Pick one below — nothing here asks for a key.

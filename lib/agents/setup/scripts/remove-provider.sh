@@ -6,7 +6,7 @@
 #
 #   sh remove-provider.sh <provider> <agent> <cli> <entry> [<scope>] [--no-sign-out]
 #
-#   provider  fal, higgsfield, zernio or elevenlabs
+#   provider  fal, higgsfield, zernio, elevenlabs or playwright
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config
@@ -56,6 +56,7 @@ case $provider in
   higgsfield) name='Higgsfield'; auth='oauth'; codex_key_env='' ;;
   zernio)     name='Zernio';     auth='oauth'; codex_key_env='' ;;
   elevenlabs) name='ElevenLabs'; auth='oauth'; codex_key_env='' ;;
+  playwright) name='Playwright'; auth='none';  codex_key_env='' ;;
   *) echo "remove-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in

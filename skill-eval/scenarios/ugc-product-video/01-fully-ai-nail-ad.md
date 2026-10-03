@@ -1,7 +1,7 @@
 ---
 id: ugc-fully-ai-nail-ad
 title: Recreate a 30s nail ad, fully AI
-skills: [ugc-product-video, ai-asset-generation, ai-video-models, voiceover-production, realistic-image-generation, physical-action-video]
+skills: [ugc-product-video, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

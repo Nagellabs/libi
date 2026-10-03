@@ -37,6 +37,8 @@ import { probeInputAudio, mixInputMaps } from "../audio-channels";
 import { resolveAudioBitrate } from "../quality";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "../duck-envelopes";
+import { planCrossfades, renderClipShapeEnvelopes, sidechainGainAt, needsGainEnvelope } from "../gain-envelopes";
+import { dbToGain } from "@/lib/audio/clip-gain";
 import { baseCut, baseTimeRange, leadFill, resolveExportBase } from "../export-base";
 import type { ExportBackend, ExportContext } from "../backend";
 import type {
@@ -375,10 +377,21 @@ export class FfmpegOverlayBackend implements ExportBackend {
     // FLAC-in-MP4 cut: ProbedMedia.audioRead) can't share input 0 with the
     // video, which those options would move too. Its audio is mixed from its
     // own clip input instead, as a clip over the base's window.
+    //
+    // A base whose audio has a volume envelope or a crossfade is mixed the same
+    // way: the shape is a track multiplied into a CLIP input's chain, which the
+    // bare `[0:a]` base has no place for.
+    const manifestClips = audioClips.filter((c) => c.enabled);
+    const crossfades = planCrossfades(manifestClips);
+    const baseNeedsShape = inlineClip !== undefined && needsGainEnvelope(inlineClip, crossfades);
     const baseAudioAsClip =
-      baseHasAudio && inlineClip !== undefined && !!baseProbe.audioRead?.inputArgs.length && clipInputIndex.has(inlineClip.id);
+      baseHasAudio &&
+      inlineClip !== undefined &&
+      (!!baseProbe.audioRead?.inputArgs.length || baseNeedsShape) &&
+      clipInputIndex.has(inlineClip.id);
     const keepBaseAudio = baseHasAudio && !baseAudioAsClip;
-    const baseVolume = keepBaseAudio ? (inlineClip?.volume ?? 1) : 1;
+    // `gainDb` is part of the base's level, like any clip's.
+    const baseVolume = keepBaseAudio ? (inlineClip?.volume ?? 1) * dbToGain(inlineClip?.gainDb ?? 0) : 1;
 
     // Standalone clips (+ inline clips NOT belonging to the base) go through
     // the filter chain as extra audio inputs.
@@ -430,6 +443,7 @@ export class FfmpegOverlayBackend implements ExportBackend {
           trimStart: sc.trimStart ?? 0,
           duration: sc.duration,
           volume: sc.volume,
+          gainAt: sidechainGainAt(sc, clipById, crossfades),
           audioStream: inputAudio.get(clipInputIndex.get(sc.id) ?? -1)?.stream,
           read: inputAudio.get(clipInputIndex.get(sc.id) ?? -1)?.read,
         });
@@ -449,12 +463,28 @@ export class FfmpegOverlayBackend implements ExportBackend {
       envelopeIndex.set(clipId, inputPaths.length - 1);
     }
 
+    // Clips with a volume envelope or a crossfade multiply against a shape
+    // track (lib/export/gain-envelopes.ts), appended after the duck envelopes.
+    const shapes = await renderClipShapeEnvelopes({
+      mixClips: standaloneClips,
+      manifestClips,
+      plan: crossfades,
+      outDir: dirname(ctx.outputPath),
+    });
+    const gainEnvelopeIndex = new Map<string, number>();
+    for (const [clipId, envPath] of shapes) {
+      inputPaths.push(envPath);
+      inputOptionArgs.push([]);
+      gainEnvelopeIndex.set(clipId, inputPaths.length - 1);
+    }
+
     const audioChainBuild = buildAudioFilterChain({
       keepBaseAudio,
       baseVolume,
       clips: standaloneClips,
       inputIndex: clipInputIndex,
       envelopeIndex,
+      gainEnvelopeIndex,
       inputChannels,
       inputAudioStream,
       inputPtsShift,
@@ -839,6 +869,8 @@ export function buildAudioFilterChain(opts: {
   sceneDuration: number;
   /** `clip.id` → input index of its pre-rendered duck envelope, if any. */
   envelopeIndex?: Map<string, number>;
+  /** `clip.id` → input index of its pre-rendered shape track (volume envelope + crossfades), if any. */
+  gainEnvelopeIndex?: Map<string, number>;
   /** Input index → audio channel count (see `buildAudioMixGraph`). */
   inputChannels?: Map<number, number | undefined>;
   /** Input index → primary audio stream index (see `buildAudioMixGraph`). */
@@ -857,6 +889,7 @@ export function buildAudioFilterChain(opts: {
     clips: opts.clips,
     inputIndex: opts.inputIndex,
     envelopeIndex: opts.envelopeIndex,
+    gainEnvelopeIndex: opts.gainEnvelopeIndex,
     mixDuration: "first",
     inputChannels: opts.inputChannels,
     inputAudioStream: opts.inputAudioStream,

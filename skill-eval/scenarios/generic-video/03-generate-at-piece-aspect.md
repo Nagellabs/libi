@@ -1,7 +1,7 @@
 ---
 id: generate-at-piece-aspect
 title: AI video is generated at the piece's aspect ratio, not the model's default
-skills: [generic-video, ai-video-models]
+skills: [generic-video, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

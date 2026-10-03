@@ -103,7 +103,7 @@ const SEEDANCE_REF_SCHEMA: JsonSchemaLike = {
 // one shared `VEO_SCHEMA` used to stand in for all of them plus five unrelated
 // endpoints. That was not a rounding error: the FLF operation appeared to have
 // no way to pass a last frame at all, so the fake could not serve
-// `physical-action-video`'s headline first-last-frame technique, and
+// the physical-action first-last-frame technique, and
 // `fal-ai/wan-flf2v` — the other dedicated FLF endpoint — had the same hole.
 //
 // Every schema below is transcribed from fal's live OpenAPI, fetched

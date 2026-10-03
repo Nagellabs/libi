@@ -42,7 +42,7 @@ export type InspectorOverlayKind =
   | "tracked";
 
 export interface InspectorFieldDef {
-  /** Stable property key, e.g. "background.color", "reveal.mode", "content". */
+  /** Stable property key, e.g. "background.color", "fontSize", "content". */
   key: string;
   /** Human label used in highlight callouts. */
   label: string;

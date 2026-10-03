@@ -33,7 +33,7 @@ covers: [captions, transcript, word-timings, caption-style, free-stt-first, capt
 >   `01` holds the re-spread branch (count changed → note). An agent that invents a timing
 >   caveat here, or regenerates the track, is wrong in the opposite direction.
 > - The chosen style is named to the user (a hard needle for the old behavioural bullet) —
->   one of the skill's four reveal styles or a bundled look from `list_caption_styles`.
+>   one of the skill's four reveal styles or a bundled look from `libi.caption_style({ action: "list" })`.
 > - "let the piece grow to fit it" is in the prompt because the first run (2026-09-27) stopped
 >   turn 1 to ask extend-or-trim: `audio_add_clip`'s `lengthPolicy` text says to ask whenever
 >   a clip would end past the piece's end, and does not say an EMPTY piece is exempt (the code
@@ -56,13 +56,13 @@ to his real speech timing. Pick a nice caption style that suits the content.
 ```yaml
 assertions:
   # A local transcript was made or reused.
-  - { transcript_contains: ["[tool-call mcp__libi__libi_analysis_transcribe_audio]", "[tool-call mcp__libi__libi_analysis_get]", "[tool-call mcp__libi__libi_analysis_get_audio_chunks]"], turn: 1, expect: present }
+  - { transcript_contains: ["[tool-call mcp__libi__libi_analysis_transcribe_audio]", "[tool-call mcp__libi__libi_analysis_query]"], turn: 1, expect: present }
   # AUD-1: the heard clip made cues (generate_captions), or the cue was built by hand.
   - transcript_matches: '\\"cueCount\\":[1-9]|\[tool-call mcp__libi__libi_add_overlay\] \{[^\n]*"kind":"text"'
     turn: 1
     expect: present
   # The style was named to the user: a reveal style (the skill's four) OR a bundled look from
-  # libi.list_caption_styles, by label or id — generate_captions takes either, and the 2026-09-27
+  # libi.caption_style list, by label or id — generate_captions takes either, and the 2026-09-27
   # re-run picked `news-serif` and told the user "Newsroom" (a pass the four-name list failed).
   - transcript_contains: ["cumulative", "Cumulative", "karaoke", "Karaoke", "word-by-word", "Word-by-word", "letter-by-letter", "Letter-by-letter",
       "Clean", "Boxed", "Outline", "Pop", "Beast", "Minimal", "Lower Third", "Hormozi", "Beasty", "TikTok", "Cyan Glow", "Pink Glow",
@@ -89,8 +89,8 @@ assertions:
 - Transcribed the audio using **free local Whisper first** — did NOT call a paid
   STT provider (ElevenLabs or other) without explicit user approval.
 - Read per-word timings from the RAW word array via
-  `libi.analysis_get_audio_chunks` — did NOT reverse-engineer word boundaries
-  from `libi.analysis_search_transcript` context windows.
+  `libi.analysis_query` action `audio_chunks` — did NOT reverse-engineer word boundaries
+  from `libi.analysis_query` action `search_transcript` context windows.
 - Built caption cues for **only the first phrase** ("And so, my fellow Americans", before
   the pause) — not the whole recording.
 - Converted absolute word timestamps to element-local seconds by subtracting

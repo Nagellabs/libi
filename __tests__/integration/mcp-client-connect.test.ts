@@ -64,7 +64,7 @@ describe("MCP client → libi server", () => {
     expect(toolNames).toContain("libi.get_composition");
     expect(toolNames).toContain("libi.list_pieces");
     expect(toolNames).toContain("libi.get_version");
-    expect(toolNames).toContain("libi.list_jobs");
+    expect(toolNames).toContain("libi.job");
 
     // The tracking-engine installer must be agent-reachable over tools/list —
     // before it existed, an agent hitting tracking_engine_not_installed had
@@ -80,18 +80,20 @@ describe("MCP client → libi server", () => {
     >;
     expect(installProps).toHaveProperty("force");
 
-    // libi.list_jobs exists so an agent can discover work it has no jobId for —
+    // libi.job({ action: "list" }) exists so an agent can discover work it has no jobId for —
     // the situation that made it report "nothing has been downloaded" over a
     // running 6 GB download (session 9c3ce4d0). Every filter must actually reach
     // the agent: a silently-empty inputSchema would leave it guessing arguments,
     // which is the exact failure mode the compute_object_track regression below
     // documents.
-    const listJobsTool = result.tools.find((t) => t.name === "libi.list_jobs");
+    const listJobsTool = result.tools.find((t) => t.name === "libi.job");
     expect(listJobsTool).toBeTruthy();
     const listJobsProps = (listJobsTool!.inputSchema.properties ?? {}) as Record<
       string,
       unknown
     >;
+    expect(listJobsProps).toHaveProperty("action");
+    expect(listJobsProps).toHaveProperty("jobId");
     expect(listJobsProps).toHaveProperty("status");
     expect(listJobsProps).toHaveProperty("kind");
     expect(listJobsProps).toHaveProperty("limit");
@@ -106,14 +108,14 @@ describe("MCP client → libi server", () => {
       }
     }
 
-    // Regression: compute_object_track is the only tracking tool whose
-    // schema was built with `z.object(...).refine(...)`. A Zod-v3 `.refine()`
+    // Regression: libi.track's compute action is the only tracking action whose
+    // schema is built with `z.object(...).refine(...)`. A Zod-v3 `.refine()`
     // is a ZodEffects with NO `.shape`, so the MCP SDK's
     // `normalizeObjectSchema` returned undefined and published an EMPTY
     // inputSchema — the agent then saw a parameterless tool and blind-guessed
-    // its arguments. The fix registers the raw shape; assert the agent now
-    // sees the full parameter list.
-    const cot = result.tools.find((t) => t.name === "libi.compute_object_track");
+    // its arguments. The fix registers the raw shape (and the merged tool lists the
+    // union of every action's properties); assert the agent now sees the full parameter list.
+    const cot = result.tools.find((t) => t.name === "libi.track");
     expect(cot).toBeTruthy();
     expect(cot!.inputSchema).toBeTruthy();
     expect(cot!.inputSchema.type).toBe("object");
@@ -123,6 +125,7 @@ describe("MCP client → libi server", () => {
     expect(cotProps).toHaveProperty("objectKind");
     expect(cotProps).toHaveProperty("anchors");
     expect(cotProps).toHaveProperty("derivedFromSubjectName");
+    expect(result.tools.some((t) => t.name === "libi.compute_object_track")).toBe(false);
 
     // The fal SAM2 tools were removed outright — they must not be advertised.
     expect(result.tools.some((t) => t.name === "libi.compute_object_track_providers")).toBe(false);

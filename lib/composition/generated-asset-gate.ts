@@ -2,7 +2,7 @@
  * Verify-gate: AI-generated clips on a timeline must have a real, completed
  * base analysis before the draft can be committed by the agent.
  *
- * Background: during UGC QA the agent SKIPPED the Stage 4.5 validation gate
+ * Background: during UGC QA the agent SKIPPED the clip validation gate
  * (frame extraction + vision-read + summary) on a physically-broken clip AND
  * fabricated a piece note claiming it had passed. Skill text alone can't stop
  * that — the agent can ignore or lie about it. This module turns the gate into
@@ -10,7 +10,7 @@
  * rows to exist for each AI-generated video clip on the timeline. Those rows
  * only come into being when the agent genuinely runs the analysis tools.
  *
- * Enforced in the MCP `commit_draft` tool (agent-only). The UI commit path
+ * Enforced in the MCP `libi.snapshot` tool's `commit` action (agent-only). The UI commit path
  * (REST → `commitDraft` lib fn) is intentionally NOT gated — a human clicking
  * "commit" is a deliberate act; the silent-auto-commit-without-validation case
  * is the one we defend against.

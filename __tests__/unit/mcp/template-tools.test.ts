@@ -269,7 +269,7 @@ describe("template tools", () => {
     expect((await searchTemplatesTool({ query: "kinetic" })).data).not.toHaveProperty("catalog");
   });
 
-  it("list_templates shows at most 50 public entries and points at search_templates for the rest", async () => {
+  it("libi.template list shows at most 50 public entries and points at the search action for the rest", async () => {
     const d = await create();
     const ids = Array.from({ length: 60 }, (_, i) => `${String(i).padStart(10, "0")}${"p".repeat(10)}`);
     replaceCatalog(catalogOf(ids.map((id, i) => pubEntry(id, `Public ${i}`, { uses7d: 100 + i }))), null, Date.now());
@@ -277,7 +277,7 @@ describe("template tools", () => {
     expect(pub.templates).toHaveLength(50);
     // The top 50 in the chosen order (trending: most uses7d first).
     expect(pub.templates[0].cloudId).toBe(ids[59]);
-    expect(pub.morePublic).toMatch(/search_templates/);
+    expect(pub.morePublic).toMatch(/libi\.template\(\{ action: "search" \}\)/);
     const all = (await listTemplatesTool({ scope: "all" })).data as { templates: Array<{ id: string | null }>; morePublic?: string };
     expect(all.templates).toHaveLength(51);
     expect(all.templates.some((t) => t.id === d.templateId)).toBe(true);
@@ -362,9 +362,60 @@ describe("template tools", () => {
   it("apply_template reports navigated: false when the studio did not take the POST", async () => {
     const d = await create();
     notifyMock.navigateAwaited.mockResolvedValue(false);
-    const r = await applyTemplate({ templateId: d.templateId, pieceId });
+    const r = await applyTemplate({ templateId: d.templateId, pieceId, navigate: true });
     expect(r.success).toBe(true);
     expect((r.data as { navigated: boolean }).navigated).toBe(false);
+  });
+
+  it("apply_template opens the editor only on a piece it created, unless navigate says otherwise", async () => {
+    const d = await create();
+    // Into an existing piece: the agent is already working there; the user's editor is not moved.
+    const into = await applyTemplate({ templateId: d.templateId, pieceId });
+    expect((into.data as { navigated: boolean }).navigated).toBe(false);
+    expect(notifyMock.navigateAwaited).not.toHaveBeenCalled();
+    // navigate: true opens it.
+    const forced = await applyTemplate({ templateId: d.templateId, pieceId, navigate: true, copy: 2 });
+    expect((forced.data as { navigated: boolean }).navigated).toBe(true);
+    expect(notifyMock.navigateAwaited).toHaveBeenCalledTimes(1);
+    // A new piece the user has never seen opens by default; navigate: false keeps it closed.
+    notifyMock.navigateAwaited.mockClear();
+    const made = await applyTemplate({ templateId: d.templateId, newPiece: { name: "A" } });
+    expect((made.data as { navigated: boolean }).navigated).toBe(true);
+    const quiet = await applyTemplate({ templateId: d.templateId, newPiece: { name: "B" }, navigate: false });
+    expect((quiet.data as { navigated: boolean }).navigated).toBe(false);
+    expect(notifyMock.navigateAwaited).toHaveBeenCalledTimes(1);
+  });
+
+  it("apply_template names a layer it does not have, and writes nothing", async () => {
+    const d = await create();
+    const before = (await applyTemplate({ templateId: d.templateId, newPiece: { name: "probe" } })).data as { pieceId: string };
+    const bad = await applyTemplate({ templateId: d.templateId, pieceId: before.pieceId, omitLayers: ["ghost"], copy: 2 });
+    expect(bad.success).toBe(false);
+    expect(bad.error).toBe("layer_unknown");
+    expect((bad.data as { hint: string }).hint).toMatch(/ghost \(layers: /);
+    const clash = await applyTemplate({ templateId: d.templateId, pieceId: before.pieceId, omitLayers: ["headline"], layerOverrides: { headline: { opacity: 0.5 } }, copy: 3 });
+    expect(clash.error).toBe("layer_override_omitted");
+    const kind = await applyTemplate({ templateId: d.templateId, pieceId: before.pieceId, layerOverrides: { logo: { color: "#fff" } }, copy: 4 });
+    expect(kind.error).toBe("layer_override_invalid");
+    expect(kind.success).toBe(false);
+  });
+
+  it("apply_template: another fit, override or start is another apply, not a replay", async () => {
+    const d = await create();
+    const a = await applyTemplate({ templateId: d.templateId, pieceId });
+    const same = await applyTemplate({ templateId: d.templateId, pieceId });
+    expect((same.data as { replayed?: boolean }).replayed).toBe(true);
+    const shifted = await applyTemplate({ templateId: d.templateId, pieceId, startAt: 5 });
+    expect((shifted.data as { replayed?: boolean }).replayed).toBeUndefined();
+    const omitted = await applyTemplate({ templateId: d.templateId, pieceId, omitLayers: ["logo"] });
+    expect((omitted.data as { replayed?: boolean }).replayed).toBeUndefined();
+    expect(a.success && shifted.success && omitted.success).toBe(true);
+  });
+
+  it("apply_template says a new piece cannot be reflowed into", async () => {
+    const d = await create();
+    const r = await applyTemplate({ templateId: d.templateId, newPiece: { name: "C" }, fit: "reflow" });
+    expect((r.data as { warnings: string[] }).warnings.some((w) => w.includes("fit: 'reflow' needs an existing piece"))).toBe(true);
   });
 
   it("apply_template guards: one of templateId/cloudId, a refused install, replace needs confirmReplace, piece required", async () => {
@@ -560,7 +611,12 @@ describe("template tools", () => {
     expect((await loadManifest(dst)).overlays!.map((o) => o.id).sort()).toEqual(ids2);
   });
 
-  it("the tool description says how to make a second copy on purpose, and that a replace always applies", async () => {
+  // These two build the whole libi MCP server (every tool schema, plus dynamic imports of its
+  // module graph), twice for the second: real work that a loaded machine stretches past vitest's
+  // 5 s default. Nothing here asserts on time.
+  const BUILD_SERVER_BUDGET = { timeout: 30_000 };
+
+  it("the tool description says how to make a second copy on purpose, and that a replace always applies", BUILD_SERVER_BUDGET, async () => {
     const { createLibiMcpServer } = await import("@/mcp/server");
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
     const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -569,12 +625,13 @@ describe("template tools", () => {
     const [ct, st] = InMemoryTransport.createLinkedPair();
     await Promise.all([server.connect(st), client.connect(ct)]);
     try {
-      const d = (await client.listTools()).tools.find((t) => t.name === "libi.apply_template")!.description ?? "";
-      expect(d).toMatch(/second copy on purpose, pass a different newPiece\.name/);
-      expect(d).toMatch(/'replace' into an existing piece is never answered from memory/);
-      // Fix round 3: the same escape for an append into the same piece, and the left-out list.
-      expect(d).toMatch(/again on purpose[^.]*pass copy: 2/);
-      expect(d).toMatch(/leftOut/);
+      const tool = (await client.listTools()).tools.find((t) => t.name === "libi.apply_template")!;
+      // The description keeps one sentence; the how-to lives on `copy` and in the replayed result's note.
+      expect(tool.description ?? "").toMatch(/replayed: true/);
+      const copy = (tool.inputSchema.properties as Record<string, { description?: string }>).copy.description ?? "";
+      expect(copy).toMatch(/ON PURPOSE pass a different newPiece\.name, or copy: 2/);
+      expect(copy).toMatch(/'replace' into an existing piece always applies/);
+      expect(tool.description ?? "").toMatch(/leftOutNote/);
     } finally {
       await client.close();
       await server.close();
@@ -582,7 +639,7 @@ describe("template tools", () => {
   });
 
   // Fix round 3, N2: one chat's apply is never another chat's answer.
-  it("the replay memory is per MCP session: the same apply from two chats makes two pieces", async () => {
+  it("the replay memory is per MCP session: the same apply from two chats makes two pieces", BUILD_SERVER_BUDGET, async () => {
     const d = await create();
     const { createLibiMcpServer } = await import("@/mcp/server");
     const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -1006,7 +1063,7 @@ describe("template tools", () => {
     expect(testDb.select().from(pieces).all()).toHaveLength(before);
   });
 
-  it("delete_template removes it and reports; show_templates navigates", async () => {
+  it("delete_template removes it and reports; libi.show (templates) navigates", async () => {
     const d = await create();
     expect(await deleteTemplateTool({ templateId: d.templateId })).toEqual({ success: true, data: { ok: true } });
     // `template_deleted` takes no params, so the call carries one argument.

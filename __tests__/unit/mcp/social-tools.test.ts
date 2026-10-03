@@ -39,6 +39,8 @@ vi.mock("@/mcp/jobs-client", () => ({
 
 import { socialStatus, postPiece, socialLinkPost } from "@/mcp/tools/social-tools";
 import { notify } from "@/mcp/notify";
+import { planInboxSend } from "@/lib/social/inbox";
+import type { SocialPost, TargetOptions } from "@/lib/social/types";
 
 const IG = {
   id: "acc-ig",
@@ -125,6 +127,8 @@ function toExportViews(jobs: unknown[], url: string): Array<Record<string, unkno
     .map((j, i) => {
       const r = JSON.parse(j.resultJson) as {
         filePath: string;
+        width?: number;
+        height?: number;
         audioDecision?: { purpose: string | null; excludedFileIds: string[]; carriesCopyrighted: boolean };
       };
       return {
@@ -138,6 +142,9 @@ function toExportViews(jobs: unknown[], url: string): Array<Record<string, unkno
         purpose: r.audioDecision?.purpose ?? null,
         excludedFileIds: r.audioDecision?.excludedFileIds ?? [],
         carriesCopyrighted: r.audioDecision?.carriesCopyrighted ?? false,
+        // A social-sized file unless a fixture says otherwise.
+        width: r.width ?? 1080,
+        height: r.height ?? 1920,
       };
     });
 }
@@ -201,6 +208,10 @@ const EXPORT_FINGERPRINT = (): string => {
   return `${st.size}-${Math.round(st.mtimeMs)}`;
 };
 
+/** A second real file: an export larger than a post needs. */
+const EXPORT_4K_FILE = path.join(os.tmpdir(), "libi-social-tools-test-export-4k.mp4");
+fs.writeFileSync(EXPORT_4K_FILE, "not really a 4k mp4");
+
 const postBody = () => calls.find((c) => /\/api\/social\/posts$/.test(c.url) && c.method === "POST")?.body ?? null;
 const called = (re: RegExp) => calls.some((c) => re.test(c.url));
 
@@ -255,7 +266,7 @@ describe("libi.social_status", () => {
     expect(res.data!.accounts).toBeNull();
     expect(res.data!.postingContract).toMatch(/Draft only/);
     expect(String(res.data!.hint)).toMatch(/separate from your own zernio tools/);
-    expect(String(res.data!.hint)).toMatch(/libi\.social_link_post/);
+    expect(String(res.data!.hint)).toMatch(/libi\.social_link/);
     // Not connected: nothing is asked of the provider.
     expect(called(/\/api\/social\/accounts/)).toBe(false);
   });
@@ -351,7 +362,10 @@ describe("libi.post_piece never publishes", () => {
 
   it("takes TikTok's own privacy level and interaction defaults, never a hardcoded one", async () => {
     await postPiece({ pieceId: "piece-1" });
-    const targets = postBody()!.targets as Array<{ platform: string; accountId: string; options: Record<string, never> }>;
+    // TikTok and Instagram are separate drafts; read the targets of both.
+    const targets = calls
+      .filter((c) => /\/api\/social\/posts$/.test(c.url) && c.method === "POST")
+      .flatMap((c) => c.body!.targets as Array<{ platform: string; accountId: string; options: Record<string, never> }>);
     const tiktok = targets.find((t) => t.platform === "tiktok")!;
     expect(tiktok.accountId).toBe("acc-tt");
     expect(tiktok.options).toEqual({
@@ -383,7 +397,8 @@ describe("libi.post_piece exports only when it has to", () => {
   it("exports when the piece has no export, then uploads and drafts", async () => {
     const res = await postPiece({ pieceId: "piece-1" });
     expect(exportVideo).toHaveBeenCalledTimes(1);
-    expect(exportVideo.mock.calls[0][0]).toEqual({ pieceId: "piece-1", quality: "source" });
+    // A social export that names no size: libi fits it to 1080x1920 (no `quality: "source"`).
+    expect(exportVideo.mock.calls[0][0]).toEqual({ pieceId: "piece-1", purpose: "social" });
     expect(runJobViaServer).toHaveBeenCalledTimes(1);
     expect(runJobViaServer.mock.calls[0][0]).toBe("social-upload");
     expect(runJobViaServer.mock.calls[0][1]).toEqual({
@@ -427,6 +442,38 @@ describe("libi.post_piece exports only when it has to", () => {
     expect(res.data!.reusedExport).toMatchObject({ completedAt: "2026-09-20T10:00:00.000Z" });
     // The agent must be able to tell the user which file went out.
     expect(String(res.data!.next)).toMatch(/re-export/);
+  });
+
+  it("prefers an older social-sized export over a newer 4K one, and never reuses the 4K", async () => {
+    connectedRoutes({
+      jobs: [
+        { pieceId: "piece-1", status: "completed", completedAt: "2026-09-21T10:00:00.000Z", resultJson: JSON.stringify({ filePath: EXPORT_4K_FILE, width: 2160, height: 3840 }) },
+        { pieceId: "piece-1", status: "completed", completedAt: "2026-09-20T10:00:00.000Z", resultJson: JSON.stringify({ filePath: EXPORT_FILE, width: 1080, height: 1920 }) },
+      ],
+    });
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).not.toHaveBeenCalled();
+    expect(res.data).toMatchObject({ exported: false, exportPath: EXPORT_FILE });
+    expect(String(res.data!.next)).toMatch(/larger than a post needs/);
+  });
+
+  it("with only a 4K export on record it renders a social-fit export instead of posting 221 MB", async () => {
+    connectedRoutes({
+      jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-21T10:00:00.000Z", resultJson: JSON.stringify({ filePath: EXPORT_4K_FILE, width: 2160, height: 3840 }) }],
+    });
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(exportVideo.mock.calls[0][0]).toMatchObject({ purpose: "social" });
+    expect(exportVideo.mock.calls[0][0]).not.toHaveProperty("quality");
+    expect(res.data).toMatchObject({ exported: true, exportPath: EXPORT_FILE, reusedExport: null });
+  });
+
+  it("an export with no recorded size is not assumed to fit", async () => {
+    connectedRoutes({
+      jobs: [{ pieceId: "piece-1", status: "completed", completedAt: "2026-09-21T10:00:00.000Z", resultJson: JSON.stringify({ filePath: EXPORT_4K_FILE, width: 0, height: 0 }) }],
+    });
+    await postPiece({ pieceId: "piece-1" });
+    expect(exportVideo).toHaveBeenCalledTimes(1);
   });
 
   it("skips a recorded export outside libi's storage, and renders a fresh one", async () => {
@@ -528,8 +575,8 @@ describe("libi.post_piece refuses before it spends anything", () => {
     ]);
     const res = await postPiece({ pieceId: "piece-1" });
     expect(res).toMatchObject({ success: false, error: "libi_not_connected" });
-    expect(String((res.data as { hint: string }).hint)).toMatch(/Connect libi on the Social page/);
-    expect(String((res.data as { hint: string }).hint)).toMatch(/libi\.social_link_post/);
+    expect(String((res.data as { hint: string }).hint)).toMatch(/Connect libi/);
+    expect(String((res.data as { hint: string }).hint)).toMatch(/libi\.social_link/);
     expect(exportVideo).not.toHaveBeenCalled();
     expect(runJobViaServer).not.toHaveBeenCalled();
     expect(called(/\/api\/social\/posts$/)).toBe(false);
@@ -642,11 +689,86 @@ describe("libi.post_piece opens the piece's Posting tab on the new draft", () =>
     expect(String(refused.data!.next)).toContain("Find it in the piece's Posting tab");
     // Whichever branch: still a draft, and still the user's call to publish.
     expect(String(refused.data!.next)).toContain("This is a DRAFT — nothing is public.");
-    expect(String(refused.data!.next)).toContain("publish or schedule only on their explicit yes");
+    expect(String(refused.data!.next)).toContain("only on their explicit yes");
   });
 });
 
-describe("libi.social_link_post", () => {
+describe("libi.post_piece says where the draft is and in libi's words", () => {
+  it("a result note: visible in libi's Posting tab and at the provider, nothing in TikTok or Instagram until the user sends it", async () => {
+    const res = await postPiece({ pieceId: "piece-1", exportPath: EXPORT_FILE });
+    const note = String(res.data!.note);
+    expect(note).toMatch(/Posting tab/);
+    expect(note).toMatch(/at the provider/);
+    expect(note).toMatch(/nothing appears in TikTok or Instagram until the user sends it/i);
+    expect(note).toMatch(/Send to TikTok inbox/);
+    // The agent is pointed at the buttons, never at the provider's own publish tools as a path.
+    expect(note).toMatch(/never deliver it with the provider's own tools/i);
+  });
+
+  it("translates the provider status: a draft is a draft in libi and at the provider only", async () => {
+    const res = await postPiece({ pieceId: "piece-1", exportPath: EXPORT_FILE });
+    expect(res.data!.status).toBe("draft");
+    expect(String(res.data!.statusWords)).toMatch(/Draft: saved in libi's Posting tab and at the provider/);
+    expect((res.data!.posts as Array<{ statusWords: string }>)[0].statusWords).toBe(res.data!.statusWords);
+  });
+
+  it("the posting contract no longer offers the provider's raw publish call as a path", async () => {
+    const res = await socialStatus();
+    const contract = String(res.data!.postingContract);
+    expect(contract).toMatch(/Draft only/);
+    expect(contract).toMatch(/Send to TikTok inbox/);
+    expect(contract).toMatch(/Never call the provider's own publish tools/);
+    expect(contract).not.toMatch(/is_draft:\s*false/);
+    expect(contract).not.toMatch(/you send posts_update_post/);
+  });
+
+  it("a needs item names the screen to open with libi.show, with the account", async () => {
+    const needs = "Reconnect Instagram with Facebook Login to attach licensed music.";
+    connectedRoutes({
+      plan: {
+        copyrighted: true,
+        hasMusic: true,
+        variants: { "without-song": { purpose: "social", excludedFileIds: ["f1"], carriesCopyrighted: false } },
+        targets: [
+          { platform: "instagram", accountId: "acc-ig", plan: { mode: "strip", sentence: "Posts without the song.", warnings: [], needs, exportVariant: "without-song" }, music: { mode: "strip" } },
+          { platform: "tiktok", accountId: "acc-tt", plan: { mode: "strip", sentence: "Posts without the song.", warnings: [], exportVariant: "without-song" }, music: { mode: "strip" } },
+        ],
+      },
+    });
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(res.success).toBe(true);
+    const targets = res.data!.targets as Array<{ platform: string; plan?: { needs?: string; needsOpen?: unknown } }>;
+    expect(targets.find((t) => t.platform === "instagram")!.plan).toMatchObject({
+      needs,
+      needsOpen: { tool: "libi.show", target: "social_settings", accountId: "acc-ig" },
+    });
+    expect(targets.find((t) => t.platform === "tiktok")!.plan).not.toHaveProperty("needsOpen");
+  });
+
+  it("an account that needs reconnecting carries the screen to open; a healthy one does not", async () => {
+    routes.unshift([
+      /\/api\/social\/accounts$/,
+      () => ({ body: { accounts: [{ ...IG, health: { status: "reconnect" } }, { ...TT, health: { status: "healthy" } }] } }),
+    ]);
+    const res = await socialStatus();
+    const accounts = res.data!.accounts as Array<{ id: string; open?: unknown }>;
+    expect(accounts.find((a) => a.id === "acc-ig")!.open).toEqual({ tool: "libi.show", target: "social_settings", accountId: "acc-ig" });
+    expect(accounts.find((a) => a.id === "acc-tt")!.open).toBeUndefined();
+  });
+
+  it("libi not connected: the answer carries the settings screen to open", async () => {
+    routes.unshift([
+      /\/api\/social\/status$/,
+      () => ({ body: { providerId: "zernio", connected: false, needsReconnect: false, settings: { timezone: null, defaults: { instagramType: "reel", aiLabel: true } } } }),
+    ]);
+    const status = await socialStatus();
+    expect(status.data!.open).toEqual({ tool: "libi.show", target: "social_settings" });
+    const posted = await postPiece({ pieceId: "piece-1" });
+    expect((posted.data as { open: unknown }).open).toEqual({ tool: "libi.show", target: "social_settings" });
+  });
+});
+
+describe("libi.social_link kind post (socialLinkPost)", () => {
   it("records the link and opens the tab, inventing no post", async () => {
     const res = await socialLinkPost({ pieceId: "piece-1", providerPostId: "zernio-77" });
     expect(res.success).toBe(true);
@@ -671,6 +793,109 @@ describe("libi.social_link_post", () => {
     await expect(socialLinkPost({ pieceId: "gone", providerPostId: "z" })).resolves.toMatchObject({ success: false, error: "piece_not_found" });
     routes[0] = [/\/api\/social\/links$/, () => ({ status: 409, body: { error: "no_provider" } })];
     await expect(socialLinkPost({ pieceId: "piece-1", providerPostId: "z" })).resolves.toMatchObject({ success: false, error: "no_provider" });
+  });
+});
+
+describe("post_piece — TikTok gets a draft of its own", () => {
+  const creates = () => calls.filter((c) => c.url.endsWith("/api/social/posts") && c.method === "POST");
+  const platformsOf = (c: Call) => (c.body as { targets: Array<{ platform: string }> }).targets.map((t) => t.platform);
+  let postNo = 0;
+  /** Each create answers with a fresh id and echoes the targets, like the route. */
+  const echoCreates = () => {
+    postNo = 0;
+    routes.unshift([/\/api\/social\/posts$/, () => ({ body: { post: { id: `post-${++postNo}`, status: "draft" }, deduped: false } })]);
+  };
+  /** The SocialPost the route would store for a create body, as planInboxSend reads it. */
+  const storedPost = (c: Call): SocialPost => {
+    const b = c.body as { targets: Array<{ platform: string; accountId: string; options: TargetOptions }>; media: Array<{ url: string }> };
+    return {
+      id: "post-x",
+      status: "draft",
+      content: "",
+      createdAt: "2026-10-03T00:00:00.000Z",
+      media: [{ url: "https://m/media/x.mp4", type: "video" }],
+      tags: [],
+      targets: b.targets.map((t) => ({ platform: t.platform as SocialPost["targets"][number]["platform"], accountId: t.accountId, status: "pending" as const })),
+      libi: { pieceId: "piece-1", pieceName: "My Piece", exportFile: "piece.mp4", requestId: "r", mediaUrl: b.media[0].url, targetOptions: b.targets.map((t) => t.options) },
+    };
+  };
+
+  it("no copyrighted music: IG + TikTok make two drafts, one upload, one export, and the TikTok one can go to the inbox", async () => {
+    echoCreates();
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(res.success).toBe(true);
+    expect(creates().map(platformsOf).sort()).toEqual([["instagram"], ["tiktok"]]);
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(runJobViaServer).toHaveBeenCalledTimes(1);
+    // Both drafts carry the group's single upload, each with its own request id.
+    expect(creates().map((c) => (c.body as { media: Array<{ url: string }> }).media[0].url)).toEqual([UPLOAD.publicUrl, UPLOAD.publicUrl]);
+    expect(new Set(creates().map((c) => (c.body as { requestId: string }).requestId)).size).toBe(2);
+    expect(calls.filter((c) => /\/api\/social\/request-id/.test(c.url))).toHaveLength(2);
+    const tiktokDraft = creates().find((c) => platformsOf(c)[0] === "tiktok")!;
+    const igDraft = creates().find((c) => platformsOf(c)[0] === "instagram")!;
+    expect(planInboxSend(storedPost(tiktokDraft))).toMatchObject({ ok: true, platforms: ["tiktok"] });
+    expect(planInboxSend(storedPost(igDraft))).toMatchObject({ ok: false, code: "no_inbox_platform" });
+    // The result still lists every draft, opens the first, and tells the agent why TikTok is apart.
+    const posts = res.data?.posts as Array<{ providerPostId: string; targets: Array<{ platform: string }> }>;
+    expect(posts.map((p) => p.providerPostId)).toEqual(["post-1", "post-2"]);
+    expect(res.data?.providerPostId).toBe("post-1");
+    expect(String(res.data?.next)).toMatch(/2 linked drafts/);
+    expect(String(res.data?.next)).toMatch(/TikTok has a draft of its own/);
+    expect(String(res.data?.note)).toMatch(/Send to TikTok inbox/);
+  });
+
+  it("a TikTok-only or Instagram-only post stays one draft", async () => {
+    await postPiece({ pieceId: "piece-1", targets: [{ platform: "tiktok" }] });
+    expect(creates()).toHaveLength(1);
+    calls = [];
+    await postPiece({ pieceId: "piece-1", targets: [{ platform: "instagram" }] });
+    expect(creates()).toHaveLength(1);
+  });
+
+  it("copyrighted music where TikTok and Instagram share a variant: still split, one export and upload for the variant", async () => {
+    const WITHOUT = { purpose: "social", excludedFileIds: ["s"], carriesCopyrighted: false };
+    const WITH = { purpose: "social", excludedFileIds: [], carriesCopyrighted: true };
+    const t = (platform: string, accountId: string, mode: string) => ({
+      platform,
+      accountId,
+      plan: { mode, sentence: `${platform} ${mode}`, warnings: [], exportVariant: "without-song", allowedModes: [] },
+      music: { mode },
+    });
+    connectedRoutes({
+      plan: { copyrighted: true, hasMusic: true, variants: { "without-song": WITHOUT, "with-song": WITH }, targets: [t("instagram", "acc-ig", "strip"), t("tiktok", "acc-tt", "draft")] },
+    });
+    echoCreates();
+    const f = path.join(os.tmpdir(), "libi-social-split-without.mp4");
+    fs.writeFileSync(f, "x");
+    exportVideo.mockResolvedValueOnce({ success: true, data: { filePath: f } });
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(res.success).toBe(true);
+    expect(exportVideo).toHaveBeenCalledTimes(1);
+    expect(runJobViaServer).toHaveBeenCalledTimes(1);
+    expect(creates().map(platformsOf).sort()).toEqual([["instagram"], ["tiktok"]]);
+    expect((res.data?.posts as Array<{ exportVariant: string }>).map((p) => p.exportVariant)).toEqual(["without-song", "without-song"]);
+  });
+
+  it("a second create failing names the draft that WAS made and says not to re-run", async () => {
+    let n = 0;
+    routes.unshift([
+      /\/api\/social\/posts$/,
+      () => {
+        n += 1;
+        return n === 1 ? { body: { post: { id: "post-1", status: "draft" }, deduped: false } } : { status: 502, body: { error: "provider", message: "Zernio is down" } };
+      },
+    ]);
+    const spy = vi.spyOn(notify, "navigateAwaited");
+    const res = await postPiece({ pieceId: "piece-1" });
+    expect(res.success).toBe(false);
+    expect(creates()).toHaveLength(2);
+    expect(res.data).toMatchObject({ providerPostId: "post-1", posts: [{ providerPostId: "post-1" }], navigated: true });
+    const hint = String(res.data!.hint);
+    expect(hint).toContain("Zernio is down");
+    expect(hint).toContain("Draft post-1");
+    expect(hint).toContain("WAS created");
+    expect(hint).toContain("do not re-run libi.post_piece");
+    expect(spy).toHaveBeenCalledWith({ target: "posting", pieceId: "piece-1", id: "post-1" });
   });
 });
 
@@ -711,8 +936,10 @@ describe("post_piece — music", () => {
     const r = await postPiece({ pieceId: "piece-1" });
     expect(exportVideo).toHaveBeenCalledTimes(1);
     expect(exportVideo.mock.calls[0][0]).toMatchObject({ purpose: "social", copyrightedAudio: "exclude" });
-    expect(creates()).toHaveLength(1);
-    const targets = (creates()[0].body as { targets: Array<{ options: { music?: unknown } }> }).targets;
+    // One export, but TikTok's draft is its own (so it can go to the inbox): two creates, one upload.
+    expect(creates()).toHaveLength(2);
+    expect(runJobViaServer).toHaveBeenCalledTimes(1);
+    const targets = creates().flatMap((c) => (c.body as { targets: Array<{ options: { music?: unknown } }> }).targets);
     expect(targets.map((t) => t.options.music)).toEqual([{ mode: "strip" }, { mode: "draft" }]);
     expect(r.data?.targets).toEqual([
       { platform: "instagram", accountId: "acc-ig", plan: { mode: "strip", sentence: "IG strip", warnings: [] } },
@@ -849,7 +1076,8 @@ describe("post_piece — music", () => {
       expect(exportVideo).toHaveBeenCalledTimes(1);
       expect(exportVideo.mock.calls[0][0]).toMatchObject({ copyrightedAudio: "exclude" });
       expect(r.data).toMatchObject({ exportPath: FRESH, exported: true });
-      expect(creates().map((c) => (c.body as { exportPath: string }).exportPath)).toEqual([FRESH]);
+      // One export, shared by TikTok's own draft and the Instagram one.
+      expect(creates().map((c) => (c.body as { exportPath: string }).exportPath)).toEqual([FRESH, FRESH]);
     });
 
     it("a file that matches the only variant is used as given", async () => {
@@ -860,7 +1088,7 @@ describe("post_piece — music", () => {
       const r = await postPiece({ pieceId: "piece-1", exportPath: WITHOUT_FILE });
       expect(exportVideo).not.toHaveBeenCalled();
       expect(r.data).toMatchObject({ exportPath: WITHOUT_FILE, exported: false, reusedExport: null });
-      expect(creates()).toHaveLength(1);
+      expect(creates()).toHaveLength(2); // the one export, TikTok's draft apart from Instagram's
     });
 
     it("a file whose audio libi cannot tell is refused before anything is exported or uploaded", async () => {

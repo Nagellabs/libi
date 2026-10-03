@@ -65,7 +65,7 @@ other invariant is in the prose below**, judged from the transcript.
 - Did NOT ask the user to connect a provider, and did NOT call `libi.suggest_provider` or
   `libi.list_providers`. Nothing here is generated, so there is no provider to pick — a
   brand-new user's first interaction must not be a request to connect one.
-- Called `libi.show_piece` with the `pieceId` returned by the build to reveal it.
+- Called `libi.show({ target: "piece" })` with the `pieceId` returned by the build to reveal it.
 - The closing message plainly stated that the film is PRE-MADE / downloaded, NOT
   generated live in this session — the transparency disclosure was NOT skipped.
 - The closing message also said the film was itself BUILT IN LIBI (by a coding agent,

@@ -1,6 +1,6 @@
 ---
 id: navigation-show-piece
-title: Agent-driven navigation — show_piece moves the editor
+title: Agent-driven navigation — `libi.show` target `piece` moves the editor
 surfaces: [terminal, acp, connect]
 agents: [claude-code, codex]
 systems: [navigation-events, notify-http, sse]
@@ -16,22 +16,22 @@ cost: subscription-tokens
 > Open the piece "Agent Eval Run" in my editor.
 
 ## Expected behavior
-- Agent resolves the piece (via `list_pieces`) and calls `libi.show_piece`.
+- Agent resolves the piece (via `list_pieces`) and calls `libi.show({ target: "piece" })`.
 - The MCP child POSTs `/api/notify`; the server emits a navigation event over
   SSE; the editor panel switches to the piece — with no manual action.
 
 ## Checks
 - [ ] Editor navigates to "Agent Eval Run" within ~2s of the tool call.
 - [ ] No page reload occurred (SPA navigation via SSE, not refresh).
-- [ ] `libi.log` shows the notify round-trip (`grep -i show_piece` /
+- [ ] `libi.log` shows the notify round-trip (`grep -i show` /
       `tag: "mcp"` events around the call time).
-- [ ] Follow-up: ask the agent to `libi.show_extension` — the app
+- [ ] Follow-up: ask the agent to `libi.show({ target: "extension" })` — the app
       navigates to Agents → Libi MCP (second navigation kind works too).
 - [ ] Navigate back to the piece afterwards (leave editor on "Agent Eval Run"
       for scenario 04).
 
 ## Notes
-- This is the canonical "agent → UI" push path. If it fails, every show_*
+- This is the canonical "agent → UI" push path. If it fails, every libi.show target
   tool is broken: check `mcp/notify.ts` → `/api/notify` → `navigationEmitter`
   → `/api/agent/events` SSE → client handler chain.
 - Per repo policy, navigation must be agent-driven only — confirm the editor

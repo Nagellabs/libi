@@ -8,6 +8,7 @@ import {
 } from "@/lib/video-download/launcher";
 import { isNetworkCause, isUvOfflineMessage } from "@/lib/uv-env/network-failure";
 import { mcpLogger as logger } from "@/lib/logger";
+import { normaliseSearch } from "@/lib/video-download/search";
 import type { ToolResult } from "./types";
 import type { DownloadVideoParams } from "./schemas";
 import { reportToolProgress } from "./tool-progress";
@@ -93,11 +94,16 @@ export function needsInstallMessage(cause: string): string {
   );
 }
 
+/** Results a `candidates` listing returns when the caller gave no `count`. */
+export const DEFAULT_CANDIDATES = 5;
+
 interface DownloadedVideo {
   fileId: string;
   filename: string;
   title: string;
   bytes: number;
+  /** A search's pick: what to confirm with the user. */
+  picked?: { title: string; url: string; durationSec?: number; uploader?: string };
 }
 
 /**
@@ -116,7 +122,26 @@ export async function downloadVideo(
   params: DownloadVideoParams,
   extra?: RequestHandlerExtra<ServerRequest, ServerNotification>,
 ): Promise<ToolResult> {
-  const url = canonicalizeVideoUrl(params.url);
+  const hasUrl = params.url !== undefined;
+  const hasSearch = params.search !== undefined;
+  if (hasUrl === hasSearch) {
+    return {
+      success: false,
+      error: "download_failed",
+      data: { message: hasUrl ? "pass either url or search, not both." : "pass a url, or search (words to find) instead." },
+    };
+  }
+  const search = hasSearch ? normaliseSearch(params.search!) : undefined;
+  if (search !== undefined && search === "") {
+    return { success: false, error: "download_failed", data: { message: "search is empty: pass the artist and title (e.g. \"fleetwood mac dreams official audio\"), or a url." } };
+  }
+  if (params.candidates && !hasSearch) {
+    return { success: false, error: "download_failed", data: { message: "candidates lists search results: pass search (words to find), not url." } };
+  }
+  if (!params.candidates && params.pieceId === undefined) {
+    return { success: false, error: "download_failed", data: { message: "pass pieceId (the piece to import into, or null for the unassigned library)." } };
+  }
+  const url = hasUrl ? canonicalizeVideoUrl(params.url!) : undefined;
   // Only a launcher's EXISTENCE marks the first-use install; one that exists
   // but points at nothing is a repair the job does on its own (and, with the
   // uv tool still on disk, in seconds) — logged, not disclosed as a download.
@@ -142,9 +167,29 @@ export async function downloadVideo(
     });
   }
   try {
+    if (params.candidates) {
+      // A listing, not a download: nothing is stored, and a repeat is a fresh search (results move), never a cached row.
+      const resp = await runJobViaServer<{ candidates?: Array<{ title: string; url: string; durationSec?: number; uploader?: string }> }>(
+        "video_download",
+        { search, candidates: params.count ?? DEFAULT_CANDIDATES, pieceId: null, audioOnly: false },
+        { extra, forceNew: true },
+      );
+      const listed = (resp.status === "matching_completed" ? resp.existingJob.result : resp.result)?.candidates;
+      if (!listed?.length) return { success: false, error: "download_failed", data: { message: "the search returned no results" } };
+      return {
+        success: true,
+        data: {
+          candidates: listed,
+          note: "Nothing was downloaded. Confirm the right one with the user (title, uploader and length), then call libi.download_video({ url: <its url>, pieceId, audioOnly }).",
+          ...(firstUse ? { ytDlpInstalled: true } : {}),
+        },
+      };
+    }
     const resp = await runJobViaServer<DownloadedVideo>(
       "video_download",
-      { url, pieceId: params.pieceId, audioOnly: params.audioOnly },
+      search !== undefined
+        ? { search, pieceId: params.pieceId, audioOnly: params.audioOnly }
+        : { url, pieceId: params.pieceId, audioOnly: params.audioOnly },
       { extra, pieceId: params.pieceId ?? undefined },
     );
     const result =

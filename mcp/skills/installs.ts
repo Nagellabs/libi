@@ -32,6 +32,7 @@ import {
   type SkillInstallsResponse,
 } from "@/lib/agents/skill-installs-types";
 import { loadEnabledSkills } from "./loader";
+import { legacyUserRoots, refreshLegacyUserRoots } from "./legacy-user-roots";
 import type { Skill } from "./types";
 import {
   SKILL_DIALECTS,
@@ -847,8 +848,22 @@ function reconcileFolderInstalls(userLevelWritten: ReadonlySet<SetupAgentId>): v
   }
 }
 
+/**
+ * User-level roots libi wrote before installs were recorded (`./legacy-user-roots.ts`): the agents with
+ * no recorded user-level row are the only ones whose root is looked at.
+ */
+function unrecordedUserRoots(): ReturnType<typeof legacyUserRoots> {
+  return legacyUserRoots({
+    recordedAgents: new Set(allRows().filter((r) => r.scope === "user").map((r) => r.agentId)),
+    env: process.env,
+    homedir: os.homedir(),
+    libiHome: getLibiHome(),
+    linkedToLibiAgentDir,
+  });
+}
+
 async function runSync(reason: string): Promise<void> {
-  if (allRows().length === 0) return;
+  if (allRows().length === 0 && unrecordedUserRoots().length === 0) return;
   const skills = await loadEnabledSkills();
   // Rows are read AFTER the load, and everything from here on runs with no await, so an install
   // removed while skills were loading is never written back and nothing runs between the steps:
@@ -879,7 +894,12 @@ async function runSync(reason: string): Promise<void> {
     }
     tally(writeRow(row, skills));
   }
-  logger.info({ tag: "skills", op: "installs_sync", reason, rows: rows.length, ...counts }, "skills.installs_sync");
+  // After the rows, with the rows read again: a user-level row written above has made its agent
+  // recorded, and its root is the row's, not a legacy one.
+  refreshLegacyUserRoots(skills, unrecordedUserRoots(), reason);
+  if (rows.length > 0) {
+    logger.info({ tag: "skills", op: "installs_sync", reason, rows: rows.length, ...counts }, "skills.installs_sync");
+  }
 }
 
 let running: Promise<void> | null = null;

@@ -7,7 +7,7 @@
  * `undefined`, `acpModeFor` returned null, and the push was skipped with a
  * warning. The resumed Claude session then ran in the user's own
  * `permissions.defaultMode` (`auto` on the owner's Mac): with the picker on
- * "Ask each time", `update_piece_name` ran with no approval card.
+ * "Ask each time", `libi.update_piece` ran with no approval card.
  *
  * Every entry here comes from `listSessions` only — no `newSession` happened
  * in this process unless a test says so — which is exactly the state after a

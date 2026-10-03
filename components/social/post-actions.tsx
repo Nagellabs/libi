@@ -20,6 +20,7 @@ import {
   retryAtFor,
   useDeleteSocialPost,
   useRetrySocialPost,
+  useSendToInbox,
   useSocialAccounts,
   useSocialStatus,
   useUpdateSocialPost,
@@ -28,10 +29,12 @@ import { trackEvent } from "@/lib/analytics/client";
 import type { PostStatus } from "@/lib/social/types";
 import { toDatetimeLocal } from "@/lib/social/format";
 import { platformLabel } from "@/lib/social/catalog";
+import { planInboxSend } from "@/lib/social/inbox";
+import { PLATFORM_MUSIC_RULES } from "@/lib/social/music-policy";
 import { SchedulePicker } from "@/components/social/schedule-picker";
 import { PlatformOpenLinks } from "@/components/social/post-links";
 
-type ActionName = "schedule" | "reschedule" | "cancel" | "publish" | "edit" | "delete" | "retry" | "open";
+type ActionName = "schedule" | "reschedule" | "cancel" | "publish" | "inbox" | "edit" | "delete" | "retry" | "open";
 
 /**
  * The closed lifecycle list. Nothing outside this map ever renders, and the
@@ -39,7 +42,7 @@ type ActionName = "schedule" | "reschedule" | "cancel" | "publish" | "edit" | "d
  * enforced by this table, not by convention.
  */
 const ACTIONS: Record<PostStatus, ActionName[]> = {
-  draft: ["schedule", "publish", "edit", "delete"],
+  draft: ["schedule", "publish", "inbox", "edit", "delete"],
   scheduled: ["reschedule", "cancel", "edit"],
   publishing: [],
   failed: ["retry", "edit", "delete"],
@@ -77,10 +80,12 @@ export function PostActions({
   const update = useUpdateSocialPost();
   const del = useDeleteSocialPost();
   const retry = useRetrySocialPost();
+  const sendToInbox = useSendToInbox();
 
   const [schedulePopoverOpen, setSchedulePopoverOpen] = useState(false);
   const [publishConfirmOpen, setPublishConfirmOpen] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [inboxConfirmOpen, setInboxConfirmOpen] = useState(false);
   // The zone the popover's field is LABELLED with, and the one its value is
   // read in. The post's own zone first, then the user's posting default — a
   // real zone either way, because reading the instant in the browser's zone
@@ -221,6 +226,67 @@ export function PostActions({
             </AlertDialog>
           </>
         );
+      case "inbox": {
+        // Only for a draft with a platform that has an inbox (the rules say which). The button is
+        // there even when it cannot send: the reason is the answer, said next to it.
+        const names = [...new Set(post.targets.filter((t) => PLATFORM_MUSIC_RULES[t.platform]?.draftHandoff).map((t) => platformLabel(t.platform)))];
+        if (names.length === 0) return null;
+        const label = `Send to ${names.join(" and ")} inbox`;
+        const plan = planInboxSend(post);
+        const reason = plan.ok ? null : plan.message;
+        const serverReason = sendToInbox.error instanceof SocialApiError ? (sendToInbox.error.body.message ?? sendToInbox.error.body.error) : null;
+        return (
+          <>
+            <Button
+              variant="outline"
+              size={btnSize}
+              className="cursor-pointer"
+              data-testid="post-action-inbox"
+              disabled={!plan.ok || sendToInbox.isPending}
+              title={reason ?? `Uploads the video to your ${names.join(" and ")} inbox as a draft. Nothing is posted.`}
+              onClick={() => setInboxConfirmOpen(true)}
+            >
+              {label}
+            </Button>
+            {reason && (
+              <span data-testid="post-action-inbox-reason" className="basis-full text-xs text-muted-foreground">
+                {reason}
+              </span>
+            )}
+            {serverReason && !reason && (
+              <span data-testid="post-action-inbox-error" className="basis-full text-xs text-destructive">
+                {serverReason}
+              </span>
+            )}
+            <AlertDialog open={inboxConfirmOpen} onOpenChange={setInboxConfirmOpen}>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{label}?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    {`The video is uploaded to your ${names.join(" and ")} inbox as a draft. Nothing is posted: open the ${names[0]} app's notification to finish it there.`}
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel className="cursor-pointer">Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    className="cursor-pointer"
+                    onClick={() => {
+                      trackEvent("social_post_action", { provider: "zernio", action: "send_to_inbox" });
+                      sendToInbox.mutate(
+                        { id: post.id, requestId },
+                        // Closed either way: a refusal is shown beside the button, not behind the dialog.
+                        { onError: onRateLimited, onSettled: () => setInboxConfirmOpen(false) },
+                      );
+                    }}
+                  >
+                    {label}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </>
+        );
+      }
       case "edit":
         // Never reached without an `onEdit` — the render below filters it out.
         if (!onEdit) return null;

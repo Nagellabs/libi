@@ -358,9 +358,9 @@ test.describe("Templates page", () => {
     // Leave the home as this file found it, through the agent's own tool — and
     // with it, cover the last two run-tool entries: the page falls back to the
     // empty state over the SSE, and the list agrees.
-    await runTool(request, "libi.delete_template", { templateId });
+    await runTool(request, "libi.template", { action: "delete", templateId });
     await expect(page.getByTestId("templates-empty")).toBeVisible({ timeout: 15_000 });
-    const list = await runTool(request, "libi.list_templates", {});
+    const list = await runTool(request, "libi.template", { action: "list" });
     expect((list.data as { templates: unknown[] }).templates).toHaveLength(0);
   });
 });

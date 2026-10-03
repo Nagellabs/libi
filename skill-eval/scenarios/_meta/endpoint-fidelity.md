@@ -1,7 +1,7 @@
 ---
 id: meta-endpoint-fidelity
 title: Agent reaches only canonical fal endpoints (no unknown IDs)
-skills: [ugc-product-video, ai-asset-generation, ai-video-models, voiceover-production, realistic-image-generation]
+skills: [ugc-product-video, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

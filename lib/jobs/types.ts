@@ -168,7 +168,7 @@ export interface JobRunner<P, R> {
    *
    *  When set, `enqueue({forceNew:true})` returns `attached_running` instead
    *  of deleting a non-terminal row — the caller is told a run is already in
-   *  progress and can `cancel_job` first if it really wants to start over.
+   *  progress and can `libi.job` (cancel) first if it really wants to start over.
    *  Left unset (the default) `forceNew` keeps its existing semantics, which
    *  three call sites rely on returning a `new` shape. */
   exclusiveResource?: boolean;
@@ -273,7 +273,7 @@ export interface EnqueueOptions {
  *  list endpoint, and `Array.prototype.map` passes the ELEMENT INDEX as the
  *  second argument — so a positional clock silently became `now = 0` for the
  *  first row, making every job report `msSinceProgress: 0` and an undecayed ETA.
- *  That shipped into `GET /api/jobs`, which is what `libi.list_jobs` reads, and
+ *  That shipped into `GET /api/jobs`, which is what `libi.job({ action: "list" })` reads, and
  *  was caught only by watching a live job (2026-08-17). With an object, a stray
  *  numeric index is falsy-or-not-an-object either way and the default clock
  *  wins. */

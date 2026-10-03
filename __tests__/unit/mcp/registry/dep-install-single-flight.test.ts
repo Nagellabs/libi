@@ -130,7 +130,7 @@ describe("ensureMcp shares the single-flight with retryDep", () => {
     const download = slowUvDownload();
     vi.spyOn(proto, "runCustomInstaller").mockResolvedValue(undefined);
     const resync = (new DependencyManager() as unknown as WithEnsureMcp).ensureMcp(ytDef());
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(download).toHaveBeenCalled()); // the resync's install is in flight
     await Promise.all([resync, new DependencyManager().retryDep("whisper", "uv")]);
     expect(download).toHaveBeenCalledTimes(1);
     const last = transitions.filter((t) => t.mcpId === "whisper" && t.binary === "uv").at(-1);
@@ -145,7 +145,7 @@ describe("ensureMcp shares the single-flight with retryDep", () => {
       throw new Error("uv tool install failed: offline");
     });
     const repair = new DependencyManager().retryDep("youtube-download", "yt-dlp");
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(install).toHaveBeenCalled()); // the repair's install is in flight
     await Promise.allSettled([
       repair,
       (new DependencyManager() as unknown as WithEnsureMcp).ensureMcp(ytDef()),
@@ -162,12 +162,12 @@ describe("ensureMcp shares the single-flight with retryDep", () => {
   it("a Retry that joins a resync which left uv undetected fails, naming it", async () => {
     // The download "succeeds" but puts nothing in place (a binary that fails
     // its run check would look the same).
-    vi.spyOn(proto, "downloadGroup").mockImplementation(async () => {
+    const download = vi.spyOn(proto, "downloadGroup").mockImplementation(async () => {
       await new Promise((r) => setTimeout(r, 150));
     });
     vi.spyOn(proto, "runCustomInstaller").mockResolvedValue(undefined);
     const resync = (new DependencyManager() as unknown as WithEnsureMcp).ensureMcp(ytDef());
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(download).toHaveBeenCalled()); // the resync's install is in flight
     await expect(new DependencyManager().retryDep("whisper", "uv")).rejects.toThrow(
       "uv: the install completed without an error, but libi still does not detect it as installed.",
     );

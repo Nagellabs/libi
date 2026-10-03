@@ -53,6 +53,14 @@ describe("shouldOpenBrowser", () => {
     expect(shouldOpenBrowser({ isDevCheckout: false, env: { CI: "0" } })).toBe(true);
     expect(shouldOpenBrowser({ isDevCheckout: false, env: { CI: "" } })).toBe(true);
   });
+
+  it("stays out of the way in a test run, unless a flag or LIBI_OPEN asks for it", () => {
+    expect(shouldOpenBrowser({ isDevCheckout: false, env: { VITEST: "true" } })).toBe(false);
+    expect(shouldOpenBrowser({ isDevCheckout: false, env: { NODE_ENV: "test" } })).toBe(false);
+    expect(shouldOpenBrowser({ isDevCheckout: false, env: { NODE_ENV: "production" } })).toBe(true);
+    expect(shouldOpenBrowser({ flag: true, isDevCheckout: false, env: { VITEST: "true" } })).toBe(true);
+    expect(shouldOpenBrowser({ isDevCheckout: false, env: { VITEST: "true", LIBI_OPEN: "1" } })).toBe(true);
+  });
 });
 
 describe("browserOpenCommand", () => {
@@ -102,6 +110,16 @@ function fakeChild(): EventEmitter & { unref: () => void } {
 }
 
 describe("openStudioUrl", () => {
+  it("never reaches the OS under a test run unless the test injects its own spawn", async () => {
+    // This file itself runs under vitest, so `process.env.VITEST` is set: with no `spawnImpl` the
+    // real `child_process.spawn` must stay untouched (a real `open` would raise a browser tab).
+    expect(process.env.VITEST).toBeTruthy();
+    await expect(openStudioUrl("http://localhost:3456", { platform: "darwin" })).resolves.toEqual({
+      opened: false,
+      reason: "a test run never launches a real browser",
+    });
+  });
+
   it("reports success when the launcher exits cleanly", async () => {
     const child = fakeChild();
     const spawnImpl = vi.fn(() => child) as never;

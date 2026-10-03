@@ -369,9 +369,9 @@ if (!globalForSessionModel.__libiSessionModelEmitter) {
 export const sessionModelEmitter = globalForSessionModel.__libiSessionModelEmitter;
 
 // ── Global navigate emitter ─────────────────────────────────────────
-// `navigate` events (libi.show_piece / show_asset / show_preview) used to
+// `navigate` events (libi.show with target piece / asset / preview) used to
 // be delivered ONLY to a mounted per-session `onNavigate` handler with no
-// replay. The first show_piece of a turn races the editor's per-session
+// replay. The first libi.show piece of a turn races the editor's per-session
 // subscription (initial load / session switch) and was silently dropped —
 // the user then had to ask "show me the piece" manually. Mirror the proven
 // refresh_query pattern: emit on a global singleton at the SSE-singleton

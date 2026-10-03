@@ -22,7 +22,7 @@ import {
  * told to navigate BEFORE the tool ran at all — so pointing one at a deleted
  * piece produced a success the agent then relayed as fact. Observed
  * 2026-08-21: with the onboarding demo deleted, the agent called
- * `libi.show_piece` on the dead id, got `navigated: true`, and told the user
+ * `libi.show({ target: "piece" })` on the dead id, got `navigated: true`, and told the user
  * "It's back on screen — hit play" while the editor showed "No piece open".
  *
  * The agent cannot detect that on its own — nothing else in the turn

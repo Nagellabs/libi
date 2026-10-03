@@ -110,7 +110,8 @@ describe("async ownership — what the worker announces", () => {
     await r.load("a", "__t.setTimeout(() => { __log.push('cb:' + __wire()); Promise.resolve().then(() => __log.push('micro:' + __wire())); }, 5);");
     g.__wire = () => r.trace().at(-1);
     r.render("a");
-    await new Promise((res) => setTimeout(res, 30));
+    // The window closes from a later task: wait for it, not a fixed 30 ms.
+    await vi.waitFor(() => expect(r.trace().at(-1)).toBe("asyncDone:a"));
     delete g.__wire;
     expect(log).toEqual(["cb:async:a", "micro:async:a"]);
     expect(r.trace()).toEqual(["loaded:a", "started:a", "layer:a", "async:a", "asyncDone:a"]);
@@ -213,8 +214,7 @@ describe("async ownership — what the worker announces", () => {
     (s.setTimeout as (fn: () => void, ms: number) => void)(() => {}, 5); // nobody's
     owner.enter(own("a")); // a's helper settled
     expect(w.wire.map((m) => m.t)).toEqual(["async"]);
-    await new Promise((res) => setTimeout(res, 20));
-    expect(w.wire.map((m) => m.t)).toEqual(["async", "asyncDone"]);
+    await vi.waitFor(() => expect(w.wire.map((m) => m.t)).toEqual(["async", "asyncDone"]));
     expect(owner.current()).toBeNull();
   });
 });
@@ -317,7 +317,7 @@ describe("fix round 3 — the bookkeeping a body cannot bend (N2)", () => {
     };
     try {
       r.render("h");
-      await new Promise((res) => setTimeout(res, 30));
+      await vi.waitFor(() => expect(r.wire.some((m) => m.t === "asyncDone")).toBe(true));
     } finally {
       Array.prototype.push = realPush;
     }
@@ -353,14 +353,14 @@ describe("fix round 3 — a body that is disposed or replaced loses the work it 
     await r.load("b", "__t.setInterval(() => __log.push('b'), 5);", HASH_B);
     r.render("a");
     r.render("b");
-    await new Promise((res) => setTimeout(res, 40));
-    expect(log.filter((x) => x === "a").length).toBeGreaterThan(1);
+    const ticksOf = (who: string) => log.filter((x) => x === who).length;
+    await vi.waitFor(() => expect(ticksOf("a")).toBeGreaterThan(1));
     await r.dispose("a");
-    const aTicks = log.filter((x) => x === "a").length;
-    const bTicks = log.filter((x) => x === "b").length;
-    await new Promise((res) => setTimeout(res, 40));
-    expect(log.filter((x) => x === "a").length).toBe(aTicks);
-    expect(log.filter((x) => x === "b").length).toBeGreaterThan(bTicks);
+    const aTicks = ticksOf("a");
+    const bTicks = ticksOf("b");
+    // b's interval ticks every 5 ms, as a's did: once b has ticked twice more, a has had its chance.
+    await vi.waitFor(() => expect(ticksOf("b")).toBeGreaterThan(bTicks + 1));
+    expect(ticksOf("a")).toBe(aTicks);
     await r.dispose("b");
   });
 
@@ -430,10 +430,11 @@ describe("fix round 4 — a render's owner is read through bookkeeping a body ca
        __t.setTimeout(() => {}, 5);`,
     );
     g.__patched = false;
+    const closed = () => r.wire.filter((m) => m.t === "asyncDone").length;
     r.render("h");
-    await new Promise((res) => setTimeout(res, 30));
+    await vi.waitFor(() => expect(closed()).toBe(1));
     r.render("h");
-    await new Promise((res) => setTimeout(res, 30));
+    await vi.waitFor(() => expect(closed()).toBe(2));
     Map.prototype.get = realGet;
     const windows = r.wire.filter((m) => m.t === "async");
     expect(windows.length).toBe(2);
@@ -518,16 +519,15 @@ describe("fix round 4 — a reload of the SAME body keeps the timers it has runn
     g.__started = false;
     await r.load("a", source);
     r.render("a");
-    await new Promise((res) => setTimeout(res, 30));
-    expect(log.length).toBeGreaterThan(1);
+    await vi.waitFor(() => expect(log.length).toBeGreaterThan(1));
     // The same body, recompiled: a kind change keeps the hash.
     r.emit({ t: "load", id: "a", kind: "tracked", source, sourceHash: HASH_A, width: 10, height: 10 });
     await settle(1);
     const ticks = log.length;
-    await new Promise((res) => setTimeout(res, 30));
-    expect(log.length).toBeGreaterThan(ticks);
+    await vi.waitFor(() => expect(log.length).toBeGreaterThan(ticks));
     await r.dispose("a"); // …and disposing it still stops it
     const after = log.length;
+    // Nothing more may tick: a window of several of its 5 ms periods (a negative, so it IS a wait).
     await new Promise((res) => setTimeout(res, 30));
     expect(log.length).toBe(after);
   });
@@ -560,7 +560,7 @@ describe("Task 13 re-review 3, M5: the engine installs an entry through a captur
     await settle();
     await r.load("h", "__t.setTimeout(() => {}, 5);", HASH_B);
     r.render("h");
-    await new Promise((res) => setTimeout(res, 30));
+    await vi.waitFor(() => expect(r.wire.some((m) => m.t === "asyncDone")).toBe(true));
     Map.prototype.set = realSet;
     const windows = r.wire.filter((m) => m.t === "async");
     expect(windows.length).toBe(1);

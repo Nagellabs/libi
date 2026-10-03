@@ -162,7 +162,9 @@ describe("forwardJobProgressViaMcp", () => {
       mgr, jobId, progressToken: "tok", sendNotification,
     });
     const runPromise = mgr.runToCompletion(jobId);
-    await new Promise((r) => setTimeout(r, 100));
+    // The first tick has gone out, and the runner is parked mid-run.
+    await vi.waitFor(() => expect(sendNotification).toHaveBeenCalled());
+    await vi.waitFor(() => expect(resolveRunner).not.toBeNull());
     const before = sendNotification.mock.calls.length;
     unsubscribe();
     resolveRunner!();

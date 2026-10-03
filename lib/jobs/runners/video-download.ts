@@ -15,6 +15,7 @@ import { resolveNodeCommand } from "@/lib/runtime/node-runtime";
 import { DependencyManager } from "@/mcp/registry/dependency-manager";
 import { storeFile, mimeFromExtension } from "@/mcp/tools/file-tools";
 import { serverLogger as logger } from "@/lib/logger";
+import { normaliseSearch } from "@/lib/video-download/search";
 import {
   parseYtDlpLauncherTarget,
   ytDlpLauncherPath,
@@ -56,19 +57,59 @@ const MAX_FILESIZE_ARG = `${MAX_BYTES / (1024 * 1024)}M`;
 export const INFO_JSON_STEM = "libi-meta";
 const INFO_JSON_FILE = `${INFO_JSON_STEM}.info.json`;
 
-const videoDownloadParamsSchema = z.object({
-  url: z.string(),
-  pieceId: z.string().nullable(),
-  audioOnly: z.boolean().default(false),
-});
+/** yt-dlp's search prefix: `ytsearch1:` is "the first YouTube result". */
+const SEARCH_PREFIX = "ytsearch1:";
+
+/** Most search results a `candidates` run lists. */
+export const MAX_CANDIDATES = 10;
+
+/**
+ * A download is a page `url` OR a `search` (the words to find; yt-dlp takes the first YouTube hit). The url form's
+ * params are exactly what they always were, so its dedupe hash is unchanged. `candidates: N` (with `search`) lists the
+ * top N results WITHOUT downloading anything, so the caller can confirm one and download it by url.
+ */
+const videoDownloadParamsSchema = z
+  .object({
+    url: z.string().optional(),
+    search: z.string().optional(),
+    pieceId: z.string().nullable(),
+    audioOnly: z.boolean().default(false),
+    candidates: z.number().int().min(1).max(MAX_CANDIDATES).optional(),
+  })
+  .superRefine((p, ctx) => {
+    if ((p.url === undefined) === (p.search === undefined)) {
+      ctx.addIssue({ code: "custom", message: "pass exactly one of url or search" });
+    } else if (p.search !== undefined && normaliseSearch(p.search) === "") {
+      ctx.addIssue({ code: "custom", path: ["search"], message: "search is empty" });
+    }
+    if (p.candidates !== undefined && p.search === undefined) {
+      ctx.addIssue({ code: "custom", path: ["candidates"], message: "candidates lists search results: pass search" });
+    }
+  });
 
 export type VideoDownloadParams = z.infer<typeof videoDownloadParamsSchema>;
+
+/** What a search settled on: the answer to "is this the right track?". */
+export interface PickedResult {
+  title: string;
+  url: string;
+  /** Seconds, when yt-dlp knows it. */
+  durationSec?: number;
+  uploader?: string;
+}
+
+/** What a `candidates` run answers: the top search results, nothing downloaded. */
+export interface VideoCandidatesResult {
+  candidates: PickedResult[];
+}
 
 export interface VideoDownloadResult {
   fileId: string;
   filename: string;
   title: string;
   bytes: number;
+  /** Search mode only: the result libi picked. */
+  picked?: PickedResult;
 }
 
 /** IEC unit multipliers exactly as yt-dlp's `format_bytes` prints them. */
@@ -377,11 +418,94 @@ export function normaliseDownloadName(name: string): string {
   return `${base}${ext}`;
 }
 
+/** Seconds a candidates search may take before it is abandoned (it is one page of search results). */
+const CANDIDATES_TIMEOUT_MS = 60_000;
+/** Most stdout a candidates search keeps: ten flat entries are a few KB, so more than this is not a search page. */
+const CANDIDATES_MAX_OUTPUT = 4 * 1024 * 1024;
+
+/**
+ * The top `count` YouTube results for `query`, flat (titles, pages, lengths; no media is fetched), through the
+ * same yt-dlp the download uses, so a launcher that cannot start is the same `YtDlpLaunchError` the run repairs.
+ */
+async function searchCandidates(ctx: JobContext<VideoDownloadParams>, query: string, count: number): Promise<VideoCandidatesResult> {
+  ctx.reportProgress(0, 1, "search");
+  const args = ["--ignore-config", "--flat-playlist", "-J", ...jsRuntimeArgs(), `ytsearch${count}:${query}`];
+  const ytDlp = resolveYtDlpSpawn();
+  const child = spawn(ytDlp.command, args, { windowsHide: true, env: ytDlp.env });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf-8");
+  child.stdout.on("data", (chunk: string) => {
+    if (stdout.length < CANDIDATES_MAX_OUTPUT) stdout += chunk;
+  });
+  child.stderr.setEncoding("utf-8");
+  child.stderr.on("data", (chunk: string) => {
+    if (stderr.length < 8192) stderr += chunk;
+  });
+  let timedOut = false;
+  const guard = setInterval(() => {
+    if (ctx.shouldCancel()) child.kill("SIGTERM");
+  }, 500);
+  const timer = setTimeout(() => {
+    timedOut = true;
+    child.kill("SIGKILL");
+  }, CANDIDATES_TIMEOUT_MS);
+  let code: number;
+  try {
+    code = await new Promise<number>((resolve, reject) => {
+      child.once("error", (err: NodeJS.ErrnoException) => {
+        reject(
+          err.code && LAUNCH_FAILURE_ERRNOS.has(err.code)
+            ? new YtDlpLaunchError(`could not start ${ytDlp.command}: ${err.code}`, { cause: err })
+            : err,
+        );
+      });
+      child.once("close", (c) => resolve(c ?? 1));
+    });
+  } finally {
+    clearInterval(guard);
+    clearTimeout(timer);
+  }
+  if (ctx.shouldCancel()) throw new Error("cancelled");
+  if (timedOut) throw new Error(`the YouTube search for "${query}" took over ${CANDIDATES_TIMEOUT_MS / 1000} s and was stopped. Try again, or ask the user for a link.`);
+  if (LAUNCH_FAILURE_EXIT_CODES.has(code)) {
+    const tail = stderr.trim().split("\n").slice(-2).join(" ");
+    throw new YtDlpLaunchError(`the yt-dlp launcher ${ytDlp.command} could not run its entry point (exit ${code})${tail ? `: ${tail}` : ""}`);
+  }
+  if (code !== 0) {
+    const tail = stderr.trim().split("\n").slice(-3).join(" ");
+    throw new Error(`yt-dlp search failed (exit ${code}): ${tail || "no output"}`);
+  }
+  let entries: Array<Record<string, unknown>> = [];
+  try {
+    const parsed = JSON.parse(stdout) as { entries?: Array<Record<string, unknown>> };
+    entries = Array.isArray(parsed.entries) ? parsed.entries : [];
+  } catch {
+    throw new Error("yt-dlp search answered something that is not JSON");
+  }
+  const candidates: PickedResult[] = [];
+  for (const e of entries) {
+    const page = clean(e.url) ?? clean(e.webpage_url) ?? (clean(e.id) ? `https://www.youtube.com/watch?v=${clean(e.id)}` : undefined);
+    const title = clean(e.title);
+    if (!page || !title) continue;
+    const duration = typeof e.duration === "number" && Number.isFinite(e.duration) ? Math.round(e.duration) : undefined;
+    const uploader = clean(e.uploader) ?? clean(e.channel);
+    candidates.push({ title, url: page, ...(duration !== undefined ? { durationSec: duration } : {}), ...(uploader ? { uploader } : {}) });
+  }
+  if (candidates.length === 0) throw new Error(`no search results for "${query}". Try other words (the artist and title, "official audio"), or ask the user for a link.`);
+  ctx.reportProgress(1, 1, "search");
+  return { candidates: candidates.slice(0, count) };
+}
+
 async function download(
   ctx: JobContext<VideoDownloadParams>,
   outDir: string,
-): Promise<VideoDownloadResult> {
-  const { url, pieceId, audioOnly } = ctx.params;
+): Promise<VideoDownloadResult | VideoCandidatesResult> {
+  const { url, search, pieceId, audioOnly } = ctx.params;
+  if (ctx.params.candidates !== undefined) {
+    return searchCandidates(ctx, normaliseSearch(search as string), ctx.params.candidates);
+  }
+  const query = search !== undefined ? normaliseSearch(search) : undefined;
   const args = [
     "--newline",
     // A user's ~/.config/yt-dlp/config could otherwise add `--paths` / `-o`
@@ -402,7 +526,8 @@ async function download(
     ...(audioOnly
       ? ["-f", "bestaudio", "-x", "--audio-format", "mp3"]
       : ["-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b", "--merge-output-format", "mp4"]),
-    url,
+    // A search is a one-entry "playlist": no playlist metadata file next to the media.
+    ...(query !== undefined ? ["--no-write-playlist-metafiles", `${SEARCH_PREFIX}${query}`] : [url as string]),
   ];
 
   const ytDlp = resolveYtDlpSpawn();
@@ -488,12 +613,14 @@ async function download(
     throw new Error(
       capNotice
         ? `yt-dlp refused the download: ${capNotice}`
-        : "yt-dlp reported success but produced no file",
+        : query !== undefined
+          ? `no search results for "${query}". Try other words (the artist and title, "official audio"), or ask the user for a link.`
+          : "yt-dlp reported success but produced no file",
     );
   }
   // A run that could not produce a finished file must FAIL, not register
   // whatever is lying in the temp dir. See `isPartialArtifact`.
-  const complete = entries.filter((e) => !isPartialArtifact(e) && e !== INFO_JSON_FILE);
+  const complete = entries.filter((e) => !isPartialArtifact(e) && e !== INFO_JSON_FILE && !/\.info\.json$/.test(e));
   if (complete.length === 0) {
     logger.warn(
       { tag: "video-download", op: "no_complete_output", entries, capNotice },
@@ -537,13 +664,15 @@ async function download(
   // — `storeFile` writes storage, ffprobes video/audio for duration and
   // dimensions, and inserts the `files` row.
   const storedName = normaliseDownloadName(chosen.name);
+  // Where it came from: the page asked for, or — for a search — the page the search picked.
+  const source = url ?? clean(info?.webpage_url) ?? `${SEARCH_PREFIX}${query}`;
   const record = await storeFile({
     pieceId,
     filename: storedName,
     buffer,
     contentType: mimeFromExtension(chosen.name),
-    description: `Downloaded from ${url}`,
-    audioRights: downloadStamp(info, url),
+    description: `Downloaded from ${source}`,
+    audioRights: downloadStamp(info, source),
   });
 
   // The terminal row is the stored file's real size — for a merged download
@@ -555,15 +684,31 @@ async function download(
     "downloaded video stored as an asset",
   );
 
+  const picked = query !== undefined ? pickedFrom(info, source, storedName) : undefined;
   return {
     fileId: record.id,
     filename: record.filename,
     title: path.basename(storedName, path.extname(storedName)),
     bytes: buffer.length,
+    ...(picked ? { picked } : {}),
   };
 }
 
-export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadResult> = {
+const clean = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
+/** The title / page / length of what a search picked, from yt-dlp's own info json. */
+function pickedFrom(info: YtDlpInfo | null, source: string, storedName: string): PickedResult {
+  const duration = typeof info?.duration === "number" && Number.isFinite(info.duration) ? Math.round(info.duration) : undefined;
+  const uploader = clean(info?.uploader) ?? clean(info?.channel);
+  return {
+    title: clean(info?.title) ?? path.basename(storedName, path.extname(storedName)),
+    url: source,
+    ...(duration !== undefined ? { durationSec: duration } : {}),
+    ...(uploader ? { uploader } : {}),
+  };
+}
+
+export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadResult | VideoCandidatesResult> = {
   kind: "video_download",
   maxConcurrent: 2,
   paramsSchema: videoDownloadParamsSchema as unknown as z.ZodSchema<VideoDownloadParams>,
@@ -571,7 +716,7 @@ export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadRe
   noProgressTimeoutMs: 180_000,
   mcpToolId: makeMcpToolId("libi", "libi.download_video"),
 
-  async run(ctx: JobContext<VideoDownloadParams>): Promise<VideoDownloadResult> {
+  async run(ctx: JobContext<VideoDownloadParams>): Promise<VideoDownloadResult | VideoCandidatesResult> {
     // Same SSRF guard every agent-supplied url goes through (remote_fetch).
     // Runs BEFORE any spawn so a file:// or metadata-service url never reaches
     // a subprocess.
@@ -590,7 +735,8 @@ export const videoDownloadRunner: JobRunner<VideoDownloadParams, VideoDownloadRe
     // address is not caught here. It still blocks the cheap cases (non-http
     // schemes, literal private/metadata addresses, hostnames that resolve
     // privately at check time) before anything is spawned.
-    await assertPublicHttpUrl(ctx.params.url);
+    // A search has no url to vet: yt-dlp resolves it against YouTube's own search.
+    if (ctx.params.url !== undefined) await assertPublicHttpUrl(ctx.params.url);
 
     // uv and yt-dlp are tier-2 deps: nothing installs them at boot, so a
     // fresh machine reaches this runner with an empty `~/.libi/bin`. `ensureDep`

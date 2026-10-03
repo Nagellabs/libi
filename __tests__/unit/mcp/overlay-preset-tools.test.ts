@@ -133,7 +133,7 @@ describe("overlay-preset MCP tools", () => {
   });
 
   // Final review I2: a preset is merged over the overlay, and a preset file
-  // written by anything but save_overlay_preset (a template's caption style, a
+  // written by anything but libi.overlay_preset save (a template's caption style, a
   // hand-edited JSON) could carry `kind` / `id` / a code body. The kind check
   // compares the PRESET's declared kind, so a text-kind preset whose fields say
   // `kind: "three"` used to flip the overlay into an unvalidated three overlay.

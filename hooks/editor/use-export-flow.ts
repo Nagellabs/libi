@@ -14,7 +14,8 @@ export interface ExportStartParams {
   source: ExportSource;
   filename: string;
   format: ExportFormat;
-  quality: ExportQuality;
+  /** Absent for a social export that names no size: the server fits it to 1080×1920. */
+  quality?: ExportQuality;
   /** Resolution text/code/3D overlays render at; the server falls back to the stored default. */
   graphicsQuality?: GraphicsQuality;
   customWidth?: number;
@@ -124,8 +125,9 @@ export function useExportFlow(options: UseExportFlowOptions = {}): UseExportFlow
         setStatus("queued");
         trackEvent("export_started", {
           format: params.format,
-          quality: params.quality,
-          graphics_quality: params.graphicsQuality ?? DEFAULT_GRAPHICS_QUALITY,
+          // A size libi chose (a social export that named none) is its own bucket, never a quality tier.
+          quality: params.quality ?? "social_fit",
+          graphics_quality: params.graphicsQuality ?? (params.quality ? DEFAULT_GRAPHICS_QUALITY : "social_fit"),
         });
         return queuedExport;
       } catch (err) {

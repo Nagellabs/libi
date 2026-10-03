@@ -6,6 +6,7 @@ import {
   saveManifest,
 } from "@/lib/composition/persistence";
 import { pieceDurationSec } from "@/lib/composition/duration";
+import { crossfadePlan } from "@/lib/audio/clip-gain";
 import {
   addClip,
   updateClip as updateClipPure,
@@ -25,6 +26,7 @@ import { effectiveRights } from "@/lib/audio-rights/read";
 import { updateAudioRights } from "@/lib/audio-rights/write";
 import { COPYRIGHTED_CLIP_NOTE } from "@/lib/audio-rights/piece-audio";
 import { requestSongMatch } from "./audio-rights-tools";
+import { inBatchContext } from "./batch-context";
 import type { ToolContext, ToolResult } from "./types";
 import type {
   AudioAddClipParams,
@@ -116,6 +118,7 @@ export async function audioAddClip(
     duration,
     trimStart: params.trimStart ?? 0,
     volume: params.volume ?? 1,
+    ...(params.gainDb ? { gainDb: params.gainDb } : {}),
     enabled: params.enabled ?? true,
     linkedOverlayId: params.linkedOverlayId,
     label: params.label,
@@ -125,7 +128,9 @@ export async function audioAddClip(
   // Match a copyrighted song the agent just named, or one never matched yet
   // (addendum §3). A failed match never fails the clip add.
   const shouldMatch = rights?.class === "copyrighted" && (params.rights !== undefined || !rights.platformPicks);
-  const music = shouldMatch ? await requestSongMatch(params.fileId) : undefined;
+  // A batch (libi.apply_ops) never calls out to a platform: it adds the clip and says the match was left.
+  const matchSkipped = shouldMatch && inBatchContext();
+  const music = shouldMatch && !matchSkipped ? await requestSongMatch(params.fileId) : undefined;
   return {
     success: true,
     data: {
@@ -133,6 +138,7 @@ export async function audioAddClip(
       ...(rights ? { rights: { class: rights.class, ...(rights.track ? { track: rights.track } : {}) } } : {}),
       ...(rights?.class === "copyrighted" ? { note: COPYRIGHTED_CLIP_NOTE } : {}),
       ...(music ? { music } : {}),
+      ...(matchSkipped ? { musicMatchSkipped: true } : {}),
     },
   };
 }
@@ -146,10 +152,30 @@ export async function audioUpdateClip(
   for (const k of ["startTime", "duration", "trimStart", "volume", "enabled", "label", "timelineOrder"] as const) {
     if (params[k] !== undefined) patch[k] = params[k];
   }
+  // 0 is "none" for both: the field leaves the manifest rather than sitting at 0.
+  for (const k of ["gainDb", "crossfadeMs"] as const) {
+    if (params[k] !== undefined) patch[k] = params[k] === 0 ? undefined : params[k];
+  }
   const next = updateClipPure(manifest, params.clipId, patch);
   if (!next) return { success: false, error: `Audio clip ${params.clipId} not found` };
   await saveManifest(ctx.pieceId, next);
-  return { success: true, data: { clipId: params.clipId, ...patch } };
+  // A crossfade needs an earlier clip of the same file overlapping this one's start. Say so when it has none,
+  // rather than leave the agent to find out by listening.
+  const updated = (next.audioClips ?? []).find((c) => c.id === params.clipId);
+  const idle =
+    updated !== undefined &&
+    (updated.crossfadeMs ?? 0) > 0 &&
+    !crossfadePlan(next.audioClips ?? []).get(updated.id)?.in;
+  return {
+    success: true,
+    data: {
+      clipId: params.clipId,
+      ...patch,
+      ...(idle
+        ? { note: "crossfadeMs has no effect yet: no earlier clip of the same file overlaps this clip's start (place them overlapping by the crossfade length)." }
+        : {}),
+    },
+  };
 }
 
 export async function audioRemoveClip(

@@ -18,7 +18,9 @@ import { MANAGED_PYTHON_DISK_MB } from "@/lib/uv-env/managed-python-size";
  *  machine (lib/uv-env/managed-python-size.ts). */
 const PYTHON_ONCE = `plus ~${MANAGED_PYTHON_DISK_MB} MB for libi's own Python the first time`;
 
-export const PROVIDER_KINDS = ["image", "video", "music", "voice", "sfx", "transcription", "social"] as const;
+/** `browser` is the one kind that makes no media: a tool the agent drives a web page with (posting to a site's own
+ *  uploader — `mcp/skills/browser-posting`). */
+export const PROVIDER_KINDS = ["image", "video", "music", "voice", "sfx", "transcription", "social", "browser"] as const;
 export type ProviderKind = (typeof PROVIDER_KINDS)[number];
 
 /** Runtime guard for a kind that arrived over the wire (`POST /api/notify`). */
@@ -26,7 +28,7 @@ export function isProviderKind(v: unknown): v is ProviderKind {
   return typeof v === "string" && (PROVIDER_KINDS as readonly string[]).includes(v);
 }
 
-export type ProviderId = "fal" | "higgsfield" | "elevenlabs" | "ace-step" | "kokoro" | "whisper" | "zernio";
+export type ProviderId = "fal" | "higgsfield" | "elevenlabs" | "playwright" | "ace-step" | "kokoro" | "whisper" | "zernio";
 
 export interface ProviderDef {
   id: ProviderId;
@@ -44,9 +46,10 @@ export interface ProviderDef {
    * (`keyName`, and `<your key>` in `commands`). `"oauth"`: they sign in with
    * their own account in a browser, through the agent's own `mcp login`, and the
    * agent keeps that sign-in. Such a provider has no key, so nothing may treat
-   * a missing key as a problem (`lib/providers/detect.ts`).
+   * a missing key as a problem (`lib/providers/detect.ts`). `"none"`: nothing to prove — a local server the
+   * agent starts itself (Playwright), so there is no key to ask for and no sign-in step.
    */
-  auth?: "oauth";
+  auth?: "oauth" | "none";
   /** How the detector recognises an entry already in the agent's config. */
   match: { names: string[]; urls?: string[] };
   /**
@@ -57,6 +60,12 @@ export interface ProviderDef {
    * them together.
    */
   commands?: { claude: string; codex: string };
+  /**
+   * The add command on native Windows, where it differs from `commands` (the PowerShell setup scripts carry
+   * these instead, kept equal by the same test). Claude Code on Windows cannot start `npx` directly — its
+   * docs wrap a local stdio server in `cmd /c`.
+   */
+  windowsCommands?: { claude?: string; codex?: string };
   /**
    * `auth: "oauth"` only: each agent's own sign-in command for the entry the
    * add creates. The Providers tab's Sign in runs these through
@@ -198,6 +207,28 @@ export const PROVIDER_CATALOG: readonly ProviderDef[] = [
     signInCommands: { claude: "claude mcp login elevenlabs", codex: "codex mcp login elevenlabs" },
     addSignsIn: ["codex", "claude"],
     codexNote: "Add opens your browser to sign in with your ElevenLabs account, and waits until you finish.",
+  },
+  {
+    id: "playwright",
+    name: "Playwright",
+    // A browser the agent drives: it opens its own Chrome window, where the user signs in to a site once (the
+    // login is kept between runs), then uploads a file BY PATH — so a video's size doesn't matter, unlike Claude
+    // in Chrome's 10 MB upload. The browser-posting skill posts to TikTok Studio with it (2026-10-02).
+    kinds: ["browser"],
+    kind: "remote-mcp",
+    docsUrl: "https://github.com/microsoft/playwright-mcp",
+    // A local server the agent starts with npx: no key, no sign-in, needs Node.js on the computer.
+    transport: "stdio",
+    auth: "none",
+    match: { names: ["playwright"] },
+    commands: {
+      claude: "claude mcp add --scope user playwright -- npx @playwright/mcp@latest",
+      codex: "codex mcp add playwright -- npx @playwright/mcp@latest",
+    },
+    windowsCommands: {
+      claude: "claude mcp add --scope user playwright -- cmd /c npx @playwright/mcp@latest",
+    },
+    codexNote: "Runs on your computer with npx (needs Node.js). No key or sign-in.",
   },
   {
     id: "ace-step",

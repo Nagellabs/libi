@@ -6,7 +6,7 @@ on demand the first time a tracking tool reports `tracking_engine_not_installed`
 
 ## When you need this guide
 
-A tracking tool (e.g. `libi.compute_object_track`) returned:
+A tracking tool (e.g. `libi.track` action `compute`) returned:
 ```json
 { "error": "tracking_engine_not_installed",
   "data": { "installPlanPath": "mcp/bundled-mcps/plans/libi-tracking.md" } }
@@ -107,10 +107,10 @@ the engine actually looks at; trust that over any path in this document.
 
 - `libi.install_tracking_engine` returns the failing step and error; fix the
   named input and call it again — the job resumes idempotently.
-- Run `libi.diagnose_mcp({ mcpId: "libi-tracking" })` — the `auxiliary` field
+- Run `libi.extension({ action: "diagnose", mcpId: "libi-tracking" })` — the `auxiliary` field
   shows the last error from the Python sidecar probe.
 - `uv` errors: the installer downloads `uv` itself when it is missing. If
-  that download failed, call `libi.show_extension({ extensionId: "libi-tracking" })`
+  that download failed, call `libi.show({ target: "extension", extensionId: "libi-tracking" })`
   and ask the user to press **Download** next to `uv` on that card, then re-run
   step 3. Do not try to install `uv` yourself, and do not restart libi for it —
   boot does not install `uv`.

@@ -119,8 +119,7 @@ describe.skipIf(process.platform === "win32")("prefetchManagedPython", () => {
     writeFakeUv("slow");
     const before = process.listenerCount("exit");
     const run = prefetchManagedPython({ uv });
-    await new Promise((r) => setTimeout(r, 100));
-    expect(process.listenerCount("exit")).toBe(before + 1);
+    await vi.waitFor(() => expect(process.listenerCount("exit")).toBe(before + 1));
     expect(await run).toEqual({ [LIBI_PYTHON_VERSION]: "fetched" });
     expect(process.listenerCount("exit")).toBe(before);
   });

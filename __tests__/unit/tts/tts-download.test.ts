@@ -112,6 +112,8 @@ describe("ttsDownloadModel RunJobResult shapes", () => {
     expect(d.status).toBe("installed");
     expect(d.attachedToRunning).toBe(true);
     expect(d.matchedExisting).toBeUndefined();
+    expect(d.note).toMatch(/Attached to a download of this model/);
+    expect(d.note).toMatch(/forceNew:true/);
     expect(d.existingJob).toEqual({
       jobId: "job-orig",
       pieceId: null,
@@ -141,6 +143,7 @@ describe("ttsDownloadModel RunJobResult shapes", () => {
     expect(d.status).toBe("not_installed");
     expect(d.matchedExisting).toBe(true);
     expect(d.hint).toMatch(/forceNew/);
+    expect((d as { note?: string }).note).toMatch(/earlier identical job matched/);
     expect(d.existingJob?.status).toBe("cancelled");
   });
 });

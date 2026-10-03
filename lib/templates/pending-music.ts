@@ -1,4 +1,4 @@
-import type { DuckSettings } from "@/lib/engine/types";
+import type { AudioClip, DuckSettings } from "@/lib/engine/types";
 
 /** A template's song that was left out on apply (social-music spec §7). Lives in
  *  the piece's composition until `libi.fetch_template_music` places it. */
@@ -10,6 +10,11 @@ export interface PendingMusicClip {
   /** The template clip's own flag. Absent on an entry written before it was
    *  carried: placed enabled. */
   enabled?: boolean;
+  /** The template clip's loudness shape (AudioClip.gainDb / volumeKeyframes / crossfadeMs),
+   *  placed unchanged by `libi.fetch_template_music`. Absent when the clip had none. */
+  gainDb?: number;
+  volumeKeyframes?: AudioClip["volumeKeyframes"];
+  crossfadeMs?: number;
   /** The template clip's duck, its sidechains already CLIP IDS in this piece
    *  (re-minted at apply, like a created clip's). */
   duck?: DuckSettings;

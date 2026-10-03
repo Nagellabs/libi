@@ -29,9 +29,10 @@ import {
   useVersionDiff,
   useCommitDraft,
   useDiscardDraft,
+  useRecoverableDrafts,
   useRestoreSnapshot,
 } from "@/lib/queries/snapshots";
-import type { VersionRow } from "@/lib/queries/snapshots";
+import type { RecoverableDraftRow, VersionRow } from "@/lib/queries/snapshots";
 import { VersionDetailPanel } from "./version-detail-panel";
 import { AlertTriangle } from "lucide-react";
 import { trackEvent } from "@/lib/analytics/client";
@@ -53,6 +54,13 @@ function formatVersionTime(committedAt: number | null): string {
   return new Date(committedAt * 1000).toLocaleString();
 }
 
+/** What set a recoverable draft aside, in the user's words. */
+const RECOVERABLE_LABEL: Record<RecoverableDraftRow["kind"], string> = {
+  discarded: "Discarded draft",
+  "before-restore": "Draft before a restore",
+  "before-recover": "Draft before a recovery",
+};
+
 export function VersionHistoryModal({ pieceId, open, onOpenChange }: Props) {
   const { data: history } = useVersionHistory(pieceId, open);
   const versions = history?.versions ?? [];
@@ -62,6 +70,8 @@ export function VersionHistoryModal({ pieceId, open, onOpenChange }: Props) {
   const commit = useCommitDraft();
   const discard = useDiscardDraft();
   const restore = useRestoreSnapshot();
+  const recoverable = useRecoverableDrafts(pieceId, open);
+  const kept = recoverable.data?.drafts ?? [];
 
   // Default selection: draft if present, else current snapshot. Re-applied
   // whenever the modal opens or the version list first arrives. Adjusted
@@ -148,7 +158,8 @@ export function VersionHistoryModal({ pieceId, open, onOpenChange }: Props) {
                       </TooltipTrigger>
                       <TooltipContent>
                         Throw away all unsaved changes and revert to the current
-                        snapshot. Can&apos;t be undone.
+                        snapshot. The discarded draft is kept for{" "}
+                        {recoverable.data?.days ?? 7} days under Recoverable drafts.
                       </TooltipContent>
                     </Tooltip>
                   </>
@@ -247,6 +258,45 @@ export function VersionHistoryModal({ pieceId, open, onOpenChange }: Props) {
                     </button>
                   );
                 })}
+
+                {/* Drafts a Discard or a Restore set aside: gone from the list
+                    above on purpose (it is the user's own history), but not
+                    lost. Restore puts one back as the draft, and the draft it
+                    replaces is kept in turn, so this is itself undoable. */}
+                {kept.length > 0 && (
+                  <div data-testid="recoverable-drafts" className="border-b bg-muted/30">
+                    <div className="px-3 pt-2 pb-1">
+                      <p className="text-xs font-medium">Recoverable drafts</p>
+                      <p className="text-[11px] font-normal text-muted-foreground">
+                        Set aside by a discard or a restore. Kept {recoverable.data?.days ?? 7} days.
+                      </p>
+                    </div>
+                    {kept.map((d) => (
+                      <div
+                        key={d.id}
+                        data-testid="recoverable-draft"
+                        className="flex items-center gap-2 border-t px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm">{RECOVERABLE_LABEL[d.kind]}</p>
+                          <p className="text-[11px] font-normal text-muted-foreground">
+                            {formatVersionTime(d.keptAt)} · {d.overlays} layer{d.overlays === 1 ? "" : "s"} ·{" "}
+                            {d.audioClips} audio clip{d.audioClips === 1 ? "" : "s"}
+                          </p>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 shrink-0 cursor-pointer"
+                          disabled={restore.isPending}
+                          onClick={() => restore.mutate({ pieceId, snapshotId: d.id }, { onSuccess: () => onOpenChange(false) })}
+                        >
+                          Restore
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Detail */}

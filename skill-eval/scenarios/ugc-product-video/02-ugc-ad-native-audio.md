@@ -1,7 +1,7 @@
 ---
 id: ugc-ad-native-audio
 title: UGC ad keeps native AI-video audio
-skills: [ugc-product-video, ai-asset-generation, ai-video-models, voiceover-production, realistic-image-generation]
+skills: [ugc-product-video, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

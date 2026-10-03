@@ -216,6 +216,11 @@ function isOAuthProvider(providerId: ProviderId | null): boolean {
   return providerId !== null && findProvider(providerId).auth === "oauth";
 }
 
+/** A provider with nothing to prove (`auth: "none"`, a local server like Playwright): it never needs a key. */
+function isKeylessProvider(providerId: ProviderId | null): boolean {
+  return providerId !== null && findProvider(providerId).auth === "none";
+}
+
 /** libi's own endpoints — never shown as a provider. */
 const LIBI_NAMES = new Set(["libi", "libi-app"]);
 
@@ -259,7 +264,7 @@ function claudeRow(name: string, entry: ClaudeEntry, scope: NonNullable<Detected
   if (isOAuthProvider(providerId) && isHttp) return !hasKey ? { ...row, signIn: "unknown" } : row;
   // Only a CATALOG provider can be "needs-key": libi has no idea whether a
   // server it has never heard of wants one.
-  return providerId && !hasKey ? { ...row, status: "needs-key" } : row;
+  return providerId && !hasKey && !isKeylessProvider(providerId) ? { ...row, status: "needs-key" } : row;
 }
 
 /** Checks one stdio row's launch command; see the header. */
@@ -441,7 +446,7 @@ function codexRows(entries: CodexMcpListEntry[], check: LauncherCheck): Detected
       else if (e.auth_status === CODEX_NOT_LOGGED_IN) push({ ...row, status: "needs-sign-in" });
       else push({ ...row, signIn: "unknown" });
     } else {
-      push(providerId && !hasKey ? { ...row, status: "needs-key" } : row);
+      push(providerId && !hasKey && !isKeylessProvider(providerId) ? { ...row, status: "needs-key" } : row);
     }
   }
   return out;

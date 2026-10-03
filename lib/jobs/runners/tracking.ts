@@ -141,8 +141,11 @@ interface TrackingResumeState {
 export const trackingRunner: JobRunner<TrackingParams, TrackingResult> = {
   kind: "tracking",
   mcpToolId: [
-    makeMcpToolId("libi", "libi.compute_object_track"),
-    makeMcpToolId("libi-tracking", "libi.compute_object_track"),
+    // `libi.track` is the merged tool: its compute, compute_segment, ground_target, list_candidates and
+    // pick_candidate actions all run this job, and the progress bridge tells them apart by `action`
+    // (lib/sessions/tool-call-matcher.ts).
+    makeMcpToolId("libi", "libi.track"),
+    makeMcpToolId("libi-tracking", "libi.track"),
   ],
   maxConcurrent: 1,
   // `.default("mediapipe-object")` on `method` makes the schema's input type

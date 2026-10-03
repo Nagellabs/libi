@@ -16,7 +16,7 @@ interface RouteParams {
  * caller). Takes the browser-only checks (`browserOnlyRefusal`): the flag
  * decides whether an extension's tools raise a card, so an agent's shell must
  * not be able to switch it off with a header-less curl. The agent's own tool,
- * `libi.update_mcp_server`, may only turn it ON (mcp/tools/mcp-server-tools.ts).
+ * `libi.extension({ action: "update" })`, may only turn it ON (mcp/tools/mcp-server-tools.ts).
  */
 export async function PATCH(request: Request, { params }: RouteParams) {
   const refused = browserOnlyRefusal(request);

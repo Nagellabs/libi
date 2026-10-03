@@ -8,6 +8,7 @@ import { buildAudioMixGraph } from "@/lib/export/audio-mix";
 import { probeInputAudio, mixInputMaps } from "@/lib/export/audio-channels";
 import { renderDuckEnvelopes, type DuckEnvelopeInput, type PlacedSidechain } from "@/lib/export/duck-envelopes";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
+import { planCrossfades, renderClipShapeEnvelopes, sidechainGainAt } from "@/lib/export/gain-envelopes";
 import { exportLogger as logger } from "@/lib/logger";
 import { resolveAudioBitrate } from "@/lib/export/quality";
 
@@ -43,6 +44,178 @@ export function buildRenderMuxArgs(opts: {
   return args;
 }
 
+/** One mix, prepared: the ffmpeg inputs (leading ones first) and the graph over them. */
+export interface PreparedAudioMix {
+  /** `leadingInputs`, then each usable clip's source, then the duck and shape tracks. */
+  inputPaths: string[];
+  /** Input options per input index (placed before its `-i`). */
+  inputOptions: Map<number, string[]>;
+  /** The clips that are in the mix (enabled, source present, with an audio stream). */
+  usable: AudioClip[];
+  /** Ducked clip id -> the WAV of its duck gain (mono f32 at ENVELOPE_SAMPLE_RATE, from composition time 0). A ducked
+   *  clip with no entry mixes undicked (no sidechain of it is in the mix). */
+  duckTracks: Map<string, string>;
+  /** The graph ending in `[aout]` over `clips` (default: all usable). The inputs stay the same, so a
+   *  graph over ONE clip still hears the others as its duck's sidechains. Null when nothing is in play. */
+  chainFor(clips?: AudioClip[]): string | null;
+}
+
+/**
+ * Everything the audio half of an export needs short of running ffmpeg: resolve each enabled clip's
+ * ORIGINAL file, probe it, render the duck and shape tracks into `outDir`, and build the mix graph
+ * over the shared inputs. The chromium-render mux and the loudness measure
+ * (`lib/export/audio-measure.ts`) both read it, so what is measured is what is exported.
+ *
+ * `leadingInputs` are inputs the caller owns that come first (the mux's video-only render). Returns
+ * null when there is nothing to mix (no enabled clips, missing sources, non-local storage).
+ */
+export async function prepareAudioMix(opts: {
+  leadingInputs: string[];
+  audioClips: AudioClip[];
+  files: FileRecord[];
+  outDir: string;
+  durationSeconds?: number;
+  signal?: AbortSignal;
+  op: string;
+}): Promise<PreparedAudioMix | null> {
+  const enabled = opts.audioClips.filter((c) => c.enabled);
+  if (enabled.length === 0) return null;
+
+  const storage = await getStorage();
+  if (!(storage instanceof LocalFileStorage)) {
+    logger.warn(
+      { tag: "export", op: opts.op },
+      "non-local storage — skipping audio mix",
+    );
+    return null;
+  }
+
+  const fileById = new Map(opts.files.map((f) => [f.id, f]));
+  // Each enabled clip with a resolvable source becomes an input after the leading ones. ALWAYS the
+  // original file (never the proxy) — exports read originals (the proxy invariant).
+  const inputPaths: string[] = [...opts.leadingInputs];
+  const inputIndex = new Map<string, number>();
+  const usable: AudioClip[] = [];
+  for (const c of enabled) {
+    const f = fileById.get(c.fileId);
+    if (!f) {
+      logger.warn(
+        { tag: "export", op: opts.op, clipId: c.id, fileId: c.fileId },
+        "audio clip source file missing from payload — skipping clip",
+      );
+      continue;
+    }
+    inputPaths.push(storage.localPath(f.pieceId, f.filename));
+    inputIndex.set(c.id, inputPaths.length - 1);
+    usable.push(c);
+  }
+  if (usable.length === 0) return null;
+
+  // Each clip input's primary audio stream (the one the preview plays) and its
+  // channel count: stereo whenever any clip is, mono upmixed at unity, and
+  // the same track the editor plays (Review M6).
+  const inputAudio = await probeInputAudio(
+    new Map([...inputIndex.values()].map((idx) => [idx, inputPaths[idx]])),
+  );
+  // A clip whose file has no audio stream (a silent video it was linked to)
+  // contributes nothing, and `[n:a]` for it would fail the whole mux.
+  for (let i = usable.length - 1; i >= 0; i--) {
+    const c = usable[i];
+    if (inputAudio.get(inputIndex.get(c.id)!)?.hasAudio === false) {
+      logger.info(
+        { tag: "export", op: opts.op, clipId: c.id, fileId: c.fileId },
+        "audio clip's file has no audio stream — leaving it out of the mix",
+      );
+      usable.splice(i, 1);
+      inputIndex.delete(c.id);
+    }
+  }
+  if (usable.length === 0) return null;
+  const { inputChannels, inputAudioStream, inputPtsShift } = mixInputMaps(inputAudio);
+
+  // Ducked clips are multiplied by a pre-rendered gain curve rather than run
+  // through an ffmpeg compressor, so the export applies the preview's own duck.
+  // See lib/export/duck-envelopes.ts. Envelopes become inputs after the clips.
+  const clipById = new Map(usable.map((c) => [c.id, c]));
+  // One crossfade plan over the manifest's enabled clips, shared by every clip's
+  // shape track and by the duck's sidechain levels (lib/audio/clip-gain.ts).
+  const manifestById = new Map(enabled.map((c) => [c.id, c]));
+  const crossfades = planCrossfades(enabled);
+  const envelopeInputs: DuckEnvelopeInput[] = [];
+  for (const c of usable) {
+    if (!c.duck) continue;
+    // Every resolvable sidechain drives the duck; they are summed into one
+    // envelope. A sidechain that is not in the mix is skipped rather than
+    // failing — the clip still ducks under the ones that remain.
+    const sidechains: PlacedSidechain[] = [];
+    for (const scId of duckSidechainIds(c.duck)) {
+      const sc = clipById.get(scId);
+      const scFile = sc && fileById.get(sc.fileId);
+      if (!sc || !scFile) continue;
+      sidechains.push({
+        path: storage.localPath(scFile.pieceId, scFile.filename),
+        startTime: sc.startTime,
+        trimStart: sc.trimStart ?? 0,
+        duration: sc.duration,
+        volume: sc.volume,
+        gainAt: sidechainGainAt(sc, manifestById, crossfades),
+        audioStream: inputAudio.get(inputIndex.get(sc.id)!)?.stream,
+        read: inputAudio.get(inputIndex.get(sc.id)!)?.read,
+      });
+    }
+    if (sidechains.length === 0) continue; // no sidechain in the mix — stays undicked
+    envelopeInputs.push({ clipId: c.id, duck: c.duck, sidechains });
+  }
+  const timelineSeconds =
+    opts.durationSeconds ?? Math.max(...usable.map((c) => c.startTime + c.duration), 0);
+  const envelopes = await renderDuckEnvelopes({
+    inputs: envelopeInputs,
+    timelineSeconds,
+    outDir: opts.outDir,
+    signal: opts.signal,
+  });
+  const envelopeIndex = new Map<string, number>();
+  for (const [clipId, path] of envelopes) {
+    inputPaths.push(path);
+    envelopeIndex.set(clipId, inputPaths.length - 1);
+  }
+
+  // A clip with a volume envelope or a crossfade multiplies against its shape
+  // track (lib/export/gain-envelopes.ts), appended after the duck envelopes.
+  const shapes = await renderClipShapeEnvelopes({
+    mixClips: usable,
+    manifestClips: enabled,
+    plan: crossfades,
+    outDir: opts.outDir,
+  });
+  const gainEnvelopeIndex = new Map<string, number>();
+  for (const [clipId, path] of shapes) {
+    inputPaths.push(path);
+    gainEnvelopeIndex.set(clipId, inputPaths.length - 1);
+  }
+
+  // An input ffmpeg reads off its timeline gets its probe's input options.
+  const inputOptions = new Map<number, string[]>();
+  for (const [idx, a] of inputAudio) if (a.read?.inputArgs.length) inputOptions.set(idx, a.read.inputArgs);
+
+  // No base audio — the mix has no full-length base. duration=longest covers the latest-ending clip
+  // (every clip is `adelay`ed onto the timeline).
+  const chainFor = (clips: AudioClip[] = usable): string | null =>
+    buildAudioMixGraph({
+      baseAudio: null,
+      clips,
+      inputIndex,
+      envelopeIndex,
+      gainEnvelopeIndex,
+      mixDuration: "longest",
+      inputChannels,
+      inputAudioStream,
+      inputPtsShift,
+    }).chain;
+
+  return { inputPaths, inputOptions, usable, duckTracks: envelopes, chainFor };
+}
+
 /**
  * Mux the composition's audio onto a video-only render produced by the
  * chromium-render export path. The render page emits frames only (no audio
@@ -64,126 +237,24 @@ export async function muxAudioIntoRender(opts: {
   audioBitrate?: number;
   durationSeconds?: number;
 }): Promise<string> {
-  const enabled = opts.audioClips.filter((c) => c.enabled);
-  if (enabled.length === 0) return opts.videoPath;
-
-  const storage = await getStorage();
-  if (!(storage instanceof LocalFileStorage)) {
-    logger.warn(
-      { tag: "export", op: "export_render_audio_mux" },
-      "non-local storage — skipping audio mux",
-    );
-    return opts.videoPath;
-  }
-
-  const fileById = new Map(opts.files.map((f) => [f.id, f]));
-  // Input 0 is the rendered video; each enabled clip with a resolvable source
-  // becomes inputs 1..N. ALWAYS the original file (never the proxy) — exports
-  // read originals (the proxy invariant).
-  const inputPaths: string[] = [opts.videoPath];
-  const inputIndex = new Map<string, number>();
-  const usable: AudioClip[] = [];
-  for (const c of enabled) {
-    const f = fileById.get(c.fileId);
-    if (!f) {
-      logger.warn(
-        { tag: "export", op: "export_render_audio_mux", clipId: c.id, fileId: c.fileId },
-        "audio clip source file missing from payload — skipping clip",
-      );
-      continue;
-    }
-    inputPaths.push(storage.localPath(f.pieceId, f.filename));
-    inputIndex.set(c.id, inputPaths.length - 1);
-    usable.push(c);
-  }
-  if (usable.length === 0) return opts.videoPath;
-
-  // Each clip input's primary audio stream (the one the preview plays) and its
-  // channel count: stereo whenever any clip is, mono upmixed at unity, and
-  // the same track the editor plays (Review M6).
-  const inputAudio = await probeInputAudio(
-    new Map([...inputIndex.values()].map((idx) => [idx, inputPaths[idx]])),
-  );
-  // A clip whose file has no audio stream (a silent video it was linked to)
-  // contributes nothing, and `[n:a]` for it would fail the whole mux.
-  for (let i = usable.length - 1; i >= 0; i--) {
-    const c = usable[i];
-    if (inputAudio.get(inputIndex.get(c.id)!)?.hasAudio === false) {
-      logger.info(
-        { tag: "export", op: "export_render_audio_mux", clipId: c.id, fileId: c.fileId },
-        "audio clip's file has no audio stream — leaving it out of the mix",
-      );
-      usable.splice(i, 1);
-      inputIndex.delete(c.id);
-    }
-  }
-  if (usable.length === 0) return opts.videoPath;
-  const { inputChannels, inputAudioStream, inputPtsShift } = mixInputMaps(inputAudio);
-
-  // Ducked clips are multiplied by a pre-rendered gain curve rather than run
-  // through an ffmpeg compressor, so the export applies the preview's own duck.
-  // See lib/export/duck-envelopes.ts. Envelopes become inputs after the clips.
-  const clipById = new Map(usable.map((c) => [c.id, c]));
-  const envelopeInputs: DuckEnvelopeInput[] = [];
-  for (const c of usable) {
-    if (!c.duck) continue;
-    // Every resolvable sidechain drives the duck; they are summed into one
-    // envelope. A sidechain that is not in the mix is skipped rather than
-    // failing — the clip still ducks under the ones that remain.
-    const sidechains: PlacedSidechain[] = [];
-    for (const scId of duckSidechainIds(c.duck)) {
-      const sc = clipById.get(scId);
-      const scFile = sc && fileById.get(sc.fileId);
-      if (!sc || !scFile) continue;
-      sidechains.push({
-        path: storage.localPath(scFile.pieceId, scFile.filename),
-        startTime: sc.startTime,
-        trimStart: sc.trimStart ?? 0,
-        duration: sc.duration,
-        volume: sc.volume,
-        audioStream: inputAudio.get(inputIndex.get(sc.id)!)?.stream,
-        read: inputAudio.get(inputIndex.get(sc.id)!)?.read,
-      });
-    }
-    if (sidechains.length === 0) continue; // no sidechain in the mix — stays undicked
-    envelopeInputs.push({ clipId: c.id, duck: c.duck, sidechains });
-  }
-  const timelineSeconds =
-    opts.durationSeconds ?? Math.max(...usable.map((c) => c.startTime + c.duration), 0);
-  const envelopes = await renderDuckEnvelopes({
-    inputs: envelopeInputs,
-    timelineSeconds,
+  const mix = await prepareAudioMix({
+    leadingInputs: [opts.videoPath],
+    audioClips: opts.audioClips,
+    files: opts.files,
     outDir: dirname(opts.videoPath),
+    durationSeconds: opts.durationSeconds,
+    op: "export_render_audio_mux",
   });
-  const envelopeIndex = new Map<string, number>();
-  for (const [clipId, path] of envelopes) {
-    inputPaths.push(path);
-    envelopeIndex.set(clipId, inputPaths.length - 1);
-  }
-
-  // No base audio — the rendered file is video-only. duration=longest covers
-  // the latest-ending clip; the output container length stays the video length
-  // (clips never extend past the composition).
-  const { chain } = buildAudioMixGraph({
-    baseAudio: null,
-    clips: usable,
-    inputIndex,
-    envelopeIndex,
-    mixDuration: "longest",
-    inputChannels,
-    inputAudioStream,
-    inputPtsShift,
-  });
+  if (!mix) return opts.videoPath;
+  // The output container length stays the video length (clips never extend past the composition).
+  const chain = mix.chainFor();
   if (!chain) return opts.videoPath;
 
   const ext = opts.format === "webm" ? "webm" : "mp4";
   const outPath = join(dirname(opts.videoPath), `out-audio.${ext}`);
-  // An input ffmpeg reads off its timeline gets its probe's input options.
-  const inputOptions = new Map<number, string[]>();
-  for (const [idx, a] of inputAudio) if (a.read?.inputArgs.length) inputOptions.set(idx, a.read.inputArgs);
   const args = buildRenderMuxArgs({
-    inputPaths,
-    inputOptions,
+    inputPaths: mix.inputPaths,
+    inputOptions: mix.inputOptions,
     audioChain: chain,
     format: opts.format,
     audioBitrate: opts.audioBitrate,
@@ -191,12 +262,12 @@ export async function muxAudioIntoRender(opts: {
   });
 
   logger.info(
-    { tag: "export", op: "export_render_audio_mux", clipCount: usable.length, format: opts.format },
+    { tag: "export", op: "export_render_audio_mux", clipCount: mix.usable.length, format: opts.format },
     "muxing audio into chromium-render output",
   );
   await runFfmpeg(args, {
     op: "export_render_audio_mux",
-    context: { clipCount: usable.length, format: opts.format },
+    context: { clipCount: mix.usable.length, format: opts.format },
     totalDurationSeconds: opts.durationSeconds,
   });
   return outPath;

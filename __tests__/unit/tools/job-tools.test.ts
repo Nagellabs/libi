@@ -1,5 +1,5 @@
 /**
- * `libi.get_job_status` / `libi.list_jobs` / `libi.cancel_job` MCP tool tests.
+ * `libi.job({ action: "status" })` / `libi.job({ action: "list" })` / `libi.job({ action: "cancel" })` MCP tool tests.
  *
  * After Task 6 the MCP child no longer holds a JobManager — these tools
  * delegate to `@/mcp/jobs-client`, which talks to the Next.js server over
@@ -34,7 +34,7 @@ const getStatusMock = vi.mocked(getJobStatusFromServer);
 const listJobsMock = vi.mocked(listJobsFromServer);
 const cancelMock = vi.mocked(cancelJobOnServer);
 
-describe("libi.get_job_status", () => {
+describe("libi.job({ action: 'status' })", () => {
   beforeEach(() => {
     getStatusMock.mockReset();
     cancelMock.mockReset();
@@ -88,7 +88,7 @@ describe("libi.get_job_status", () => {
   });
 });
 
-describe("libi.cancel_job", () => {
+describe("libi.job({ action: 'cancel' })", () => {
   beforeEach(() => {
     getStatusMock.mockReset();
     cancelMock.mockReset();
@@ -123,7 +123,7 @@ describe("libi.cancel_job", () => {
   });
 });
 
-describe("libi.list_jobs", () => {
+describe("libi.job({ action: 'list' })", () => {
   beforeEach(() => {
     listJobsMock.mockReset();
   });

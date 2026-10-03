@@ -185,8 +185,8 @@ describe("fromAnyToolName — every codex title shape lands on the claude id", (
     expect(fromAnyToolName("mcp__libi-app__libi.generate_speech")).toBe(
       "libi:libi.generate_speech",
     );
-    expect(fromAnyToolName("mcp__libi__libi.compute_object_track")).toBe(
-      "libi:libi.compute_object_track",
+    expect(fromAnyToolName("mcp__libi__libi.track")).toBe(
+      "libi:libi.track",
     );
   });
 

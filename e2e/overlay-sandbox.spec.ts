@@ -934,15 +934,15 @@ test.describe("effect sampler — a custom effect body runs in its own sandbox",
     await openPiece(page, pieceId);          // waits for white at (150,950)
     const workers = trackWorkers(page);
 
-    const add = await runTool(request, "libi.add_effect", {
-      id: "e2e-shift", name: "E2E shift", family: "animation", phases: ["loop"], supports: ["text"],
+    const add = await runTool(request, "libi.effect", {
+      action: "add", id: "e2e-shift", name: "E2E shift", family: "animation", phases: ["loop"], supports: ["text"],
       source: REALM_PROVING_SHIFT,
     });
     expect(add.success, add.error).toBe(true);
     try {
       const overlays = await runTool(request, "libi.get_overlays", { pieceId });
       const textId = String((overlays.data?.overlays as Array<{ id: string; kind: string }>).find((o) => o.kind === "text")?.id);
-      const apply = await runTool(request, "libi.apply_layer_effect", { pieceId, layerId: textId, phase: "loop", effectId: "e2e-shift" });
+      const apply = await runTool(request, "libi.layer_effect", { action: "apply", pieceId, layerId: textId, phase: "loop", effectId: "e2e-shift" });
       expect(apply.success, apply.error).toBe(true);
 
       // The page draws identity until the sampler answers, then repaints
@@ -963,7 +963,7 @@ test.describe("effect sampler — a custom effect body runs in its own sandbox",
       // The effect lives in the e2e home's effect registry, not in the piece:
       // remove it so later specs (and a re-run against the same home) start clean.
       // Soft: a failed cleanup is reported without masking the real failure.
-      expect.soft((await runTool(request, "libi.remove_effect", { id: "e2e-shift" })).success).toBe(true);
+      expect.soft((await runTool(request, "libi.effect", { action: "remove", id: "e2e-shift" })).success).toBe(true);
     }
   });
 });

@@ -10,15 +10,16 @@ import { moveDerivedArtifacts } from "@/lib/files/move-derived";
 import { getDb } from "@/lib/db/client";
 import { files, pieces } from "@/lib/db/schema";
 import { enqueueJobOnServer, logProxyGenEnqueueFailure } from "@/mcp/jobs-client";
-import { eq, isNull, desc } from "drizzle-orm";
+import { eq, isNull, desc, inArray } from "drizzle-orm";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { parseAudioRights, serializeAudioRights, type AudioRights } from "@/lib/audio-rights/types";
 import { parseAiGenerationMeta } from "@/lib/ai-generation/types";
-import { fileCarriesAudio } from "@/lib/audio-rights/read";
+import { derivedRights, effectiveRights, fileCarriesAudio } from "@/lib/audio-rights/read";
 import { generatedStamp, uploadedStamp } from "@/lib/audio-rights/stamp";
 import type { ToolContext, ToolResult } from "./types";
-import type { ListFilesParams, DuplicateFileParams, UploadFileParams, SaveAssetParams } from "./schemas";
+import { LIST_FILES_MAX_PIECES, type ListFilesParams, type DuplicateFileParams, type UploadFileParams, type SaveAssetParams } from "./schemas";
 import type { FileRecord } from "@/lib/db/schema/types";
+import { piecesByIds, piecesInFolder, resolveManyPieces, type TargetPiece } from "./piece-targets";
 
 /**
  * RC-D: confirm a non-null target `pieceId` maps to a real `pieces` row before
@@ -97,12 +98,67 @@ export async function saveAsset(
   };
 }
 
+function matchesQuery(f: FileRecord, query: string | undefined): boolean {
+  if (!query) return true;
+  const q = query.toLowerCase();
+  return f.name.toLowerCase().includes(q) || f.filename.toLowerCase().includes(q) || (f.description?.toLowerCase().includes(q) ?? false);
+}
+
+/** A file as the grouped (several-pieces) listing prints it: what picking one needs, nothing a loop of pieces repeats. */
+function compactFile(f: FileRecord) {
+  const rights = effectiveRights(f);
+  return {
+    id: f.id,
+    name: f.name,
+    filename: f.filename,
+    type: f.type,
+    ...(f.mediaDuration != null ? { mediaDuration: f.mediaDuration } : {}),
+    ...(f.mediaWidth != null && f.mediaHeight != null ? { mediaWidth: f.mediaWidth, mediaHeight: f.mediaHeight } : {}),
+    ...(f.hasAudio != null ? { hasAudio: f.hasAudio } : {}),
+    ...(rights ? { rights: rights.class, ...(rights.track?.title ? { track: rights.track.title } : {}) } : {}),
+  };
+}
+
+/**
+ * `libi.list_files` over several pieces (`pieceIds` / `pieceFolderId`): ONE call, grouped by piece, compact rows. With a
+ * `query` that finds exactly one file in every piece it adds `perPiece` ({ pieceId: { fileId } }, what an
+ * `libi.apply_ops` op takes), so "the song already in each copy" is one call and one paste, not a list per piece.
+ */
+function listFilesForPieces(pieceList: TargetPiece[], query: string | undefined): ToolResult {
+  const db = getDb();
+  const rows = db.select().from(files).where(inArray(files.pieceId, pieceList.map((p) => p.id))).orderBy(desc(files.createdAt)).all();
+  const byPiece = new Map<string, FileRecord[]>();
+  for (const f of rows) {
+    if (!f.pieceId || !matchesQuery(f, query)) continue;
+    byPiece.set(f.pieceId, [...(byPiece.get(f.pieceId) ?? []), f]);
+  }
+  const groups = pieceList.map((p) => ({ pieceId: p.id, name: p.name, files: (byPiece.get(p.id) ?? []).map(compactFile) }));
+  const data: Record<string, unknown> = { pieces: groups };
+  if (query) {
+    const notOne = groups.filter((g) => g.files.length !== 1);
+    if (notOne.length === 0) {
+      data.perPiece = Object.fromEntries(groups.map((g) => [g.pieceId, { fileId: g.files[0].id }]));
+    } else {
+      data.note = `No perPiece: ${notOne.map((g) => `${g.name || g.pieceId} has ${g.files.length}`).join(", ")} match "${query}". Narrow \`query\` until each piece has exactly one.`;
+    }
+  }
+  return { success: true, data };
+}
+
 export async function listFiles(
   ctx: ToolContext,
   params: ListFilesParams,
 ): Promise<ToolResult> {
   const db = getDb();
   const scope = params.scope ?? "piece";
+
+  if (params.pieceIds !== undefined || params.pieceFolderId !== undefined) {
+    if (params.scope !== undefined && params.scope !== "piece") return { success: false, error: "pieceIds / pieceFolderId list piece files: leave scope out (or 'piece')." };
+    const targets = resolveManyPieces(params, { max: LIST_FILES_MAX_PIECES });
+    if (!targets.ok) return { success: false, error: targets.error };
+    return listFilesForPieces(targets.pieces, params.query);
+  }
+  if (params.recursive !== undefined) return { success: false, error: "recursive only goes with pieceFolderId." };
 
   let result: FileRecord[];
 
@@ -114,20 +170,12 @@ export async function listFiles(
     // scope === "piece"
     const pieceId = params.pieceId ?? ctx.pieceId;
     if (!pieceId) {
-      return { success: false, error: "pieceId is required when scope is 'piece'" };
+      return { success: false, error: "pieceId is required when scope is 'piece' (or name pieceIds / pieceFolderId for several pieces in one call)" };
     }
     result = db.select().from(files).where(eq(files.pieceId, pieceId)).orderBy(desc(files.createdAt)).all();
   }
 
-  if (params.query) {
-    const q = params.query.toLowerCase();
-    result = result.filter(
-      (f) =>
-        f.name.toLowerCase().includes(q) ||
-        f.filename.toLowerCase().includes(q) ||
-        (f.description?.toLowerCase().includes(q) ?? false),
-    );
-  }
+  result = result.filter((f) => matchesQuery(f, params.query));
 
   return {
     success: true,
@@ -146,30 +194,18 @@ export async function getFileLocalPath(fileId: string): Promise<string | null> {
   return storage.localPath(row.pieceId, row.filename);
 }
 
-export async function duplicateFile(params: DuplicateFileParams): Promise<ToolResult> {
-  const { fileId, targetPieceId, name } = params;
-  const db = getDb();
-  const storage = await getStorage();
+const DUPLICATE_TARGETS_MESSAGE = "name exactly one of targetPieceId, targetPieceIds, targetPieceFolderId.";
 
-  const [source] = db
-    .select()
-    .from(files)
-    .where(eq(files.id, fileId))
-    .limit(1)
-    .all();
+type FileRow = typeof files.$inferSelect;
 
-  if (!source) {
-    return { success: false, error: `File not found: ${fileId}` };
-  }
-
-  // RC-D: never duplicate into a non-existent (or traversal-shaped) target piece.
-  if (!pieceExists(db, targetPieceId)) {
-    return { success: false, error: `Piece not found: ${targetPieceId}` };
-  }
-
-  // Read the file content from storage
-  const buffer = await storage.read(source.pieceId, source.filename);
-
+/** Copy `source`'s bytes into `targetPieceId` (null = global) under a name free there, same rights and provenance. */
+async function copyFileInto(
+  db: ReturnType<typeof getDb>,
+  source: FileRow,
+  buffer: Buffer,
+  targetPieceId: string | null,
+  name: string | undefined,
+): Promise<FileRecord> {
   // Generate a unique filename to avoid overwriting existing files at the target
   let targetFilename = source.filename;
   const existingFiles = db
@@ -190,7 +226,7 @@ export async function duplicateFile(params: DuplicateFileParams): Promise<ToolRe
   }
 
   // Store as a new file in the target location
-  const record = await storeFile({
+  return storeFile({
     pieceId: targetPieceId,
     filename: targetFilename,
     buffer,
@@ -208,15 +244,102 @@ export async function duplicateFile(params: DuplicateFileParams): Promise<ToolRe
     aiGeneration: parseAiGenerationMeta(source.aiGeneration),
     audioRights: parseAudioRights(source.audioRights),
   });
+}
 
+/**
+ * `libi.duplicate_file`. With `targetPieceId` (a piece, or null for global) it copies the file there and answers
+ * with the copy, as it always has. With `targetPieceIds` or `targetPieceFolderId` it copies it into EACH piece in
+ * this one call (the bytes read once, each piece getting its own row and bytes, the source's rights and provenance
+ * on every copy) and answers `{ files: [{ pieceId, fileId }], perPiece }` like `upload_file`'s multi-piece form:
+ * `perPiece` goes straight into an `libi.apply_ops` op. A target that is the source's own piece is not copied; it
+ * keeps the source, and `perPiece` names it so a fan-out over every piece still has a file for each.
+ */
+export async function duplicateFile(params: DuplicateFileParams): Promise<ToolResult> {
+  const { fileId, targetPieceId, targetPieceIds, targetPieceFolderId, recursive, name } = params;
+  const db = getDb();
+  const storage = await getStorage();
+
+  const named = [targetPieceId !== undefined, targetPieceIds !== undefined, targetPieceFolderId !== undefined].filter(Boolean).length;
+  if (named !== 1) return { success: false, error: `${named > 1 ? "Mixed targets: " : "No target: "}${DUPLICATE_TARGETS_MESSAGE}` };
+  if (recursive !== undefined && targetPieceFolderId === undefined) return { success: false, error: "recursive only goes with targetPieceFolderId." };
+
+  const [source] = db
+    .select()
+    .from(files)
+    .where(eq(files.id, fileId))
+    .limit(1)
+    .all();
+
+  if (!source) {
+    return { success: false, error: `File not found: ${fileId}` };
+  }
+
+  if (targetPieceId !== undefined) {
+    // RC-D: never duplicate into a non-existent (or traversal-shaped) target piece.
+    if (!pieceExists(db, targetPieceId)) {
+      return { success: false, error: `Piece not found: ${targetPieceId}` };
+    }
+    const buffer = await storage.read(source.pieceId, source.filename);
+    const record = await copyFileInto(db, source, buffer, targetPieceId, name);
+    return {
+      success: true,
+      data: {
+        fileId: record.id,
+        filename: record.filename,
+        name: record.name,
+        pieceId: record.pieceId,
+        sourceFileId: source.id,
+      },
+    };
+  }
+
+  // Resolve the targets BEFORE copying anything: an unknown piece refuses the whole call.
+  let targets: TargetPiece[];
+  if (targetPieceFolderId !== undefined) {
+    const found = piecesInFolder(targetPieceFolderId, recursive);
+    if ("missing" in found) return { success: false, error: `targetPieceFolderId: no folder ${targetPieceFolderId} (libi.piece_folder action list shows the ids).` };
+    if ("empty" in found) return { success: false, error: `targetPieceFolderId: folder ${targetPieceFolderId} holds no pieces${recursive ? "" : " (pass recursive: true to include its subfolders)"}.` };
+    targets = found.pieces;
+  } else {
+    const found = piecesByIds(targetPieceIds ?? []);
+    if (found.unknown.length > 0) {
+      return { success: false, error: `targetPieceIds: no such piece ${found.unknown.join(", ")}. Nothing was copied (libi.list_pieces shows the ids).` };
+    }
+    targets = found.pieces;
+  }
+  if (targets.length === 0) return { success: false, error: "targetPieceIds is empty." };
+  if (targets.length > UPLOAD_MAX_PIECES) {
+    return { success: false, error: `That names ${targets.length} pieces; the limit is ${UPLOAD_MAX_PIECES} per call. Split it across calls.` };
+  }
+
+  const toCopy = targets.filter((t) => t.id !== source.pieceId);
+  const buffer = toCopy.length > 0 ? await storage.read(source.pieceId, source.filename) : Buffer.alloc(0);
+  const stored: { pieceId: string; fileId: string }[] = [];
+  const errors: { pieceId: string; error: string }[] = [];
+  for (const piece of toCopy) {
+    try {
+      const record = await copyFileInto(db, source, buffer, piece.id, name);
+      stored.push({ pieceId: piece.id, fileId: record.id });
+    } catch (err) {
+      errors.push({ pieceId: piece.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  const ownPiece = targets.some((t) => t.id === source.pieceId) && source.pieceId !== null;
+  if (stored.length === 0 && !ownPiece) {
+    return { success: false, error: `Nothing was copied: ${errors.map((e) => `${e.pieceId}: ${e.error}`).join("; ")}` };
+  }
   return {
     success: true,
     data: {
-      fileId: record.id,
-      filename: record.filename,
-      name: record.name,
-      pieceId: record.pieceId,
+      files: stored,
+      // Straight into an apply_ops op: each piece applies its own file (the source's piece, the source itself).
+      perPiece: {
+        ...(ownPiece ? { [source.pieceId as string]: { fileId: source.id } } : {}),
+        ...Object.fromEntries(stored.map((f) => [f.pieceId, { fileId: f.fileId }])),
+      },
       sourceFileId: source.id,
+      ...(ownPiece ? { note: "The source's own piece was not copied into: it keeps the source file (perPiece names it)." } : {}),
+      ...(errors.length > 0 ? { errors } : {}),
     },
   };
 }
@@ -695,61 +818,201 @@ export async function assignFile(params: AssignFileParams): Promise<ToolResult> 
   };
 }
 
-export async function uploadFile(
-  ctx: ToolContext,
-  params: UploadFileParams,
-): Promise<ToolResult> {
-  const { filePath, name, description, aiGeneration, folderId } = params;
+/** What one upload reads off the user's disk and decides ONCE, however many pieces it then goes into. */
+interface PreparedUpload {
+  buffer: Buffer;
+  filename: string;
+  contentType: string | null;
+  media: Awaited<ReturnType<typeof probeMedia>>;
+  /** The source's rights when `derivedFromFileId` named one. */
+  inherited: AudioRights | null;
+  /** `undefined` leaves the stamp to storeFile (an `aiGeneration` upload is `generated`). */
+  audioRights: AudioRights | undefined;
+}
+
+/**
+ * Read, probe and decide the rights of `params.filePath`, or say why not. Nothing is stored here: every refusal
+ * (a missing file, a `derivedFromFileId` that is not a libi file) happens before the first byte lands anywhere.
+ */
+async function prepareUpload(params: UploadFileParams): Promise<{ error: string } | PreparedUpload> {
+  const { filePath, aiGeneration, derivedFromFileId } = params;
 
   try {
     await fs.access(filePath);
   } catch {
-    return { success: false, error: `File not found: ${filePath}` };
+    return { error: `File not found: ${filePath}` };
   }
 
-  const buffer = await fs.readFile(filePath);
+  // A file made from another libi file inherits that file's audio rights
+  // (`derivedRights`: the most restrictive of its inputs, read through
+  // `effectiveRights`). The agent may say "derived"; it can never say "owned" —
+  // the class comes from the source, not from the call. Checked before any
+  // byte is stored: a source that is not a libi file is refused, not guessed.
+  let inherited: AudioRights | null = null;
+  if (derivedFromFileId !== undefined) {
+    const [source] = getDb()
+      .select({
+        type: files.type,
+        hasAudio: files.hasAudio,
+        audioRights: files.audioRights,
+        createdAt: files.createdAt,
+        aiGeneration: files.aiGeneration,
+        description: files.description,
+      })
+      .from(files)
+      .where(eq(files.id, derivedFromFileId))
+      .limit(1)
+      .all();
+    if (!source) {
+      return { error: `derivedFromFileId ${derivedFromFileId} is not a libi file. Pass the id of the file this one was made from (libi.list_files), or omit it for a plain upload.` };
+    }
+    inherited = derivedRights([source]);
+  }
+
+  const buffer = Buffer.from(await fs.readFile(filePath));
   const filename = path.basename(filePath);
-  const contentType = mimeFromExtension(filename);
-
-  const media = await probeMedia(filePath);
-
-  const record = await storeFile({
-    pieceId: ctx.pieceId,
+  return {
+    buffer,
     filename,
-    buffer: Buffer.from(buffer),
-    contentType,
-    name,
-    description,
-    mediaDuration: media.duration,
-    mediaWidth: media.width,
-    mediaHeight: media.height,
-    hasAudio: media.hasAudio,
-    hasAlpha: media.hasAlpha,
-    aiGeneration,
+    contentType: mimeFromExtension(filename),
+    media: await probeMedia(filePath),
+    inherited,
     // A file from the user's disk is theirs (owner decision 2026-09-28); one
     // that carries `aiGeneration` is left to storeFile, which stamps it
     // generated. An agent that uploads a file it fetched from the web itself
     // stamps it copyrighted (`libi.set_audio_rights`, social-music skill §1).
-    audioRights: aiGeneration ? undefined : uploadedStamp(),
+    // A derived file takes its source's rights — and a copyrighted source wins
+    // over `aiGeneration` (an AI remix of a released song is still that song's).
+    // Otherwise as before: aiGeneration → generated (left to storeFile), else owned.
+    audioRights:
+      inherited && (inherited.class === "copyrighted" || !aiGeneration)
+        ? inherited
+        : aiGeneration
+          ? undefined
+          : uploadedStamp(),
+  };
+}
+
+/** Store a prepared upload in ONE piece: the single path every target of an upload goes through. */
+function storePrepared(pieceId: string, params: UploadFileParams, prep: PreparedUpload, folderId: string | undefined): Promise<FileRecord> {
+  return storeFile({
+    pieceId,
+    filename: prep.filename,
+    buffer: prep.buffer,
+    contentType: prep.contentType,
+    name: params.name,
+    description: params.description,
+    mediaDuration: prep.media.duration,
+    mediaWidth: prep.media.width,
+    mediaHeight: prep.media.height,
+    hasAudio: prep.media.hasAudio,
+    hasAlpha: prep.media.hasAlpha,
+    aiGeneration: params.aiGeneration,
+    audioRights: prep.audioRights,
     folderId,
   });
+}
 
+/** The facts of a stored file that read the same for every copy of an upload. */
+function uploadedFileFacts(record: FileRecord, prep: PreparedUpload, derivedFromFileId: string | undefined) {
+  return {
+    name: record.name,
+    type: record.type,
+    contentType: record.contentType,
+    size: record.size,
+    mediaDuration: record.mediaDuration,
+    mediaWidth: record.mediaWidth,
+    mediaHeight: record.mediaHeight,
+    // aiGeneration is the serialized JSON string as stored, or null. The
+    // agent can parse-and-display it for confirmation, or just rely on the
+    // editor's Generation tab. Test fixtures assert on this shape.
+    aiGeneration: record.aiGeneration ?? null,
+    // Said only for a derived file with audio, so the agent sees what it inherited.
+    ...(prep.inherited && fileCarriesAudio(record)
+      ? { audioRights: { class: parseAudioRights(record.audioRights)?.class ?? prep.inherited.class, inheritedFrom: derivedFromFileId } }
+      : {}),
+  };
+}
+
+/** The most pieces one `upload_file` call stores into (the same ceiling as `libi.apply_ops`). */
+export const UPLOAD_MAX_PIECES = 50;
+
+const UPLOAD_TARGETS_MESSAGE = "name exactly one of pieceId, pieceIds, pieceFolderId.";
+
+/**
+ * `libi.upload_file`. With `pieceId` it stores the file in that piece and answers with the file record, as it
+ * always has. With `pieceIds` or `pieceFolderId` it stores the file ONCE PER PIECE in this one call: each piece
+ * gets its own `files` row and its own bytes (files belong to a piece), read and probed once, the same
+ * provenance and rights stamped on every copy. It answers `{ files: [{ pieceId, fileId }], perPiece }` — the
+ * `perPiece` map is exactly what an `libi.apply_ops` op takes to give each piece its own `fileId`.
+ */
+export async function uploadFile(
+  ctx: ToolContext,
+  params: UploadFileParams,
+): Promise<ToolResult> {
+  const { pieceIds, pieceFolderId, recursive, folderId, derivedFromFileId } = params;
+  const named = [params.pieceId !== undefined, pieceIds !== undefined, pieceFolderId !== undefined].filter(Boolean).length;
+  if (named > 1 || (named === 0 && !ctx.pieceId)) return { success: false, error: `${named > 1 ? "Mixed targets: " : "No target piece: "}${UPLOAD_TARGETS_MESSAGE}` };
+  if (recursive !== undefined && pieceFolderId === undefined) return { success: false, error: "recursive only goes with pieceFolderId." };
+  const many = pieceIds !== undefined || pieceFolderId !== undefined;
+  if (many && folderId !== undefined) {
+    return { success: false, error: "folderId is an ASSET folder inside one piece, so it does not go with pieceIds / pieceFolderId. Upload without it, then move each file with libi.asset_folder." };
+  }
+
+  if (!many) {
+    const prep = await prepareUpload(params);
+    if ("error" in prep) return { success: false, error: prep.error };
+    const record = await storePrepared(params.pieceId ?? ctx.pieceId, params, prep, folderId);
+    return {
+      success: true,
+      data: { fileId: record.id, filename: record.filename, ...uploadedFileFacts(record, prep, derivedFromFileId) },
+    };
+  }
+
+  // Resolve the targets BEFORE storing anything: an unknown piece refuses the whole call.
+  let targets: TargetPiece[];
+  if (pieceFolderId !== undefined) {
+    const found = piecesInFolder(pieceFolderId, recursive);
+    if ("missing" in found) return { success: false, error: `pieceFolderId: no folder ${pieceFolderId} (libi.piece_folder action list shows the ids).` };
+    if ("empty" in found) return { success: false, error: `pieceFolderId: folder ${pieceFolderId} holds no pieces${recursive ? "" : " (pass recursive: true to include its subfolders)"}.` };
+    targets = found.pieces;
+  } else {
+    const found = piecesByIds(pieceIds ?? []);
+    if (found.unknown.length > 0) {
+      return { success: false, error: `pieceIds: no such piece ${found.unknown.join(", ")}. Nothing was uploaded (libi.list_pieces shows the ids).` };
+    }
+    targets = found.pieces;
+  }
+  if (targets.length === 0) return { success: false, error: "pieceIds is empty." };
+  if (targets.length > UPLOAD_MAX_PIECES) {
+    return { success: false, error: `That names ${targets.length} pieces; the limit is ${UPLOAD_MAX_PIECES} per call. Split it across calls.` };
+  }
+
+  const prep = await prepareUpload(params);
+  if ("error" in prep) return { success: false, error: prep.error };
+
+  const stored: { pieceId: string; fileId: string }[] = [];
+  const errors: { pieceId: string; error: string }[] = [];
+  let first: FileRecord | undefined;
+  for (const piece of targets) {
+    try {
+      const record = await storePrepared(piece.id, params, prep, undefined);
+      first ??= record;
+      stored.push({ pieceId: piece.id, fileId: record.id });
+    } catch (err) {
+      errors.push({ pieceId: piece.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (!first) return { success: false, error: `Nothing was uploaded: ${errors.map((e) => `${e.pieceId}: ${e.error}`).join("; ")}` };
   return {
     success: true,
     data: {
-      fileId: record.id,
-      filename: record.filename,
-      name: record.name,
-      type: record.type,
-      contentType: record.contentType,
-      size: record.size,
-      mediaDuration: record.mediaDuration,
-      mediaWidth: record.mediaWidth,
-      mediaHeight: record.mediaHeight,
-      // aiGeneration is the serialized JSON string as stored, or null. The
-      // agent can parse-and-display it for confirmation, or just rely on the
-      // editor's Generation tab. Test fixtures assert on this shape.
-      aiGeneration: record.aiGeneration ?? null,
+      files: stored,
+      // Straight into an apply_ops op: each piece applies its own file.
+      perPiece: Object.fromEntries(stored.map((f) => [f.pieceId, { fileId: f.fileId }])),
+      filename: prep.filename,
+      ...uploadedFileFacts(first, prep, derivedFromFileId),
+      ...(errors.length > 0 ? { errors } : {}),
     },
   };
 }

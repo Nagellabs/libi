@@ -18,7 +18,7 @@ export const ETA_MIN_DONE = 3;
  * Remaining-time estimate, aged by how long we have been waiting for the next
  * tick. THE ONE implementation of the formula — the live emit path
  * (`EtaTracker.etaMs`) and the read path (`snapshotFromRow`) both call this, so
- * a chat row and `libi.get_job_status` can never quote different numbers for
+ * a chat row and `libi.job({ action: "status" })` can never quote different numbers for
  * the same job.
  *
  * `msSinceProgress` is what makes this honest, and omitting it is what made the

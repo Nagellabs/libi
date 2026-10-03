@@ -86,6 +86,29 @@ describe("libi.fetch_template_music", () => {
     ]);
   });
 
+  it("places each clip with the template's gain, volume envelope and crossfade", async () => {
+    const env = { keyframes: [{ t: 0, value: 0 }, { t: 1.5, value: -12, easing: "ease-in" }] };
+    const m0 = await loadManifest("p1");
+    m0.pendingMusic = [{
+      ...PENDING,
+      clips: [
+        { startTime: 0, duration: 3, trimStart: 12, volume: 0.8, gainDb: -6, volumeKeyframes: env, crossfadeMs: 400 },
+        { startTime: 4, duration: 2, trimStart: 30, volume: 0.8 },
+      ],
+    }];
+    await saveManifest("p1", m0);
+    downloadVideo.mockImplementation(async () => {
+      getDb().insert(files).values({ id: "dl", pieceId: "p1", filename: "Espresso.mp3", name: "Espresso.mp3", description: "", type: "audio", storagePath: "p1/Espresso.mp3", hasAudio: true }).run();
+      return { success: true, data: { fileId: "dl" } };
+    });
+    expect((await fetchTemplateMusic({ pieceId: "p1", assetId: PENDING.assetId })).success).toBe(true);
+    const placed = ((await loadManifest("p1")).audioClips ?? []).filter((c) => c.fileId === "dl");
+    expect(placed.map((c) => [c.gainDb, c.volumeKeyframes, c.crossfadeMs])).toEqual([
+      [-6, env, 400],
+      [undefined, undefined, undefined],
+    ]);
+  });
+
   /** Task 22 review: the rights write failing must not lose the user's song. */
   it("still places the clips, and logs a warning, when recording the track on the file fails", async () => {
     // The downloader answers a file id that is not in this piece, so updateAudioRights answers ok:false.

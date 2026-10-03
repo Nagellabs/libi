@@ -69,7 +69,7 @@ describe("fake-fal model KB", () => {
 /**
  * One shared `VEO_SCHEMA` stood in for eight endpoints with eight
  * different input shapes. The visible cost: the dedicated FLF endpoint behind
- * `physical-action-video`'s headline technique advertised no way to pass a last
+ * the physical-action first-last-frame technique advertised no way to pass a last
  * frame at all, so an agent that did the right thing — read the schema before
  * calling — concluded the technique was unavailable, and a scenario exercising
  * it would have failed for a reason unrelated to the skill.

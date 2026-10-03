@@ -6,7 +6,7 @@ vi.mock("@/lib/navigation-events", () => ({ navigationEmitter: { emit: vi.fn() }
 
 import {
   createAssetFolderTool, renameAssetFolderTool, deleteAssetFolderTool,
-  moveAssetFolderTool, moveAssetTool, listAssetsTool,
+  moveAssetFolderTool, moveAssetTool, listAssetsTool, assetFolderPieceId, filePieceId,
 } from "@/mcp/tools/asset-folder-tools";
 
 let db: ReturnType<typeof createTestDb>;
@@ -64,5 +64,16 @@ describe("asset-folder tools", () => {
     const res = await deleteAssetFolderTool({ folderId: a.folder.id, mode: "cascade" });
     expect(res.success).toBe(false);
     expect(res.error).toContain("confirm");
+  });
+
+  it("the refresh helpers name the scope: a piece id, or undefined for the global pool and for a row that is not there", async () => {
+    const inPiece = (await createAssetFolderTool({ pieceId: "test-piece-1", name: "P" })).data as { folder: { id: string } };
+    const global = (await createAssetFolderTool({ pieceId: null, name: "G" })).data as { folder: { id: string } };
+    expect(assetFolderPieceId(inPiece.folder.id)).toBe("test-piece-1");
+    expect(assetFolderPieceId(global.folder.id)).toBeUndefined();
+    expect(assetFolderPieceId("nope")).toBeUndefined();
+    seedFile("file1");
+    expect(filePieceId("file1")).toBe("test-piece-1");
+    expect(filePieceId("nope")).toBeUndefined();
   });
 });

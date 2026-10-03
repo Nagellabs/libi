@@ -32,7 +32,7 @@ function truncate(value: string | null, cap = PIECE_TEXT_CAP): string | null {
  * overflows the agent's per-tool token limit (~75 KB observed) — the list gets
  * dumped to a file the agent then has to scrape. A discovery listing never needs
  * the script blob, so drop it and bound the free-text fields. The full script is
- * still reachable per-file via the Script tab / `analysis_get`.
+ * still reachable per-file via the Script tab / `libi.analysis_query` `get`.
  */
 function leanPiece(row: typeof pieces.$inferSelect) {
   const { description, snapshotSummary, ...rest } = row;

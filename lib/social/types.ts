@@ -70,6 +70,16 @@ export interface SocialTarget {
   url?: string;
   error?: string;
   options?: TargetOptions;
+  /**
+   * `inbox` when the provider answered "published" but the platform only took
+   * the video as an UPLOAD to the account's inbox / drafts (TikTok's inbox
+   * upload): the user still has to finish it in the platform's own app, and
+   * nothing is public. Set by the adapter from what the provider reports, so
+   * every reader says "sent to the inbox" instead of echoing "published" — an
+   * inbox upload used to come back as `published` / `PUBLIC_TO_EVERYONE` and
+   * read as a public post. Absent otherwise (`lib/social/status-words.ts`).
+   */
+  delivery?: "inbox";
 }
 
 export interface SocialPost {

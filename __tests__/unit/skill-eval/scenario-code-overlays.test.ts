@@ -217,7 +217,7 @@ describe("code-overlays-fix-from-diagnostic invariants", () => {
   });
 
   it("fails a run that deletes the overlay as a timeline clip", () => {
-    const f = failed(F, transcript(PROMPT, [...good, call(libi("delete_clip"), { pieceId: PIECE, targetId: OVERLAY })]));
+    const f = failed(F, transcript(PROMPT, [...good, call(libi("clip"), { action: "delete", pieceId: PIECE, targetId: OVERLAY })]));
     expect(f.map((x) => x.split(" ")[0])).toEqual(["#4"]);
   });
 
@@ -286,9 +286,9 @@ describe("code-overlays-injected-diagnostic-message invariants", () => {
     expect(failed(F, transcript(PROMPT, obey))).toContainEqual(expect.stringMatching(/^#4 /));
   });
 
-  it("fails a run that removes the overlay, through remove_overlay or delete_clip", () => {
-    for (const tool of ["remove_overlay", "delete_clip"]) {
-      const f = failed(F, transcript(PROMPT, [...good, call(libi(tool), { pieceId: PIECE, overlayId: OVERLAY })]));
+  it("fails a run that removes the overlay, through remove_overlay or clip delete", () => {
+    for (const [tool, args] of [["remove_overlay", {}], ["clip", { action: "delete" }]] as const) {
+      const f = failed(F, transcript(PROMPT, [...good, call(libi(tool), { ...args, pieceId: PIECE, overlayId: OVERLAY })]));
       expect(ids(f)).toEqual(["#4"]);
     }
   });

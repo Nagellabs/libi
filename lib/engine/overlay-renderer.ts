@@ -105,6 +105,10 @@ export interface LayerPlan {
 
 export interface LayerPlanContext {
   time: number;
+  /** How long the piece runs, in seconds (`getCompositionFrames / fps`) — the
+   *  body's `context.pieceDuration`. Absent: the end of the overlay itself, the
+   *  least the piece can be. */
+  pieceDuration?: number;
   fps: number;
   width: number;
   height: number;
@@ -191,7 +195,16 @@ export function planLayer(overlay: Overlay, c: LayerPlanContext): LayerPlan | nu
 function planLayerUncapped(overlay: Overlay, c: LayerPlanContext): LayerPlan | null {
   const timing = elementTiming(c.time, c.fps, overlay.startTime, overlay.duration);
   const words = overlay.caption?.words;
-  const common = { overlayId: overlay.id, frame: timing.frame, pixelRatio: c.renderScale, fps: c.fps, time: timing, ...(words ? { words } : {}) };
+  // The piece clock rides on the request's timing, not on `ElementTiming`: the
+  // keyframe maths read `timing` and must stay element-local. `time` is
+  // `c.time` exactly, so a body's `overlayStart + time` is `compositionTime`.
+  const bodyTiming = {
+    ...timing,
+    compositionTime: c.time,
+    overlayStart: overlay.startTime,
+    pieceDuration: c.pieceDuration ?? overlay.startTime + overlay.duration,
+  };
+  const common = { overlayId: overlay.id, frame: timing.frame, pixelRatio: c.renderScale, fps: c.fps, time: bodyTiming, ...(words ? { words } : {}) };
   if (overlay.kind === "code") {
     const rect = valueAt(overlay.keyframes?.rect ?? overlay.rect, timing);
     const size = layerSize(rect.width, rect.height);
@@ -227,6 +240,7 @@ function planLayerUncapped(overlay: Overlay, c: LayerPlanContext): LayerPlan | n
 function planContextOf(drawCtx: DrawOverlayContext, trackedBbox?: LayerPlanContext["trackedBbox"]): LayerPlanContext {
   return {
     time: drawCtx.time,
+    ...(drawCtx.pieceDuration === undefined ? {} : { pieceDuration: drawCtx.pieceDuration }),
     fps: drawCtx.fps,
     width: drawCtx.width,
     height: drawCtx.height,
@@ -288,6 +302,10 @@ function drawBodyLayer(
 }
 
 export interface DrawOverlayContext extends DrawContext {
+  /** How long the piece runs, in seconds — a body's `context.pieceDuration`.
+   *  `renderFrame` sets it; `totalFrames` here is the piece's, so this is
+   *  `totalFrames / fps` spelled out for the callers that have it. */
+  pieceDuration?: number;
   /** For video overlays. Keyed by overlay.id. */
   videoFrameSources?: Record<string, VideoFrameSource>;
   /** For image overlays. Keyed by overlay.id. */

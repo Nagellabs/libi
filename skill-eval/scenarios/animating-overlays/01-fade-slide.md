@@ -20,16 +20,17 @@ assertions: []
 ## Behavioral expectations
 - Added the title as a `kind: "text"` overlay (NOT a `code` overlay) reading
   "Grand Opening" near the top.
-- Animated the fade + slide with KEYFRAMES — used `libi.add_keyframe` with two
-  calls per property (a start + end keyframe: `opacity` 0→1 and `position` for the
-  upward slide). Did NOT author a `code` overlay `drawFunction` to animate the
+- Animated the slide with KEYFRAMES — used `libi.add_keyframe` with two calls (a
+  start + end keyframe of `position` for the upward slide). The fade is either the
+  same keyframe treatment (`opacity` 0→1 over the same window) or the `fade` effect
+  on the `in` slot. Did NOT author a `code` overlay `drawFunction` to animate the
   opacity/position — the whole point is the motion stays as timeline diamonds the
   user can re-time and re-curve.
 - Scoped the motion to roughly the first second of the window (via explicit
   keyframe times), not the whole clip.
 - Set a sensible easing on the motion (e.g. `ease-out` for the fade/slide entrance)
-  via the `easing` param or `libi.set_keyframe_easing` — did not leave it as a bare
+  via the `easing` param or `libi.keyframe({ action: "set_easing" })` — did not leave it as a bare
   linear ramp if a nicer entrance curve was obviously appropriate.
 - Did NOT reach for a code/three overlay to accomplish a plain transform+opacity
   transition, and did NOT confuse this with a text-reveal (typewriter) or a looping
-  effect (bob/pulse) — this is a one-way keyframed A→B transition.
+  effect (bob/pulse) — the slide is a one-way keyframed A→B transition.

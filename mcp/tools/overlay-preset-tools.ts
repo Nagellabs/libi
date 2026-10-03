@@ -46,7 +46,7 @@ function slugifyPresetName(name: string): string {
 }
 
 /**
- * save_overlay_preset — capture an overlay's reusable styling/animation/
+ * libi.overlay_preset save — capture an overlay's reusable styling/animation/
  * transform/effects fields under a slugged, deduped id derived from `name`.
  */
 export async function saveOverlayPreset(params: SaveOverlayPresetParams): Promise<ToolResult> {
@@ -99,14 +99,14 @@ export async function saveOverlayPreset(params: SaveOverlayPresetParams): Promis
   return { success: true, data: { presetId: id } };
 }
 
-/** list_overlay_presets — bundled + user presets, optionally filtered by kind. */
+/** libi.overlay_preset list — bundled + user presets, optionally filtered by kind. */
 export async function listOverlayPresets(params: ListOverlayPresetsParams): Promise<ToolResult> {
   const presets = await listPresets(params.kind);
   return { success: true, data: { presets } };
 }
 
 /**
- * apply_overlay_preset — merge a preset's captured fields onto an overlay. The
+ * libi.overlay_preset apply — merge a preset's captured fields onto an overlay. The
  * preset kind must match the target overlay kind. The `refresh_query
  * composition` event is emitted by the server registration on success.
  */
@@ -151,7 +151,7 @@ export async function applyOverlayPreset(params: ApplyOverlayPresetParams): Prom
   return { success: true };
 }
 
-/** delete_overlay_preset — remove a user-saved preset (bundled ids are a no-op). */
+/** libi.overlay_preset delete — remove a user-saved preset (bundled ids are a no-op). */
 export async function deleteOverlayPreset(params: DeleteOverlayPresetParams): Promise<ToolResult> {
   await deleteUserPreset(params.presetId);
   overlayLogger.info(

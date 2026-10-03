@@ -14,6 +14,7 @@
 import type { McpToolId } from "@/lib/agents/mcp-tool-id";
 import { parseMcpToolId } from "@/lib/agents/mcp-tool-id";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
+import { mergedToolAction } from "@/lib/agents/merged-tools";
 
 const LIBI_PLAIN = /^libi[._]/;
 
@@ -30,19 +31,24 @@ const BUNDLED_NAME_BY_ID = new Map<string, string>(
  *  (user-installed) servers are prettified generically from the wire segment.
  *
  *  Examples:
- *    "libi:libi.compute_object_track"          → "Libi Compute object track"
- *    "libi-tracking:libi.compute_object_track" → "Libi Compute object track"
+ *    "libi:libi.list_pieces"                   → "Libi List pieces"
+ *    "libi-tracking:libi.remove_background"    → "Libi Remove background"
  *    "youtube-downloader:ytdlp_search_videos"  → "YouTube Downloader Ytdlp search videos"
  *    "elevenlabs:creative_generate_speech"     → "ElevenLabs Generate speech"
  *    "fal-ai:generate_image"                   → "fal-ai Generate image"
  *    "My_Custom_MCP:do_thing"                  → "My Custom MCP Do thing"
+ *
+ *  A merged libi tool (`libi.keyframe`, `libi.show`, … — lib/agents/merged-tools.ts) names
+ *  the one thing it did when the call's `args` are passed: "Libi Keyframe · set easing".
  */
-export function formatToolId(id: McpToolId): string {
+export function formatToolId(id: McpToolId, args?: unknown): string {
   const parsed = parseMcpToolId(id);
   if (!parsed) return id;
   const { serverId, toolName } = parsed;
   if (serverId === "libi" || serverId === "libi-tracking") {
-    return formatLibiName(toolName);
+    const label = formatLibiName(toolName);
+    const action = mergedToolAction(toolName, args);
+    return action ? `${label} · ${action.replace(/_/g, " ")}` : label;
   }
   const known = KNOWN_PROVIDER_LABELS.get(serverId.toLowerCase());
   const serverLabel = known?.label ?? formatServerLabel(serverId);

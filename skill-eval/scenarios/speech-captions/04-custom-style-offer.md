@@ -5,7 +5,7 @@ skills: [speech-captions, animated-text-overlays]
 mcps: []
 agent: claude-code
 runs: 1
-covers: [text-overlay, caption-style, create_caption_style, reusable-artifact]
+covers: [text-overlay, caption-style, caption_style, reusable-artifact]
 ---
 
 ## Prompt
@@ -22,7 +22,7 @@ assertions: []
   `stroke`, and any background/shadow that reads as "punchy") on the caption text
   overlay(s) — NOT baked into a `code` overlay.
 - BECAUSE the user signaled they want to reuse the look, offered (consent-first) to save
-  it as a REUSABLE custom caption style via `libi.create_caption_style({ … })` — which
+  it as a REUSABLE custom caption style via `libi.caption_style({ action: "create", … })` — which
   persists and appears in the Style tab's custom list for any caption — instead of
   re-specifying the same color/stroke fields per caption every time.
 - Did NOT just describe the look in prose or hardcode it; the deliverable is an applied,
@@ -30,5 +30,5 @@ assertions: []
 
 ## Inverse (judge reference — NOT the prompt)
 If the user had asked for a one-off look with no reuse intent, simply setting the style
-fields (without the create_caption_style offer) is acceptable — the offer is prompted by
+fields (without the caption_style offer) is acceptable — the offer is prompted by
 the "reuse on other videos" signal.

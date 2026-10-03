@@ -43,12 +43,12 @@ describe("JobManager concurrency", () => {
     const pb = mgr.runToCompletion(bId);
 
     // Let the first runner start, then release it.
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(1));
     expect(activeCount).toBe(1);
     release[0]();
     await pa;
     // Now the second runner has a slot.
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(2));
     expect(activeCount).toBe(1);
     release[1]();
     await pb;
@@ -71,11 +71,11 @@ describe("JobManager concurrency", () => {
     expect(mgr.activeOrWaiting("k-busy")).toBe(0);
     const pa = mgr.runToCompletion(jobIdOf(await mgr.enqueue("k-busy", { v: "a" })));
     const pb = mgr.runToCompletion(jobIdOf(await mgr.enqueue("k-busy", { v: "b" })));
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(1));
     expect(mgr.activeOrWaiting("k-busy")).toBe(2); // one running, one waiting for the slot
     release[0]();
     await pa;
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(2));
     expect(mgr.activeOrWaiting("k-busy")).toBe(1);
     release[1]();
     await pb;
@@ -107,8 +107,7 @@ describe("JobManager concurrency", () => {
     const pb = mgr.runToCompletion(bId).catch((e) => e);
 
     // Wait for runner `a` to be active.
-    await new Promise((r) => setTimeout(r, 20));
-    expect(runCount).toBe(1);
+    await vi.waitFor(() => expect(runCount).toBe(1));
 
     // Cancel the queued one.
     await mgr.cancel(bId);
@@ -152,11 +151,11 @@ describe("JobManager concurrency", () => {
     const pb = mgr.runToCompletion(bId);
     const pc = mgr.runToCompletion(cId);
 
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(2));
     expect(activeCount).toBe(2); // a + b
     release[0](); release[1]();
     await pa; await pb;
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(3));
     expect(activeCount).toBe(1); // c
     release[2]();
     await pc;

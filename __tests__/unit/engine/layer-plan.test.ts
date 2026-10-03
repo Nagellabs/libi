@@ -22,11 +22,23 @@ describe("planLayer", () => {
     const plan = planLayer(o, base)!;
     expect(plan.request).toEqual({
       overlayId: "c1", kind: "code", frame: 15, size: { width: 300, height: 150 }, pixelRatio: 2, fps: 30,
-      time: { frame: 15, time: 0.5, totalFrames: 60, duration: 2, progress: 0.25 },
+      time: { frame: 15, time: 0.5, totalFrames: 60, duration: 2, progress: 0.25, compositionTime: 1, overlayStart: 0.5, pieceDuration: 2.5 },
       words: [{ text: "hi", start: 0, end: 1 }],
     });
     expect(plan.request.pad).toBeUndefined(); // plain code stays clipped to its rect
     expect(plan.rollRad).toBe(0);
+  });
+  it("code: the request's timing carries the piece clock — compositionTime is the frame's own time, overlayStart the overlay's start, pieceDuration what the caller says", () => {
+    const o = { id: "c1", kind: "code", startTime: 11.3, duration: 4, z: 0, opacity: 1, rect: { x: 0, y: 0, width: 10, height: 10 }, drawFunction: "" } as unknown as Overlay;
+    const t = planLayer(o, { ...base, time: 12.5, pieceDuration: 24 })!.request.time;
+    expect(t).toMatchObject({ compositionTime: 12.5, overlayStart: 11.3, pieceDuration: 24 });
+    expect(t.time).toBeCloseTo(1.2, 9);
+    expect(t.compositionTime).toBeCloseTo(t.overlayStart! + t.time, 9);
+    // Without one, the piece is at least as long as the overlay runs.
+    expect(planLayer(o, { ...base, time: 12.5 })!.request.time.pieceDuration).toBeCloseTo(15.3, 9);
+    // The wire accepts it as planned.
+    const { overlayId, ...rest } = planLayer(o, { ...base, time: 12.5, pieceDuration: 24 })!.request;
+    expect(parseHostMessage({ t: "render", id: overlayId, req: 1, ...rest })).not.toBeNull();
   });
   it("code: inside a size-changing keyframe segment it sends the segment's two sizes; a static rect, a position-only segment and the hold after a tween send none", () => {
     const r = { x: 0, y: 0, width: 400, height: 200 };
@@ -117,5 +129,8 @@ describe("collectLayerRequests", () => {
     const reqs = collectLayerRequests(comp, 5, 1);
     expect(reqs.map((r) => r.overlayId)).toEqual(["a", "b"]);
     expect(reqs[0].time.frame).toBe(5);
+    // pieceDuration is the piece's, not the overlay's: the latest overlay ends at 6 s.
+    expect(reqs.map((r) => r.time.pieceDuration)).toEqual([6, 6]);
+    expect(reqs.map((r) => r.time.compositionTime)).toEqual([0.5, 0.5]);
   });
 });

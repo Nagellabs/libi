@@ -67,7 +67,7 @@ export interface SessionEntry {
   listeners: Set<(event: AgentEvent) => void>;
   /** Permission requests awaiting user decision. Keyed by pendingId. */
   pendingApprovals: Map<string, PendingApproval>;
-  /** Set by libi.restart_acp_session — instructs the SessionManager to reload
+  /** Set by libi.extension({ action: "restart_session" }) — instructs the SessionManager to reload
    *  this session's ACP connection after the current prompt unwinds. */
   reloadPending?: boolean;
   /** ACP session config options from new/load session (contains the `model`

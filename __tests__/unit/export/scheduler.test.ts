@@ -71,8 +71,7 @@ describe("ExportScheduler", () => {
     expect(bIn).toBe(false);
     expect(s.waitingInfo("b")?.reason).toBe("memory");
     snap = { ...snap, availMemBytes: 12 * GB };
-    await tick(60);
-    expect(bIn).toBe(true);
+    await vi.waitFor(() => expect(bIn).toBe(true)); // the next 20 ms re-evaluation lets it in
     a.release();
     (await b).release();
   });
@@ -116,8 +115,7 @@ describe("ExportScheduler", () => {
     await tick(40);
     expect(bgIn).toBe(false);
     busy = false;
-    await tick(400);
-    expect(bgIn).toBe(true);
+    await vi.waitFor(() => expect(bgIn).toBe(true));
     (await bg).release();
   });
 
@@ -182,8 +180,7 @@ describe("ExportScheduler — memory still ramping up", () => {
     expect(s.waitingInfo("b")?.reason).toBe("memory");
     expect(info).toHaveBeenCalledWith(expect.objectContaining({ op: "schedule_wait", exportId: "b", reason: "memory", availMB: 12288, rampMB: 6144 }), "export.schedule_wait");
     t += MEMORY_RAMP_MS + 1; // by now the first has allocated and the OS figure shows it
-    await tick(60);
-    expect(bIn).toBe(true);
+    await vi.waitFor(() => expect(bIn).toBe(true));
     a.release();
     (await b).release();
   });

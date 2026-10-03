@@ -21,7 +21,7 @@ import { files, mcpServers } from "@/lib/db/schema/sqlite";
 import { seedDatabase } from "@/lib/db/init";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 vi.mock("@/lib/db/client", () => ({ getDb: vi.fn() }));
 
@@ -102,15 +102,15 @@ afterEach(async () => {
 });
 
 describe("compute_object_track MCP surface (compute paths file)", () => {
-  it("libi.compute_object_track is registered on the libi-tracking MCP", () => {
+  it("libi.track compute is registered on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("libi.compute_object_track IS registered on the core libi MCP (always-on)", () => {
+  it("libi.track compute IS registered on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 });
@@ -186,7 +186,7 @@ describe("computeObjectTrack post-fan-out paths", () => {
 });
 
 // Regression: lisa-13 24s cameraman-wobble. A standalone agent repair
-// (libi.compute_track_segment) must land at provenance:"agent" so it
+// (libi.track compute_segment) must land at provenance:"agent" so it
 // authoritatively outranks the engine seed; the computeObjectTrack shot
 // fan-out must keep its per-shot SEED at provenance:"engine". Before this,
 // every agent repair tied the seed at "engine" and won only by a
@@ -233,7 +233,7 @@ describe("compute_track_segment provenance precedence", () => {
     ).toBe(true);
 
     // 2. Standalone agent repair over an overlapping window — no provenance
-    //    passed (mirrors the libi.compute_track_segment registration path).
+    //    passed (mirrors the libi.track compute_segment registration path).
     //    Correct-subject box at x=200.
     vi.mocked(runJobViaServer).mockResolvedValueOnce({
       jobId: "job-repair",
@@ -290,5 +290,40 @@ describe("compute_track_segment provenance precedence", () => {
     const final = await readTrack(PIECE_ID, trackId);
     const at2 = final?.samples.find((s) => Math.abs(s.t - 2) < 1e-6);
     expect(at2?.x).toBe(200); // agent repair wins despite newer+wider engine seed
+  });
+});
+
+// The jobs↔chat progress bridge (lib/agents/session-event-handler.ts) pairs a job with the chat row of the
+// libi.track call that started it. The shot fan-out's per-shot jobs say so in their `toolHint`: they belong to
+// the call whose action is `compute`, and carry a label ("segment 1/2") for the progress line.
+describe("shot fan-out names the merged tool and its action in each sub-job's toolHint", () => {
+  it("passes { toolName: libi.track, toolArgs: { action: compute }, progressLabel } on every per-shot job", async () => {
+    const { computeObjectTrack } = await import("@/mcp/tools/tracking-tools");
+    vi.mocked(runJobViaServer)
+      .mockResolvedValueOnce({
+        jobId: "job-shots",
+        resumed: false,
+        result: { shots: [{ start: 0, end: 2 }, { start: 2, end: 4 }], samples: [], framerate: 30 },
+      } as never)
+      .mockResolvedValue({
+        jobId: "job-seg",
+        resumed: false,
+        result: { samples: [{ t: 1, x: 1, y: 1, w: 8, h: 8, confidence: 0.9, visible: true }], framerate: 30 },
+      } as never);
+
+    await computeObjectTrack({
+      fileId: FILE_ID,
+      objectKind: "object",
+      anchors: [{ fileId: FILE_ID, time: 0, bbox: [0, 0, 10, 10] as [number, number, number, number] }],
+    });
+
+    const hints = vi
+      .mocked(runJobViaServer)
+      .mock.calls.map((c) => (c[2] as { toolHint?: unknown } | undefined)?.toolHint)
+      .filter(Boolean);
+    expect(hints).toEqual([
+      { toolName: "libi.track", toolArgs: { action: "compute" }, progressLabel: "segment 1/2" },
+      { toolName: "libi.track", toolArgs: { action: "compute" }, progressLabel: "segment 2/2" },
+    ]);
   });
 });

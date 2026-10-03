@@ -58,7 +58,7 @@ Tags in use: `ffmpeg` (pair with `.op`), `proxy`, `filmstrip`, `export` (`record
 `social-music` (rights and music at posting: `plan_resolved`, `catalog_unavailable`, `account_kind_detected`,
 `export_audio_excluded`, `template_music_pending`, `template_music_fetched`; also `rights_set`, `owned_refused`,
 `facts_put_refused`, `facts_get_refused`, `catalog_refused`, `track_refused`, `preview_refused`, `preview_failed`,
-`piece_rights_read_failed`, `pending_music_read_failed`, `template_example_audio_dropped`, `template_music_rights_failed`),
+`piece_rights_read_failed`, `pending_music_read_failed`, `facts_record_failed` (a catalog read's evidence about the account could not be stored — `recordCatalogOutcome` clears a cached "Reconnect with Facebook Login" the moment a search succeeds), `template_example_audio_dropped`, `template_music_rights_failed`),
 `overlay-sandbox`, `uv-env` (op `uv_offline`: a uv run that could not download its managed Python or packages;
 `python_prefetched` / `python_prefetch_failed` / `python_prefetch_schedule_failed`: the background Python prefetch),
 `e2e` (the test-only `/api/e2e/*` routes: `run_tool_refused`, `run_tool_failed`),
@@ -186,11 +186,19 @@ Every one of these has broken something. Do not relax one without evidence.
   the browser-only checks (`browserOnlyRefusal`) plus a `confirmCode` no tool, tool result or
   log line ever carries. The same checks guard visibility, the nickname and the creator key's
   import and reveal; the approval card's answer, the approval mode and an extension's "Require
-  approval" switch (`libi.update_mcp_server` may only turn it ON); social publish / schedule /
+  approval" switch (`libi.extension` action `update` may only turn it ON); social publish / schedule /
   edit / delete / retry (an agent's `libi.post_piece` draft is exempt), connect / disconnect and
   the social settings; the catalog report; and a chat's Restart session
   (`POST /api/sessions/:id/restart`). Honest limits in `lib/approval/extensions.ts`
   LIMITATIONS.
+- **`libi.apply_ops` runs the registered tools, never a copy of them, and writes only drafts.** Each op goes
+  through the tool's own handler (`mcp/tools/apply-ops-invoker.ts` reads the server's registry), and per piece
+  inside a draft transaction (`lib/composition/manifest-transaction.ts`): while one is active, `loadManifest` /
+  `saveManifest` read and write an in-memory copy, so a failed op leaves nothing to undo and `dryRun` is the
+  same run without the final save. Everything that edits a composition must keep going through that seam
+  (`persistence.ts`); a handler that writes anything ELSE (a file row, a job, a platform call) does not belong
+  in `APPLY_OPS_ALLOWED`, because a rollback would not reach it. Tool-level `notify.refreshQuery` is held
+  during a batch and sent once per piece (`holdRefreshQueries`); `tool_used` is reported once per op, not per piece.
 - **Song matching speaks the provider abstraction only.** `lib/social/music-match.ts`, the
   `music-match` / `platform-picks` routes, `libi.audio_add_clip` / `libi.set_audio_rights` and the
   music UI read catalogs through `SocialAdapter` (`withAdapter`) and decide everything platform-shaped
@@ -293,8 +301,7 @@ Every one of these has broken something. Do not relax one without evidence.
   `.agents/skills`), mirrored by `libi connect` and into `~/.libi/agent`.
 
 **Overlay sandbox**
-- **Custom effect bodies (`animate.js`: `libi.add_effect` / `update_effect` / git
-  installs) never run in the app origin either** — not in the preview, not on `/render`.
+- **Custom effect bodies (`animate.js`: `libi.effect` actions `add` / `update` / `install_from_git`) never run in the app origin either** — not in the preview, not on `/render`.
   The effect sampler (`lib/sandbox/effect-sampler.ts`), a sandbox of its own on the same
   runtime bundle, runs the body and answers with a numeric table (1025 samples of every
   `TransformDelta` field, `lib/effects/curve.ts`); the page validates every number and
@@ -472,6 +479,10 @@ Every one of these has broken something. Do not relax one without evidence.
 - Outside `<LIBI_HOME>/agent`, skill roots are written only through
   `writeSkillsToRoot({ external: true })`; libi may delete only manifest-listed real skill
   folders there — never a link, a file, or a folder it didn't write.
+  A user-level root libi wrote before installs were recorded (a manifest, no `skill_installs` row) is
+  refreshed on boot and on a skill change (`mcp/skills/legacy-user-roots.ts`), but only from a LIBI_HOME
+  inside the user's home and not a worktree's: a vitest, skill-eval or worktree home never rewrites the
+  real `~/.agents/skills`. Verify it with a scratch `HOME`, never the real one.
 - **Exports live in the piece.** A finished export is `<storage>/<pieceId>/exports/<name>.<ext>`
   plus a `piece_exports` row (lib/exports/store.ts) — the row is the source of truth; an
   `export` job row can be replaced by a same-params re-export, the record can't. There is no
@@ -546,7 +557,38 @@ runtime-installed ACP adapters) are different things.
 - **A new MCP tool** — implementation in `mcp/tools/`, Zod v3 schema in
   `mcp/tools/schemas.ts`, register in `mcp/server.ts`. libi bundles no third-party MCP and
   has no `generation` gate any more; a paid tool on libi's own MCP has no automatic gate,
-  so the owning skill must make the agent disclose cost and confirm.
+  so the owning skill must make the agent disclose cost and confirm. Then classify it for `libi.apply_ops`:
+  allowed or refused in `lib/agents/apply-ops-allowlist.ts` (a drift test fails until you do).
+- **A merged ("action") tool** (`libi.keyframe`, `libi.show`, `libi.job`, …) — one noun-named tool whose old verbs
+  are values of `action` (or `target`/`kind`). Name and discriminator go in `lib/agents/merged-tools.ts` (data
+  only: the chat label and `tool_used` read it); the def goes in `mcp/tools/families/` (each action = the
+  ORIGINAL zod schema + handler, unchanged) and registers through `MERGED_TOOLS` in `mcp/server.ts`.
+  `mcp/tools/action-tool.ts` advertises one flat schema and re-validates each call against the action's own
+  schema, so strict stays strict. Never merge an extension-gated verb with ungated ones: the extension approval
+  gate and the agent's remembered "don't ask again" are both keyed on the tool NAME, and nothing in
+  `registerActionTool` can tell (`merged-tool-risk.test.ts` pins that only the two tracking tools belong to an
+  extension). Declare every action as read-only or changing in `MERGED_TOOL_RISK` (`lib/agents/merged-tools.ts`):
+  a tool with any changing action is never offered "don't ask again" (`withholdAllowAlways`), and a drift test
+  fails when an action is left out. A per-action `gate` (`surface`, `check`) exists for the rest; no family uses one yet.
+  The tracking family (`libi.track`, `libi.tracked_overlay`) is the one registered elsewhere: `registerTrackingTools`
+  (shared with the standalone `serve-mcp-tracking`), and `libi-tracking`'s `toolPrefixes` (`libi.track`,
+  `libi.tracked_overlay`) gate it. A job runner's `mcpToolId` may name a merged tool: the progress bridge tells
+  its actions apart by `action` (`lib/sessions/tool-call-matcher.ts`), so a sub-job's `toolHint` carries one
+  (`{ action: "compute" }` for the shot fan-out). A property that differs between actions goes in `widen` (the
+  loosest type is advertised, each action still enforces its own); a spelling a sibling action uses for the same
+  property goes in the action's `aliases`.
+  The e2e `run-tool` harness runs a merged tool through `RUN_ACTION_TOOLS` (`lib/e2e/run-tool-input.ts`), never a
+  per-verb entry. Write calls as `libi.<tool>({ action: "x", … })` and running prose as `` `libi.<tool>` action `x` ``
+  (`target` for `libi.show`, `kind` for `libi.social_link`) in skills and the manual. Descriptions stay short (the
+  families test caps them); a per-action rule lives in the `action` property's text, which is where an agent reads it.
+- **Bytes in `tools/list`** — every tool's schema is paid in context whenever an agent loads it (both clients defer
+  libi's tools and load them by name; `ALWAYS_LOAD_TOOLS` in `lib/mcp/agent-surface.ts` are the few loaded up front,
+  capped by a test). Guidance about a RESULT goes in the result's `note`, returned only when it applies, not in
+  the description. A large nested field the agent rarely writes may be advertised open (`mcp/tools/advertised-schemas.ts`,
+  or `widen` on a merged tool) when a skill documents its shape; the handler still validates the full zod
+  (`parseInFull`) before doing anything. Never open up `add_overlay` / `update_overlay`. Schemas are served without
+  `$schema` and with tuples rewritten (`mcp/tools-list-shape.ts`): an ajv 2020-12 test compiles every served schema,
+  because Claude Code silently drops a tool whose schema fails that check.
 - **A job runner** — `lib/jobs/runners/<kind>.ts`, register in `registry.ts`, set
   `mcpToolId` when an agent-called tool drives it, pick `maxConcurrent` by resource cost.
 - **A bundled skill, or a substantive change to one** — ship a `skill-eval` scenario with

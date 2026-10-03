@@ -47,7 +47,7 @@ afterEach(() => {
 const readManifest = () =>
   JSON.parse(readFileSync(join(storageRoot, "storage", PIECE_ID, "composition.json"), "utf-8"));
 
-describe("audio_duck_enable", () => {
+describe("libi.audio_duck enable", () => {
   it("attaches a duck object with defaults to the target clip", async () => {
     const result = await audioDuckEnable(
       { pieceId: PIECE_ID },
@@ -90,7 +90,7 @@ describe("audio_duck_enable", () => {
   });
 });
 
-describe("audio_duck_disable", () => {
+describe("libi.audio_duck disable", () => {
   it("removes the duck object", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
@@ -105,7 +105,7 @@ describe("audio_duck_disable", () => {
   });
 });
 
-describe("audio_duck_update", () => {
+describe("libi.audio_duck update", () => {
   it("patches individual duck fields", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
@@ -131,7 +131,7 @@ describe("audio_duck_update", () => {
   });
 });
 
-describe("audio_duck_disable idempotency + edge cases", () => {
+describe("libi.audio_duck disable idempotency + edge cases", () => {
   it("disabling a clip with no ducking is a no-op success", async () => {
     const result = await audioDuckDisable(
       { pieceId: PIECE_ID },
@@ -152,7 +152,7 @@ describe("audio_duck_disable idempotency + edge cases", () => {
   });
 });
 
-describe("audio_duck_update edge cases", () => {
+describe("libi.audio_duck update edge cases", () => {
   it("updating with no fields returns the existing duck unchanged", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
@@ -188,7 +188,7 @@ describe("audio_duck_update edge cases", () => {
  * had to be ffmpeg'd into one 42-second "VO bus" clip and re-rendered on every
  * retime. The single-id form stays accepted so older skills keep working.
  */
-describe("audio_duck_enable — multiple sidechains", () => {
+describe("libi.audio_duck enable — multiple sidechains", () => {
   const readDuck = () =>
     readManifest().audioClips.find((c: { id: string }) => c.id === "music").duck;
 
@@ -227,7 +227,7 @@ describe("audio_duck_enable — multiple sidechains", () => {
     expect(result.success).toBe(false);
   });
 
-  it("audio_duck_update replaces the whole sidechain set", async () => {
+  it("libi.audio_duck update replaces the whole sidechain set", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
       { pieceId: PIECE_ID, clipId: "music", sidechainClipIds: ["vo"] },
@@ -240,7 +240,7 @@ describe("audio_duck_enable — multiple sidechains", () => {
     expect(readDuck().sidechainClipIds).toEqual(["vo2", "vo3"]);
   });
 
-  it("audio_duck_update leaves the sidechain set alone when patching other params", async () => {
+  it("libi.audio_duck update leaves the sidechain set alone when patching other params", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
       { pieceId: PIECE_ID, clipId: "music", sidechainClipIds: ["vo", "vo2"] },
@@ -250,7 +250,7 @@ describe("audio_duck_enable — multiple sidechains", () => {
     expect(readDuck().ratio).toBe(8);
   });
 
-  it("audio_duck_update rejects a sidechain set that would form a cycle", async () => {
+  it("libi.audio_duck update rejects a sidechain set that would form a cycle", async () => {
     await audioDuckEnable(
       { pieceId: PIECE_ID },
       { pieceId: PIECE_ID, clipId: "music", sidechainClipIds: ["vo"] },

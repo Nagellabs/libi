@@ -36,6 +36,8 @@ describe("updateMemories", () => {
     expect(result.success).toBe(true);
     expect(readMemories()).toBe("existing\n\nnew memory\n");
     expect(notify.instructionsChanged).toHaveBeenCalledTimes(1);
+    // Tells the agent its chat is NOT restarted and when the memory applies.
+    expect(result.data).toMatchObject({ ok: true, mode: "append", note: expect.stringContaining("new chats") });
   });
 
   it("replace mode rewrites the file", async () => {

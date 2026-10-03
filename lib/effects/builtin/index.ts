@@ -30,7 +30,7 @@ import {
 } from "./text-internal";
 
 /** The ONE definition site for built-in effects. Each effect task appends its
- *  EffectDef here. The registry, picker, list_effects tool, and skill drift
+ *  EffectDef here. The registry, picker, libi.effect list action, and skill drift
  *  test all derive from this array — never a second hand-maintained list. */
 export const BUILTIN_EFFECTS: EffectDef[] = [
   fadeEffect,

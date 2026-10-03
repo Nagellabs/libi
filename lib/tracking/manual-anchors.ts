@@ -224,8 +224,8 @@ function nearestConfidentSample(
  * Manual mode (default): the box is the user's literal correction
  * (size-reconciled to the local envelope, centre preserved) — unchanged.
  *
- * Agent mode: agent anchors are whole-person boxes from ground_target /
- * analysis. The engine head re-track (run by compute_track_segment, seeded
+ * Agent mode: agent anchors are whole-person boxes from libi.track ground_target /
+ * analysis. The engine head re-track (run by libi.track compute_segment, seeded
  * by these anchors) is the source of truth. The render override only steps
  * in where that re-track is provably wrong:
  *  - confident engine box AGREES horizontally with the anchor → SKIP (trust

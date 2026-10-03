@@ -37,6 +37,21 @@ describe("ProviderSuggestionCard", () => {
     expect(screen.getByText("To make holograms you need a provider")).toBeInTheDocument();
   });
 
+  it("a browser card reads as a tool the agent needs, and connects Playwright on the Providers tab", () => {
+    const browser: ProviderSuggestionPayload = {
+      kind: "browser",
+      covered: [],
+      suggested: [{ id: "playwright", name: "Playwright", kinds: ["browser"], kind: "remote-mcp" }],
+    };
+    render(<ProviderSuggestionCard payload={browser} sessionId="sess-2" />);
+    expect(screen.getByText("This needs a browser I can drive")).toBeInTheDocument();
+    expect(screen.queryByText(/To make/)).toBeNull();
+    expect(screen.getByRole("link", { name: /Connect Playwright/ })).toHaveAttribute(
+      "href",
+      "/agents?tab=providers&provider=playwright&from=sess-2",
+    );
+  });
+
   it("omits from= when the card has no session", () => {
     render(<ProviderSuggestionCard payload={music} sessionId={null} />);
     expect(screen.getByRole("link", { name: /Connect ElevenLabs/ })).toHaveAttribute(

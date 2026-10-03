@@ -3,7 +3,7 @@
  * A caption STYLE is the static-look subset of a text overlay (color + optional
  * stroke / shadow / background / font). The user picks one from the Style tab.
  * The agent can create new ones from a user's example (e.g. "make me a punchy
- * pink one with a thick black outline") via `create_caption_style`; they
+ * pink one with a thick black outline") via `libi.caption_style` (create); they
  * persist and show in the Style list for later reuse.
  *
  * Persistence reuses the overlay-preset store: a user caption style is stored as
@@ -53,7 +53,7 @@ function isReservedId(id: string): boolean {
 }
 
 /**
- * create_caption_style — persist a new user caption style from explicit look
+ * caption_style create — persist a new user caption style from explicit look
  * fields (no overlay needed). Slug derived from `name`; reserved-id and
  * name-uniqueness guarded (override to replace).
  */
@@ -100,13 +100,13 @@ export async function createCaptionStyle(
   return { success: true, data: { styleId: id } };
 }
 
-/** list_caption_styles — bundled + user caption styles (the Style-tab list). */
+/** caption_style list — bundled + user caption styles (the Style-tab list). */
 export async function listCaptionStylesTool(): Promise<ToolResult> {
   const styles = await listCaptionStyles();
   return { success: true, data: { styles } };
 }
 
-/** delete_caption_style — remove a user caption style (bundled ids are a no-op). */
+/** caption_style delete — remove a user caption style (bundled ids are a no-op). */
 export async function deleteCaptionStyle(
   params: DeleteCaptionStyleParams,
 ): Promise<ToolResult> {

@@ -1079,7 +1079,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
     fetchAgentProviders();
   }, [fetchAgentProviders]);
 
-  // Listen for `navigate_agents` events (libi.show_extension,
+  // Listen for `navigate_agents` events (libi.show({ target: "extension" }),
   // libi.start_onboarding). MUST go through the shared singleton EventSource
   // (subscribeBroadcast), not its own `new EventSource(...)` —
   // EditorStateProvider lives at the `(app)` layout and is permanently
@@ -1119,7 +1119,7 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
     });
   }, [router]);
 
-  // `navigate_templates` (libi.show_templates) — same shared singleton
+  // `navigate_templates` (libi.show({ target: "templates" })) — same shared singleton
   // EventSource, same reason as the effect above.
   useEffect(() => {
     const gate = getTabNavGate((id) => activeSessionIdRef.current === id);
@@ -1130,6 +1130,20 @@ export function EditorStateProvider({ children }: { children: ReactNode }) {
         const params = new URLSearchParams({ tab: "mine" });
         if (typeof data.templateId === "string") params.set("template", data.templateId);
         router.push(`/templates?${params.toString()}`);
+      });
+    });
+  }, [router]);
+
+  // `navigate_social` (libi.show({ target: "social_settings" })) — the same singleton and gate.
+  useEffect(() => {
+    const gate = getTabNavGate((id) => activeSessionIdRef.current === id);
+    return subscribeBroadcast((data) => {
+      if (data.type !== "navigate_social") return;
+      if (typeof window === "undefined") return;
+      gate(data, () => {
+        const params = new URLSearchParams({ tab: "settings" });
+        if (typeof data.accountId === "string" && data.accountId) params.set("account", data.accountId);
+        router.push(`/social?${params.toString()}`);
       });
     });
   }, [router]);

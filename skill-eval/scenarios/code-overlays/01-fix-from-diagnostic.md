@@ -98,9 +98,7 @@ assertions:
     expect: absent
   - transcript_matches: '\[tool-call mcp__libi__libi_add_overlay\] \{[^\n]*"body":"(?:(?!drawPulsingCircle)[^"\\]|\\.)*"'
     expect: absent
-  - transcript_contains:
-      - "[tool-call mcp__libi__libi_remove_overlay]"
-      - "[tool-call mcp__libi__libi_delete_clip]"
+  - transcript_matches: '\[tool-call mcp__libi__libi_(?:remove_overlay\]|clip\][^\n]*"action":\s*"delete")'
     expect: absent
   - transcript_matches: '\[tool-call mcp__libi__libi_add_overlay\] [^\n]*\n+\[tool-result  ok\] [^\n]*?\\"success\\":true'
     count: "==1"

@@ -67,7 +67,10 @@ export async function POST(req: Request): Promise<Response> {
   } catch {
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
-  const wantSkills = body.skills ?? [];
+  // `["*"]`: every bundled skill, as a real install has them — what a benchmark wants, so the
+  // agent's starting context (the skills list) matches production rather than one skill.
+  const allBundled = body.skills?.length === 1 && body.skills[0] === "*";
+  const wantSkills = allBundled ? [] : (body.skills ?? []);
   const wantMcps = body.mcps ?? [];
   const agent = body.agent ?? "claude-code";
   // Only the two unattended modes: `ask` would prompt for every tool, and nothing in an
@@ -126,7 +129,7 @@ export async function POST(req: Request): Promise<Response> {
 
   // 3. Enable exactly the requested skills (disable all other bundled skills
   //    so wiring is deterministic). User skills are left untouched.
-  db.update(skillsTable).set({ enabled: false }).where(eq(skillsTable.source, "bundled")).run();
+  db.update(skillsTable).set({ enabled: allBundled }).where(eq(skillsTable.source, "bundled")).run();
   if (wantSkills.length) {
     db.update(skillsTable)
       .set({ enabled: true })

@@ -56,7 +56,7 @@ interface FileTreeProps {
   onDeletePiece: (pieceId: string) => void;
   onRenamePiece?: (pieceId: string, name: string) => void;
   onUploadFiles?: (pieceId: string, files: File[]) => void;
-  /** Folder reveal request (from libi.show_folder). `nonce` re-fires repeats. */
+  /** Folder reveal request (from libi.show({ target: "folder" })). `nonce` re-fires repeats. */
   revealFolder?: { id: string; nonce: number } | null;
 }
 
@@ -249,7 +249,7 @@ const FileTree = forwardRef<FileTreeHandle, FileTreeProps>(function FileTree(
     });
   }, [activePieceId, pieces, folders]);
 
-  // Reveal a folder (from libi.show_folder): expand its ancestor chain +
+  // Reveal a folder (from libi.show({ target: "folder" })): expand its ancestor chain +
   // scroll it into view. `revealFolder` carries a monotonic `nonce` so a
   // repeated reveal of the same folder re-fires. The effect only acts once
   // per nonce — but it waits until the target folder is actually present in

@@ -436,10 +436,8 @@ describe("PostingTab — exports and the round trip from the composer", () => {
     await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:running"));
     // The record finishes (the exports query is invalidated by the one SSE).
     records = records.map((r) => (r.id === "exp_busy" ? exportRecord("busy", { completedAt: 500 }) : r));
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 2100));
-    });
-    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:done"));
+    // The exports query re-reads on its own interval (a couple of seconds), so the wait is the query's: await the outcome.
+    await waitFor(() => expect(screen.getByTestId("stub-awaited")).toHaveTextContent("exp_busy:done"), { timeout: 8_000 });
     expect(screen.getByTestId("stub-exports")).toHaveTextContent("busy");
   }, 10_000);
 

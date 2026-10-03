@@ -1,13 +1,13 @@
 ---
 id: generic-video-native-audio
 title: Generic AI video keeps native audio (no unsolicited TTS)
-skills: [generic-video, ai-asset-generation, ai-video-models, voiceover-production, realistic-image-generation]
+skills: [generic-video, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
 # Routed through the storyboard by default; the flow legitimately takes >300 s.
 timeoutSec: 900
-covers: [native-audio, no-kokoro, voiceover-production, generic-video]
+covers: [native-audio, no-kokoro, video-generation-craft, generic-video]
 ---
 
 ## Prompt
@@ -23,4 +23,4 @@ assertions:
 ## Behavioral expectations
 - Kept native audio ON for the spoken line (`generate_audio=true`); did not mute.
 - Did NOT generate a separate Kokoro / ElevenLabs / TTS voiceover for a single short clip.
-- Loaded the voiceover-production skill's policy (native audio by default).
+- Loaded the video-generation-craft skill's policy (native audio by default).

@@ -1,4 +1,5 @@
 import { getCurrentPort } from "@/lib/libi-home";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { getCurrentToolCall } from "@/mcp/tool-call-context";
 
 /**
@@ -6,7 +7,7 @@ import { getCurrentToolCall } from "@/mcp/tool-call-context";
  *
  * Fire-and-forget by default — silently no-ops if the server isn't running.
  * `send` reports whether the POST actually landed, which most callers ignore;
- * the one that must not is `navigateAgents`, because `libi.show_extension` and
+ * the one that must not is `navigateAgents`, because `libi.show({ target: "extension" })` and
  * `libi.start_onboarding` tell the agent a page is on screen and that claim has
  * to be true.
  */
@@ -60,6 +61,24 @@ function navigationOrigin(): { origin: { toolCallId?: string; toolName: string; 
   };
 }
 
+/** A `refresh_query` as `notify.refreshQuery` takes it. */
+export type RefreshQueryEvent = { queryKey: string; pieceId?: string; fileId?: string; trackId?: string };
+
+const refreshSink = new AsyncLocalStorage<Map<string, RefreshQueryEvent>>();
+
+/**
+ * Run `fn` with every `notify.refreshQuery` it makes (directly or through any tool handler) HELD instead
+ * of sent, and hand back the distinct events, one per (queryKey, piece, file, track). `libi.apply_ops` runs
+ * dozens of single-edit handlers per piece, each of which refreshes the editor; held and de-duplicated
+ * they become one refresh per query per piece, sent by the caller once the piece's fate is known (a
+ * piece that was rolled back or dry-run refreshes nothing: the disk did not change).
+ */
+export async function holdRefreshQueries<T>(fn: () => Promise<T>): Promise<{ result: T; refreshes: RefreshQueryEvent[] }> {
+  const sink = new Map<string, RefreshQueryEvent>();
+  const result = await refreshSink.run(sink, fn);
+  return { result, refreshes: [...sink.values()] };
+}
+
 export const notify = {
   navigate(event: {
     target: "piece" | "asset" | "preview" | "storyboard" | "folder" | "posting" | "exports";
@@ -75,7 +94,7 @@ export const notify = {
   /**
    * `navigate`, but awaitable: resolves true only when the studio accepted the
    * POST. For the one caller whose RESULT claims a screen changed —
-   * `libi.post_piece` / `libi.social_link_post` report `navigated`, and the
+   * `libi.post_piece` / `libi.social_link` (kind `post`) report `navigated`, and the
    * agent tells the user "it is open in the Posting tab" — that claim has to be
    * true, the same reason `navigateAgents` hands its promise back.
    */
@@ -87,15 +106,20 @@ export const notify = {
   }): Promise<boolean> {
     return send({ type: "navigate", ...event });
   },
-  refreshQuery(event: { queryKey: string; pieceId?: string; fileId?: string; trackId?: string }): void {
+  refreshQuery(event: RefreshQueryEvent): void {
+    const held = refreshSink.getStore();
+    if (held) {
+      held.set(JSON.stringify([event.queryKey, event.pieceId, event.fileId, event.trackId]), event);
+      return;
+    }
     send({ type: "refresh_query", ...event });
   },
   refreshMcpConfig(): void {
     send({ type: "refresh_mcp_config" });
   },
   /** Tell the server that memories or the instruction override changed (files
-   *  under ~/.libi/). The server regenerates workspace files and restarts
-   *  sessions; the agent process firing this is about to be killed. */
+   *  under ~/.libi/). The server only logs it: the manual is rendered fresh per
+   *  `libi.read_manual`, and the session that made the save must stay alive. */
   instructionsChanged(): void {
     send({ type: "instructions_changed" });
   },
@@ -108,7 +132,7 @@ export const notify = {
     send({ type: "analysis_changed", ...event });
   },
   /** Send the user to the Agents page. The ONE method that
-   *  hands its promise back: `libi.show_extension` and `libi.start_onboarding`
+   *  hands its promise back: `libi.show({ target: "extension" })` and `libi.start_onboarding`
    *  report "navigated" only when the POST landed. */
   navigateAgents(event: { tab: "agents" | "libi-mcp" | "providers"; extensionId?: string; provider?: string }): Promise<boolean> {
     return send({ type: "navigate_agents", ...event, ...navigationOrigin() });
@@ -116,6 +140,10 @@ export const notify = {
   /** Send the user to the Templates page; resolves true only when the POST landed. */
   navigateTemplates(event: { templateId?: string }): Promise<boolean> {
     return send({ type: "navigate_templates", ...event, ...navigationOrigin() });
+  },
+  /** Send the user to Social → Settings (optionally at one account); resolves true only when the POST landed. */
+  navigateSocial(event: { accountId?: string }): Promise<boolean> {
+    return send({ type: "navigate_social", ...event, ...navigationOrigin() });
   },
   /** Flash an inspector field for an overlay (guided edit). */
   highlight(event: {

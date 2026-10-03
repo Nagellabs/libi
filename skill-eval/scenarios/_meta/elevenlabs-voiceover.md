@@ -1,7 +1,7 @@
 ---
 id: meta-elevenlabs-voiceover
 title: Agent reaches ElevenLabs only on explicit opt-in voiceover request
-skills: [voiceover-production, ai-asset-generation]
+skills: [video-generation-craft, ai-asset-generation]
 mcps: [elevenlabs]
 agent: claude-code
 runs: 1
@@ -11,7 +11,7 @@ covers: [elevenlabs, voiceover, opt-in-voiceover, text-to-speech, elevenlabs-hos
 
 > **STATUS (2026-06-05): LENIENT — asserts the fake-ElevenLabs mirror is reached.**
 > The user EXPLICITLY asks for a single ElevenLabs voiceover, so the opt-in path
-> in `voiceover-production` should run the speech tool against the test-mode fake and
+> in `video-generation-craft` should run the speech tool against the test-mode fake and
 > import the resulting audio. This proves the ElevenLabs tool path end-to-end at zero cost.
 >
 > **2026-09-25: ElevenLabs is its hosted server.** Speech is `creative_generate_speech`, a

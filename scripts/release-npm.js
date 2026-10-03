@@ -107,6 +107,18 @@ function capture(cmd, cmdArgs) {
   return res.status === 0 ? res.stdout.trim() : null;
 }
 
+/**
+ * The environment for the commits this script MAKES. A CI runner's clock is UTC,
+ * and git writes the committer's offset from `TZ`, so the version commit of 0.1.17
+ * read "Thu 21:51 +0000" — the same instant as Friday 04:51 +0700, but the public
+ * record showed a work day. The workflow passes the operator's zone (`vars.RELEASE_TZ`,
+ * default Asia/Bangkok, the same one its release-window gate counts days in) as
+ * RELEASE_TZ; it is applied here and NOT to the whole step, so the tests the step
+ * runs keep the runner's own zone. Unset (a release run by hand) leaves the machine's
+ * own zone alone. Never a date override: the instant stays the real one.
+ */
+const commitEnv = () => (process.env.RELEASE_TZ ? { ...process.env, TZ: process.env.RELEASE_TZ } : process.env);
+
 const pkg = () => JSON.parse(readFileSync(path.join(ROOT, "package.json"), "utf-8"));
 
 // ── 0. release window ──────────────────────────────────────────────────────
@@ -305,9 +317,9 @@ function syncNoticesAfterBump() {
     "add",
     "THIRD-PARTY-NOTICES.md",
   ]);
-  run("amend", "git", ["commit", "--amend", "--no-edit"]);
+  run("amend", "git", ["commit", "--amend", "--no-edit"], { env: commitEnv() });
   // `npm version` tagged the pre-amend commit; move the tag to the real one.
-  run("re-point the version tag", "git", ["tag", "-f", "-a", "-m", `v${v}`, `v${v}`]);
+  run("re-point the version tag", "git", ["tag", "-f", "-a", "-m", `v${v}`, `v${v}`], { env: commitEnv() });
   console.log(`   notices re-synced and folded into the v${v} commit`);
 }
 
@@ -375,7 +387,7 @@ const bump = (() => {
 })();
 
 if (bump !== "none") {
-  run(`version bump (${bump})`, "npm", ["version", bump]);
+  run(`version bump (${bump})`, "npm", ["version", bump], { env: commitEnv() });
   syncNoticesAfterBump();
 }
 const version = pkg().version;

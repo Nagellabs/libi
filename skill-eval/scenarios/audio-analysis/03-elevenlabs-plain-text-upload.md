@@ -61,8 +61,8 @@ assertions:
   # The flat text was NOT saved as the file's chunk transcript (either save variant): a
   # words-less `ready` chunk is skipped by every later Whisper run, so captions would be
   # impossible on this file.
-  - { transcript_contains: "[tool-call mcp__libi__libi_analysis_save_audio_chunk]", expect: absent }
-  - { transcript_contains: "[tool-call mcp__libi__libi_analysis_save_audio_chunk_from_file]", expect: absent }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_analysis_save\][^\n]*"action":\s*"audio_chunk"', expect: absent }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_analysis_save\][^\n]*"action":\s*"audio_chunk_from_file"', expect: absent }
   # It did not route around ElevenLabs to the local model it was told not to use for this.
   - { transcript_contains: "[tool-call mcp__libi__libi_analysis_transcribe_audio]", expect: absent }
 ```

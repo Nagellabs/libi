@@ -171,6 +171,15 @@ export class FrameTimesOutOfRangeError extends Error {
  *  postback small and fast. Real exports set their own ExportSettings. */
 export const VERIFY_BITRATE_BPS = 2_000_000;
 
+/**
+ * The verify render's bitrate for its size: 2 Mbps up to the usual 720 x 1280, scaling with the pixel count
+ * above it (a `region` asks for a bigger render so its text has pixels; blocky text defeats the point).
+ */
+export function verifyBitrate(width: number, height: number): number {
+  const ratio = (width * height) / (720 * 1280);
+  return Math.round(VERIFY_BITRATE_BPS * Math.min(6, Math.max(1, ratio)));
+}
+
 export async function renderCompositionFrames(
   pieceId: string,
   atTimes: number[],
@@ -288,7 +297,7 @@ export async function renderCompositionFrames(
   const settings: ExportSettings = {
     format: "mp4",
     codec: "avc",
-    bitrate: VERIFY_BITRATE_BPS,
+    bitrate: verifyBitrate(width, height),
     width,
     height,
     fps: manifest.fps,

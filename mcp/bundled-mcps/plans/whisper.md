@@ -39,7 +39,7 @@ carries a `dependencies` array — find the entry with `binary: "uv"`:
 
 - `installed: true` — carry on to step 3.
 - `installed: false` — libi downloads it from the Agents → Libi MCP
-  tab: call `libi.show_extension({ extensionId: "whisper" })` and ask the user to
+  tab: call `libi.show({ target: "extension", extensionId: "whisper" })` and ask the user to
   press **Download** next to `uv` on that card, then re-run
   `libi.get_install_plan` to confirm before continuing. Do not try to install
   `uv` yourself, and do not go on to step 3 without it — the model download
@@ -96,9 +96,9 @@ labels or audio-event tags, drive a transcription tool from your own tool list
 through the `audio-analysis` skill's Path B:
 
 ```
-libi.analysis_chunk_audio({ fileId: "<id>" })
+libi.analysis_extract({ action: "chunk_audio", fileId: "<id>" })
 → your provider's STT on each chunk's audioPath
-→ libi.analysis_save_audio_chunk({ chunkId, text, words, ... })
+→ libi.analysis_save({ action: "audio_chunk", chunkId, text, words, ... })
 ```
 
 When that skill ships a `references/providers/<id>.md` for the provider you

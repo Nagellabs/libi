@@ -551,7 +551,7 @@ describe("the typed PowerShell command, read back the way PowerShell reads it", 
           for (const [line, script, args] of lines) {
             if (line === null) {
               expect(script).toBe("signin-provider.ps1");
-              expect(def.auth).toBeUndefined();
+              expect(def.auth).not.toBe("oauth");
               continue;
             }
             checked++;
@@ -713,7 +713,8 @@ describe("the PowerShell scripts, as text", () => {
         ),
       );
       for (const agent of ["claude", "codex"] as const) {
-        const [head, ...args] = tokenizeCatalogCommand(def.commands![agent]);
+        // PowerShell runs on Windows, where a provider may need its own command (`windowsCommands`).
+        const [head, ...args] = tokenizeCatalogCommand(def.windowsCommands?.[agent] ?? def.commands![agent]);
         expect(head).toBe(agent);
         const list = args.map(psLiteral).join(", ");
         expect(add()).toMatch(new RegExp(`^ {2}'${def.id}/${agent}' +\\{ \\$addArgs = @\\(${escapeRegExp(list)}\\) \\}$`, "m"));
@@ -969,6 +970,10 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
           const says = `${agent === "codex" ? "Codex" : "Claude Code"} adds ${def.name}, then opens your browser to sign in with your ${def.name} account. This waits here until you finish signing in.\n`;
           expect(result.stdout).toBe(agent === "claude" ? `${says}${marked(def.id)}` : says);
           expect(existsSync(path.join(home, ".profile"))).toBe(false);
+        } else if (def.auth === "none") {
+          // A local server with nothing to prove: no key prompt, no sign-in, nothing saved — just the add.
+          expect(result.stdout).toBe("");
+          expect(existsSync(path.join(home, ".profile"))).toBe(false);
         } else if (agent === "codex" && def.codexKeyEnv) {
           expect(result.stdout).toBe(`${def.name} key: \nSaved ${def.codexKeyEnv} in ${path.join(home, ".profile")}. Restart libi and Codex so they read it.\n`);
           expect(readFileSync(path.join(home, ".profile"), "utf8")).toBe(savedLine(def));
@@ -1109,6 +1114,8 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
       let out = "";
       child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
       const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
+      // "close" comes after the process has ended AND its stdout has been read to the end: all of `out` has arrived.
+      const closed = new Promise<void>((resolve) => child.on("close", () => resolve()));
       try {
         // 5 s to start + the 8 s deadline below, twice, stays inside the suite's 30 s: a miss on the second run
         // still fails by name instead of timing out.
@@ -1139,7 +1146,7 @@ describe.each(SCRIPT_SHELLS)("the provider scripts, run by %s, do exactly what t
           }
         }
       }
-      await new Promise((r) => setTimeout(r, 50));
+      await closed;
       const read = createSignInMarkerReader();
       expect(read(out)).toEqual([
         { phase: "start", entry: "elevenlabs" },

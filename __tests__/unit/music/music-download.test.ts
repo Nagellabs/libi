@@ -80,6 +80,7 @@ describe("musicDownloadModel RunJobResult shapes", () => {
     expect(d.clientKey).toBe("ck-new");
     expect(d.attachedToRunning).toBeUndefined();
     expect(d.matchedExisting).toBeUndefined();
+    expect((d as { note?: string }).note).toBeUndefined();
     expect(runJobViaServer).toHaveBeenCalledWith(
       "music_model_download",
       // Params carry NO force flag — one identity for one output dir.
@@ -129,6 +130,8 @@ describe("musicDownloadModel RunJobResult shapes", () => {
     expect(d.status).toBe("installed");
     expect(d.attachedToRunning).toBe(true);
     expect(d.matchedExisting).toBeUndefined();
+    expect((d as { note?: string }).note).toMatch(/Attached to a download of this model/);
+    expect((d as { note?: string }).note).toMatch(/force:true/);
     expect(d.existingJob).toEqual({
       jobId: "job-orig",
       pieceId: null,

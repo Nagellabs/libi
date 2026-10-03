@@ -1,63 +1,31 @@
 <!-- Adapted from krusemediallc/arcads-claude-code (MIT, © Caleb Kruse / Kruse Media LLC).
-     Reworked for libi tooling (ai-asset-generation flow, provider model ids, libi.upload_file). -->
+     Reworked for libi tooling. -->
 
-# Script craft — tone, pacing, and read-aloud timing
+# Script craft: tone, pacing, dialogue
 
-Model-agnostic. This is how you write dialogue that sounds like a real person,
-not a TTS voice reading ad copy. Use after you've picked an angle
-([copywriting-angles.md](copywriting-angles.md)) and a format
-([ad-formats.md](ad-formats.md)), before the dialogue gate
-([dialogue-gate.md](dialogue-gate.md)).
+How to write dialogue that sounds like a person, not a TTS voice reading ad copy. Use it after an angle ([copywriting-angles](copywriting-angles.md)) and a format ([ad-formats](ad-formats.md)), before the [dialogue gate](dialogue-gate.md). Timing from words to duration is in [craft](../references/craft.md).
 
-## Tone bank — pick one persona per video
+## One persona per video
 
-Choose ONE and carry it through every beat. Each persona is emotion words + a
-behavior description you can drop straight into the tone-direction layer.
+Pick one and carry it through every beat; each is emotion words plus a behaviour you can drop into the tone direction.
 
-| Persona | Emotion words | Behavior |
-|---|---|---|
-| **Excited fan** | genuine, excited, breathless | talks with energy but pauses between thoughts, uses natural breaths, laughs at herself |
-| **Chill recommender** | relaxed, honest, conversational | speaks slowly, leaves beats of silence between lines, steady eye contact, shrugs casually |
-| **Skeptic converted** | surprised, impressed, almost reluctant | raises eyebrows, pauses mid-sentence as if reconsidering, sounds like they can't believe it |
-| **Best friend sharing** | warm, conspiratorial, intimate | lowers their voice, leans in, takes their time — talks like it's a secret worth savoring |
-| **Morning routine casual** | sleepy, soft, unhurried | yawns, moves slowly, long pauses between sentences, talks between sips of coffee |
+| Persona | Emotion | Behaviour |
+| --- | --- | --- |
+| Excited fan | genuine, excited, breathless | energetic but pauses between thoughts, natural breaths, laughs at herself |
+| Chill recommender | relaxed, honest, conversational | speaks slowly, beats of silence between lines, steady eye contact, shrugs |
+| Skeptic converted | surprised, impressed, almost reluctant | raised eyebrows, pauses mid-sentence as if reconsidering, can't quite believe it |
+| Best friend sharing | warm, conspiratorial, intimate | lowers the voice, leans in, takes their time, as if it were a secret worth savouring |
+| Morning routine casual | sleepy, soft, unhurried | yawns, moves slowly, long pauses, talks between sips of coffee |
 
-## Mandatory pacing cue
+## The pacing cue is mandatory
 
-AI video generators default to unnaturally fast speech. **Every tone direction
-MUST include an explicit pacing/speed cue** that tells the model to slow down and
-leave room. Without it the clip sounds rushed and fake. Pick one (or write your
-own in this spirit):
-
-- `pauses between thoughts as if collecting the next word`
-- `leaves a beat of silence after each sentence before continuing`
-- `speaks at a relaxed, unhurried pace — no rushing`
-- `takes natural breaths between sentences, never rushing to the next line`
-- `lets moments breathe — a sip, a glance down, a pause before speaking again`
-
-This is not optional. A tone-direction paragraph with no pacing cue is incomplete.
-
-## Read-aloud word count → duration
-
-The word-count→duration methodology, the read-aloud discipline, the silent-beat
-rule, and the **"favor one full-length multi-beat clip"** principle live in the
-**`ugc-craft`** skill (Clip-duration methodology) — the single source of truth.
-Size the WHOLE clip's spoken script (not each beat) to its runtime there. The
-[dialogue-gate.md](dialogue-gate.md) enforces the fit check before any spend.
+AI generators default to unnaturally fast speech, so every tone direction carries an explicit speed cue; a tone paragraph without one is incomplete. Examples: "pauses between thoughts as if collecting the next word"; "leaves a beat of silence after each sentence before continuing"; "speaks at a relaxed, unhurried pace, no rushing"; "takes natural breaths between sentences"; "lets moments breathe, a sip, a glance down, a pause". Fast formats (the feature walkthrough) say "fast but clear" instead.
 
 ## Dialogue rules
 
-- **Casual spoken language.** Write how people actually talk, not how copy reads.
-- **Filler words** make it real: "okay so", "literally", "I'm not even", "like",
-  "you guys".
-- **End mid-thought or with a laugh**, not a polished sign-off. Real people trail
-  off; ad reads land cleanly. You want the former.
-- **Each line should feel like a different take** stitched together — slightly
-  different framing/energy per beat.
-- **No forbidden words** in the spoken line either — see
-  [forbidden-words.md](forbidden-words.md). Nobody says "this is a cinematic,
-  professional serum" out loud.
+- Casual spoken language, with the filler real people use ("okay so", "literally", "like", "you guys").
+- End mid-thought or on a laugh, not a polished sign-off; ad reads land cleanly, real people trail off.
+- Each line should feel like a different take, with slightly different framing and energy per beat.
+- No banned words in the spoken line either ([craft](../references/craft.md)).
 
-A good UGC line is short, specific, and sounds like a voice memo to a friend.
-"Okay so I almost returned this and now I'm obsessed" beats "This professional
-serum delivers stunning results."
+A good line is short, specific and sounds like a voice memo to a friend: "Okay so I almost returned this and now I'm obsessed" beats "This professional serum delivers stunning results."

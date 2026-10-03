@@ -31,7 +31,7 @@ covers: [templates, apply_template, cloudId, public-template, leftOut, author-te
 > (`scripts/skill-eval/author-terms.ts`), so the check cannot drift from the fixture. The
 > template's name and tags share no word with those values, so quoting the name is safe.
 >
-> **Why the author-value needles are `agent_text`.** `libi.get_template` hands the scaffold
+> **Why the author-value needles are `agent_text`.** `libi.template` action `get` hands the scaffold
 > back (labelled as the author's), so the effect id and the outline value are in the
 > transcript on every run, passing or not. Only the agent's own words are evidence of it
 > quoting them.
@@ -62,7 +62,7 @@ assertions:
 ## Behavioral expectations
 - One `libi.apply_template({ cloudId, newPiece, … })` (the tool installs it first); did
   not rebuild the layer by hand. The headline text went in either as `slotValues` or, since
-  `libi.get_template` takes no `cloudId` and the slot keys are unknown until the install,
+  `libi.template` action `get` takes no `cloudId` and the slot keys are unknown until the install,
   through `libi.update_overlay` on the slot's layer afterwards — both are fine.
 - Told the user, in plain words, that the headline's exit effect and its outline were left
   out because this libi does not have them, so the piece will differ from the template's
@@ -70,5 +70,5 @@ assertions:
   for it ("the headline"), as the skill says, never in the author's.
 - Did not repeat the author's effect id or outline value, and did not try to recreate the
   missing effect by inventing one.
-- Read the template's instructions (`libi.get_template`) and ended with `libi.show_preview`
+- Read the template's instructions (`libi.template` action `get`) and ended with `libi.show({ target: "preview" })`
   and one line on what was applied and what is still open.

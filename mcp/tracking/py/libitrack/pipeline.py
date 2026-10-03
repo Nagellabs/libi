@@ -917,7 +917,7 @@ def run_segment(job: dict) -> int:
     # identity (anchors + ReID + the repair loop pick the right person),
     # but emit the HEAD sub-region derived from that person's segmentation
     # silhouette instead of the body box. Triggered by objectKind:"face"
-    # (so `compute_object_track`/`compute_track_segment` with a face
+    # (so `libi.track` compute / compute_segment with a face
     # objectKind "just works") or an explicit headRefine flag.
     head_refine = bool(job.get("headRefine")) or job.get("objectKind") == "face"
 

@@ -15,8 +15,8 @@
 
 `accounts_get_tik_tok_creator_info({ account_id })` reports what THIS account may do — privacy levels,
 the interaction toggles and their defaults, and the duration cap. Use only a `privacy_level` it returned.
-**On the measured account the only level is `PUBLIC_TO_EVERYONE`**, so there is **no private option and
-therefore no safe rehearsal on TikTok** — a Zernio draft is the only safe state. A guessed privacy level
+On the accounts measured so far the only level it returned is `PUBLIC_TO_EVERYONE`, so there is no
+private option and therefore no safe rehearsal on TikTok: a Zernio draft is the only safe state. A guessed privacy level
 is the one mistake that publishes.
 
 `libi.post_piece` reads creator info itself and refuses with `tiktok_creator_info_unavailable` rather

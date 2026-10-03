@@ -393,7 +393,7 @@ describe("a cached build that names a deleted piece", () => {
    * `findExistingPiece` guard, which DOES check the piece exists and carries a
    * manifest, never gets a say. Delete the demo piece and press "Show me how
    * it works" again: the tool hands the agent a pieceId that resolves to
-   * nothing, `show_piece` navigates nowhere, no error is raised, and it stays
+   * nothing, `libi.show` (piece) navigates nowhere, no error is raised, and it stays
    * broken for every future press. The user's only escape is a `force` flag
    * they have no way to know about.
    *

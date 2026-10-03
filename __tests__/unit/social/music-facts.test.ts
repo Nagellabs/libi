@@ -5,7 +5,7 @@ vi.mock("@/lib/logger", () => ({ serverLogger: logSpies, mcpLogger: logSpies }))
 
 import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { getAccountMusicFacts, setAccountMusicFacts, setSocialSettings } from "@/lib/db/settings";
-import { factsKey, mergeDetected, resolveAccountFacts, setUserTikTokKind } from "@/lib/social/music-facts";
+import { factsKey, mergeDetected, recordCatalogOutcome, resolveAccountFacts, setUserTikTokKind } from "@/lib/social/music-facts";
 import type { SocialAdapter } from "@/lib/social/adapter";
 
 beforeEach(() => {
@@ -112,6 +112,50 @@ describe("account music facts", () => {
       const f = await resolveAccountFacts(a, "zernio", { id: "tt", platform: "tiktok" }, { now: NOW, recheckNegative: true });
       expect(a.musicAccountFacts).not.toHaveBeenCalled();
       expect(f.tiktokKind).toMatchObject({ value: "personal", source: "user" });
+    });
+  });
+
+  describe("a catalog read is evidence about the account (recordCatalogOutcome)", () => {
+    const NOW = new Date("2026-09-28T12:00:00.000Z");
+    const minsAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
+    const ig = { id: "ig", platform: "instagram" as const };
+    const tt = { id: "tt", platform: "tiktok" as const };
+    const tracks = { tracks: [{ id: "1", title: "T", kind: "search" as const }] };
+
+    it("a successful Instagram search clears a FRESH 'needs Facebook Login' fact, with no probe", async () => {
+      setAccountMusicFacts(factsKey("zernio", "ig"), { instagramFacebookLogin: { value: false, source: "detected", checkedAt: minsAgo(5) } });
+      recordCatalogOutcome("zernio", ig, tracks, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "ig")).instagramFacebookLogin).toEqual({ value: true, source: "detected", checkedAt: NOW.toISOString() });
+      const a = probe({});
+      const f = await resolveAccountFacts(a, "zernio", ig, { now: NOW });
+      expect(f.instagramFacebookLogin?.value).toBe(true);
+      expect(a.musicAccountFacts).not.toHaveBeenCalled();
+      expect(logSpies.info).toHaveBeenCalledWith(expect.objectContaining({ op: "account_kind_detected", platform: "instagram", value: "facebook_login" }), expect.any(String));
+    });
+
+    it("a successful TikTok read records business over a detected personal, but never over the user's own choice", () => {
+      setAccountMusicFacts(factsKey("zernio", "tt"), { tiktokKind: { value: "personal", source: "detected", checkedAt: minsAgo(5) } });
+      recordCatalogOutcome("zernio", tt, tracks, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "tt")).tiktokKind).toMatchObject({ value: "business", source: "detected" });
+      setUserTikTokKind("zernio", "tt2", "personal");
+      recordCatalogOutcome("zernio", { id: "tt2", platform: "tiktok" }, tracks, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "tt2")).tiktokKind).toMatchObject({ value: "personal", source: "user" });
+    });
+
+    it("a refusal that names the cause records it (a user who went back to Instagram Login)", () => {
+      setAccountMusicFacts(factsKey("zernio", "ig"), { instagramFacebookLogin: { value: true, source: "detected", checkedAt: minsAgo(500) } });
+      recordCatalogOutcome("zernio", ig, { unavailable: { reason: "needs_facebook_login" } }, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "ig")).instagramFacebookLogin).toMatchObject({ value: false, checkedAt: NOW.toISOString() });
+    });
+
+    it("any other failure says nothing about the account", () => {
+      setAccountMusicFacts(factsKey("zernio", "ig"), { instagramFacebookLogin: { value: false, source: "detected", checkedAt: minsAgo(5) } });
+      recordCatalogOutcome("zernio", ig, { unavailable: { reason: "error" } }, NOW);
+      recordCatalogOutcome("zernio", ig, { unavailable: { reason: "unsupported" } }, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "ig")).instagramFacebookLogin).toMatchObject({ value: false, checkedAt: minsAgo(5) });
+      expect(getAccountMusicFacts(factsKey("zernio", "yt"))).toEqual({});
+      recordCatalogOutcome("zernio", { id: "yt", platform: "youtube" } as never, tracks, NOW);
+      expect(getAccountMusicFacts(factsKey("zernio", "yt"))).toEqual({});
     });
   });
 });

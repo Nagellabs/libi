@@ -129,6 +129,7 @@ describe("installTrackingEngine", () => {
     const d = (res as { data: InstallData }).data;
     expect(d.status).toBe("installed");
     expect(d.attachedToRunning).toBe(true);
+    expect((d as { note?: string }).note).toMatch(/Attached to the tracking-engine install/);
     expect(d.existingJob!.jobId).toBe("job-orig");
     expect(d.hint).toMatch(/verify_install/);
   });
@@ -151,6 +152,7 @@ describe("installTrackingEngine", () => {
     const d = (res as { data: InstallData }).data;
     expect(d.status).toBe("not_installed");
     expect(d.matchedExisting).toBe(true);
+    expect((d as { note?: string }).note).toMatch(/earlier identical job matched/);
     expect(d.existingJob!.status).toBe("cancelled");
     expect(d.hint).toMatch(/force/);
   });

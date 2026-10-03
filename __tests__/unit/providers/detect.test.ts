@@ -89,6 +89,16 @@ describe("detectProviders — Claude", () => {
     });
   });
 
+  it("a stdio Playwright entry with no env is connected, never needs-key (it has no key to need)", async () => {
+    fs.writeFileSync(claudeConfigPath, JSON.stringify({
+      mcpServers: { playwright: { type: "stdio", command: "npx", args: ["@playwright/mcp@latest"], env: {} } },
+    }));
+    const [row] = await detectRows({ claudeConfigPath, agentDir, codexExec: noCodex });
+    expect(row).toEqual({
+      agent: "claude", name: "playwright", providerId: "playwright", transport: "stdio", status: "connected", scope: "user",
+    });
+  });
+
   it("matches by URL host when the name is unfamiliar", async () => {
     fs.writeFileSync(claudeConfigPath, JSON.stringify({
       mcpServers: { "my-images": { type: "http", url: "https://mcp.fal.ai/mcp", headers: { Authorization: "Bearer k" } } },
@@ -243,6 +253,16 @@ describe("detectProviders — Codex", () => {
       codexExec: async (args) => { seen.push(args); return { ok: true as const, stdout: "[]" }; },
     });
     expect(seen).toEqual([["mcp", "list", "--json"]]);
+  });
+
+  it("a codex stdio Playwright entry with no env is connected, never needs-key", async () => {
+    const [row] = await detectRows({
+      claudeConfigPath, agentDir,
+      codexExec: async () => ({ ok: true as const, stdout: JSON.stringify([
+        { name: "playwright", enabled: true, transport: { type: "stdio", command: "npx", args: ["@playwright/mcp@latest"] }, auth_status: "unsupported" },
+      ]) }),
+    });
+    expect(row).toMatchObject({ agent: "codex", name: "playwright", providerId: "playwright", transport: "stdio", status: "connected" });
   });
 
   it("reports needs-key for an HTTP entry with no bearer var", async () => {

@@ -21,6 +21,7 @@ import {
 import { applyAttachmentParsing } from "@/lib/agents/parse-attachments";
 import { getApprovalMode } from "@/lib/approval/settings";
 import { isApprovalRequiredExtensionTool } from "@/lib/approval/extensions";
+import { mergedToolAllowsAlways } from "@/lib/agents/merged-tools";
 import { serverLogger as logger } from "@/lib/logger";
 import {
   jobProgressEmitter,
@@ -31,6 +32,7 @@ import {
   fromAnyToolName,
   fromCodexToolCall,
   makeMcpToolId,
+  parseMcpToolId,
   toolIdForCall,
   type McpToolId,
 } from "@/lib/agents/mcp-tool-id";
@@ -136,6 +138,49 @@ function updateMeta(update: unknown): unknown {
   return update && typeof update === "object"
     ? (update as { _meta?: unknown })._meta
     : undefined;
+}
+
+/**
+ * Drop the agent's "remember this choice" options (`allow_always`) from a request for a merged libi
+ * tool that has an action which changes something (`MERGED_TOOL_RISK`). The agent remembers that choice
+ * per tool NAME, never per action or argument: one "always" on `libi.snapshot` compare would also run
+ * discard and restore unasked, and one on `libi.track` list would disarm the libi-tracking extension's
+ * approval gate for compute. What is left is allow once / reject, which is exactly what the user can
+ * judge from the call. Every other tool, and a merged tool whose actions all only read, is returned as is.
+ *
+ * Applied to the options that are both shown AND stored (the permission route accepts only an offered
+ * option) and before `decidePermissionAction`, so an auto mode cannot pick the withheld option either.
+ */
+export function withholdAllowAlways(
+  request: RequestPermissionRequest,
+  toolId: McpToolId | null,
+): RequestPermissionRequest {
+  const parsed = toolId ? parseMcpToolId(toolId) : null;
+  if (!parsed || (parsed.serverId !== "libi" && parsed.serverId !== "libi-tracking")) return request;
+  if (mergedToolAllowsAlways(parsed.toolName)) return request;
+  if (!request.options.some((o) => o.kind === "allow_always")) return request;
+  return { ...request, options: request.options.filter((o) => o.kind !== "allow_always") };
+}
+
+/**
+ * Give a nameless permission request's `toolCall` the title and arguments of the call it approves, taken
+ * from the `tool-call` part cached when that call opened (same toolCallId). A Codex MCP approval carries
+ * neither, so its card read only "Permission required"; with them it is labelled like the chip above it,
+ * and a merged libi tool names its action ("Libi Snapshot · discard") — the same path Claude's request
+ * takes. A request that already has a title is returned untouched, and so is one the cache cannot name.
+ */
+export function nameToolCall(
+  toolCall: RequestPermissionRequest["toolCall"],
+  cached: { toolId: McpToolId | null; rawTitle?: string; args?: unknown },
+): RequestPermissionRequest["toolCall"] {
+  if (typeof toolCall.title === "string" && toolCall.title.length > 0) return toolCall;
+  const title = cached.rawTitle || cached.toolId || "";
+  if (!title) return toolCall;
+  return {
+    ...toolCall,
+    title,
+    ...(toolCall.rawInput === undefined && cached.args !== undefined ? { rawInput: cached.args } : {}),
+  };
 }
 
 /**
@@ -298,12 +343,20 @@ export class SessionEventHandler {
     session: SessionEntry | undefined,
     toolCallId: string,
   ): McpToolId | null {
+    return this.cachedCall(session, toolCallId)?.toolId ?? null;
+  }
+
+  /** The cached `tool-call` part recorded when this tool call OPENED, or null. */
+  private cachedCall(
+    session: SessionEntry | undefined,
+    toolCallId: string,
+  ): Extract<AgentMessagePart, { type: "tool-call" }> | null {
     if (!session) return null;
     const agentMsg = this.findAgentMessageWithToolCall(session, toolCallId);
     const part = agentMsg?.parts.find(
       (p) => p.type === "tool-call" && p.toolCallId === toolCallId,
     );
-    return part?.type === "tool-call" ? part.toolId : null;
+    return part?.type === "tool-call" ? part : null;
   }
 
   /**
@@ -1196,10 +1249,23 @@ export class SessionEventHandler {
    * cancelled (handled by SessionManager — see Task 4).
    */
   async handlePermissionRequest(
-    params: RequestPermissionRequest,
+    rawParams: RequestPermissionRequest,
   ): Promise<RequestPermissionResponse> {
-    const sessionId = params.sessionId;
+    const sessionId = rawParams.sessionId;
     const session = this.lookupSession(sessionId);
+
+    // Claude names the tool on the request. A Codex MCP approval is NAMELESS — only the `tool_call`
+    // that preceded it, with the same toolCallId, says which tool it is — so read it back off the cache.
+    const meta = extractToolMeta(rawParams);
+    const nameless = meta.rawName === "" && !!rawParams.toolCall?.toolCallId;
+    const cachedCall = nameless ? this.cachedCall(session, rawParams.toolCall.toolCallId) : null;
+    const toolId = meta.toolId ?? cachedCall?.toolId ?? null;
+    const params = withholdAllowAlways(rawParams, toolId);
+    // What the CARD shows: the same recovery gives a nameless request the title and arguments of the call
+    // it approves, so every renderer ("Libi Snapshot · discard") reads them off the event like a Claude
+    // request's. Only the stored and emitted copy is named: the decision above still runs on the request as
+    // the agent sent it, so naming the call changes no approval (a Codex extension gate stays advisory).
+    const shownToolCall = cachedCall ? nameToolCall(params.toolCall, cachedCall) : params.toolCall;
 
     // Defensive: unknown session — preserve the previous best-effort behavior
     // (pick first allow option, else first option, else empty string) so the
@@ -1228,7 +1294,7 @@ export class SessionEventHandler {
       const pendingId = randomUUID();
       session.pendingApprovals.set(pendingId, {
         pendingId,
-        toolCall: params.toolCall,
+        toolCall: shownToolCall,
         options,
         reason: action.reason,
         resolve,
@@ -1237,7 +1303,7 @@ export class SessionEventHandler {
       this.emit(sessionId, {
         type: "agent-permission-request",
         pendingId,
-        toolCall: params.toolCall,
+        toolCall: shownToolCall,
         options,
         reason: action.reason,
       });
@@ -1251,7 +1317,7 @@ export class SessionEventHandler {
         this.ensureAgentMessage(session).parts.push({
           type: "permission-request",
           pendingId,
-          toolCall: params.toolCall,
+          toolCall: shownToolCall,
           options,
           reason: action.reason,
           status: "pending",

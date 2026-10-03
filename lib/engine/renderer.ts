@@ -114,9 +114,11 @@ export function collectLayerRequests(
 ): LayerRequest[] {
   const globalTime = globalFrame / composition.fps;
   const out: LayerRequest[] = [];
+  const pieceDuration = getCompositionFrames(composition) / composition.fps;
   for (const overlay of overlaysActiveAt(composition.overlays ?? [], globalTime)) {
     const plan = planLayer(overlay, {
       time: globalTime,
+      pieceDuration,
       fps: composition.fps,
       width: composition.width,
       height: composition.height,
@@ -213,6 +215,7 @@ export function renderFrame(
             frame: globalFrame,
             time: globalTime,
             totalFrames: compTotalFrames,
+            pieceDuration: compTotalFrames / composition.fps,
             videoFrameSources,
             imageElements,
             layers,

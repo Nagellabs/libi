@@ -298,7 +298,7 @@ function ServerStatusLine({
  * extension's tools are always listed and its `enabled` column is ignored
  * (dropped by the migration); `requireApproval` is what the permission gate
  * enforces by tool prefix. Keeps its own `#mcp-<id>` anchor so
- * `libi.show_extension({ extensionId })` scrolls to the nested row.
+ * `libi.show({ target: "extension", extensionId })` scrolls to the nested row.
  *
  * The approval switch is annotated when Codex is the active agent, because
  * there the gate is NOT IMPLEMENTED (`lib/approval/extensions.ts` LIMITATIONS

@@ -9,6 +9,8 @@ what background removal needs.
 
 ## The paid endpoints
 
+These ids are the current defaults; confirm one with `search_models` / `get_model_schema` before relying on it.
+
 **Video:** `bria/video/background-removal/v3` (Bria V-RMBG 3.0) with
 `{ video_url, background_color: "Transparent", output_container_and_codec: "webm_vp9" }`.
 **Pass those two explicitly** — `background_color` defaults to `Black`, so omitting it
@@ -19,16 +21,24 @@ alpha at all (any mp4/h264 variant silently drops it).
 
 ### Two endpoints NOT to use
 
-- Do NOT use `bria/video/background-removal` (the v1 id): it is a real endpoint but its
+- Do not use `bria/video/background-removal` (the v1 id): it is a real endpoint but its
   worker crashes server-side on the transparent path (status reports COMPLETED, result
-  fetch 500s) and it is priced ~33x above v3.
-- Do NOT use `veed/video-background-removal` either — measured softer on both hair and
-  subject edges at ~5x v3's price.
+  fetch 500s) and it is priced many times above v3.
+- Do not use `veed/video-background-removal` either: it measured softer on both hair and
+  subject edges, at a much higher price than v3.
+
+## Local versus paid, measured
+
+On real footage, the local MatAnyone matte resolved finer hair (individual curls and wisps)
+where V-RMBG 3.0 merged them into a more solid mass. V-RMBG 3.0 was structurally sturdier: it
+kept a gesturing hand whole where the local matte fragmented it, and being temporally aware it
+is the better answer for flicker. That is why local stays the default and paid is reached for
+on a verifiably broken local result.
 
 ## Cost
 
-Get the price via `get_pricing` for the endpoint and state it plainly; proceed only on
-explicit user approval.
+Get the price via `get_pricing` for the endpoint and state it plainly; proceed only on an
+explicit yes.
 
 ## Getting the source uploaded
 

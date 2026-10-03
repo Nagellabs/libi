@@ -10,7 +10,7 @@ narration over b-roll, an explicit "add a voiceover" request. It is never the
 native audio of a video generation: an AI clip speaks because it was generated
 with `generate_audio: true`, and one voice across several clips comes from a
 reference-conditioned generation, not from a TTS track laid over the top. See
-the `voiceover-production` skill before you synthesize anything for a generated
+the `video-generation-craft` skill (its voice reference) before you synthesize anything for a generated
 video, and the `voice-replacement` skill for deliberately changing the voice on
 a video that already exists. Installing this extension is not a reason to use it.
 
@@ -45,7 +45,7 @@ carries a `dependencies` array — find the entry with `binary: "uv"`:
 
 - `installed: true` — carry on to step 3.
 - `installed: false` — libi downloads it from the Agents → Libi MCP
-  tab: call `libi.show_extension({ extensionId: "local-tts" })` and ask the user to
+  tab: call `libi.show({ target: "extension", extensionId: "local-tts" })` and ask the user to
   press **Download** next to `uv` on that card, then re-run
   `libi.get_install_plan` to confirm before continuing. Do not try to install
   `uv` yourself, and do not go on to step 3 without it — the model download

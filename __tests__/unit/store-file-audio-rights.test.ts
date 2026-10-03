@@ -110,3 +110,87 @@ describe("libi.upload_file stamps the user's own file", () => {
     expect(rights).toMatchObject({ class: "generated", track: { title: "calm piano intro" } });
   });
 });
+
+/** agent-speed A7: a file made from another libi file inherits its rights; an
+ *  agent can say "derived", never "owned". */
+describe("libi.upload_file({ derivedFromFileId }) inherits the source's rights", () => {
+  let dir: string;
+  beforeEach(() => {
+    testDb = createTestDb();
+    seedPiece(testDb);
+    vi.clearAllMocks();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "libi-upload-derived-"));
+    vi.mocked(mockStorage.save).mockResolvedValue("test-piece-1/mix.mp3");
+    vi.mocked(mockStorage.localPath).mockReturnValue("/storage/test-piece-1/mix.mp3");
+  });
+
+  const stored = (fileId: string) => testDb.select().from(files).where(eq(files.id, fileId)).get()!;
+  const seedSource = (id: string, over: Partial<typeof files.$inferInsert>) =>
+    testDb.insert(files).values({
+      id, pieceId: "test-piece-1", filename: `${id}.mp3`, name: `${id}.mp3`, description: "", type: "audio", storagePath: `test-piece-1/${id}.mp3`, hasAudio: true, ...over,
+    }).run();
+  const upload = async (extra: Record<string, unknown>) => {
+    const filePath = path.join(dir, "mix.mp3");
+    fs.writeFileSync(filePath, "x");
+    return uploadFile({ pieceId: "test-piece-1" }, { pieceId: "test-piece-1", filePath, ...extra } as never);
+  };
+
+  it("copyrighted stays copyrighted, with the song and its source", async () => {
+    seedSource("song", { audioRights: JSON.stringify({ ...COPY, track: { title: "Espresso", artist: "Sabrina Carpenter" } }) });
+    const r = await upload({ derivedFromFileId: "song" });
+    expect(r.success).toBe(true);
+    const rights = parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights);
+    expect(rights).toMatchObject({ class: "copyrighted", decidedBy: "provenance", track: { title: "Espresso" }, source: { url: "https://x.example/a" } });
+    expect(r.data).toMatchObject({ audioRights: { class: "copyrighted", inheritedFrom: "song" } });
+  });
+
+  it("an UNSTAMPED download (the yt-dlp breadcrumb) counts as copyrighted for its derivative", async () => {
+    seedSource("old", { audioRights: null, description: "Downloaded from https://youtu.be/abc" });
+    const r = await upload({ derivedFromFileId: "old" });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)?.class).toBe("copyrighted");
+  });
+
+  it("generated stays generated", async () => {
+    seedSource("gen", { audioRights: JSON.stringify({ class: "generated", decidedBy: "provenance", decidedAt: "2026-09-27T00:00:00.000Z" }) });
+    const r = await upload({ derivedFromFileId: "gen" });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)?.class).toBe("generated");
+  });
+
+  it("an owned source gives an owned derivative (the source's own class, nothing the agent claimed)", async () => {
+    seedSource("mine", { audioRights: JSON.stringify({ class: "owned", decidedBy: "user", decidedAt: "2026-09-27T00:00:00.000Z" }) });
+    const r = await upload({ derivedFromFileId: "mine" });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)).toMatchObject({ class: "owned", decidedBy: "provenance" });
+  });
+
+  it("aiGeneration cannot launder a copyrighted source into generated", async () => {
+    seedSource("song", { audioRights: JSON.stringify(COPY) });
+    const r = await upload({
+      derivedFromFileId: "song",
+      aiGeneration: { provider: "elevenlabs", model: "music_v1", prompt: "remix", startedAt: "2026-09-27T00:00:00.000Z", completedAt: "2026-09-27T00:00:01.000Z", durationMs: 1000 },
+    });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)?.class).toBe("copyrighted");
+  });
+
+  it("aiGeneration on a non-copyrighted source is still stamped generated", async () => {
+    seedSource("mine", { audioRights: JSON.stringify({ class: "owned", decidedBy: "user", decidedAt: "2026-09-27T00:00:00.000Z" }) });
+    const r = await upload({
+      derivedFromFileId: "mine",
+      aiGeneration: { provider: "elevenlabs", model: "music_v1", prompt: "remix", startedAt: "2026-09-27T00:00:00.000Z", completedAt: "2026-09-27T00:00:01.000Z", durationMs: 1000 },
+    });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)?.class).toBe("generated");
+  });
+
+  it("a source with no audio inherits nothing: the file is stamped like a plain upload", async () => {
+    seedSource("pic", { type: "image", hasAudio: false, filename: "pic.png", storagePath: "test-piece-1/pic.png" });
+    const r = await upload({ derivedFromFileId: "pic" });
+    expect(parseAudioRights(stored((r.data as { fileId: string }).fileId).audioRights)).toMatchObject({ class: "owned" });
+    expect((r.data as { audioRights?: unknown }).audioRights).toBeUndefined();
+  });
+
+  it("a source that is not a libi file is refused before anything is stored", async () => {
+    const r = await upload({ derivedFromFileId: "nope" });
+    expect(r.success).toBe(false);
+    expect(r.error).toContain("is not a libi file");
+    expect(mockStorage.save).not.toHaveBeenCalled();
+  });
+});

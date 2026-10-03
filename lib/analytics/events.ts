@@ -180,6 +180,11 @@ export const EVENT_NAMES = [
   "page_engagement",
   // cross-cutting
   "tool_used",
+  // libi.apply_ops finished (one event per call; `tool_used` also fires once per OP of its list, with the
+  // op's tool and action). Params, all bounded: pieces (1 | 5 | 20 | 50, the upper edge of the bucket),
+  // ops (3 | 10 | 30 | 100, likewise), dry_run (boolean), outcome
+  // applied | partial | failed | dry_run | invalid.
+  "apply_ops_run",
   // membership interest — fired only after the server accepts the signup, so
   // this counts waitlist rows that exist and not form submissions that failed.
   // The only param is `plan`, bounded by the WaitlistCard's featureKey union;
@@ -233,7 +238,7 @@ export const EVENT_NAMES = [
   // `libi.suggest_provider` (a card in the chat in-app, the commands as text
   // on a CLI). Fired from the MCP process on the tool's success path; the
   // `kind` param is the schema's enum (image | video | music | voice | sfx |
-  // transcription | social). The agent's `reason` line is user-shaped and never sent.
+  // transcription | social | browser). The agent's `reason` line is user-shaped and never sent.
   "provider_suggested",
   // libi's OWN grant for a social provider finished its browser sign-in
   // (callback route), never the click. Param: provider (SocialProviderId).

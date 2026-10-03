@@ -37,7 +37,7 @@ covers: [captions, transcript, element-local-timing, readability, caption-width-
 >   result `note`. The agent must relay that, and must not "fix" it by re-running
 >   `generate_captions` — which would replace the track and throw the user's edit away.
 > - Tolerant of the route: the transcript may come from `analysis_transcribe_audio` or an
->   existing analysis (`analysis_get` / `analysis_get_audio_chunks`); `audio_add_clip` or any
+>   existing analysis (`libi.analysis_query` action `get` / `audio_chunks`); `audio_add_clip` or any
 >   other way of putting the file at 2 s is fine.
 
 ## Prompt
@@ -52,7 +52,7 @@ saying.
 ```yaml
 assertions:
   # A local transcript was made or reused (generate_captions refuses without one).
-  - { transcript_contains: ["[tool-call mcp__libi__libi_analysis_transcribe_audio]", "[tool-call mcp__libi__libi_analysis_get]", "[tool-call mcp__libi__libi_analysis_get_audio_chunks]"], turn: 1, expect: present }
+  - { transcript_contains: ["[tool-call mcp__libi__libi_analysis_transcribe_audio]", "[tool-call mcp__libi__libi_analysis_query]"], turn: 1, expect: present }
   # AUD-1: the track was built in one generate_captions call and the heard clip made cues.
   - { transcript_contains: "[tool-call mcp__libi__libi_generate_captions]", turn: 1, expect: present }
   - transcript_matches: '\\"cueCount\\":[1-9]'

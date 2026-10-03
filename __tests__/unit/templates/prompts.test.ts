@@ -13,9 +13,10 @@ describe("template prompts", () => {
   it("apply never names a piece the page made — the agent creates it", () => {
     expect(applyTemplatePrompt({ templateId: "t-1", name: "Lower third" })).not.toMatch(/pieceId/);
   });
-  it("edit names update_template and the id", () => {
+  it("edit names the libi.template tool and the id", () => {
     const p = editTemplatePrompt({ templateId: "t-1", name: "Lower third" });
-    expect(p).toContain("libi.get_template");
+    expect(p).toContain('libi.template({ action: "get" })');
+    expect(p).toContain('libi.template({ action: "update" })');
     expect(p).toContain("t-1");
     expect(p).toMatch(/index\.md/);
   });

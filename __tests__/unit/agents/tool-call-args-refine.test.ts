@@ -6,7 +6,7 @@
  * `rawInput` is empty there and the real arguments arrive on a later
  * `tool_call_update`. Only the subagent branch consumed that refinement, so
  * every ordinary call kept the empty `{}` it was created with — which is what
- * the skill-eval transcript rendered (`[tool-call mcp__libi-app__libi_show_piece] {}`
+ * the skill-eval transcript rendered (`[tool-call mcp__libi-app__libi_show] {}`
  * for every call in every run), and what the chat row's detail line reads.
  */
 import { describe, it, expect } from "vitest";
@@ -63,7 +63,7 @@ describe("ordinary tool-call args are refined from the update that carries them"
       notify(session.sessionId, {
         sessionUpdate: "tool_call",
         toolCallId: "tc-1",
-        title: "mcp__libi-app__libi_show_piece",
+        title: "mcp__libi-app__libi_show",
         rawInput: {},
       }),
     );
@@ -74,11 +74,11 @@ describe("ordinary tool-call args are refined from the update that carries them"
       notify(session.sessionId, {
         sessionUpdate: "tool_call_update",
         toolCallId: "tc-1",
-        title: "mcp__libi-app__libi_show_piece",
-        rawInput: { pieceId: "piece-7" },
+        title: "mcp__libi-app__libi_show",
+        rawInput: { target: "piece", pieceId: "piece-7" },
       }),
     );
-    expect(argsOf(session, "tc-1")).toEqual({ pieceId: "piece-7" });
+    expect(argsOf(session, "tc-1")).toEqual({ target: "piece", pieceId: "piece-7" });
   });
 
   it("fills them from a completed update too, when that is the first one carrying input", () => {

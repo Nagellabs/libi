@@ -37,13 +37,13 @@ describe("show_in_chat surface gating (registration responds to createLibiMcpSer
     const names = await registeredToolNames("in-app");
     expect(names).toContain("libi.show_in_chat");
     // sanity: other always-on tools are present
-    expect(names).toContain("libi.show_asset");
+    expect(names).toContain("libi.show");
   });
 
   it("does NOT register libi.show_in_chat when no surface is passed (terminal/BYO-CLI default)", async () => {
     const names = await registeredToolNames();
     expect(names).not.toContain("libi.show_in_chat");
-    expect(names).toContain("libi.show_asset");
+    expect(names).toContain("libi.show");
   });
 
   it("does NOT register it for any non-'in-app' value", async () => {

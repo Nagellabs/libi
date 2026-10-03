@@ -10,7 +10,7 @@ export interface MatteSegmentOpts {
   range: { start: number; end: number };
   /** Directory the sidecar writes `f%06d.png` alpha frames into. */
   outputDir: string;
-  /** [x, y, w, h] frame-pixel seed box (from libi.ground_target); null/omitted = auto (largest person). */
+  /** [x, y, w, h] frame-pixel seed box (from libi.track({ action: "ground_target" })); null/omitted = auto (largest person). */
   seedBox?: [number, number, number, number] | null;
   /** Grayscale seed-mask PNG path (>127 = subject) — overrides derivation. */
   seedMaskPath?: string | null;

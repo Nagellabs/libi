@@ -6,14 +6,14 @@ mcps: [youtube-download, fal-ai]
 agent: claude-code
 runs: 1
 timeoutSec: 900
-covers: [create_character, auto-catalog, rep-image, no-background-extras, no-overgeneration]
+covers: [character-create, auto-catalog, rep-image, no-background-extras, no-overgeneration]
 # SOURCE-DEPENDENT, NOT a deterministic regression guard (like mimic-video): it downloads
 # a real short YouTube clip (`libi.download_video` is real in test mode; only fal/elevenlabs
 # are faked) and
 # runs a real Claude Code vision analysis, so wall-clock is ~6-15 min and a TIMEOUT is a
 # hardware/network artifact, NOT a skill regression. On TIMEOUT, JUDGE FROM THE PARTIAL
 # transcript + kept LIBI_HOME (analysis record + the /pieces/<id>/characters API): the
-# download → analysis → create_character all happen before any slow tail. Run with --keep.
+# download → analysis → libi.character create all happen before any slow tail. Run with --keep.
 # fal-ai is enabled ONLY so the "no over-generation" invariant below is meaningful — a
 # pure analysis+catalog ask must never fire a fal endpoint.
 ---
@@ -27,7 +27,7 @@ clip. Any people who only appear incidentally in the background are not the subj
 
 ## Hard invariants
 ```yaml
-# Cataloging drives libi-core catalog/analysis tools (create_character,
+# Cataloging drives libi-core catalog/analysis tools (libi.character create,
 # analysis_describe_frame, etc.) which are NOT recorded in the fal/elevenlabs trace, so the
 # cataloging behavior is judged below, not asserted here. The one mechanical guarantee for
 # this analysis-only ask: NO generation endpoint should fire (fal-ai is enabled so this
@@ -41,7 +41,7 @@ assertions:
 - Downloaded the clip (`libi.download_video`) and ran the full `video-analysis`
   pipeline — extracting frames, describing each with `people[]`/`subjects[]` naming where
   identifiable, and saving a video-level summary.
-- **Proactively created a character** (`libi.create_character`) for the recurring host —
+- **Proactively created a character** (`libi.character` action `create`) for the recurring host —
   following `using-character-library`'s auto-catalog directive — and reported the new
   catalog entry inline in chat with its rep image (`![name](/api/files/by-id/<id>/content)`),
   name, and a short description. (The harness auto-approves, so do not judge whether it

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { join } from "node:path";
-import { computeVerifyDims, VERIFY_BITRATE_BPS, overlayFileIds } from "@/lib/render/frame-capture";
+import { computeVerifyDims, VERIFY_BITRATE_BPS, verifyBitrate, overlayFileIds } from "@/lib/render/frame-capture";
 import type { Overlay } from "@/lib/engine/types";
 import type { RenderPayload } from "@/lib/export/render-jobs";
 import { createTempStorageDir, cleanupTempDir } from "../../helpers/test-storage";
@@ -57,6 +57,13 @@ describe("verify render bitrate", () => {
     // The verify MP4 exists only for the agent's frame extraction; 2 Mbps at
     // ≤720 short-side is fully legible and keeps the postback small + fast.
     expect(VERIFY_BITRATE_BPS).toBe(2_000_000);
+  });
+
+  it("stays at 2 Mbps up to 720 x 1280 and grows with the pixels above it (a region's render), capped", () => {
+    expect(verifyBitrate(720, 1280)).toBe(2_000_000);
+    expect(verifyBitrate(360, 640)).toBe(2_000_000);
+    expect(verifyBitrate(1080, 1920)).toBe(4_500_000);
+    expect(verifyBitrate(3840, 2160)).toBe(12_000_000);
   });
 });
 

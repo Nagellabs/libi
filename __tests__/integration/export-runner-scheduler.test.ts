@@ -115,8 +115,7 @@ describe("export runner ↔ scheduler", () => {
     const other = await s.acquire({ id: "other", priority: "foreground", estimate: BACKGROUND_EXAMPLE_ESTIMATE });
     const rec = record();
     const run = exportRunner.run(ctx(params(rec.id)));
-    await new Promise((r) => setTimeout(r, 60));
-    expect(ticks).toContainEqual([0, 1, "waiting"]);
+    await vi.waitFor(() => expect(ticks).toContainEqual([0, 1, "waiting"]));
     expect(getExportRecord(rec.id)?.status).toBe("queued");
     expect((await getExportView(rec.id))?.waiting).toEqual({ reason: "cap", message: "Waiting for a free export slot — 1 export running" });
     other.release();
@@ -138,7 +137,7 @@ describe("export runner ↔ scheduler", () => {
     let cancelled = false;
     const rec = record();
     const run = exportRunner.run(ctx(params(rec.id), () => cancelled));
-    await new Promise((r) => setTimeout(r, 40));
+    await vi.waitFor(() => expect(ticks).toContainEqual([0, 1, "waiting"])); // it is in the queue
     cancelled = true;
     await expect(run).rejects.toThrow();
     expect(getExportRecord(rec.id)?.status).toBe("cancelled");
@@ -174,8 +173,7 @@ describe("export runner ↔ scheduler", () => {
     stub.started = () => void started++;
     const cancelledAll = { v: false };
     const runs = [record("one"), record("two")].map((rec) => exportRunner.run(ctx(params(rec.id), () => cancelledAll.v)).catch(() => undefined));
-    await new Promise((r) => setTimeout(r, 100));
-    expect(started).toBe(2);
+    await vi.waitFor(() => expect(started).toBe(2));
     expect(s.runningCount()).toBe(2);
     cancelledAll.v = true;
     await Promise.all(runs);
@@ -193,8 +191,7 @@ describe("export runner ↔ scheduler", () => {
     // The cap was 2 hardware sessions; it is 1 now: a second hardware export waits for the encoder.
     const first = await s.acquire({ id: "hw1", priority: "foreground", estimate: HW_ESTIMATE });
     const second = s.acquire({ id: "hw2", priority: "foreground", estimate: HW_ESTIMATE });
-    await new Promise((r) => setTimeout(r, 30));
-    expect(s.waitingInfo("hw2")?.reason).toBe("encoder");
+    await vi.waitFor(() => expect(s.waitingInfo("hw2")?.reason).toBe("encoder"));
     first.release();
     (await second).release();
   });

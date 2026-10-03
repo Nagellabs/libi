@@ -1,7 +1,6 @@
 ---
 name: mimic-video-captions
-description: Reproduce / mimic the ON-SCREEN CAPTIONS of an existing video — lyric typography, kinetic text, road/perspective captions, glowing animated subtitles. Owns the caption-mimic flow — the authoritative words+timing come from the Whisper transcript, the visual treatment + motion from a caption-focused paid analysis, routing each caption to the right renderer (3D/perspective → three-overlays, flat kinetic 2D → animated-text-overlays, plain subtitle → speech-captions), then RENDER and self-correct via the verify loop. Load this when the user wants the source's captions reproduced faithfully — NOT for recreating the video's content (that is mimic-video).
-when_to_use: The user wants to reproduce / mimic / copy the ON-SCREEN CAPTIONS or lyric typography of an existing video onto a piece — "add the same captions", "mimic the lyric text", "recreate the floating road captions", "copy how the words animate". Triggers when the captions THEMSELVES are the thing to reproduce. Loaded by mimic-video when it routes a caption-reproduction request here; also a direct entry point.
+description: "Reproduce the on-screen captions of an existing video onto a piece: lyric typography, kinetic text, road or perspective captions, glowing subtitles ('add the same captions', 'copy how the words animate'). Also entered from mimic-video. Not for recreating the video itself (mimic-video) or plain speech subtitles (speech-captions)."
 tags:
   - overlays
   - recreate
@@ -10,182 +9,55 @@ tags:
 
 # Mimic On-Screen Captions
 
-The owner of "reproduce the captions of THIS video." A caption is its **motion + style on
-the footage**, not just its words — so a faithful reproduction needs THREE things, from TWO
-sources, then a **render-verify loop** to prove it:
+Done looks like: the piece's captions say the source's exact words at the right times and look and move like the source's, and you have rendered frames and looked at them to prove it. A caption is its motion and style on the footage, not just its words, so a faithful reproduction needs three things from two sources, then a verify loop.
 
-1. **The exact words + timing** — authoritative from the **Whisper transcript** (`audio-analysis`).
-2. **The visual treatment + how it animates** — from a **caption-focused paid analysis**:
-   run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
-   with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
-   `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`. It watches the WHOLE video so it can describe motion a per-frame still can't.
-3. **The right renderer** for each caption — 3D/perspective vs flat-kinetic-2D vs plain subtitle.
+## Words and look come from different sources
 
-Then you **build → render → look at the pixels → fix** (the verify loop), because the agent
-builds blind otherwise and over-scales captions out of frame.
+The video model sees the visual treatment but mis-reads words and timing; the transcript has exact words and word-level timing but says nothing about look. Cross them and the captions read wrong or animate wrong.
 
-> **Why a dedicated skill.** Reproducing captions is a craft with its own failure modes
-> (deciding 2D-vs-3D off frozen stills, mis-reading sung words, over-scaling 3D text out of
-> frame, building blind with no render feedback). `mimic-video` stays a thin router; this skill
-> owns the caption craft so the router stays clean.
+- **Words and timing: the transcript.** Run `audio-analysis` (local Whisper), using the medium model for non-English or sung lyrics. Transcribe even a "music-only" lyric reel: the captions are those words. Never take words from the visual analysis.
+- **Look and motion: a caption-focused analysis** that watches the whole video and returns, per caption, its anchor (world: locked in the scene and drifting or growing with the camera, or screen: fixed, scaling or fading), keyframes (centre cx, cy and height as a 0 to 1 fraction of frame height), reveal schedule (all at once or progressive), orientation (billboard, ground-tilted, roadside wall, with degrees), and colour, glow and weight. Never take look from the transcript.
 
----
+## The caption-focused analysis is paid: ask first
 
-## Step 1 — Split the two sources (words vs look). This split is the whole game.
+It is the biggest quality lever, so recommend it, but it runs on a video-understanding model on your provider, libi shows no approval card for it, and it spends the user's credits. Before running it, name the model, give the per-second price from the provider's pricing tool, and get a yes. Say what you would run and what it costs even when no source file is loaded yet. The call and the exact flow (the caption-spec prompt, saving the result under `summary.custom.caption_spec` with `libi.analysis_save` action `summary_custom`, which needs a `summary` step to exist first) are in the `video-analysis` skill and its provider reference.
 
-The video model **mis-reads words and timing** but **sees the visual treatment**. The transcript
-gives **exact words + word-level timing** but says nothing about look. So:
+If the user declines, fall back to the free path: sample a few frames across one caption's on-screen window with `libi.analysis_extract` action `frames` (never `libi.generate_thumbnails`, which leaves throwaway JPGs in the piece's assets) and view them. It is rougher, because a still freezes the animation and you will under-call the motion.
 
-- **Words + timing → the Whisper transcript.** Invoke `audio-analysis` (Whisper). Use the
-  `medium` model for non-English / sung lyrics (per `music-video-creation` Rule 6). Yes —
-  transcribe even a "music-only" lyric reel, because **the captions ARE those words**. This is
-  the authoritative source for WHAT each caption says and WHEN.
-- **Look + motion → the caption-focused analysis (paid, see Step 2).** Never trust the analysis
-  for the exact words — only for anchor (world vs screen), keyframes (center + height-fraction),
-  orientation, reveal schedule, color/glow.
+## Flat by default, 3D only when the source is
 
-Never take words from the analysis or look from the transcript. Cross the streams and the
-captions read wrong or animate wrong.
+A static frame cannot tell a centred scale-punch (2D) from a 3D dolly toward the camera, so do not infer 3D from stills. Reproduce a caption in 3D only when the source genuinely shows depth (text laid on a road or floor, world-anchored lyrics that recede with the footage) or the user asks. With the caption-focused analysis, its `anchor` and `orientation` decide: world plus roadside-wall or ground-tilted is 3D; screen plus billboard is flat 2D. Without it and genuinely unsure, default to flat; ask the user ("flat 2D or 3D animated?") only when the source plausibly reads as a real road or perspective look and the answer changes the result.
 
-## Step 2 — Strongly suggest the caption-focused paid analysis (ask first, disclose cost)
+Route each caption:
+- **Text mapped onto road or floor geometry, receding or growing with the footage**: `three-overlays` (a real `three` overlay). A caption that only looks 3D but is not footage-mapped is a text overlay with `place3d: true`, not a `three` overlay.
+- **Flat kinetic 2D** (typewriter, word by word, pop, slide, glow): a declarative text overlay with a `reveal` first, via `speech-captions` or `animated-text-overlays`, plus `libi.layer_effect` action `apply` for entrance, exit and loop motion. Escalate to a code overlay only for motion those cannot express (per-word colour cycling, beat-synced bursts, position morphing), and write the declarative version first to lock the timing.
+- **Plain synced subtitle**: `speech-captions`.
 
-When the user wants to **mimic** captions, the caption-focused analysis is the single biggest
-quality lever — it is **strongly recommended**. It is PAID (your provider's credits, ~$0.002/s
-of source; a 20s reel ≈ a few cents). It runs on YOUR provider (the video-understanding model in
-your fal MCP, `fal-ai/video-understanding`) and libi shows **no approval card** for it, so you
-MUST name the model and its approximate cost (~$0.002 per second of video) and get a yes before
-running it — even when no source file is loaded yet, say what you WOULD run and what it costs
-(cooperative approval, the libi paid-tool convention):
+Captions are overlays added in post, never baked into a generated clip.
 
-> "To mimic these captions faithfully I'd run a caption-focused analysis — it watches the whole
-> video and returns each caption's exact motion (anchor, keyframes, orientation, reveal, color).
-> It costs about <X> in your provider's credits (~$0.002/s). Want me to run it? I can also try from frames
-> alone for free, but the result will be rougher."
+## Time, style and size each caption
 
-On **yes**: run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
-with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
-`libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`.
-(`analysis_update_summary_custom` writes into the file's `summary` step, so that step must
-exist — run `video-analysis` flow (A), or save a minimal `video_v1` summary with
-`libi.analysis_save_summary`, before saving the spec.)
-The result is a per-caption spec (NOT a production script — it lives under
-`summary.custom.caption_spec`, separate from any script text). It gives, per caption:
-- `text` (use the TRANSCRIPT's words instead — see Step 1),
-- `appear_sec`/`exit_sec`,
-- `anchor`: **world** (locked in the 3D scene — drifts/recedes/grows as the camera moves) vs
-  **screen** (fixed, only scales/fades) — this decides the whole rebuild,
-- `keyframes`: time | center cx,cy (0..1) | **height as a FRACTION of frame height** (0..1),
-- `reveal`: all-at-once vs progressive (with the per-character schedule),
-- `orientation`: billboard / ground-tilted / roadside-wall (+ degrees),
-- color hex + glow blur + font weight.
+Place each caption at its word or line's real transcript timestamp, peak-aligned to the vocal onset with no global lead offset. Match the source's colour, weight, position and glow rather than a generic subtitle look. Size and position from the analysis keyframes: at each moment the on-screen centre should be near (cx, cy) and the height near its height fraction of the frame; if those change across keyframes, animate so it visibly moves or recedes. **Never exceed the given height fraction**: most captions are small (0.04 to 0.15), and exceeding it is what pushes text out of frame.
 
-On **no** (declined the cost): fall back to sampling a few frames across ONE caption's window
-with **`libi.analysis_extract_frames`** (FREE — frames land in the Frames tab; NEVER
-`libi.generate_thumbnails`, which dumps throwaway JPGs into the piece's assets) and read them
-with your own Read tool. This is rougher — a still freezes the animation, so you will under-call
-motion — but it is free.
+## Verify by rendering
 
-## Step 3 — Flat by default; go 3D only when the source clearly is (or the user asks).
+You build blind otherwise. After each caption or small batch, `libi.render_overlay_frames({ pieceId, overlayId })` (the loop `three-overlays` owns), view the frames, and check them against the source:
 
-Captions are **flat 2D by default**. Only reproduce a caption as 3D when the SOURCE
-genuinely shows real depth (text laid on a road/floor, world-anchored lyrics that recede
-with the footage) or the user explicitly asks for a 3D look. A static frame freezes the
-animation, and a centered scale-punch (2D) and a 3D dolly-toward-camera look **identical
-in a still** — so don't infer 3D from a frozen frame alone.
+- A blank frame on a 3D caption is the geometry footgun (a roadside-wall caption needs a positive `rotation.y` to recede; the wrong sign throws it behind the camera with no error). `three-overlays` has the fix.
+- `overflow.touchesEdge: true` means it clips the frame; shrink it. A 3D caption's projected size depends on the camera, so this flag and your eyes are the only guard.
+- Wrong position, size or motion against the source: fix it.
 
-- If you ran the **caption-focused analysis** (Step 2), let its `anchor` + `orientation`
-  decide: `world` + roadside-wall/ground-tilted ⇒ **3D**; `screen` + billboard ⇒ **flat 2D**
-  (the default).
-- If you did NOT (frames only) and the depth is genuinely ambiguous, **default to flat 2D**.
-  Only ask the user when the source plausibly reads as a real 3D / road / perspective look
-  and the call materially changes the result — frame it as "flat 2D vs 3D animated" and
-  wait for the answer before building that caption. Do not reflexively recommend 3D.
+Fix a text overlay with `libi.update_overlay`; for a code or three caption edit the file at the `codeFilePath` from `libi.add_overlay` (or `libi.get_overlays`) and the watcher re-renders. Allow about two loops per caption, and if it is still wrong, tell the user what is off rather than thrashing. Do the loop on the hardest captions (world-anchored, receding, or flagged large) at minimum. A caption you did not render and look at is unverified.
 
-Route by the decision (climb the kind ladder — pick the lowest kind that expresses it):
-- **3D / perspective** (text genuinely mapped onto road/floor geometry, world-anchored lyrics
-  that recede/grow WITH the footage) → **`three-overlays`** (real WebGL `three` overlays). Note:
-  a caption that merely LOOKS 3D but isn't footage-mapped is `kind:"text"` + `place3d:true`
-  (set via `update_overlay`), NOT a `three` overlay — reserve `three` for perspective-on-geometry.
-- **Flat kinetic 2D** (typewriter, word-by-word, pop, slide, glowing flat text) → **DECLARATIVE
-  `kind:"text"` + a `reveal:{ mode }` FIRST** via `speech-captions` / `animated-text-overlays`,
-  layering `libi.apply_layer_effect` for entrance/exit/loop motion. Escalate to a `code` overlay
-  ONLY for motion the declarative reveal modes + effects genuinely can't express (per-word color
-  cycling, beat-synced bursts, smooth position morphing). Even then, write the declarative version
-  first to lock timing before swapping in code.
-- **Plain synced subtitle** (one line at a time, no kinetic treatment) → **`speech-captions`**.
+## If you decline to display the actual lyrics
 
-Captions are **text / code / three overlays added in post** — never baked into a generated clip.
+Reproducing a recognizable song's lyrics verbatim may carry rights issues, so flag it for the user's own or cleared content. If you decline to put the words in, build the whole scaffold and hand the words to the user rather than dropping the captions:
 
-## Step 4 — Time + style each caption from the two sources
+1. Get timing without the words from `libi.music_detect_beats({ fileId })`, vocal onsets or the appearance times in the analysis. You may reuse the transcript's timestamps; timing is not the copyrighted work.
+2. Apply the complete look and animation; style is not encumbered.
+3. Put a neutral placeholder at each timed slot matching the source's line rhythm and word count (`LINE 1`, `[lyric]`). Declarative text overlays are already click-to-edit; a code overlay that was genuinely needed holds all its line strings in one labelled array at the top of the draw function.
+4. Hand over a per-line map: each caption's start time and where to type its words.
 
-For each caption:
-1. **Time** it to the transcript: place it at the word/line's real timestamp, peak-aligned to the
-   vocal onset (`music-video-creation` Rule 5 — no global lead offset).
-2. **Style** it to match the source: color, font weight, position, glow from the analysis (or the
-   frames). Don't default to a generic subtitle look.
-3. **Size + place** from the analysis keyframes: drive the overlay so at each moment its on-screen
-   center ≈ (cx,cy) and its height ≈ height_fraction × frame_height. If center/height change across
-   keyframes, ANIMATE so it visibly moves/recedes. **HARD RULE: never exceed the given
-   height-fraction** — this is what keeps the text in frame (most captions are SMALL, 0.04–0.15).
+Try the faithful reproduction first, and never deliver a caption-less recreation of a caption-driven video.
 
-## Step 5 — VERIFY LOOP (mandatory): build → render → look → fix
-
-The agent builds blind. After adding each caption (or a small batch), **prove it** with the
-render-verify loop **owned by `three-overlays`** (it applies to any 3D overlay; captions are one
-use):
-
-1. `libi.render_overlay_frames({ pieceId, overlayId })` — rasterizes a few real composition
-   frames (base video + your overlay) to PNGs on disk and returns their paths + an `overflow`
-   flag per frame.
-2. **Read the returned PNG paths with your Read tool** (it opens them as images — the proven
-   `analysis_extract_frames` pattern). LOOK at them.
-3. Check, against the source/intent:
-   - **Blank frame** ⇒ the 3D **yaw-sign / behind-camera footgun** — fix the geometry (a
-     roadside-wall caption needs POSITIVE `rotation.y` to recede toward −z; the wrong sign throws
-     the word behind the camera and it renders blank with no error).
-   - **`overflow.touchesEdge: true`** ⇒ the caption is clipping the frame — shrink it. (3D text
-     can't be statically clamped — its projected size depends on the camera — so this detector +
-     your eyes are the only guard.)
-   - **Wrong position / size / motion** vs the source ⇒ fix.
-4. Fix by **editing the overlay's code file directly** — the `scene.jsx` (3D) or `draw.jsx` (2D)
-   at the `codeFilePath` returned by `add_overlay` (rediscover via `get_overlays`); the watcher
-   re-renders the preview. Then re-verify. Cap ~2 loops per caption — if still wrong after two,
-   tell the user what's off rather than thrashing.
-
-A caption you didn't render and look at is unverified. Do the loop on at least the hardest
-captions (the world-anchored / receding ones), and always on any the analysis flagged as large.
-
----
-
-## Copyright fallback — if you decline to transcribe / display the actual lyrics, DON'T drop the captions
-
-Build the full caption SCAFFOLD and hand the words to the user:
-1. **Timing without the words.** Get caption times from `libi.music_detect_beats({ fileId })`,
-   vocal-onset timing, or the on-screen appearance times the analysis recorded. (You MAY reuse a
-   Whisper transcript's **timestamps** — timing is not the copyrighted work — while NOT rendering
-   the lyric words.)
-2. **Full design.** Apply the complete style + effect (color, glow, position, kinetic animation) —
-   the look is not copyright-encumbered.
-3. **Placeholder text, trivially swappable.** Put a neutral placeholder at each timed slot matching
-   the source's line/phrase rhythm + word count (`LINE 1`, `● ● ●`, `[lyric]`). For ordinary
-   kinetic captions this is declarative `kind:"text"` overlays — the words are already
-   click-to-edit in Preview. Only when the caption genuinely required a `code` overlay (motion the
-   reveal modes + effects couldn't express), hold ALL line strings in ONE labelled array at the TOP
-   of the draw function (`const LINES = ["LINE 1", …]`) so they stay easy to replace.
-4. **Hand off with a per-line map** — each caption's start time + where to type its words.
-
-Try the faithful reproduction FIRST; fall to this scaffold only when reproducing the actual words
-is declined. Never deliver a caption-less recreation of a caption-driven video.
-
-Licensing caveat: reproducing a recognizable song's lyrics verbatim may carry rights issues — flag
-it (as with a reused music bed) for the user's own / cleared content.
-
-## Cross-skill references
-- `audio-analysis` — Whisper transcript (authoritative words + word-level timing).
-- `video-analysis` — flow (B) documents the caption-spec path this skill drives: run the caption-focused analysis on your own video provider (`fal-ai/video-understanding`
-  with a caption-spec prompt — see `video-analysis` flow (B)) and save the result with
-  `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <spec> })`.
-- `three-overlays` — real 3D / perspective captions + the build→render→inspect→fix verify loop.
-- `animated-text-overlays` — flat kinetic 2D caption effects (code overlays).
-- `speech-captions` — plain transcript-synced subtitles.
-- `mimic-video` — the video-content recreate router; hands caption-reproduction requests here.
+Related: `audio-analysis`, `video-analysis`, `three-overlays`, `animated-text-overlays`, `speech-captions`, and `mimic-video`, which hands caption requests here.

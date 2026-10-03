@@ -57,6 +57,15 @@ const timing = z.object({
   totalFrames: z.number(),
   duration: z.number(),
   progress: z.number(),
+  /** The piece-level clock the body is drawn on (the documented
+   *  `context.compositionTime` / `overlayStart` / `pieceDuration`): this frame's
+   *  absolute time, where the overlay starts on the timeline, and how long the
+   *  piece runs. FINITE like everything a body reads off the wire. Optional so
+   *  a sender that predates them still parses; the runtime then reads the
+   *  overlay-local clock as the piece clock (`buildDrawBodyContext`). */
+  compositionTime: z.number().finite().optional(),
+  overlayStart: z.number().finite().optional(),
+  pieceDuration: z.number().finite().nonnegative().optional(),
 });
 const vec3 = z.object({ x: z.number(), y: z.number(), z: z.number() });
 const word = z.object({ text: z.string(), start: z.number(), end: z.number() });
@@ -124,9 +133,16 @@ export const IDLE_LAYER_MS = 60_000;
  */
 export function contentFitKey(
   at: { width: number; height: number },
-  m: { fps: number; time: { totalFrames: number; duration: number }; words?: ReadonlyArray<{ text: string; start: number; end: number }> },
+  m: {
+    fps: number;
+    time: { totalFrames: number; duration: number; overlayStart?: number; pieceDuration?: number };
+    words?: ReadonlyArray<{ text: string; start: number; end: number }>;
+  },
 ): string {
-  return `${at.width}x${at.height}@${m.fps}/${m.time.totalFrames}/${m.time.duration}${wordsSignature(m.words)}`;
+  // A body that paces off `compositionTime` / `pieceDuration` draws differently
+  // when the overlay moves or the piece grows, so those re-probe the fit too.
+  const piece = m.time.overlayStart === undefined && m.time.pieceDuration === undefined ? "" : `@${m.time.overlayStart ?? 0}/${m.time.pieceDuration ?? 0}`;
+  return `${at.width}x${at.height}@${m.fps}/${m.time.totalFrames}/${m.time.duration}${piece}${wordsSignature(m.words)}`;
 }
 
 /**
@@ -143,7 +159,7 @@ export function contentFitKeys(m: {
   size: { width: number; height: number };
   fitSegment?: { from: { width: number; height: number }; to: { width: number; height: number } };
   fps: number;
-  time: { totalFrames: number; duration: number };
+  time: { totalFrames: number; duration: number; overlayStart?: number; pieceDuration?: number };
   words?: ReadonlyArray<{ text: string; start: number; end: number }>;
 }): string[] {
   return m.fitSegment

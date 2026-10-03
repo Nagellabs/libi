@@ -7,7 +7,7 @@
 #
 #   sh replace-provider.sh <provider> <agent> <cli> <entry> [<scope>]
 #
-#   provider  fal, higgsfield, zernio or elevenlabs
+#   provider  fal, higgsfield, zernio, elevenlabs or playwright
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   entry     the name the provider's MCP server has in the agent's config now
@@ -34,7 +34,7 @@ scope=$5
 # follows a remove. A libi test keeps this list the same as the providers
 # add-provider.sh knows.
 case $provider in
-  fal | higgsfield | zernio | elevenlabs) ;;
+  fal | higgsfield | zernio | elevenlabs | playwright) ;;
   *) echo "replace-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in

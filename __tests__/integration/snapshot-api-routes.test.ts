@@ -109,4 +109,38 @@ describe("snapshot API routes", () => {
     const body = await goodRes.json();
     expect(body.ok).toBe(true);
   });
+
+  it("a discarded draft comes back through POST /restore with its rec- id (agent-speed C1)", async () => {
+    const { PUT } = await import("@/lib/composition/persistence").then((m) => ({ PUT: m.saveManifest }));
+    await PUT(PIECE_ID, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "x", kind: "text", content: "unsaved", font: "Inter", color: "#fff", align: "center", rect: { x: 0, y: 0, width: 10, height: 10 }, startTime: 0, duration: 1, z: 0, opacity: 1 }] } as never);
+    const { discardDraft } = await import("@/lib/composition/lifecycle");
+    const kept = await discardDraft(PIECE_ID);
+    expect(kept?.id).toMatch(/^rec-/);
+    const { POST: postRestore } = await import("@/app/api/pieces/[pieceId]/snapshot/restore/route");
+    const res = await postRestore(makeReq({ snapshotId: kept!.id, confirm: true }), { params: Promise.resolve({ pieceId: PIECE_ID }) });
+    expect(res.status).toBe(200);
+    const { loadManifest } = await import("@/lib/composition/persistence");
+    expect((await loadManifest(PIECE_ID)).overlays?.map((o) => o.id)).toEqual(["x"]);
+    // and an expired / unknown one is an error, not a silent no-op
+    const bad = await postRestore(makeReq({ snapshotId: "rec-gone", confirm: true }), { params: Promise.resolve({ pieceId: PIECE_ID }) });
+    expect(bad.status).toBe(500);
+  });
+
+  it("GET /recoverable lists the discarded draft for the Version history, newest first, with the keep window", async () => {
+    const { GET: listRecoverable } = await import("@/app/api/pieces/[pieceId]/snapshot/recoverable/route");
+    const params = { params: Promise.resolve({ pieceId: PIECE_ID }) };
+    const empty = await (await listRecoverable(new Request("http://t"), params)).json();
+    expect(empty).toEqual({ drafts: [], days: 7 });
+
+    const { saveManifest } = await import("@/lib/composition/persistence");
+    await saveManifest(PIECE_ID, { width: 1920, height: 1080, fps: 30, overlays: [{ id: "x", kind: "text", content: "unsaved", font: "Inter", color: "#fff", align: "center", rect: { x: 0, y: 0, width: 10, height: 10 }, startTime: 0, duration: 1, z: 0, opacity: 1 }] } as never);
+    const { discardDraft } = await import("@/lib/composition/lifecycle");
+    const kept = await discardDraft(PIECE_ID);
+
+    const body = await (await listRecoverable(new Request("http://t"), params)).json();
+    expect(body.days).toBe(7);
+    expect(body.drafts).toHaveLength(1);
+    expect(body.drafts[0]).toMatchObject({ id: kept!.id, kind: "discarded", overlays: 1, audioClips: 0 });
+    expect(body.drafts[0].id).toMatch(/^rec-/);
+  });
 });

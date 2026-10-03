@@ -165,3 +165,12 @@ export function resolveEasing(easing: string | undefined): EasingFunction {
 
   return linear;
 }
+
+/** True when `easing` is a known preset id OR a well-formed cubic-bezier(...) literal. */
+export function isValidEasing(easing: string): boolean {
+  if (PRESETS_BY_ID.has(easing)) return true;
+  const m = CUBIC_BEZIER_RE.exec(easing.trim());
+  if (!m) return false;
+  const parts = m[1].split(",").map((s) => Number(s.trim()));
+  return parts.length === 4 && parts.every((n) => Number.isFinite(n));
+}

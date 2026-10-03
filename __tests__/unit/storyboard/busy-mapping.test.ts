@@ -5,7 +5,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { pieces } from "@/lib/db/schema/sqlite";
-import { saveManifest } from "@/lib/composition/persistence";
+import { getDb } from "@/lib/db/client";
+import { saveManifest, loadManifest } from "@/lib/composition/persistence";
 import { saveCurrentSnapshot, listSnapshotHistory } from "@/lib/composition/snapshots";
 import { commitDraftTool, discardDraftTool } from "@/mcp/tools/snapshot-tools";
 import { POST as commitRoute } from "@/app/api/pieces/[pieceId]/snapshot/commit/route";
@@ -95,7 +96,7 @@ describe("StoryboardBusyError mapping", () => {
     expect(body.error).not.toContain("Safe to retry");
   });
 
-  describe("commit_draft / discard_draft behind a held storyboard lock", () => {
+  describe("snapshot commit / discard behind a held storyboard lock", () => {
     let release!: () => void;
     let holder: Promise<unknown>;
     let pid: string;
@@ -127,10 +128,17 @@ describe("StoryboardBusyError mapping", () => {
       expect(JSON.parse(makeError(err).content[0].text).retryable).toBe(false);
     });
 
-    it("the MCP discard tool raises a partial busy error", async () => {
+    it("the MCP discard tool refuses cleanly — the draft is kept first, so nothing has changed yet", async () => {
+      // Discard keeps the draft (composition AND storyboard) as a recoverable draft before it
+      // touches anything; reading the storyboard behind a held lock fails right there.
       const err = await discardDraftTool({ pieceId: pid, confirm: true } as never).catch((e) => e);
       expect(err).toBeInstanceOf(StoryboardBusyError);
-      expect(err.partial).toBe(true);
+      expect(err.partial).toBe(false);
+      expect(JSON.parse(makeError(err).content[0].text).retryable).toBe(true);
+      // The draft is untouched: still a draft, still v2.
+      expect((await loadManifest(pid)).overlays?.[0]?.displayName).toBe("v2");
+      const [row] = await getDb().select({ hasDraft: pieces.hasDraft }).from(pieces);
+      expect(row?.hasDraft).toBe(true);
     });
 
     it("the commit route answers 409 with retryable:false", async () => {

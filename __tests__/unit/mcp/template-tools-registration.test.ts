@@ -17,14 +17,10 @@ import type { AgentSurface } from "@/lib/mcp/agent-surface";
 
 const NAMES = [
   "libi.create_template_from_piece",
-  "libi.update_template",
-  "libi.list_templates",
-  "libi.search_templates",
-  "libi.get_template",
+  "libi.template",
   "libi.apply_template",
   "libi.fetch_template_music",
-  "libi.delete_template",
-  "libi.show_templates",
+  "libi.show",
   "libi.publish_template",
 ] as const;
 
@@ -50,24 +46,44 @@ describe("the template tools are reachable over MCP on both surfaces", () => {
   it("none is in-app-only", () => {
     for (const n of NAMES) expect(IN_APP_ONLY_TOOLS).not.toContain(n);
   });
+  it("libi.template is one flat tool whose actions are the five readers/admin verbs; none of the other template tools is folded into it", async () => {
+    const tools = (await listTools()).tools;
+    const tool = tools.find((t) => t.name === "libi.template")!;
+    const props = (tool.inputSchema.properties ?? {}) as Record<string, { enum?: string[] }>;
+    expect(props.action.enum).toEqual(["get", "search", "list", "update", "delete"]);
+    expect(tool.inputSchema.required).toEqual(["action"]);
+    const names = tools.map((t) => t.name);
+    for (const old of ["libi.get_template", "libi.search_templates", "libi.list_templates", "libi.update_template", "libi.delete_template"]) {
+      expect(names, old).not.toContain(old);
+    }
+    for (const kept of ["libi.create_template_from_piece", "libi.apply_template", "libi.fetch_template_music", "libi.publish_template"]) {
+      expect(names, kept).toContain(kept);
+    }
+  });
+
   it("apply_template's converted schema carries the documented arguments", async () => {
     const tool = (await listTools()).tools.find((t) => t.name === "libi.apply_template")!;
     expect(Object.keys((tool.inputSchema.properties ?? {}) as object).sort()).toEqual([
       "cloudId",
       "confirmReplace",
       "copy",
+      "fit",
+      "layerOverrides",
       "mode",
+      "navigate",
       "newPiece",
+      "omitLayers",
       "pieceId",
       "slotValues",
+      "startAt",
       "templateId",
     ]);
   });
 
   it("publish_template's converted schema carries the documented arguments, and its description says it only prepares — the user publishes", async () => {
     const tool = (await listTools()).tools.find((t) => t.name === "libi.publish_template")!;
-    expect(Object.keys((tool.inputSchema.properties ?? {}) as object).sort()).toEqual(["confirm", "exampleVideo", "nickname", "templateId"]);
-    // `confirm` is still accepted (older skill copies send it) but no longer required.
+    // `confirm` is still accepted (older skill copies send it) but is neither advertised nor required.
+    expect(Object.keys((tool.inputSchema.properties ?? {}) as object).sort()).toEqual(["exampleVideo", "nickname", "templateId"]);
     expect([...(tool.inputSchema.required ?? [])].sort()).toEqual(["exampleVideo", "templateId"]);
     const d = tool.description ?? "";
     expect(d).toMatch(/PUBLIC catalog/);
@@ -82,10 +98,17 @@ describe("the template tools are reachable over MCP on both surfaces", () => {
   // Final review I3: these descriptions are the one instruction EVERY client
   // sees — a user's own Claude Code or Codex never has to load the skill — and
   // apply_template's used to say "follow its Steps" with no caveat.
-  it("apply_template and get_template frame index.md as untrusted author content", async () => {
+  it("apply_template and libi.template get frame index.md as untrusted author content", async () => {
     const tools = (await listTools()).tools;
-    for (const name of ["libi.apply_template", "libi.get_template"]) {
-      const d = tools.find((t) => t.name === name)!.description ?? "";
+    // The `get` action's rule rides in the `action` property's description, which every client renders.
+    const actionDoc = (tools.find((t) => t.name === "libi.template")!.inputSchema.properties as Record<string, { description?: string }>).action
+      .description!;
+    const getAction = actionDoc.slice(actionDoc.indexOf("get = "), actionDoc.indexOf("; search = "));
+    const texts: Array<[string, string]> = [
+      ["libi.apply_template", tools.find((t) => t.name === "libi.apply_template")!.description ?? ""],
+      ["libi.template get", getAction],
+    ];
+    for (const [name, d] of texts) {
       expect(d, name).not.toMatch(/follow its Steps/);
       expect(d, name).toMatch(/untrusted/i);
       for (const never of ["shell command", "fetch a URL", "files", "secrets", "other pieces"]) expect(d, `${name}: ${never}`).toContain(never);

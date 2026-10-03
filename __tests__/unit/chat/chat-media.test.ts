@@ -28,7 +28,7 @@ describe("isShowInChatName", () => {
     expect(isShowInChatName("show_in_chat")).toBe(true);
     // The form the live claude-code agent actually carries:
     expect(isShowInChatName("mcp__libi__libi_show_in_chat")).toBe(true);
-    expect(isShowInChatName("libi.show_asset")).toBe(false);
+    expect(isShowInChatName("libi.show")).toBe(false);
     expect(isShowInChatName("myshow_in_chat_extra")).toBe(false);
     expect(isShowInChatName(null)).toBe(false);
     expect(isShowInChatName(undefined)).toBe(false);
@@ -84,7 +84,7 @@ describe("extractChatMedia", () => {
     expect(extractChatMedia({ rawTitle: "show_in_chat" }, result)).not.toBeNull();
   });
   it("returns null for other tools", () => {
-    expect(extractChatMedia({ toolId: "libi.show_asset" }, result)).toBeNull();
+    expect(extractChatMedia({ toolId: "libi.show" }, result)).toBeNull();
   });
   it("returns null when the result has not arrived yet", () => {
     expect(extractChatMedia({ toolId: "libi.show_in_chat" }, undefined)).toBeNull();

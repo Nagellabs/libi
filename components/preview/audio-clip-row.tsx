@@ -7,6 +7,7 @@ import { useAudioClipPosition } from "@/hooks/preview/use-audio-clip-position";
 import { dragToTiming } from "@/lib/preview/audio-clip-drag";
 import { duckSidechainIds } from "@/lib/audio/duck-params";
 import { CopyrightBadge } from "./copyright-badge";
+import { ClipGainOverlay } from "./clip-gain-overlay";
 
 interface AudioClipRowProps {
   clip: AudioClip;
@@ -140,6 +141,7 @@ export default function AudioClipRow({
           color={clip.enabled ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.25)"}
         />
       </div>
+      <ClipGainOverlay clip={clip} />
       <button
         onClick={(e) => { e.stopPropagation(); onToggleEnabled(); }}
         aria-label={clip.enabled ? "Mute clip" : "Unmute clip"}

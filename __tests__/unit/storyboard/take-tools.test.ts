@@ -25,7 +25,7 @@ describe("take + reference tools and storyboard_get enrichment", () => {
     resetTestDb();
   });
 
-  it("attach_storyboard_clip appends a versioned take", async () => {
+  it("storyboard_take attach_clip appends a versioned take", async () => {
     const card = await addStoryboardCard(pieceId, { title: "c" });
     const r1 = await attachStoryboardClip({ pieceId, cardId: card.id, fileId: "f1", costUsd: 0.3 }, { pieceId });
     expect(r1.success).toBe(true);
@@ -53,7 +53,7 @@ describe("take + reference tools and storyboard_get enrichment", () => {
     expect(out?.selectedClipId).toBe(t1!.id);
   });
 
-  it("select_storyboard_take returns card_or_take_not_found on missing take", async () => {
+  it("storyboard_take select returns card_or_take_not_found on missing take", async () => {
     const card = await addStoryboardCard(pieceId, { title: "c" });
     const r = await selectStoryboardTake({ pieceId, cardId: card.id, takeId: "nonexistent" }, { pieceId });
     expect(r.success).toBe(false);

@@ -41,7 +41,7 @@ Poll `creative_get_flow_run_status({ flow_id, session_ids: <all of them>, contex
 `has_failures`, show the error verbatim and ask how to proceed. When it is done, the audio
 is in `media[]`: each entry's `url` (an mp3), matched to its generation by `generation_id`.
 The entries in `generations[]` carry the status and `price.credits`, never a URL.
-**The URL is short-lived: download it right away**, as SKILL.md Step 9 says for a URL (to a
+**The URL is short-lived: download it right away**, as the import section of SKILL.md says for a URL (to a
 temp path, then `libi.upload_file` with `aiGeneration`). A transcription's result is in
 `transcripts[]` instead: `text` is flat text only, with no per-word timing and no speaker
 labels.
@@ -59,7 +59,7 @@ Pass its `node_id` in `connect_from`, with the same `flow_id`.
 
 ## Provenance
 
-In Step 9's `aiGeneration`, set `provider: "elevenlabs"`, `model` to the `model_id`, and
+In the `aiGeneration` block, set `provider: "elevenlabs"`, `model` to the `model_id`, and
 `providerJobId` to the session id. Set `costEstimate` to `{ amount: <credits>, currency:
 "credits", tier: <model_id> }`, using the generation's `price.credits` from the poll (or the
 estimate's `credits`).

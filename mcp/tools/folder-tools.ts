@@ -17,7 +17,7 @@ import { eq } from "drizzle-orm";
 
 export async function createFolderTool(params: {
   name: string;
-  parentFolderId?: string;
+  parentFolderId?: string | null;
 }): Promise<ToolResult> {
   const name = params.name.trim();
   if (!name) return { success: false, error: "invalid_name" };

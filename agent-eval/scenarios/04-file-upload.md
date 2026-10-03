@@ -18,7 +18,7 @@ cost: subscription-tokens
 
 ## Expected behavior
 - Agent calls `libi.upload_file` (path → content-type inference → ffprobe
-  metadata → storage + DB insert), then `libi.show_asset` to display it.
+  metadata → storage + DB insert), then `libi.show({ target: "asset" })` to display it.
 - Upload auto-enqueues a `proxy_gen` job; the asset is auto-wrapped in an
   asset record (Asset Options).
 
@@ -27,7 +27,7 @@ cost: subscription-tokens
 - [ ] File on disk: `ls ~/.libi/storage/<pieceId>/` contains the video.
 - [ ] Media metadata probed: agent (or `list_files`) reports duration/dimensions.
 - [ ] Asset appears in the editor Assets grid without manual reload.
-- [ ] `show_asset` navigates the editor to the asset view.
+- [ ] `libi.show` target `asset` navigates the editor to the asset view.
 - [ ] Proxy job ran: `*-proxy.mp4` appears next to the original (within ~30s),
       or `jq 'select(.tag == "proxy")' ~/.libi/logs/libi.log` shows the run.
 

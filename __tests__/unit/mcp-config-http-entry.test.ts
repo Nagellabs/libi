@@ -25,8 +25,9 @@ describe("libi http entry", () => {
   it("invalidateMcpConfig POSTs /reload to the aggregator and never throws when it is down", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
     expect(() => invalidateMcpConfig({ reason: "test" })).not.toThrow();
-    await new Promise((r) => setTimeout(r, 0));
-    expect(fetchSpy).toHaveBeenCalledWith(expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/reload$/), expect.objectContaining({ method: "POST" }));
+    await vi.waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/reload$/), expect.objectContaining({ method: "POST" })),
+    );
     fetchSpy.mockRestore();
   });
 });

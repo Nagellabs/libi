@@ -105,7 +105,7 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
     });
   });
 
-  it("forwards navigate events (show_preview target)", async () => {
+  it("forwards navigate events (libi.show preview target)", async () => {
     const res = await postNotify({
       type: "navigate",
       target: "preview",
@@ -121,7 +121,7 @@ describe("/api/notify → /api/agent/events SSE pipeline", () => {
     });
   });
 
-  it("forwards navigate_agents events (show_extension / start_onboarding)", async () => {
+  it("forwards navigate_agents events (libi.show extension / start_onboarding)", async () => {
     const res = await postNotify({
       type: "navigate_agents",
       tab: "libi-mcp",

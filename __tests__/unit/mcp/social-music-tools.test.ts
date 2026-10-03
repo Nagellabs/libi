@@ -65,6 +65,15 @@ describe("libi.social_music_search", () => {
     expect(calls.find((c) => c.url.includes("/catalog?"))!.url).toContain("q=espresso");
   });
 
+  it("reads the catalog BEFORE the plan, so a read that proves the account can attach is on record when the plan is built", async () => {
+    routes = [
+      planRoute({ mode: "attach", sentence: "S", warnings: [], exportVariant: "without-song", allowedModes: ["attach", "include", "strip"] }),
+      [/\/api\/social\/music\/catalog\?/, () => ({ body: { tracks: [{ id: "ig-1", title: "Espresso" }] } })],
+    ];
+    await socialMusicSearch({ pieceId: "p1", platform: "instagram", accountId: "ig" });
+    expect(calls.map((c) => (c.url.includes("/catalog?") ? "catalog" : "plan"))).toEqual(["catalog", "plan"]);
+  });
+
   it("needs an account for Instagram and TikTok", async () => {
     expect(await socialMusicSearch({ pieceId: "p1", platform: "tiktok" })).toMatchObject({ success: false, error: "account_required" });
     expect(await socialMusicSearch({ pieceId: "p1", platform: "instagram" })).toMatchObject({ success: false, error: "account_required" });
@@ -99,6 +108,8 @@ describe("libi.social_music_search", () => {
     ];
     const r = await socialMusicSearch({ pieceId: "p1", platform: "instagram", accountId: "ig" });
     expect(r).toMatchObject({ success: true, data: { plan: { needs: expect.stringMatching(/Facebook Login/) }, candidates: [], autoSelected: null, unavailable: "needs_facebook_login" } });
+    // …and the `needs` names the screen to open with libi.show (no menus to explain).
+    expect(r.data!.plan).toMatchObject({ needsOpen: { tool: "libi.show", target: "social_settings", accountId: "ig" } });
   });
 
   it("the plan route failing is an error the agent can act on", async () => {

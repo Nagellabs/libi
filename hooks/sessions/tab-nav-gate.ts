@@ -1,6 +1,6 @@
 /**
- * Which studio tab obeys an agent's "show" navigation (`libi.show_extension`,
- * `libi.show_templates`, `libi.start_onboarding` → `navigate_agents` / `navigate_templates`).
+ * Which studio tab obeys an agent's "show" navigation (`libi.show({ target: "extension" })`,
+ * `libi.show({ target: "templates" })`, `libi.start_onboarding` → `navigate_agents` / `navigate_templates`).
  *
  * The event reaches EVERY open tab over its SSE connection, and every tab used to obey — so a tab
  * the user had parked on another page was yanked away by a chat running in a different tab

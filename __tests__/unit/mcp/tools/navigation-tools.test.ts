@@ -4,7 +4,7 @@
  * Until 2026-08-21 all four returned `{ navigated: true }` unconditionally,
  * without ever asking whether the target existed. The cost showed up in a real
  * onboarding run: with the demo piece deleted, the agent called
- * `libi.show_piece` on the dead id, got a success, and told the user "It's back
+ * `libi.show({ target: "piece" })` on the dead id, got a success, and told the user "It's back
  * on screen — hit play" while the editor showed "No piece open". Nothing else
  * in the turn contradicted the success, so the agent had no way to notice.
  *

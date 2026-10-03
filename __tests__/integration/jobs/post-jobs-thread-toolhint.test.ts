@@ -96,13 +96,10 @@ describe("POST /api/jobs threads toolHint", () => {
     // Route returned. Now release the runner so the first progress tick fires.
     releaseRunner();
 
-    // Wait for the progress chain to drain.
-    await new Promise((r) => setTimeout(r, 100));
-
-    const calls = vi
-      .mocked(notify.jobProgress)
-      .mock.calls.filter(([arg]) => arg.jobId === json.jobId);
-    expect(calls.length).toBeGreaterThan(0);
+    // Wait for the first progress notification, not a fixed time.
+    const callsFor = () => vi.mocked(notify.jobProgress).mock.calls.filter(([arg]) => arg.jobId === json.jobId);
+    await vi.waitFor(() => expect(callsFor().length).toBeGreaterThan(0));
+    const calls = callsFor();
 
     // The FIRST progress event must carry the hint — proves the route
     // attached it before the runner started emitting. Non-string toolArgs
@@ -145,12 +142,9 @@ describe("POST /api/jobs threads toolHint", () => {
     const json = (await res.json()) as { jobId: string };
 
     releaseRunner();
-    await new Promise((r) => setTimeout(r, 100));
-
-    const calls = vi
-      .mocked(notify.jobProgress)
-      .mock.calls.filter(([arg]) => arg.jobId === json.jobId);
-    expect(calls.length).toBeGreaterThan(0);
+    const callsFor = () => vi.mocked(notify.jobProgress).mock.calls.filter(([arg]) => arg.jobId === json.jobId);
+    await vi.waitFor(() => expect(callsFor().length).toBeGreaterThan(0));
+    const calls = callsFor();
     expect(calls[0][0].toolName).toBeUndefined();
     expect(calls[0][0].toolArgs).toBeUndefined();
     expect(calls[0][0].progressLabel).toBeUndefined();
@@ -189,12 +183,9 @@ describe("POST /api/jobs threads toolHint", () => {
     const json = (await res.json()) as { jobId: string };
 
     releaseRunner();
-    await new Promise((r) => setTimeout(r, 100));
-
-    const calls = vi
-      .mocked(notify.jobProgress)
-      .mock.calls.filter(([arg]) => arg.jobId === json.jobId);
-    expect(calls.length).toBeGreaterThan(0);
+    const callsFor = () => vi.mocked(notify.jobProgress).mock.calls.filter(([arg]) => arg.jobId === json.jobId);
+    await vi.waitFor(() => expect(callsFor().length).toBeGreaterThan(0));
+    const calls = callsFor();
     // The legacy field must not resurface as a threaded toolCallId.
     expect(calls[0][0].toolCallId).toBeUndefined();
   });

@@ -4,7 +4,7 @@ vi.mock("@/mcp/notify", () => ({ notify: { navigateAgents: (e: unknown) => navig
 import * as extensionTools from "@/mcp/tools/extension-tools";
 import { showExtension } from "@/mcp/tools/extension-tools";
 
-describe("libi.show_extension", () => {
+describe("libi.show({ target: 'extension' })", () => {
   beforeEach(() => navigateAgents.mockClear());
   it("navigates to the libi MCP tab focused on the extension, and reports whether the studio accepted it", async () => {
     expect(await showExtension({ extensionId: "libi-tracking" })).toEqual({ success: true, data: { ok: true, navigated: true } });

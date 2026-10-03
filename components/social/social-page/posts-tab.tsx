@@ -216,7 +216,7 @@ function PostsTable({
                   </button>
                 </TableCell>
                 <TableCell>
-                  <StatusChip status={p.status} />
+                  <StatusChip post={p} />
                 </TableCell>
                 <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{whenLabel(p, tz) ? shortWhen(p, tz) : "—"}</TableCell>
                 {METRIC_COLUMNS.map((c) => (
@@ -268,7 +268,7 @@ function PostsGrid({
                     on the card twice — a status chip and a per-network chip
                     both saying "Published" (QA 2026-09-22). */}
                 <span className="absolute top-2 left-2">
-                  <StatusChip status={p.status} />
+                  <StatusChip post={p} />
                 </span>
               </button>
               <div className="flex flex-1 flex-col gap-2 p-3">

@@ -1,7 +1,7 @@
 ---
 id: storyboard-generation-spec-cache-gate
 title: Storyboard generation spec — populate the model-schema cache, set a validated spec, wire scene-to-scene continuity
-skills: [using-storyboard, ai-asset-generation, ai-video-models, realistic-image-generation]
+skills: [using-storyboard, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -20,27 +20,35 @@ schematics first, then set up each scene's AI generation properly (keyframes plu
 parameters for the model you pick) and wire scene 2 so it stays continuous with scene 1.
 Don't spend anything until I've seen the plan.
 
+## Replies
+1. The plan looks good. Go ahead and generate the keyframes and both clips.
+
 ## Hard invariants
 ```yaml
 assertions:
-  # Keyframes use the hardened realism default, not nano-banana.
-  - { endpoint_id: openai/gpt-image-2*, expect: present }
-  - { endpoint_id: "fal-ai/nano-banana*", expect: absent }
+  # "Don't spend until I've seen the plan": nothing is generated in turn 1.
+  - { transcript_matches: '\[tool-call mcp__fal-ai__(?:run_model|submit_job)\]', turn: 1, expect: absent }
+  # Keyframes use the hardened realism default, not nano-banana. Generation calls only
+  # (`input.prompt exists`): reading another model's schema while choosing is fine.
+  - { endpoint_id: openai/gpt-image-2*, where: "input.prompt exists", expect: present }
+  - { endpoint_id: "fal-ai/nano-banana*", where: "input.prompt exists", expect: absent }
   # Clips are Seedance IMAGE-to-video (animated from the keyframes) — any Seedance
-  # version (v1/pro or 2.0; the model pick is an ai-video-models concern, the
+  # version (v1/pro or 2.0; the model pick is a video-generation-craft concern, the
   # using-storyboard contract is "animate from the keyframe, not text-to-video").
-  - { tool: run_model, endpoint_id: "*seedance*image-to-video*", expect: present }
+  # Endpoint-scoped, not tool-scoped: a video goes out through run_model OR submit_job (the fal reference
+  # says submit_job for long jobs), and `input.prompt exists` keeps schema lookups out of the count.
+  - { endpoint_id: "*seedance*image-to-video*", where: "input.prompt exists", expect: present }
   - { endpoint_id: "*seedance*text-to-video*", expect: absent }
   # Two scenes were requested — must not balloon into many extra clip generations.
-  - { tool: run_model, endpoint_id: "*seedance*", count: "<=4" }
+  - { endpoint_id: "*seedance*", where: "input.prompt exists", count: "<=4" }
 ```
 
 ## Behavioral expectations
 - Drafted the **Tier-1 schematics first** and **presented the board before any paid
   generation** — honoring "don't spend until I've seen the plan."
 - **Populated the model-schema cache before authoring any clip spec** — called
-  `get_model_schema_cache` for the chosen endpoint, and on a miss, fetched/normalized the
-  endpoint's API to `GenFieldDef[]` and saved it with `save_model_schema_cache` — rather
+  `libi.model_schema_cache` action `get` for the chosen endpoint, and on a miss, fetched/normalized the
+  endpoint's API to `GenFieldDef[]` and saved it with `libi.model_schema_cache` action `save` — rather
   than calling `set_storyboard_generation` blind.
 - Set a **generation spec on every card** via `set_storyboard_generation` (no card left
   without one), including `start_frame` + `end_frame` keyframing.

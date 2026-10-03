@@ -4,7 +4,7 @@ import { navigationEmitter } from "@/lib/navigation-events";
 /**
  * Unified timeline clip operations for the right-click menu — POST with
  * `{ op, targetId, atTime?, ripple? }`. Shares the exact `lib/composition/clip-ops`
- * core with the libi.split_clip / delete_clip / duplicate_clip MCP tools, so the
+ * core with the libi.clip MCP tool (split / delete / duplicate), so the
  * user and the agent get identical behaviour. Delete removes the timeline entity
  * only; the source file is never touched. `ripple: true` on a delete additionally
  * closes the gap by shifting every overlay/audio clip starting at/after the

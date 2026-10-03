@@ -9,12 +9,12 @@ import {
 
 describe("makeMcpToolId", () => {
   it("concatenates server-id and tool-name with a colon", () => {
-    const id = makeMcpToolId("libi", "libi.compute_object_track");
-    expect(id).toBe("libi:libi.compute_object_track");
+    const id = makeMcpToolId("libi", "libi.track");
+    expect(id).toBe("libi:libi.track");
   });
   it("preserves dashes and dots verbatim", () => {
-    expect(makeMcpToolId("libi-tracking", "libi.compute_object_track")).toBe(
-      "libi-tracking:libi.compute_object_track",
+    expect(makeMcpToolId("libi-tracking", "libi.track")).toBe(
+      "libi-tracking:libi.track",
     );
     expect(makeMcpToolId("elevenlabs", "speech_to_text")).toBe(
       "elevenlabs:speech_to_text",
@@ -28,9 +28,9 @@ describe("makeMcpToolId", () => {
 
 describe("parseMcpToolId", () => {
   it("round-trips with makeMcpToolId", () => {
-    const id = makeMcpToolId("libi", "libi.compute_object_track");
+    const id = makeMcpToolId("libi", "libi.track");
     const parsed = parseMcpToolId(id);
-    expect(parsed).toEqual({ serverId: "libi", toolName: "libi.compute_object_track" });
+    expect(parsed).toEqual({ serverId: "libi", toolName: "libi.track" });
   });
   it("handles colons inside the tool name (only the first colon splits)", () => {
     const id = "libi:weird:tool" as McpToolId;
@@ -46,13 +46,13 @@ describe("parseMcpToolId", () => {
 
 describe("fromAnyToolName", () => {
   it("returns canonical form unchanged", () => {
-    expect(fromAnyToolName("libi:libi.compute_object_track")).toBe(
-      "libi:libi.compute_object_track",
+    expect(fromAnyToolName("libi:libi.track")).toBe(
+      "libi:libi.track",
     );
   });
   it("converts wire form mcp__server__tool with dot inside tool", () => {
-    expect(fromAnyToolName("mcp__libi__libi.compute_object_track")).toBe(
-      "libi:libi.compute_object_track",
+    expect(fromAnyToolName("mcp__libi__libi.track")).toBe(
+      "libi:libi.track",
     );
   });
   it("converts wire form mcp__server__tool with underscore (recovers dot)", () => {
@@ -61,8 +61,8 @@ describe("fromAnyToolName", () => {
     );
   });
   it("handles hyphenated server ids (mcp__libi-tracking__...)", () => {
-    expect(fromAnyToolName("mcp__libi-tracking__libi.compute_object_track")).toBe(
-      "libi-tracking:libi.compute_object_track",
+    expect(fromAnyToolName("mcp__libi-tracking__libi.track")).toBe(
+      "libi-tracking:libi.track",
     );
   });
   it("handles non-libi MCPs (no underscore-to-dot recovery needed)", () => {
@@ -99,8 +99,8 @@ describe("fromAnyToolName", () => {
     );
   });
   it("recovers libi dots when libi-tracking arrives under its display name", () => {
-    expect(fromAnyToolName("mcp__Libi_Tracking__libi_compute_object_track")).toBe(
-      "libi-tracking:libi.compute_object_track",
+    expect(fromAnyToolName("mcp__Libi_Tracking__libi_track")).toBe(
+      "libi-tracking:libi.track",
     );
   });
   // Users install their own MCPs — formatting and gating must never depend
@@ -132,6 +132,9 @@ describe("the in-app server alias", () => {
   it("canonicalizes the libi-app wire name to the libi server id", () => {
     expect(fromAnyToolName("mcp__libi-app__libi_generate_music")).toBe("libi:libi.generate_music");
     expect(fromAnyToolName("mcp__libi_app__libi_show_in_chat")).toBe("libi:libi.show_in_chat");
+    // merged tools are ordinary registered names to the id layer; the action rides in the ARGS
+    expect(fromAnyToolName("mcp__libi__libi_keyframe")).toBe("libi:libi.keyframe");
+    expect(fromAnyToolName("mcp__libi_app__libi_audio_duck")).toBe("libi:libi.audio_duck");
   });
 
   it("keeps a dotted tool half intact under the alias", () => {

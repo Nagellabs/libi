@@ -1,151 +1,36 @@
 ---
 name: voice-replacement
-description: Use when the user asks to CHANGE, REPLACE, RE-VOICE, or DUB the voice on one or more EXISTING videos/scenes in a piece — a deliberate, user-triggered step AFTER the video exists ("change the voice", "give it a different voiceover", "redo the voice", "dub this", "clone my voice over it", "new narrator"). This is NOT initial generation (that keeps native audio via voiceover-production). It transcribes the target scenes, asks whether to clone the existing voice or pick a new one, lip-syncs the sections where a character speaks on camera, and mutes + re-voices the rest. A standalone entry point with its own trigger.
+description: "Change, replace or dub the voice on an existing video: 'change the voice', 'give it a different voiceover', 'redo the voice', 'dub this', 'clone my voice over it', 'new narrator'. A user-triggered step after the video exists, not part of generating one."
 ---
 
 # Voice Replacement — re-voice an existing video
 
-## Provider gate — read this first
+Needs a **voice** provider for anything beyond libi's local Kokoro (which is free, needs no key, and cannot clone). Read the `references/providers/<id>.md` here for the provider you use before your first call. With none and a need for one, call `libi.suggest_provider({ kind: "voice" })` and stop; the full rule is `libi.read_manual({ section: "providers" })`.
 
-You need a **voice** provider. libi generates no media itself.
+Done looks like: every video the user chose carries the new voice, the new speech covers what was actually said, on-camera speakers' lips match it, and the original audio is still in the piece, muted, one click from coming back.
 
-1. **Check your tool list.** If you already have a provider that can do voice, use it.
-   If this skill ships a reference for it — `references/providers/<id>.md` under this
-   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
-   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
-   reference file for your provider, use the provider's own tool docs (its
-   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
-   constraint rules in this skill. **libi's own extension tools count as a provider**
-   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
-   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
-   not generation). Prefer them by default: they are free and on-device. If one answers
-   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
-   tools) instead of switching provider.
-2. **If you have none** — no remote provider tool and no libi extension for voice — call
-   `libi.suggest_provider({ kind: "voice" })`, tell the user what it showed, and
-   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
-   back to a tool that cannot do voice.
-   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
-   for voice is already connected or already installed, and its `covered` list names it.
-   Do not open anything or ask for a key — use what `covered` names, or, if that
-   cannot do what was asked, say plainly what libi cannot do.
+This runs only when the user asks to change the voice on footage that already exists. The voice a video is generated with is `video-generation-craft` (`references/voice.md`).
 
-`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
-for a general "what's connected?". When the user asks about a provider that is not in your tool
-list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+## Constraints
 
-The user has a video (one or more scenes) and wants a **different voice** on it —
-cloned from the original speaker or a brand-new voice. This is a separate flow from
-generation: by default a piece keeps its native / `@Audio1`-carried audio
-(`voiceover-production` owns that). Run THIS skill only when the user explicitly
-asks to change/replace the voice on footage that already exists.
+- **Mute the original, never delete it.** `libi.audio_clip({ action: "update", pieceId, clipId, enabled: false })`, not action `remove`: the user can toggle it back, and action `relink_overlay` is the only recovery once it is gone.
+- **Cover the speech that was said.** Size each new segment from the transcript's talking time, not a short paraphrase: a line that under-fills leaves the speaker silent on camera. Duration is a ceiling against overflow, not the target. If natural delivery overruns, nudge `speed` or trim filler; never drop content.
+- **Lip-sync wherever a face speaks.** A new voice over a visibly talking mouth must be lip-synced, or the user told the lips will not match.
+- **Paid means disclose, then wait.** A hosted voice or a lip-sync run costs the user's money: say what you will generate and roughly what it costs, and get a yes first.
+- **Never read or handle a provider key.** Local files reach a provider only through that provider's own upload tool (as its reference describes); if a remote MCP cannot read a local path, say so and ask rather than improvising an upload.
 
-**Two hard principles** (carried over from `voiceover-production`):
-- **MUTE, never delete** the original audio — `libi.audio_update_clip({ clipId, enabled:false })`,
-  not `audio_remove_clip`. The original stays on the timeline and is one-click-toggleable
-  (per-clip speaker icon); `audio_relink_overlay` is the only recovery if it was deleted.
-- **Cover the actual speech.** Each new voice segment must cover what was actually said in
-  that scene (sized from the transcript) — not a short summary that under-fills and leaves
-  the speaker silent. `≤` scene duration is a guardrail against overflow, not the target.
+## Flow
 
-## Workflow
-
-### 0. Scope — which scenes?
-Ask (or confirm) which scenes get the new voice: **all** of the piece's video overlays,
-or a **subset** (e.g. "just the hook and verdict"). List the scenes you'll touch back
-to the user before spending anything.
-
-### 1. Transcribe each target scene (reuse if it exists)
-For each target scene's video file, get a transcript **with word-level timing** — this
-is the coverage anchor (it tells you WHO speaks, WHEN, and for HOW LONG):
-- **Reuse first:** `libi.analysis_get({ fileId })` — if a transcript already exists, use it.
-- **Else transcribe:** run the **`audio-analysis`** skill (local Whisper, free, word-level
-  timing) on each target scene's video. If diarization is needed, use a `transcription`
-  provider whose result carries speaker labels, through the `audio-analysis` skill's Path B
-  (that skill's reference for the provider says whether it does).
-Record, per scene: the spoken text, the speech start/end within the scene, and the
-talking **duration** (so the new segment can match it).
-
-### 2. Choose the voice — ASK (clone vs new), and SUGGEST the provider by FORMAT
-**Ask the user:** *"Clone the existing speaker's voice, or use a new voice?"*
-- **Clone the original** → you need a `voice` provider that can CLONE (libi's local Kokoro
-  cannot). Cut a clean ≤15 s sample with `libi.extract_audio` over a continuous, music-free
-  stretch and feed it to your provider's cloning tool — `references/providers/<id>.md` names
-  it. Persist the clone as a per-character voice asset (`using-character-library`) so the
-  same clone is reusable.
-- **New voice** → recommend by the video's **format/genre** (read it from the piece/script
-  or ask), and tell the user the trade-off:
-  - **UGC / influencer / talking-head testimonial / authentic social** → a **hosted
-    expressive voice provider**; `references/providers/<id>.md` under this skill covers
-    the one you have. Kokoro reads as flat/synthetic here.
-  - **Narration / explainer / how-to / documentary / corporate / educational / neutral VO**
-    → **local Kokoro is a great free default** (`libi.generate_speech`, on-device, no key);
-    offer the hosted provider as a paid quality upgrade for more expressive or branded
-    delivery.
-  - **Unsure / mixed** → state both and let the user pick; default to the format above.
-
-**Cost + provider gating:** a hosted voice (clone or new) is **paid** — disclose cost and
-get approval before generating. If you have no `voice` provider, call
-`libi.suggest_provider({ kind: "voice" })`, say what it showed, and — when Kokoro fits the
-format — offer Kokoro instead. Kokoro is free and needs no key. **Match the provider to the
-format — don't force a paid voice onto a plain narration, and don't push Kokoro onto a UGC
-talking-head.**
-
-### 3. Classify each target section — does a character speak ON CAMERA?
-For each target scene, decide using the analysis (`FrameDescription.people[]` /
-`VideoSummary.subjects[]`) or your read of the footage:
-- **Talking-face section** — an on-screen person whose mouth is visibly speaking. The new
-  voice MUST match the lips → **lip-sync** (step 4a).
-- **Voice-only / b-roll section** — no visible speaking face (hands, product, off-camera
-  narration, faceless demo). No lips to match → **mute + re-voice** (step 4b).
-
-### 4. Apply, per section
-
-**4a. Talking-face → lip-sync on a hosted model.** Generate the new per-scene voice segment
-(cloned/new voice, sized to the transcript — step 5), then lip-sync the scene's video to
-that audio with the best lip-sync model your `video` provider has — libi has no local
-lip-sync engine, so the hosted model is the quality path:
-- Confirm a `video` provider with a lip-sync model is in your tool list. If there is none,
-  call `libi.suggest_provider({ kind: "video", reason: "lip-sync" })` and tell the user what
-  it showed. If they decline to connect one, fall back to 4b (mute + new VO) for the talking
-  section and **DISCLOSE the lips won't match the new voice**.
-- **Upload BOTH the scene's video and the new VO audio to the provider** with the
-  provider's own upload tool — **NEVER** read a provider key or `curl` provider storage
-  yourself. If a remote provider MCP cannot read the local path, say so and ask the user
-  how to proceed rather than improvising an upload.
-- Run the lip-sync endpoint your provider reference names
-  (`references/providers/<id>.md` — it also names a cheaper alternative). Pass the uploaded
-  video URL + audio URL. **PAID — disclose the cost (~$ per minute of video) and get
-  approval first.**
-- Import the returned synced video (`libi.upload_file`), add it as a **second Asset Option**
-  on the scene's video asset, and `libi.set_default_option` to promote it (rewrites the draft
-  `scene.fileId`) so the preview shows the matched lips. The original stays a revertible
-  option; the new VO is the audible track.
-
-**4b. Voice-only / b-roll → mute + re-voice.** **Mute** the scene's inline source audio
-(`audio_update_clip({ enabled:false })`), then add the new voice segment as a **standalone**
-`audio_add_clip` at the scene's **start time** (walk `manifest.sceneOrder` summing prior
-durations).
-
-### 5. Size every segment to the speech (coverage)
-For each scene, the new voice segment's length should **match the scene's actual talking**
-(from the step-1 transcript), so it covers the same speech the original had — not a short
-paraphrase. If the speaker talked ~14s in a 15s scene, the new line is ~14s. If natural
-delivery would overflow the scene, prefer nudging `speed` slightly or trimming filler —
-**never drop content that leaves on-camera speech silent.** Place each segment at its
-scene's start; keep it within the scene's duration.
-
-### 6. Verify before commit
-- Every target scene: original inline audio **present but `enabled:false`** (muted, toggleable).
-- Every target scene: a new voice segment that **covers its speech** (no silent talking tail).
-- Talking-face scenes: lip-synced on the hosted model (or the no-provider fallback disclosure was made).
-- Untouched scenes (if a subset): unchanged.
-Report the final per-scene layout (muted original + new segment start/duration, lip-synced y/n).
-
-## What this skill does NOT own
-Generation-time audio (native audio, `@Audio1` carry) is `voiceover-production`.
-Transcription mechanics are `audio-analysis`.
-The lip-sync MODEL is hosted — reached through your own provider MCP, endpoint named in
-`references/providers/<id>.md`. There is no local lip-sync engine.
-This skill owns the DECISION flow for
-re-voicing finished footage: transcribe → clone/new → lip-sync vs mute+re-voice → cover.
+1. **Scope.** Confirm which video overlays get the new voice (all, or a subset) and list them back before spending anything.
+2. **Transcribe** each target with word timings: reuse `libi.analysis_query({ action: "get", fileId })` if a transcript exists, else load `audio-analysis`. Record the spoken text, where speech starts and ends in the clip, and its talking duration.
+3. **Choose the voice.** Ask: clone the existing speaker, or a new voice?
+   - *Clone* needs a hosted provider that can clone. Cut a clean sample of about 15 s from a continuous, music-free stretch with `libi.extract_audio`, and use the provider reference's cloning route. Keep the sample as a file and link it to the character (`libi.character` action `link`, see `using-character-library`) so it is reusable.
+   - *New voice*: match the format and say the trade-off. Social, UGC and talking-head testimonials need expressive delivery, so offer a hosted voice; Kokoro (`libi.generate_speech`) reads flat there. Narration, explainers and how-tos suit Kokoro well, with a hosted voice as a paid upgrade for more expressive or branded delivery. When unsure, state both and let the user pick.
+4. **Classify each target.** Is a person's mouth visibly speaking on camera (talking face), or is it hands, product, off-camera narration (voice-only)? Use the analysis (`people[]`, `subjects[]`) or look at the footage.
+5. **Apply.**
+   - *Talking face:* generate the segment, then lip-sync the clip to it on a hosted lip-sync model (the provider reference names one; libi has no local engine). With no lip-sync model in your tools, call `libi.suggest_provider({ kind: "video", reason: "lip-sync" })` and tell the user what it showed; if they decline, treat the clip as voice-only and say the lips will not match. Put the clip and the new audio on the provider with its own upload tool, run the model, and import the result with `libi.upload_file`. Then swap and re-voice, in this order:
+     1. Find the overlay's inline clip (`libi.get_composition`: the clip with `kind: "inline"` and `linkedOverlayId` = the overlay) and mute it: `libi.audio_clip({ action: "update", pieceId, clipId, enabled: false })`. It still plays the original file; `update_overlay` re-times it but never re-links it.
+     2. Point the overlay at the synced file: `libi.update_overlay({ pieceId, overlayId, fileId: <synced file id> })`. Keep the original file in the piece and note its id, so the swap reverts by pointing back and unmuting.
+     3. Add the synced file's own audio (the new voice, in step with the new lips) as a standalone clip: `libi.audio_add_clip({ pieceId, fileId: <synced file id>, kind: "standalone", startTime: <overlay startTime>, trimStart: <overlay trim.start, else 0>, duration: <overlay duration> })`. Not a second inline clip: only one inline clip per overlay follows a re-time. The standalone clip does not follow the overlay, so tell the user to move the two together.
+   - *Voice-only:* mute the clip's inline audio (`libi.audio_clip` action `update`, `enabled: false`), then add the new voice as a standalone `libi.audio_add_clip` at the overlay's own `startTime` (from `libi.get_overlays`).
+6. **Verify, then report.** Per target: exactly one audible voice (the new one) with the original clip present but disabled, a new segment that covers the speech, lip-sync done or the disclosure made; untouched clips unchanged. Read `libi.get_composition` back and count the enabled ones covering each target's window. Give the user the final layout (muted original, new segment start and duration, lip-synced yes or no).

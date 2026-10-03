@@ -8,7 +8,7 @@ import { notify } from "@/mcp/notify";
 import type { ExportRecordStatus, ExportRecordView } from "@/lib/exports/types";
 import { activePercent } from "@/lib/exports/list-view";
 import { api } from "./social-http";
-import type { ListExportsParams } from "./schemas";
+import type { ListExportsParams, ShowExportParams } from "./schemas";
 import type { ToolResult } from "./types";
 
 /** One export in the tool's answer. Times are ISO strings. */
@@ -79,4 +79,37 @@ export async function listExports(params: ListExportsParams): Promise<ToolResult
           : "Exports are saved inside the piece; the user sees them in its Exports tab. A done row's `path` is the file.",
     },
   };
+}
+
+/**
+ * `libi.show` target `export` — open the piece's Exports tab on ONE export.
+ * Proven before navigating, like the other show targets (navigation-tools.ts):
+ * the editor is told to move only when the piece and the export exist, so the
+ * agent never claims a screen the user is not looking at. A cancelled export is
+ * hidden from the tab (and from every list), so it counts as not found.
+ */
+export async function showExport(params: ShowExportParams): Promise<ToolResult> {
+  const res = await api<{ exports: ExportRecordView[] }>(`/api/pieces/${encodeURIComponent(params.pieceId)}/exports`);
+  if (!res.ok) {
+    if (res.status === 404) {
+      return {
+        success: false,
+        error: "piece_not_found",
+        data: { hint: `No piece "${params.pieceId}". Do not tell the user the export is on screen. Use libi.list_pieces to see what exists.` },
+      };
+    }
+    return { success: false, error: "libi_server_unavailable", data: { hint: res.body.message ?? "libi's server did not answer.", status: res.status } };
+  }
+  const found = (res.body.exports ?? []).find((e) => e.id === params.exportId && e.status !== "cancelled");
+  if (!found) {
+    return {
+      success: false,
+      error: "export_not_found",
+      data: {
+        hint: `No export "${params.exportId}" in piece "${params.pieceId}" (a cancelled export is removed from the Exports tab). Do not tell the user it is on screen. Use libi.list_exports to see the piece's exports.`,
+      },
+    };
+  }
+  notify.navigate({ target: "exports", pieceId: params.pieceId, id: found.id });
+  return { success: true, data: { navigated: true, pieceId: params.pieceId, exportId: found.id, name: found.name, status: found.status } };
 }

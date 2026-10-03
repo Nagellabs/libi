@@ -33,13 +33,26 @@ describe("probeWrapperLineOffset", () => {
 describe("buildDrawBodyContext (spec §4.3 — the narrowed surface)", () => {
   it("exposes exactly the documented keys and nothing wide", () => {
     const c = buildDrawBodyContext({ ctx, width: 640, height: 360, fps: 30, time: timing, words: [{ text: "hi", start: 0, end: 1 }], images: {} });
-    expect(Object.keys(c).sort()).toEqual(["ctx", "duration", "fps", "frame", "height", "images", "progress", "time", "totalFrames", "width", "words"]);
+    expect(Object.keys(c).sort()).toEqual(["compositionTime", "ctx", "duration", "fps", "frame", "height", "images", "overlayStart", "pieceDuration", "progress", "time", "totalFrames", "width", "words"]);
     expect(c.frame).toBe(12);
     expect(c.width).toBe(640);
   });
 
+  it("hands the piece clock through: compositionTime, overlayStart and pieceDuration are the host's numbers", () => {
+    const c = buildDrawBodyContext({
+      ctx, width: 1, height: 1, fps: 30, images: {},
+      time: { ...timing, time: 0.4, compositionTime: 11.7, overlayStart: 11.3, pieceDuration: 24 },
+    });
+    expect([c.compositionTime, c.overlayStart, c.pieceDuration]).toEqual([11.7, 11.3, 24]);
+  });
+
+  it("a request that carries no piece clock reads the overlay's own as the piece's (start 0, duration = its own)", () => {
+    const c = baseCtx();
+    expect([c.compositionTime, c.overlayStart, c.pieceDuration]).toEqual([0.4, 0, 3]);
+  });
+
   it("omits `words` entirely when the overlay carries none", () => {
-    expect(Object.keys(baseCtx()).sort()).toEqual(["ctx", "duration", "fps", "frame", "height", "images", "progress", "time", "totalFrames", "width"]);
+    expect(Object.keys(baseCtx()).sort()).toEqual(["compositionTime", "ctx", "duration", "fps", "frame", "height", "images", "overlayStart", "pieceDuration", "progress", "time", "totalFrames", "width"]);
   });
 });
 

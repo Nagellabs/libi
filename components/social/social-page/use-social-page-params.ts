@@ -22,6 +22,8 @@ export interface SocialPageParams {
   tab: SocialTab;
   /** `?post=` — deep-links the post detail sheet open on a `providerPostId`, independent of `tab`. */
   post: string | null;
+  /** `?account=` — the connected account the Settings tab points at (`libi.show({ target: "social_settings" })`). */
+  account: string | null;
 }
 
 /** Pure: the URL's params, defaulted and validated. Junk reads as absent. */
@@ -30,6 +32,7 @@ export function parseSocialPageParams(sp: URLSearchParams): SocialPageParams {
   return {
     tab: isSocialTab(tab) ? tab : DEFAULT_SOCIAL_TAB,
     post: sp.get("post") || null,
+    account: sp.get("account") || null,
   };
 }
 

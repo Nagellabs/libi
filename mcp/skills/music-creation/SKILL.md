@@ -1,220 +1,49 @@
 ---
 name: music-creation
-description: Interview-style music generation. Asks the user about genre,
-  vocals, lyrics, length, optional reference track. Dispatches via
-  ai-asset-generation skill which routes to local ACE-Step by default, or
-  a music provider on explicit request.
-when_to_use: User asks to "make music", "create a soundtrack", "write a
-  song", "generate background music" with no detailed prompt provided.
-  Also use when deciding the music for a RECREATE / mimic — when a source
-  video already has a music bed, Stage 0.5 asks reuse-the-original vs
-  generate-new before any generation. Skip if the user already supplied a
-  complete prompt — use ai-asset-generation directly. If the user wants
-  the music UNDER a video with synced lyrics / captions / beat-pulse
-  visuals, use music-video-creation instead (it wraps this skill and adds
-  the composition-hygiene rules).
+description: "Make music from a short brief: 'make music', 'write a song', 'create a soundtrack', 'background music'; also the music choice in a recreate when the source has a music bed (reuse it or generate new). Skip when the user gave a full prompt (ai-asset-generation). Music under synced lyrics or beat visuals: music-video-creation."
 tags:
   - music
 ---
 
 # Music Creation
 
-## Provider gate — read this first
+Needs a **music** provider: libi's local music extension counts, and is the default; a remote one is on explicit request. Read the `references/providers/<id>.md` here for a remote provider before your first call. With none, call `libi.suggest_provider({ kind: "music" })` and stop (a track the user brings as a file needs no provider); the full rule is `libi.read_manual({ section: "providers" })`.
 
-You need a **music** provider. libi generates no media itself.
+Done looks like: a track the user approved by its prompt, generated on the provider they chose, attached under their visuals with a deliberate length, and carrying the right rights stamp.
 
-1. **Check your tool list.** If you already have a provider that can do music, use it.
-   If this skill ships a reference for it — `references/providers/<id>.md` under this
-   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
-   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
-   reference file for your provider, use the provider's own tool docs (its
-   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
-   constraint rules in this skill. **libi's own extension tools count as a provider**
-   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
-   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
-   not generation). Prefer them by default: they are free and on-device. If one answers
-   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
-   tools) instead of switching provider.
-2. **If you have none** — no remote provider tool and no libi extension for music — call
-   `libi.suggest_provider({ kind: "music" })`, tell the user what it showed, and
-   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
-   back to a tool that cannot do music.
-   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
-   for music is already connected or already installed, and its `covered` list names it.
-   Do not open anything or ask for a key — use what `covered` names, or, if that
-   cannot do what was asked, say plainly what libi cannot do.
+## Build a music brief, ask only what is missing
 
-`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
-for a general "what's connected?". When the user asks about a provider that is not in your tool
-list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+Take what the request already says and infer the rest. A brief has: the use (background score, song, jingle, beat), genre and mood, vocals or instrumental (and language and voice if vocals), lyrics (written by you and read back for sign-off, or the user's own, under about 2000 characters), tempo and structure, and length (30 s unless told otherwise; warn above 2 minutes, which is slow locally and costly on a paid provider). Ask about the gaps in as few questions as you can, offering a handful of options to react to rather than an open prompt.
 
-> **Related:** when the user supplies a reference track, run
-> `libi.music_profile({ fileId })` first to seed the answers — it
-> returns a `suggestedPrompt`, `keyEstimate`, and `descriptors[]` you
-> can paraphrase in Stage 1.
+If the user names a reference track ("like X"), get the file (`libi.upload_file` if it is not in the piece) and run `libi.music_profile({ fileId })`: free, about a second, and it returns a `suggestedPrompt`, key and descriptors. Paraphrase it back ("around 72 BPM, A minor, mellow") and seed the prompt from it.
 
-Walk the user through the music spec one question at a time. Don't
-batch — they want to feel heard. Each answer goes into a running
-"music brief" you assemble in Stage 8.
+**Show the prompt before generating** and get a yes: one string built from genre/mood, instrumentation, tempo, structure and length, starting from the profile's `suggestedPrompt` when there is one.
 
-## Stage 0 — Frame
+## Recreating a video that already has music: reuse or generate
 
-Ask: "Is this background music for a video, a standalone song, a short
-jingle, or a beat / instrumental loop?" The answer changes default
-length + whether vocals are even on the table (a jingle: maybe; a
-background score: usually not).
+When a source video carries a music bed, whether to keep it is the user's decision, made before anything is generated. Offer both and state your default (reuse when they said "the same video" or "keep the music"; generate when they want a different feel):
 
-## Stage 0.5 — Recreating a video that already has music? (reuse vs generate — ASK FIRST)
+- **Reuse:** `libi.extract_audio({ fileId: <source video> })`, then `libi.audio_add_clip({ pieceId, fileId: <extracted audio>, kind: "standalone", startTime: 0 })`. It is free and exact. Flag the licensing caveat: it is fine for the user's own or cleared content, but a recognizable third-party song may carry rights issues, and the user decides.
+- **Generate in the same vibe:** run `libi.music_profile` on the extracted audio and seed the brief from its `suggestedPrompt`, BPM and key, so the feel matches without copying.
 
-If you arrived here from a **recreate / mimic** flow (or any flow where a **source
-video already carries a music bed**), the music is a building block with a
-source-vs-generate decision — and that decision is the user's, BEFORE the interview
-below. Do NOT silently generate a new track when the source already has one the user
-may want to keep.
+## Provider
 
-Present the two paths and ask which they want:
+Local ACE-Step (`libi.generate_music`) is the default: free, on-device, no key; instrumentals are excellent, vocals decent. A paid `music` provider is an option, never the agent's own initiative: it gives better vocals or a specific style model, and bills the user's own account (`references/providers/<id>.md` says what each offers). Offer it only when the user wants it, or when they want English vocals, or when ACE-Step answered `needs_install` and a paid one would skip the download. Before naming one, check `libi.list_providers()` and your tool list for what is actually connected; if nothing is, say so rather than offering a generic "paid provider".
 
-- **Reuse the original track (recommended when faithfulness matters).** Extract the
-  source's audio and lay it under the new visuals:
-  1. `libi.extract_audio({ fileId: <sourceVideoId> })` → an audio file (wav/m4a).
-  2. `libi.audio_add_clip({ pieceId, fileId: <extractedAudioId>, kind: "standalone",
-     startSeconds: 0 })` to place it under the recreated visuals.
-  Keeps the exact track the user liked; zero generation cost. **Licensing caveat:**
-  only reuse the original for the user's own / royalty-cleared content — if the bed is
-  a recognizable third-party song, flag that reusing it may carry rights issues and let
-  the user decide.
-- **Generate a new track in the same vibe.** Run the interview below, but FIRST seed it
-  from the original: `libi.music_profile({ fileId: <extractedAudioId> })` on the
-  extracted audio and paraphrase its `suggestedPrompt` / BPM / key as the Stage 1 seed,
-  so the new music matches the source's feel without copying it.
+Generate through `ai-asset-generation` with the approved prompt and provider; it owns the cost disclosure and the import. Then attach the track with `libi.audio_add_clip` so the user hears it under their visuals.
 
-Pick a default from the user's words — **reuse** when they said "the same video" /
-"keep the music" / "mimic / recreate it"; **generate** when they want a different feel —
-but state your assumption and let them flip it. When this fork doesn't apply (no source
-video, a from-scratch request), skip straight to Stage 1.
+## Rights
 
-## Stage 1 — Reference track? (optional)
+Music from libi's own generator is stamped *generated* and stays in social exports. A provider track imported with `libi.import_remote_files` lands as copyrighted: stamp it with `libi.set_audio_rights({ pieceId, fileId, class: "generated" })` (see `social-music`). A song the user downloads or uploads is copyrighted and handled per platform; `social-music` owns that.
 
-If the user mentions an existing track ("make it like X", "vibe of Y"),
-ask if they have the file. If yes:
+## A track longer than the piece
 
-1. Upload via `libi.upload_file` if it's not already in the piece.
-2. Call `libi.music_profile({ fileId })` (it's free, ~1s).
-3. Paraphrase the profile: *"It's around 72 BPM in A minor, mellow and
-   dark, light percussion. Want me to keep that feel?"*
-4. Use the profile's `suggestedPrompt` as the seed for Stage 7.
+A piece ends where its last clip ends, so a 3:49 track on a 3-second piece stretches the piece, and trimming throws music away. Neither is yours to pick silently. Before `libi.audio_add_clip` with a track that runs past the piece's end, ask whether to extend the piece to the full track, trim the track to the piece, or use a specific length. Then pass `lengthPolicy: "extend"` or `"trim"`, or an explicit `duration`. The tool refuses until one is stated (`asset_longer_than_piece` means the question was skipped); a track that fits needs none. A video overlay that outlasts the piece goes through the same gate on `libi.add_overlay`, where `lengthPolicy` is the only way through.
 
-If the file is local but not on disk: `libi.upload_file` first.
+## Level, dips and splices: set them on the clip, never bake a bed
 
-## Stage 2 — Genre
+A track's loudness, its dips under narration, a swell for the end card and the join of two ranges are properties of the clip, not of the file: `gainDb`, volume-envelope keys, `crossfadeMs` and `libi.audio_duck`, the same in the preview and the export, one `libi.apply_ops` for every copy of a piece. Don't mix, boost, fade or splice audio with ffmpeg and re-upload it (an upload and a clip swap in every piece per change, rights re-stamped, nothing the user can tune), and don't decode or measure levels with ffmpeg or numpy: `libi.audio_analyze` (`measure`, `report`, `align`) reads what the piece plays. The manual's audio-clips section (`libi.read_manual({ section: "mcp-tools-audio-clips" })`) owns the shapes and the worked examples.
 
-Offer 4–6 options to react to instead of an open prompt. Examples by
-use-case:
+## Optional: a beat-synced visual
 
-- Background score → ambient, cinematic, lofi, jazz, orchestral, electronic
-- Song → pop, rock, indie, R&B, country, hip-hop
-- Jingle → upbeat acoustic, retro 80s, corporate-clean, playful
-- Beat → trap, boom-bap, drill, lo-fi hip-hop, future bass
-
-Always accept "other — I'll describe it".
-
-## Stage 3 — Vocals or instrumental?
-
-Default depends on Stage 0:
-- Background score → instrumental (rarely overridden)
-- Song → vocals (rarely overridden)
-- Jingle → either
-- Beat → instrumental
-
-If vocals:
-- Language (default English)
-- Voice character: male / female / androgynous / child
-- Style: spoken / whispered / sung / belted
-
-## Stage 4 — Lyrics (only if vocals)
-
-Two paths:
-- "Write them for me" → ask for theme + 1 line of vibe; you generate
-  the lyrics yourself, then read back ~4 lines and ask for sign-off
-  before passing to the generator
-- "I'll provide them" → cap at 2000 chars; warn at 500 chars about
-  audibility for short tracks
-
-## Stage 5 — Length
-
-Default 30s. Warn at >120s (multi-minute generations are slow + costly
-on paid providers; even local ACE-Step takes ~10–15s per 8s on CPU).
-
-## Stage 6 — Provider
-
-Disclose the cost + quality trade-off:
-
-- **local ACE-Step (default, recommended)** — `libi.generate_music`: free, on-device, no
-  key. Instrumental excellent, vocals decent.
-- **A paid `music` provider** — better vocals, specific style models. Costs the user money
-  on their own provider account; see `references/providers/<id>.md` under this skill for
-  what yours offers.
-
-If the user has no provider opinion, pick local ACE-Step. If they want vocals and the
-language is English, mention a paid provider as a quality upgrade — as an option, not a
-recommendation. If they want a paid provider and you have none in your tool list, call
-`libi.suggest_provider({ kind: "music" })` and say what it showed.
-
-Whenever you mention a paid alternative — as that upgrade, or because local ACE-Step
-answered `needs_install` and a paid provider would skip the download — **check
-`libi.list_providers()` and your tool list first** and name the connected option(s) that
-can make music (either source counts; your tool list is authoritative), and say they bill
-the user's own account on that provider. If neither shows one, say so. Never offer a
-generic "a paid provider" you have not checked for.
-
-## Stage 7 — Assemble the prompt
-
-Build a single string from the answers. Include (in order):
-genre / vibe / mood, instrumentation, tempo (BPM if known or descriptor
-like "uptempo"), key (only if reference track), structure (intro / drop
-/ outro for songs), duration. If reference profile was used, prefix the
-prompt with `suggestedPrompt` and append the user's overrides.
-
-Show the user the prompt before generating. *"I'll send this to
-local-music: '<prompt>'. Approve?"*
-
-## Stage 8 — Generate via ai-asset-generation
-
-Invoke the `ai-asset-generation` skill with the assembled prompt and
-chosen provider. It handles the approval card and cost disclosure.
-
-On success, attach the wav to the piece via `libi.audio_add_clip` so
-the user hears it under their visuals.
-
-Music libi's own generators make (`libi.generate_music`) is stamped *generated* and stays in social exports. A provider track you import with `libi.import_remote_files` lands as copyrighted — stamp it with `libi.set_audio_rights({ pieceId, fileId, class: "generated" })` (see the `social-music` skill §1). A song the user downloads or uploads is copyrighted and is handled differently on each platform — see the `social-music` skill.
-
-## When the track is longer than the piece
-
-A piece has no length of its own — it ends where its last clip ends. So
-attaching a 3:49 track to a 3-second piece stretches the piece to 3:49, and
-trimming the track to 3 seconds throws the rest away. Both are real choices
-and neither is yours to make silently.
-
-Before calling `libi.audio_add_clip` with a track that runs past the piece's
-current end, ASK:
-
-> "That track is 3:49 but the piece is currently 0:03. Want me to extend the
-> piece to the full track, trim the track to 0:03, or use a specific length?"
-
-Then call `libi.audio_add_clip` with `lengthPolicy: "extend"` or `"trim"`, or
-with an explicit `duration` for a length in between. The tool refuses the add
-until you have stated one — if you see `asset_longer_than_piece` in the
-response, you skipped the question. An asset that fits inside the piece (or
-an empty piece with nothing to exceed) needs no question.
-
-## Stage 9 — Beat-synced visual? (optional)
-
-Once a track exists, ask:
-
-> "Want a beat-synced visual? I can call `libi.music_detect_beats` on
-> the track and write a full-frame code overlay that pulses on each beat."
-
-If yes: call `libi.music_detect_beats({ fileId })`, then add a code
-overlay (`libi.add_overlay({ kind: "code" })`) and write `const BEATS =
-[...]` inlined in its `codeFilePath`, using the `beatPulse(BEATS, time)`
-helper to drive a visual element. Keep it short (~12s for v1).
+Once a track exists, offer a visual that pulses on the beat. If yes: `libi.music_detect_beats({ fileId })`, then a full-frame code overlay (`libi.add_overlay({ kind: "code" })`) with `const BEATS = [...]` inlined in its `codeFilePath`, driven by the `beatPulse(BEATS, time)` helper. Keep it short, about 12 s. Visuals tied to lyrics or an ongoing music video are `music-video-creation`.

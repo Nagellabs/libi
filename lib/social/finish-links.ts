@@ -29,7 +29,8 @@ export function youtubeStudioEditorUrl(videoId: string): string {
 
 export function finishLinkFor(target: SocialTarget, music: TargetMusic | undefined, pieceHasCopyrighted: boolean): FinishLink | null {
   if (target.status !== "published") return null;
-  if (target.platform === "tiktok" && music?.mode === "draft") {
+  // A draft handoff libi decided, or an inbox upload the provider reports (whoever sent it).
+  if (target.platform === "tiktok" && (music?.mode === "draft" || target.delivery === "inbox")) {
     return TIKTOK_FINISH_LINK;
   }
   if (target.platform === "youtube" && target.platformPostId && pieceHasCopyrighted) {

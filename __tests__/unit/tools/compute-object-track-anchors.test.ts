@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { seedDatabase } from "@/lib/db/init";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 describe("compute_object_track anchors validation", () => {
   it("rejects calls without anchors, derivedFromSubjectName, or derivedFromItemName", () => {
@@ -127,19 +127,19 @@ describe("compute_object_track anchors validation", () => {
 describe("compute_object_track MCP surface", () => {
   it("is registered on the libi-tracking MCP, and the removed fal SAM2 tools are not", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     expect(names).not.toContain("libi.compute_object_track_providers");
     expect(names).not.toContain("libi.refine_track_with_sam2");
   });
 
   it("is registered on the core libi MCP (always-on), and the removed fal SAM2 tools are not", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     expect(names).not.toContain("libi.compute_object_track_providers");
     expect(names).not.toContain("libi.refine_track_with_sam2");
   });
 
-  it("libi-tracking MCP registers all 10 tracking tools", () => {
+  it("libi-tracking MCP registers both tracking tools", () => {
     const names = registeredToolNames(createTrackingMcpServer());
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });

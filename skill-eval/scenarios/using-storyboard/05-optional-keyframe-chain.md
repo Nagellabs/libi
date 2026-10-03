@@ -33,12 +33,12 @@ assertions:
    not treat a missing keyframe as a prerequisite for the clip. (It did not stall, refuse, or
    insist a keyframe is required before video.)
 2. The agent created the storyboard card via `libi.add_storyboard_card` and went through the
-   schema-cache gate for the **clip** tier (`get_model_schema_cache` → `save_model_schema_cache`
+   schema-cache gate for the **clip** tier (`libi.model_schema_cache` action `get` → `libi.model_schema_cache` action `save`
    if missing → `set_storyboard_generation({ tier: "clip", ... })`), setting only the params
    the chosen video model requires — with **no** `start_frame` / keyframe image param
    (text-to-video).
 3. The agent generated the clip and placed the resulting take on the timeline
-   (`attach_storyboard_clip` → `select_storyboard_take`), and disclosed the clip's cost before
+   (`libi.storyboard_take` action `attach_clip` → `libi.storyboard_take` action `select`), and disclosed the clip's cost before
    the paid step.
 4. The agent treated the sketch as a loose layout idea — it did not over-invest in the sketch
    or claim the sketch/keyframe was mandatory.

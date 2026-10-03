@@ -10,7 +10,7 @@ import { useDocumentVisible } from "@/hooks/use-document-visible";
 import { MCP_SCROLL_EVENT, takePendingMcpScroll } from "@/lib/mcp-scroll-intent";
 import { EXTENSION_MCP_SERVERS } from "@/mcp/registry/bundled";
 
-/** Classes that mark the card `libi.show_extension({ extensionId })` asked for. */
+/** Classes that mark the card `libi.show({ target: "extension", extensionId })` asked for. */
 const SCROLL_HIGHLIGHT = ["ring-2", "ring-yellow-500/60"] as const;
 const SCROLL_HIGHLIGHT_MS = 1500;
 
@@ -48,7 +48,7 @@ export function McpServersView() {
     (s) => s?.installStatus === "failed",
   );
 
-  // `libi.show_extension` reaches us two ways, and both are needed: the
+  // `libi.show({ target: "extension" })` reaches us two ways, and both are needed: the
   // live event when this tab is already open, and a parked intent when it is
   // not — the panel is unmounted while another tab shows, so the event has
   // nobody to reach. Either way the id is held in state until the cards have

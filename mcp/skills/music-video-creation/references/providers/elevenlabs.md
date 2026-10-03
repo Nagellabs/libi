@@ -17,6 +17,6 @@ specific style model instead, see this skill's `references/providers/fal.md`.
 
 ## A new track means a new transcript
 
-The captions do not survive a swap, whoever made the track. Rule 4 in `SKILL.md` still
-applies — list the stale overlays, scenes and ducking rules and ask before generating —
-and Rule 6's non-English `medium` model still applies when you rebuild them.
+The captions do not survive a swap, whoever made the track. The swap rule in `SKILL.md`
+still applies — list the stale overlays and ducking rules and ask before generating — and
+so does its non-English `medium` model when you rebuild them.

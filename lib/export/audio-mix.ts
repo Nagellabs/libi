@@ -1,5 +1,6 @@
 import type { AudioClip } from "@/lib/engine/types";
 import { audioFadeSeconds } from "@/lib/effects/audio-envelope";
+import { dbToGain } from "@/lib/audio/clip-gain";
 import { ENVELOPE_SAMPLE_RATE } from "@/lib/export/duck-envelopes";
 import { ON_FILE_TIMELINE, onFileTimeline } from "@/lib/export/export-base";
 
@@ -21,7 +22,10 @@ import { ON_FILE_TIMELINE, onFileTimeline } from "@/lib/export/export-base";
  *   - `atrim={trimStart}:{trimStart+duration}` + `asetpts=PTS-STARTPTS` —
  *     take the window of the SOURCE the clip actually plays (honours
  *     `clip.trimStart`; the preview seeks into the source the same way).
- *   - `volume={0..1}` — per-clip level.
+ *   - `volume={volume × 10^(gainDb/20)}` — per-clip level (`gainDb` can boost past 1).
+ *   - optional `amultiply` against the clip's SHAPE track (volume envelope +
+ *     crossfades, `lib/export/gain-envelopes.ts`), in clip time, before `adelay`;
+ *     the numbers come from the same law the preview samples (`lib/audio/clip-gain.ts`).
  *   - `adelay={ms}|{ms}` — place the clip at `startTime` on the timeline
  *     (stereo-safe syntax).
  *   - optional `amultiply` against a pre-rendered duck envelope — sidechain
@@ -49,6 +53,13 @@ export interface AudioMixOptions {
    * mix, not a broken file.
    */
   envelopeIndex?: Map<string, number>;
+  /**
+   * `clip.id` → ffmpeg input index of that clip's pre-rendered SHAPE track
+   * (volume envelope + crossfades, `lib/export/gain-envelopes.ts`), in the
+   * clip's own time. A shaped clip with no entry here plays at its static gain
+   * (a degraded mix, not a broken file).
+   */
+  gainEnvelopeIndex?: Map<string, number>;
   /**
    * `amix` duration policy:
    *  - `"first"` ties the mix length to the first input — correct when the
@@ -99,7 +110,7 @@ const PIN_STEREO = "aformat=channel_layouts=stereo";
  *  (FL/FR) passes through untouched, whereas `aformat` would upmix mono at
  *  -3 dB (Review M4). Rendered with real ffmpeg in
  *  export-audio-stereo-mix.test.ts. */
-const MONO_OR_STEREO_TO_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC";
+export const MONO_OR_STEREO_TO_STEREO = "pan=stereo|FL=FL+FC|FR=FR+FC";
 /**
  * After amix: a lookahead limiter at FULL SCALE (limit=1). It caps a mix only
  * where summing clips pushes it past 0 dBFS, which is where the preview would
@@ -124,6 +135,7 @@ const PEAK_GUARD = "alimiter=limit=1:attack=5:release=50:level=0:latency=1";
 export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | null } {
   const { clips, inputIndex } = opts;
   const envelopeIndex = opts.envelopeIndex ?? new Map<string, number>();
+  const gainEnvelopeIndex = opts.gainEnvelopeIndex ?? new Map<string, number>();
   const baseAudio = opts.baseAudio ?? null;
   const mixDuration = opts.mixDuration ?? "first";
   const inputChannels = opts.inputChannels;
@@ -141,9 +153,11 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
     if (idx !== undefined) inPlay.push(idx);
   }
   const hasDuck = clips.some((c) => c.duck && inputIndex.has(c.id) && envelopeIndex.has(c.id));
+  // A multiply stage (a duck, or a clip's shape track) outputs stereo.
+  const hasShape = clips.some((c) => inputIndex.has(c.id) && gainEnvelopeIndex.has(c.id));
   const stereoMix =
     inputChannels !== undefined &&
-    (hasDuck || inPlay.some((idx) => inputChannels.get(idx) !== 1));
+    (hasDuck || hasShape || inPlay.some((idx) => inputChannels.get(idx) !== 1));
   /** The filter that brings input `idx` to stereo, or null when the mix isn't stereo. */
   const toStereo = (idx: number): string | null => {
     if (!stereoMix) return null;
@@ -174,11 +188,13 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
     const label = `a_c${i}`;
     const trimStart = Math.max(0, c.trimStart ?? 0);
     const delayMs = Math.max(0, Math.round(c.startTime * 1000));
+    // `gainDb` is a boost the 0..1 `volume` cannot express; both are one constant.
+    const level = c.gainDb ? c.volume * dbToGain(c.gainDb) : c.volume;
     const segments: string[] = [
       `${audioIn(idx)}${onFileTimeline(opts.inputPtsShift?.get(idx))}`,
       `atrim=${trimStart}:${trimStart + c.duration}`,
       `asetpts=PTS-STARTPTS`,
-      `volume=${c.volume}`,
+      `volume=${level}`,
     ];
     // Audio-fade envelope: append afade filters after volume, before adelay.
     // Gated — clips with no audio-fade effects emit no afade filter.
@@ -190,11 +206,33 @@ export function buildAudioMixGraph(opts: AudioMixOptions): { chain: string | nul
       const outStart = Math.max(0, c.duration - fade.outSec);
       segments.push(`afade=t=out:st=${outStart.toFixed(3)}:d=${fade.outSec.toFixed(3)}`);
     }
+    // The clip's shape (volume envelope, crossfades): multiply by its track, in
+    // the clip's own time, so it is applied before the clip is placed. Both
+    // sides are pinned to ENVELOPE_SAMPLE_RATE and stereo (`amultiply` needs
+    // identical rate and layout), the envelope upmixed by `pan`, not an implicit
+    // -3 dB conversion, exactly as the duck's is below.
+    const shapeIdx = gainEnvelopeIndex.get(c.id);
+    let upmixed = false;
+    if (shapeIdx !== undefined) {
+      // To stereo FIRST, at unity: the `aformat` below would upmix a mono clip at -3 dB.
+      segments.push(toStereo(idx) ?? MONO_OR_STEREO_TO_STEREO);
+      upmixed = true;
+      chainSegments.push(`${segments.join(",")}[${label}_gpre]`);
+      chainSegments.push(
+        `[${label}_gpre]aformat=sample_fmts=fltp:sample_rates=${ENVELOPE_SAMPLE_RATE}:channel_layouts=stereo[${label}_gfmt]`,
+      );
+      chainSegments.push(
+        `[${shapeIdx}:a]pan=stereo|c0=c0|c1=c0,aformat=sample_fmts=fltp:sample_rates=${ENVELOPE_SAMPLE_RATE}[${label}_genv]`,
+      );
+      chainSegments.push(`[${label}_gfmt][${label}_genv]amultiply[${label}_gmul]`);
+      segments.length = 0;
+      segments.push(`[${label}_gmul]anull`);
+    }
     if (delayMs > 0) {
       // adelay needs a value per channel; `delays|delays` covers mono + stereo.
       segments.push(`adelay=${delayMs}|${delayMs}`);
     }
-    const up = toStereo(idx);
+    const up = upmixed ? null : toStereo(idx);
     if (up) segments.push(up);
 
     const envelopeIdx = envelopeIndex.get(c.id);

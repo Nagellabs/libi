@@ -7,7 +7,7 @@
  * tracked kind, which addOverlay can't create), then exercise the handlers.
  *
  * Time convention under test: callers pass SECONDS; the store is NORMALIZED
- * (t = seconds / duration). list_keyframes converts back to seconds.
+ * (t = seconds / duration). libi.keyframe list converts back to seconds.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
@@ -241,7 +241,7 @@ describe("keyframe tools — tracked overlay (D9 opacity-only)", () => {
   });
 });
 
-describe("keyframe tools — delete_keyframe (individual delete)", () => {
+describe("keyframe tools — libi.keyframe delete (individual delete)", () => {
   beforeEach(() => {
     tempDir = createTempStorageDir();
   });
@@ -303,7 +303,7 @@ describe("keyframe tools — delete_keyframe (individual delete)", () => {
   });
 });
 
-describe("keyframe tools — set_keyframe_easing", () => {
+describe("keyframe tools — libi.keyframe set_easing", () => {
   beforeEach(() => {
     tempDir = createTempStorageDir();
   });
@@ -389,7 +389,7 @@ describe("keyframe tools — set_keyframe_easing", () => {
   });
 });
 
-describe("keyframe tools — list_keyframes (seconds)", () => {
+describe("keyframe tools — libi.keyframe list (seconds)", () => {
   beforeEach(() => {
     tempDir = createTempStorageDir();
   });

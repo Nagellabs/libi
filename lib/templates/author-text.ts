@@ -96,6 +96,7 @@ export const AUTHOR_TEXT_FIELDS: Readonly<Record<string, { treatment: AuthorText
   "audioClips.*.linkedOverlayId": REWRITTEN,
   "audioClips.*.label": neutralised("dropped: the clip takes libi's default name"),
   "audioClips.*.duck.sidechainClipIds.*": REWRITTEN,
+  "audioClips.*.volumeKeyframes.keyframes.*.easing": EASING,
   "audioClips.*.effects.in.effectId": EFFECT_ID,
   "audioClips.*.effects.in.params.<key>": EFFECT_PARAM_KEY,
   "audioClips.*.effects.in.params.<entry>": EFFECT_PARAM_VALUE,
@@ -408,6 +409,18 @@ function neutraliseEffects(o: Obj, ctx: NeutraliseContext, at: TemplatePlace): v
   else delete o.effects;
 }
 
+/** Each keyframe's easing narrowed to a preset id or a numeric cubic-bezier(); one that is neither is dropped (plays linear). */
+function neutraliseEasings(keys: unknown[], ctx: NeutraliseContext, at: TemplatePlace): unknown[] {
+  return keys.map((k: unknown) => {
+    if (!isObj(k) || k.easing === undefined) return k;
+    const easing = String(k.easing);
+    if (EASING_IDS.has(easing) || NUMERIC_BEZIER.test(easing.trim())) return k;
+    const rest = { ...k };
+    dropKey(rest, "easing", ctx, at, EASING_LABEL);
+    return rest;
+  });
+}
+
 /** Every keyframe's easing narrowed to a preset id or a numeric cubic-bezier(). */
 function neutraliseKeyframes(o: Obj, ctx: NeutraliseContext, at: TemplatePlace): void {
   if (!isObj(o.keyframes)) return;
@@ -417,17 +430,7 @@ function neutraliseKeyframes(o: Obj, ctx: NeutraliseContext, at: TemplatePlace):
       tracks[track] = value;
       continue;
     }
-    tracks[track] = {
-      ...value,
-      keyframes: value.keyframes.map((k: unknown) => {
-        if (!isObj(k) || k.easing === undefined) return k;
-        const easing = String(k.easing);
-        if (EASING_IDS.has(easing) || NUMERIC_BEZIER.test(easing.trim())) return k;
-        const rest = { ...k };
-        dropKey(rest, "easing", ctx, at, EASING_LABEL);
-        return rest;
-      }),
-    };
+    tracks[track] = { ...value, keyframes: neutraliseEasings(value.keyframes, ctx, at) };
   }
   o.keyframes = tracks;
 }
@@ -458,7 +461,17 @@ export function neutraliseOverlay(o: Obj, ctx: NeutraliseContext, layer: number)
 /** A stranger's audio clip, in place, as it may land in the user's piece. `clip` is its 1-based position in the template; `c.id` is the id libi minted for it. */
 export function neutraliseClip(c: Obj, ctx: NeutraliseContext, clip: number): void {
   delete c.label;
-  neutraliseEffects(c, ctx, { kind: "audio clip", n: clip, ...mintedId(c) });
+  const at: TemplatePlace = { kind: "audio clip", n: clip, ...mintedId(c) };
+  neutraliseEffects(c, ctx, at);
+  neutraliseVolumeEnvelope(c, ctx, at);
+}
+
+/** A clip's volume envelope (`volumeKeyframes`) with every key's easing narrowed to a preset libi has. */
+export function neutraliseVolumeEnvelope(c: Obj, ctx: NeutraliseContext, at: TemplatePlace | number): void {
+  const track = c.volumeKeyframes;
+  if (!isObj(track) || !Array.isArray(track.keyframes)) return;
+  const place: TemplatePlace = typeof at === "number" ? { kind: "audio clip", n: at } : at;
+  c.volumeKeyframes = { ...track, keyframes: neutraliseEasings(track.keyframes, ctx, place) };
 }
 
 /** The id libi minted, when the caller set one — never anything else a template carries. */

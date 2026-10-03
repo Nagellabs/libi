@@ -10,7 +10,7 @@ import { CancelledError } from "@/lib/jobs/types";
  * in-process concurrency cap (`maxConcurrent: 4`) becomes the rate-limit
  * primitive once a server-side LLM call lands. Today, frame descriptions are
  * produced by the ACP agent itself (vision LLM call via the `video-analysis`
- * skill) and persisted via the `libi.analysis_save_frames` MCP tool — there is
+ * skill) and persisted via the `libi.analysis_save({ action: "frames" })` MCP tool — there is
  * no server-side LLM helper for a single frame.
  *
  * To make this runner functional in a follow-up PR:

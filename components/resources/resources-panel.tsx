@@ -16,7 +16,7 @@ interface ResourcesPanelProps {
   onDeletePiece?: (pieceId: string) => void;
   onRenamePiece?: (pieceId: string, name: string) => void;
   onUploadFiles?: (pieceId: string, files: File[]) => void;
-  /** Folder reveal request (from libi.show_folder). `nonce` re-fires repeats. */
+  /** Folder reveal request (from libi.show({ target: "folder" })). `nonce` re-fires repeats. */
   revealFolder?: { id: string; nonce: number } | null;
   onClose: () => void;
 }

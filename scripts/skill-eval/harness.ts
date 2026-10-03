@@ -9,12 +9,15 @@ import {
   copyFileSync,
   cpSync,
   statSync,
+  readdirSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { basename, join, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, relative, resolve, sep } from "node:path";
 import { createServer } from "node:net";
-import type { ParsedScenario, TraceCall, TranscriptView } from "./types";
+import { pathToFileURL } from "node:url";
+import type { ParsedScenario, ScenarioHookContext, ScenarioHooks, StateCheck, TraceCall, TranscriptView } from "./types";
 import { provisionSharedDeps } from "./shared-deps";
+import { codexHomeDir, findCodexRollouts, type AcpToolCall } from "./bench-metrics";
 import { rememberNextEnvDts, restoreNextEnvDts } from "@/e2e/support/harness";
 
 /**
@@ -59,13 +62,87 @@ export interface HarnessResult {
   cost: { amount: number; currency: string } | null;
   /** The in-app agent's CLI version, from the hermetic libi — see `cliVersionFromStatus`. */
   cliVersion: string;
+  /** The scenario's `verify` hook's outcome checks (completed runs with hooks only). */
+  stateChecks?: StateCheck[];
+  /** Each turn's wall-clock window (ISO), prompt first. */
+  turnWindows: Array<{ startedAt: string; endedAt: string }>;
+  /**
+   * The inner agent's own session logs, path relative to the log root: Claude Code's JSONL
+   * (its project dir) or, for `agent: codex`, the run's rollout files (`codex/YYYY/MM/DD/…`).
+   */
+  agentLogs: Array<{ path: string; content: string }>;
+  /**
+   * Every tool call the studio's chat recorded, in order — for Codex the ONLY record of the
+   * calls its Code Mode scripts made (the rollout holds the script, not each call inside it).
+   */
+  toolCalls: AcpToolCall[];
   errorMessage?: string;
+}
+
+/**
+ * The Claude Code project directory of a run: Claude Code keeps a session's log under
+ * `<config>/projects/<cwd with every non-alphanumeric as "-">/`, and the in-app agent's cwd
+ * is `<home>/agent`. The temp home's realpath (`/private/var/…` vs `/var/…`) changes the
+ * prefix, so the match is on the unique `<basename(home)>-agent` suffix. Read-only: the
+ * logs are COPIED into the report, never moved.
+ */
+export function claudeProjectDirsFor(home: string, configDir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")): string[] {
+  const projects = join(configDir, "projects");
+  if (!existsSync(projects)) return [];
+  const suffix = `-${basename(home).replace(/[^a-zA-Z0-9]/g, "-")}-agent`;
+  return readdirSync(projects)
+    .filter((d) => d.endsWith(suffix))
+    .map((d) => join(projects, d));
+}
+
+/** Every `.jsonl` under the run's Claude project dirs (subagent logs included). */
+export function readAgentLogs(home: string, configDir?: string): Array<{ path: string; content: string }> {
+  const out: Array<{ path: string; content: string }> = [];
+  const walk = (root: string, dir: string) => {
+    for (const e of readdirSync(dir)) {
+      const p = join(dir, e);
+      if (statSync(p).isDirectory()) walk(root, p);
+      else if (e.endsWith(".jsonl")) out.push({ path: relative(root, p), content: readFileSync(p, "utf8") });
+    }
+  };
+  for (const d of claudeProjectDirsFor(home, configDir)) walk(d, d);
+  return out;
+}
+
+/**
+ * Resolve `{{seed:<key>}}` to what the scenario's `seed` hook returned. Loud on an unknown key
+ * for the same reason the fixture placeholders are: a literal placeholder reaching the agent
+ * is a confusing run, not a clean failure.
+ */
+export function resolveSeedPlaceholders(text: string, placeholders: Readonly<Record<string, string>>): string {
+  return text.replace(/\{\{seed:([^}]+)\}\}/g, (_m, key: string) => {
+    const v = placeholders[key.trim()];
+    if (v === undefined) {
+      const known = Object.keys(placeholders);
+      throw new Error(
+        `skill-eval: the scenario references {{seed:${key.trim()}}}, but its seed hook returned ` +
+          `${known.length ? known.join(", ") : "no placeholders"}.`,
+      );
+    }
+    return v;
+  });
+}
+
+/** Load a scenario's hooks module (repo-relative, checked by the parser). */
+async function loadHooks(rel: string): Promise<ScenarioHooks> {
+  const abs = resolve(REPO_ROOT, rel);
+  if (!abs.startsWith(REPO_ROOT + sep) || !existsSync(abs)) {
+    throw new Error(`skill-eval: the scenario's hooks module "${rel}" is not a file in the repo (${abs}).`);
+  }
+  const mod = (await import(pathToFileURL(abs).href)) as ScenarioHooks & { default?: ScenarioHooks };
+  return { seed: mod.seed ?? mod.default?.seed, verify: mod.verify ?? mod.default?.verify };
 }
 
 const REPO_ROOT = process.cwd();
 
 /**
- * Pull the Claude CLI version out of a `GET /api/agents/status?agent=claude-code` body.
+ * Pull the agent CLI's version (Claude Code by default; `codex` for a Codex run) out of a
+ * `GET /api/agents/status?agent=<id>` body.
  *
  * Asked of the hermetic libi the run boots, never resolved in this process: nothing under
  * `scripts/skill-eval/` imports `@/lib`, and the resolver would drag in `@/lib/logger`,
@@ -75,10 +152,73 @@ const REPO_ROOT = process.cwd();
  * found but printed no parseable version has no `version`, and reads `"unresolved"` like
  * a missing one.
  */
-export function cliVersionFromStatus(body: unknown): string {
+export function cliVersionFromStatus(body: unknown, agent = "claude-code"): string {
   const agents = (body as { agents?: Record<string, { cli?: { version?: unknown } | null }> } | null)?.agents;
-  const version = agents?.["claude-code"]?.cli?.version;
+  const version = agents?.[agent]?.cli?.version;
   return typeof version === "string" && version.length > 0 ? version : "unresolved";
+}
+
+/**
+ * Every tool call in the chat's messages — what the studio's agent connection recorded as it
+ * ran, in order: `toolId` is `<server>:<tool>` (`libi:libi.add_overlay`) for an MCP call and
+ * null for a built-in. Success is read from the matching `tool-result` part. For Codex these are
+ * the calls its `exec` scripts made, nested ones included, each exactly once however a loop
+ * ran — which the rollout cannot say.
+ */
+export function acpToolCallsFrom(messages: readonly AgentMessageLike[]): AcpToolCall[] {
+  const calls: AcpToolCall[] = [];
+  const byId = new Map<string, AcpToolCall>();
+  for (const m of messages) {
+    for (const part of m.parts ?? []) {
+      if (part.type === "tool-call") {
+        const id = typeof part.toolCallId === "string" ? part.toolCallId : undefined;
+        const call: AcpToolCall = {
+          ...(id ? { toolCallId: id } : {}),
+          toolId: typeof part.toolId === "string" ? part.toolId : null,
+          title: typeof part.rawTitle === "string" ? part.rawTitle : undefined,
+          ...(typeof part.startedAt === "number" ? { startedAt: part.startedAt } : {}),
+        };
+        calls.push(call);
+        if (id) byId.set(id, call);
+      } else if (part.type === "tool-result" && typeof part.toolCallId === "string") {
+        const call = byId.get(part.toolCallId);
+        if (call && typeof part.success === "boolean") call.success = part.success;
+      }
+    }
+  }
+  return calls;
+}
+
+/** Extra env for the spawned libi when the scenario runs on `agent`. See `agentEnvFor`. */
+export function agentEnvFor(agent: string, env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  // In test mode libi scopes Codex to `<LIBI_HOME>/.codex` (lib/codex-config/canonical.ts), a
+  // home with no sign-in: `session/new` fails "Authentication required". An explicit CODEX_HOME
+  // wins over that, so a Codex run points it at the user's own Codex home — what production
+  // uses. Nothing is copied or edited there; Codex writes its rollouts into it, which the harness
+  // then reads. The home's config.toml still loads, so the user's own MCP servers sit beside libi.
+  return agent === "codex" ? { CODEX_HOME: codexHomeDir(env) } : {};
+}
+
+/**
+ * The inner agent's own session logs for a finished run — Claude Code's project dir, or
+ * Codex's rollouts matched by cwd (the in-app agent's cwd is `<home>/agent`).
+ */
+export function readRunAgentLogs(opts: {
+  agent: string;
+  home: string;
+  startedAtMs: number;
+  endedAtMs: number;
+  env?: NodeJS.ProcessEnv;
+}): Array<{ path: string; content: string }> {
+  if (opts.agent === "codex") {
+    return findCodexRollouts({
+      codexHome: codexHomeDir(opts.env),
+      sinceMs: opts.startedAtMs,
+      untilMs: opts.endedAtMs,
+      cwdIncludes: basename(opts.home),
+    });
+  }
+  return readAgentLogs(opts.home);
 }
 
 /** The fake-fal scenario config object for this run (currently just strict mode). */
@@ -615,7 +755,7 @@ async function fetchMessages(base: string, sessionId: string): Promise<AgentMess
  * hermetic home has no `uv`: the invariant was being held by a missing binary rather than by
  * the gate, and four `preauthorize: true` scenarios assert exactly that gate holds
  * (`audio-analysis/01`, `music-creation/01`, `music-video-creation/02`,
- * `voiceover-production/01` each carry a `*_download_model` ABSENT needle).
+ * `video-generation-craft/02` each carry a `*_download_model` ABSENT needle).
  *
  * The wording is load-bearing and easy to get backwards. `EVAL_PREAMBLE_NO_SPEND`'s own
  * first draft said free tools need no asking, and the agent immediately started the 8.3 GB
@@ -951,6 +1091,8 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
         ...socialEnvFor(opts.scenario),
         // The test-mode catalog's creator status (`catalogCreator:` frontmatter) — see catalogEnvFor.
         ...catalogEnvFor(opts.scenario),
+        // A Codex run needs Codex's own (signed-in) home — see agentEnvFor.
+        ...agentEnvFor(opts.agent),
         // NB: there is NO PREFERRED_AGENT env — libi warms the agent from the
         // settings DB (`preferredAgent`). The configure route below calls
         // switchAgent(opts.agent), which fully re-warms + wires the requested
@@ -997,9 +1139,10 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
     // Stamp the CLI the in-app agent runs on. Bounded, and never fatal: a status route
     // that hangs or errors costs the report its version, not the run.
     const cliVersion = cliVersionFromStatus(
-      await fetch(`${base}/api/agents/status?agent=claude-code`, { signal: AbortSignal.timeout(30_000) })
+      await fetch(`${base}/api/agents/status?agent=${opts.agent}`, { signal: AbortSignal.timeout(30_000) })
         .then((r) => r.json())
         .catch(() => null),
+      opts.agent,
     );
 
     // Pick libi's social provider when the scenario asked for one. Must precede
@@ -1040,13 +1183,14 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
     // Fresh piece + clean trace.
     const pieceRes = await post(base, "/api/pieces", {});
     if (!pieceRes.ok) throw new Error(`create piece failed: ${pieceRes.status}`);
+    const { id: harnessPieceId } = (await pieceRes.json()) as { id?: string };
     // Canvas size for this scenario (`pieceDimensions` frontmatter) — see
     // ParsedScenario.pieceDimensions. Must precede the prompt: a scenario that needs a
     // non-default aspect (a 9:16 export gate, say) seeds it here rather than asking the
     // agent to resize the canvas itself, which is a different skill's behaviour and would
     // make a failure here look like this scenario's own bug.
     if (opts.scenario.pieceDimensions) {
-      const { id: pieceId } = (await pieceRes.json()) as { id?: string };
+      const pieceId = harnessPieceId;
       if (!pieceId) throw new Error("create piece succeeded but returned no id, needed for pieceDimensions");
       const [width, height] = opts.scenario.pieceDimensions;
       const dimRes = await fetch(`${base}/api/pieces/${pieceId}/composition/dimensions`, {
@@ -1072,6 +1216,21 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
       seededTemplates.set(basename(dir), payload.templateId);
       console.log(`[skill-eval] seeded template: ${basename(dir)} → ${payload.templateId}`);
     }
+
+    // The scenario's own seed (`hooks:` frontmatter): state no frontmatter key expresses,
+    // built over the studio's HTTP routes before the session exists.
+    const hooks = opts.scenario.hooks ? await loadHooks(opts.scenario.hooks) : null;
+    if (hooks && !harnessPieceId) throw new Error("create piece succeeded but returned no id, needed by the hooks");
+    const hookCtx: ScenarioHookContext = { base, home, pieceId: harnessPieceId ?? "", fixtures: staged };
+    let seedPlaceholders: Record<string, string> = {};
+    let seedState: unknown = undefined;
+    if (hooks?.seed) {
+      const seededAt = Date.now();
+      const seeded = await hooks.seed(hookCtx);
+      seedPlaceholders = seeded.placeholders ?? {};
+      seedState = seeded.state;
+      console.log(`[skill-eval] seed hook done in ${((Date.now() - seededAt) / 1000).toFixed(1)}s: ${JSON.stringify(seedPlaceholders)}`);
+    }
     truncateTrace(home);
 
     // Create session, subscribe, send the prompt and each scripted reply, await each turn.
@@ -1091,17 +1250,41 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
     // blocks the send indefinitely.
     await watcher.ready();
     const messagesToSend = [
-      resolveTemplatePlaceholders(resolveFixturePlaceholders(opts.scenario.prompt, staged), seededTemplates) +
-        preambleFor(opts.scenario),
-      ...opts.scenario.replies,
+      resolveSeedPlaceholders(
+        resolveTemplatePlaceholders(resolveFixturePlaceholders(opts.scenario.prompt, staged), seededTemplates),
+        seedPlaceholders,
+      ) + preambleFor(opts.scenario),
+      ...opts.scenario.replies.map((r) => resolveSeedPlaceholders(r, seedPlaceholders)),
     ];
     const startedAt = Date.now();
+    const turnWindows: Array<{ startedAt: string; endedAt: string }> = [];
     const finish = async (status: HarnessResult["status"], errorMessage?: string): Promise<HarnessResult> => {
       const durationSec = Math.round((Date.now() - startedAt) / 100) / 10;
       await watcher.close();
       const messages = await fetchMessages(base, sessionId);
       const view = buildTranscriptView(messages, watcher.approvals);
+      // Outcome checks on the studio's state, while the studio is still up. Only on a
+      // completed run — an errored or timed-out one is never evaluated. A throwing hook is
+      // a failed check, not a crashed harness.
+      let stateChecks: StateCheck[] | undefined;
+      if (status === "completed" && hooks?.verify) {
+        try {
+          stateChecks = await hooks.verify({ ...hookCtx, state: seedState });
+        } catch (e) {
+          stateChecks = [{ name: "verify hook", pass: false, detail: `threw: ${(e as Error).message}` }];
+        }
+      }
+      let agentLogs: HarnessResult["agentLogs"] = [];
+      try {
+        agentLogs = readRunAgentLogs({ agent: opts.agent, home, startedAtMs: startedAt, endedAtMs: Date.now() });
+      } catch (e) {
+        console.warn(`[skill-eval] could not read the agent's session logs: ${(e as Error).message}`);
+      }
       return {
+        ...(stateChecks ? { stateChecks } : {}),
+        turnWindows,
+        agentLogs,
+        toolCalls: acpToolCallsFrom(messages),
         status,
         trace: readTrace(home),
         transcript: view.full,
@@ -1117,9 +1300,14 @@ export async function runScenarioOnce(opts: RunOnceOpts): Promise<HarnessResult>
       for (const text of messagesToSend) {
         turn++;
         if (turn > 1) console.log(`[skill-eval] scripted reply ${turn - 1}: ${text}`);
+        const turnStartedAt = new Date().toISOString();
         const sendRes = await post(base, "/api/agent/send", { sessionId, text });
         if (!sendRes.ok) throw new Error(`send failed (turn ${turn}): ${sendRes.status}`);
-        await watcher.waitForCompletions(turn);
+        try {
+          await watcher.waitForCompletions(turn);
+        } finally {
+          turnWindows.push({ startedAt: turnStartedAt, endedAt: new Date().toISOString() });
+        }
       }
       // After the last turn, before the trace is read: the positive control for the
       // catalog assertions (see CATALOG_CANARY). Only on a completed run — an errored

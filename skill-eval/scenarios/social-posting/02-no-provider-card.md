@@ -42,7 +42,7 @@ assertions:
   # It stopped: no provider was reached, and nothing was posted or linked.
   - { provider: zernio, expect: absent }
   - { transcript_contains: "[tool-call mcp__libi__libi_post_piece]", expect: absent }
-  - { transcript_contains: "[tool-call mcp__libi__libi_social_link_post]", expect: absent }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_social_link\][^\n]*"kind":\s*"post"', expect: absent }
   # It did not substitute an unrelated libi tool for the thing it cannot do.
   - { tool: "run_model", expect: absent }
   - { tool: "submit_job", expect: absent }

@@ -66,6 +66,58 @@ export function presetDimensions(
   return { width: width & ~1, height: height & ~1 };
 }
 
+/**
+ * The frame a SOCIAL export is fitted into when the caller names no size:
+ * at most 1080 on the short edge and 1920 on the long one, in the piece's own
+ * aspect. Instagram and TikTok take 1080×1920 at most, so a 4K file is four
+ * times the bytes for nothing (221 MB / 144 s measured on a 9:16 piece). 4K
+ * stays opt-in: name `quality`, `graphicsQuality` or custom dimensions.
+ */
+export const SOCIAL_FIT = { shortEdge: 1080, longEdge: 1920 } as const;
+
+/** True when a frame already fits `SOCIAL_FIT` (no larger than 1080 short / 1920 long, either orientation). */
+export function fitsSocial(width: number | null | undefined, height: number | null | undefined): boolean {
+  if (!width || !height) return false;
+  return Math.min(width, height) <= SOCIAL_FIT.shortEdge && Math.max(width, height) <= SOCIAL_FIT.longEdge;
+}
+
+/** The quality tiers a social export with no named size resolves against
+ *  (before it is fitted into `SOCIAL_FIT`): the piece's own media size, 1080p graphics. */
+export const SOCIAL_DEFAULT_QUALITY: Exclude<ExportQuality, "custom"> = "source";
+export const SOCIAL_DEFAULT_GRAPHICS_QUALITY: GraphicsQuality = "1080p";
+
+/** True when an export's request leaves its size to libi: a social purpose
+ *  and none of the fields that name one. Pure; the route and its tests share it. */
+export function usesSocialFit(req: {
+  purpose?: string;
+  quality?: unknown;
+  graphicsQuality?: unknown;
+  customWidth?: unknown;
+  customHeight?: unknown;
+}): boolean {
+  return (
+    req.purpose === "social" &&
+    req.quality === undefined &&
+    req.graphicsQuality === undefined &&
+    req.customWidth === undefined &&
+    req.customHeight === undefined
+  );
+}
+
+/** Scale a frame DOWN (never up) until it fits `box`, keeping its aspect.
+ *  Even dimensions, as H.264 yuv420p needs. */
+export function fitWithin(
+  width: number,
+  height: number,
+  box: { shortEdge: number; longEdge: number },
+): { width: number; height: number } {
+  const short = Math.min(width, height);
+  const long = Math.max(width, height);
+  const scale = short > 0 && long > 0 ? Math.min(1, box.shortEdge / short, box.longEdge / long) : 1;
+  const even = (n: number) => Math.max(2, Math.round(n) & ~1);
+  return scale >= 1 ? { width: width & ~1, height: height & ~1 } : { width: even(width * scale), height: even(height * scale) };
+}
+
 /** Overlay kinds that render text/code/3D graphics procedurally — the tier
  *  `graphicsQuality` governs. Plain image/video overlays are decoded media,
  *  not rendered, so they're governed by `quality` (media) only. */
@@ -109,6 +161,23 @@ export function hasGraphicsOverlays(
  *  never downscaled below the chosen media tier, and graphics render
  *  procedurally at the output size, so they come out sharp either way. */
 export function resolveOutputDimensions(args: {
+  quality: ExportQuality;
+  graphicsQuality: GraphicsQuality;
+  hasGraphics: boolean;
+  sourceWidth: number;
+  sourceHeight: number;
+  customWidth?: number;
+  customHeight?: number;
+  /** Cap the resolved frame to this box (scaled down, never up). Absent: no cap. */
+  fitWithin?: { shortEdge: number; longEdge: number };
+}): { width: number; height: number; drivenBy: "media" | "graphics" } {
+  const { fitWithin: box, ...rest } = args;
+  const out = resolveUncappedDimensions(rest);
+  if (!box) return out;
+  return { ...fitWithin(out.width, out.height, box), drivenBy: out.drivenBy };
+}
+
+function resolveUncappedDimensions(args: {
   quality: ExportQuality;
   graphicsQuality: GraphicsQuality;
   hasGraphics: boolean;
@@ -180,6 +249,8 @@ export function resolveExportSettingsWithTier(
      *  false — existing callers that don't pass this keep resolving purely
      *  off `quality`, as before graphics resolution existed. */
     hasGraphics?: boolean;
+    /** Cap the frame to this box (a social export's default; see `SOCIAL_FIT`). */
+    fitWithin?: { shortEdge: number; longEdge: number };
   },
 ): { settings: ExportSettings; drivenBy: "media" | "graphics" } {
   const quality: ExportQuality = partial.quality ?? "source";
@@ -197,6 +268,7 @@ export function resolveExportSettingsWithTier(
     sourceHeight: partial.sourceHeight,
     customWidth: partial.customWidth,
     customHeight: partial.customHeight,
+    fitWithin: partial.fitWithin,
   });
 
   const bitrate = bitrateForPixels(width * height);

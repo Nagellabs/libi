@@ -42,7 +42,7 @@ function formatClock(sec: number): string {
 
 /** Right-click menu for an overlay bar (image / video / text / code / three).
  *  Cut (split at the playhead), Duplicate, and Remove — the same three gestures
- *  the libi.split_clip / duplicate_clip / delete_clip MCP tools expose, sharing
+ *  the libi.clip MCP tool (split / duplicate / delete) exposes, sharing
  *  the lib/composition/clip-ops core via the /clips route. */
 export default function OverlayClipContextMenu({
   overlayId,

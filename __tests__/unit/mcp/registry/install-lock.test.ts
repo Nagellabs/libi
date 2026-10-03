@@ -118,8 +118,7 @@ describe("acquireInstallLock", () => {
     const lock = await acquireInstallLock(lockPath, { heartbeatMs: 20 });
     const old = new Date(Date.now() - 10 * 60_000);
     fs.utimesSync(lockPath, old, old);
-    await new Promise((r) => setTimeout(r, 80));
-    expect(Date.now() - fs.statSync(lockPath).mtimeMs).toBeLessThan(5_000);
+    await vi.waitFor(() => expect(Date.now() - fs.statSync(lockPath).mtimeMs).toBeLessThan(5_000));
     lock.release();
   });
 

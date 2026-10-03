@@ -237,6 +237,54 @@ describe("the release workflows: what must never drift", () => {
     }
   });
 
+  it("stamps the version commit in the operator's zone, not the runner's UTC (0.1.17 read 'Thu 21:51 +0000')", () => {
+    // The instant is real either way; what git writes is the offset, from TZ. A
+    // weekend release must not read as a work day in the public record.
+    const publish = stepsIn(npmWf, "npm").find((st) => st.id === "publish");
+    const env = (publish?.env ?? {}) as Record<string, string>;
+    // Same variable and default as the window gate, so the two cannot disagree.
+    expect(env.RELEASE_TZ).toBe("${{ vars.RELEASE_TZ || 'Asia/Bangkok' }}");
+    const gate = stepsIn(npmWf, "window").map((st) => String(st.run ?? "")).join("\n");
+    expect(gate).toContain("vars.RELEASE_TZ || 'Asia/Bangkok'");
+    // Scoped, not blanket: a TZ on the whole step or job would change the zone
+    // `npm test` runs under, which CI has only ever seen as UTC.
+    expect(env.TZ).toBeUndefined();
+    expect((jobIn(npmWf, "npm").env ?? {}) as Record<string, string>).not.toHaveProperty("TZ");
+
+    const script = readFileSync(path.join(ROOT, "scripts/release-npm.js"), "utf8");
+    expect(script).toContain("TZ: process.env.RELEASE_TZ");
+    // Every command that writes a commit or tag date takes it.
+    for (const call of [
+      'run(`version bump (${bump})`, "npm", ["version", bump], { env: commitEnv() })',
+      'run("amend", "git", ["commit", "--amend", "--no-edit"], { env: commitEnv() })',
+      "{ env: commitEnv() });\n  console.log(`   notices re-synced",
+    ]) {
+      expect(script, call).toContain(call);
+    }
+    // No faked date: the zone changes the offset only.
+    expect(script).not.toMatch(/GIT_(AUTHOR|COMMITTER)_DATE|--date/);
+  });
+
+  it("git writes the offset of TZ into the commit (the mechanism the stamp relies on)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "libi-tz-"));
+    try {
+      const git = (tz: string, ...args: string[]) =>
+        execFileSync("git", args, {
+          cwd: dir,
+          encoding: "utf8",
+          env: { ...process.env, TZ: tz, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+        }).trim();
+      git("UTC", "init", "-q");
+      git("UTC", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "a");
+      git("Asia/Bangkok", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "b");
+      const [bangkok, utc] = git("UTC", "log", "--format=%cd", "--date=iso").split("\n");
+      expect(bangkok).toMatch(/\+0700$/);
+      expect(utc).toMatch(/\+0000$/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("pushes the version commit and tag even when only the post-publish verify failed", () => {
     // 0.1.14: npm accepted the package, the registry verifier gave up on a
     // lagging CDN, the Publish step failed, and the push was skipped — a public
@@ -1113,13 +1161,17 @@ describe("a slow registry never turns a good publish red — 0.1.16", () => {
     }
   }
 
+  // These run the real resolve script: 240 asks means 240 stub spawns, a few seconds of
+  // honest work that a loaded machine stretches past vitest's 5 s default. No timing is asserted.
+  const RESOLVE_RUN_BUDGET_MS = 30_000;
+
   it("resolve, run for real: served on the 4th ask → outputs the version", () => {
     const r = runResolve({ failuresBeforeServed: 3 });
     expect(r.status).toBe(0);
     expect(r.calls).toBe(4);
     expect(r.output).toContain("version=0.1.17");
     expect(r.output).toContain("ref=v0.1.17");
-  });
+  }, RESOLVE_RUN_BUDGET_MS);
 
   it("resolve, run for real: never served → fails after exactly 240 asks, naming the re-dispatch", () => {
     const r = runResolve({ failuresBeforeServed: 10_000 });
@@ -1127,7 +1179,7 @@ describe("a slow registry never turns a good publish red — 0.1.16", () => {
     expect(r.calls).toBe(240);
     expect(r.stdout).toMatch(/::error::.*not served yet.*re-dispatch later with the same version/);
     expect(r.output).not.toContain("version=");
-  });
+  }, RESOLVE_RUN_BUDGET_MS);
 
   it("the resolve job's own timeout leaves room for that hour", () => {
     const t = Number((jobIn(elWf, "resolve") as { "timeout-minutes"?: number })["timeout-minutes"] ?? 360);

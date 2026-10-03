@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTabNavGate, TAB_NAV_CLAIM_WAIT_MS, type TabNavChannel } from "@/hooks/sessions/tab-nav-gate";
 
 /**
- * NAV-1 (full-verification F14): an agent's `libi.show_extension` / `libi.show_templates` reached
+ * NAV-1 (full-verification F14): an agent's `libi.show({ target: "extension" })` / `libi.show({ target: "templates" })` reached
  * every open studio tab, and every tab navigated — including one the user had on another page. Now
  * the event names the chat it came from, and only the tab showing that chat obeys; with no tab
  * showing it (or no chat at all — a CLI agent), today's behaviour is kept.

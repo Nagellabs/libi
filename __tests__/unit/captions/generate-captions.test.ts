@@ -249,7 +249,7 @@ describe("generateCaptions — build a caption track from word timings", () => {
     expect(last.startTime + last.duration).toBeLessThanOrEqual(5 + 1e-6);
   });
 
-  it("a plain split (libi.split_clip): BOTH halves get captioned, continuous across the split point", async () => {
+  it("a plain split (libi.clip, action split): BOTH halves get captioned, continuous across the split point", async () => {
     const { generateCaptions, loadManifest, saveManifest, getLibiStorageDir } = await setup();
     // Exactly the shape splitOverlay() produces (lib/composition/clip-ops.ts):
     // head keeps startTime 0, tail starts where the cut was made (3), and

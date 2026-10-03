@@ -33,7 +33,7 @@ function insertCompletedAnalysis(db: ReturnType<typeof createTestDb>, fileId: st
   }).run();
 }
 
-describe("commit_draft verify-gate", () => {
+describe("libi.snapshot commit verify-gate", () => {
   beforeEach(() => { createTestDb(); createTempStorageDir(); });
   afterEach(() => { resetTestDb(); cleanupTempDir(); });
 

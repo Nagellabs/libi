@@ -1,9 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
   resolveExportSettings,
+  resolveExportSettingsWithTier,
   isUpscaling,
   resolveOutputDimensions,
   hasGraphicsOverlays,
+  fitWithin,
+  usesSocialFit,
+  SOCIAL_FIT,
+  SOCIAL_DEFAULT_QUALITY,
+  SOCIAL_DEFAULT_GRAPHICS_QUALITY,
 } from "@/lib/export/quality";
 import type { Overlay } from "@/lib/engine/types";
 import type { TrackedContent } from "@/lib/tracking/types";
@@ -300,5 +306,57 @@ describe("isUpscaling", () => {
       sourceWidth: 1920, sourceHeight: 1080,
     });
     expect(isUpscaling(s, 1920, 1080)).toBe(false);
+  });
+});
+
+describe("social fit (agent-speed A4)", () => {
+  it("fitWithin scales a 4K portrait frame to 1080×1920 and a 4K landscape one to 1920×1080", () => {
+    expect(fitWithin(2160, 3840, SOCIAL_FIT)).toEqual({ width: 1080, height: 1920 });
+    expect(fitWithin(3840, 2160, SOCIAL_FIT)).toEqual({ width: 1920, height: 1080 });
+  });
+
+  it("fitWithin keeps the piece's aspect: square, 4:5 and a tall phone frame", () => {
+    expect(fitWithin(2160, 2160, SOCIAL_FIT)).toEqual({ width: 1080, height: 1080 });
+    expect(fitWithin(2160, 2700, SOCIAL_FIT)).toEqual({ width: 1080, height: 1350 });
+    // 9:20: the 1920 long edge binds, not the 1080 short one.
+    const tall = fitWithin(1080, 2400, SOCIAL_FIT);
+    expect(tall.height).toBe(1920);
+    expect(tall.width).toBe(864);
+  });
+
+  it("fitWithin never upscales and keeps dimensions even", () => {
+    expect(fitWithin(720, 1280, SOCIAL_FIT)).toEqual({ width: 720, height: 1280 });
+    expect(fitWithin(1081, 1921, SOCIAL_FIT).width % 2).toBe(0);
+    expect(fitWithin(1081, 1921, SOCIAL_FIT).height % 2).toBe(0);
+  });
+
+  it("a graphics piece resolved at the social tiers and fitted comes out 1080×1920, not 4K", () => {
+    const { settings } = resolveExportSettingsWithTier({
+      format: "mp4", codec: "avc", fps: 30,
+      quality: SOCIAL_DEFAULT_QUALITY, graphicsQuality: SOCIAL_DEFAULT_GRAPHICS_QUALITY, hasGraphics: true,
+      sourceWidth: 2160, sourceHeight: 3840, fitWithin: SOCIAL_FIT,
+    });
+    expect([settings.width, settings.height]).toEqual([1080, 1920]);
+    // The same piece at the stored defaults is the 4K the plan retires for social.
+    const full = resolveExportSettingsWithTier({
+      format: "mp4", codec: "avc", fps: 30, quality: "source", graphicsQuality: "4k", hasGraphics: true,
+      sourceWidth: 2160, sourceHeight: 3840,
+    }).settings;
+    expect([full.width, full.height]).toEqual([2160, 3840]);
+  });
+
+  it("an uncapped resolve is unchanged", () => {
+    const a = resolveOutputDimensions({ quality: "4k", graphicsQuality: "4k", hasGraphics: false, sourceWidth: 1920, sourceHeight: 1080 });
+    expect([a.width, a.height]).toEqual([3840, 2160]);
+  });
+
+  it("usesSocialFit: social with no size named; any named size opts out", () => {
+    expect(usesSocialFit({ purpose: "social" })).toBe(true);
+    expect(usesSocialFit({ purpose: "personal" })).toBe(false);
+    expect(usesSocialFit({})).toBe(false);
+    expect(usesSocialFit({ purpose: "social", quality: "4k" })).toBe(false);
+    expect(usesSocialFit({ purpose: "social", quality: "source" })).toBe(false);
+    expect(usesSocialFit({ purpose: "social", graphicsQuality: "4k" })).toBe(false);
+    expect(usesSocialFit({ purpose: "social", customWidth: 3840, customHeight: 2160 })).toBe(false);
   });
 });

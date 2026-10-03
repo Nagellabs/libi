@@ -1,133 +1,105 @@
 ---
 name: animating-overlays
-description: Animate an overlay's MOTION — move / slide / zoom / spin / fade an overlay's position, scale, rotation, or opacity from one value to another over time. Load this whenever the user asks to animate a transform or opacity transition on a text/image/video/code/three overlay. It owns the keyframes-first rule — use `libi.add_keyframe` (visible, user-editable timeline diamonds), NEVER bake the motion into a code overlay's draw function. Triggers — "make the title slide up", "fade this in", "zoom the logo in", "spin it as it enters", "animate it moving across". NOT for text-reveal typewriter/word-by-word (use animated-text-overlays) and NOT for looping/parametric motion like bob/shake/pulse (use effects).
-tags: [overlays, animation, keyframes]
+description: "Animate an overlay or audio clip: slide, zoom, spin or ramp opacity between values (keyframes), or give it an in, out or loop effect: fade in or out, pop, pulse, float, Ken Burns, audio fades, custom effects ('slide the title up', 'fade this in', 'subtle float', 'fade the music out'). Not for text reveals like typewriter or word-by-word (animated-text-overlays)."
+tags: [overlays, animation, keyframes, effects]
 ---
 
-# Animating Overlays (keyframes)
+# Animating overlays
 
-Use this when the user wants an overlay to **move, slide, zoom, spin, or fade**
-— an overlay's **position / scale / rotation / opacity** changing from one value
-to another over a window of time. The rule is simple:
+Done looks like this: the motion lives on a surface the user can see and edit — keyframe
+diamonds on the timeline, or an effect in the Effects panel — and the user can retime it
+without you. Never bake motion into a `code` overlay's draw function, and never reach for a
+code or three overlay to slide, scale, fade or loop something: a code body is opaque, cannot
+be retimed or handed off, and is locked to one overlay.
 
-> **Animate transforms + opacity with KEYFRAMES, never with a code draw
-> function.** A keyframed transition shows as draggable diamonds on the timeline,
-> can be re-timed, re-curved (curve editor), and deleted. The same motion baked
-> into a `code` overlay's `draw.jsx` is opaque — the user can't see it, can't
-> re-time it, and can't hand it off. Keyframes keep the motion on the surface.
+## Which tool
 
-## The crisp boundary — keyframes vs. draw-fn vs. reveal vs. effect
+| The user wants | Use |
+| --- | --- |
+| An overlay's position, scale, rotation or opacity to go from A to B at times you pick ("slide up", "zoom in", "dim to 40% for the middle") | keyframes: `libi.add_keyframe` |
+| A preset entrance, exit or loop, including a plain fade in/out at the overlay's own start/end, pop, pulse, float, Ken Burns, audio fades | an effect: `libi.layer_effect` action `apply` |
+| Repeating parametric motion (bob, shake, pulse, wiggle) | an effect, same tool |
+| Motion no catalog effect covers, but reusable (in/out/loop of movement, scale, rotation, opacity, blur) | a custom effect: `libi.effect` action `add` |
+| Text that reveals itself (typewriter, word-by-word, karaoke, paint-on) | `reveal` on a text overlay: load `animated-text-overlays` |
+| A static look (glow, recolor, fixed style) | a caption style (`libi.caption_style({ action: "create" })`), not an effect |
+| Motion that is not a transform: particles, a chart drawing itself, generative canvas art | a `code` overlay: the last resort |
 
-| The user wants… | Use | Why |
-| --- | --- | --- |
-| an overlay to **move / slide / zoom / spin / fade** (a one-way A→B transition of position/scale/rotation/opacity) | **KEYFRAMES** (`add_keyframe`) | visible diamonds, re-timable, curve-editable |
-| looping / parametric motion — **bob, shake, pulse, float, wiggle** | an **effect** (`apply_layer_effect` / `add_effect`) | a reusable `(progress)→TransformDelta`, shows in the Effects panel |
-| **text reveal** — typewriter, word-by-word, karaoke, paint-on | `reveal` on a `kind: "text"` overlay (skill: `animated-text-overlays`) | native, element-local reveal |
-| motion that is NOT a whole-overlay transform — particles, a data-driven chart drawing itself, per-element generative canvas art | a `code` overlay `draw.jsx` (skill: `animated-text-overlays` for kinetic text) | genuinely procedural; no controller expresses it |
+Litmus: is the whole overlay moving, scaling, rotating or changing opacity? Keyframes if it is a
+one-way change at chosen times, an effect if it is an entrance, exit or loop. A plain fade is an
+effect, not keyframes.
 
-**Litmus:** *is this the WHOLE overlay moving/scaling/rotating/fading from one
-value to another?* If yes → keyframes. If it's a repeating wobble → effect. If
-it's text characters revealing → `reveal`. Only bespoke procedural drawing that
-none of those express stays a `code` body. Do NOT reach for a `code` overlay to
-"fade in" or "slide up" something — that's exactly the keyframe case.
+## Keyframes
 
-## Tools
+A→B is two `libi.add_keyframe` calls on the same property: the start value at the start time,
+the end value at the end time (times are seconds within the overlay's window). Multi-step
+motion adds a keyframe per beat; fade-and-slide keys each property in its own pair at the same
+times. Pass the property explicitly in both keyframes; omit `properties` only to snapshot
+every track as a hold. `easing` shapes the segment leaving that keyframe, so put it on the
+start keyframe (presets such as `ease-out`, `overshoot-out`, `bounce-out`, or a
+`cubic-bezier(...)`), or change it later with `libi.keyframe({ action: "set_easing" })`. An opacity ramp up
+reads best with `ease-out`. `libi.keyframe({ action: "delete" })` and `libi.keyframe({ action: "list" })` remove and inspect.
 
-Keyframes are built entirely from **`add_keyframe`** — one call per keyframe.
-There is no separate "animate" tool: a simple A→B transition is just **two**
-`add_keyframe` calls (start value + end value), and multi-step motion is more.
+A tracked overlay's position is track-driven: only `opacity` can be keyframed on it.
 
-- **`libi.add_keyframe({ pieceId, overlayId, time, properties?, easing? })`** —
-  add (or replace) ONE keyframe at `time` **SECONDS** within the overlay window.
-  - `properties` is `{ opacity?, position?, scale?, rotation?, rect?,
-    transform3d? }`. `position` is `{ x, y }` in composition pixels; `scale` /
-    `rotation` (degrees) / `opacity` are numbers. Pass ONLY the property you're
-    animating.
-  - **Omit `properties`** to snapshot the overlay's CURRENT values at that time
-    (a "hold" keyframe on every track). Only use the omitted form for a hold —
-    for an A→B transition pass the property explicitly in BOTH keyframes so just
-    that one track is keyed.
-  - `easing` shapes the segment **leaving** this keyframe (see "Shaping the
-    curve"). Put it on the FIRST (start) keyframe of a segment.
-- **`libi.set_keyframe_easing({ pieceId, overlayId, time, easing })`** — set the
-  easing on the segment LEAVING the keyframe at `time`, after the fact.
-- **`libi.delete_keyframe({ pieceId, overlayId, time })`** — remove the keyframe
-  at `time` (across all property tracks).
-- **`libi.list_keyframes({ pieceId, overlayId })`** — read the per-track keyframe
-  list + the unified time list. Use to inspect / verify before and after.
+## Effects
 
-### The A→B pattern (the common case)
+Effects fill three slots, `in`, `out` and `loop`, which coexist (fade in, gentle float, slide
+out). Every overlay kind and every audio clip can carry them.
 
-To animate ONE property from A to B over a window, place two keyframes on that
-property — start value at the start time, end value at the end time:
+- `libi.effect` action `list` is the authoritative catalog, custom effects included. Call it before
+  applying; an unknown id comes back with the valid set.
+- `libi.layer_effect({ action: "apply", pieceId, layerId, phase, effectId, durationMs?, params? })`
+  (`layerId` is an overlay or audio clip), `libi.layer_effect` action `clear` to empty a slot. A new
+  overlay can be born with motion through `effects` on `libi.add_overlay`.
+- Tasteful by default and subtle: a caption or title takes a short `fade` in (300-500 ms), a
+  logo or badge a `pop`, a held element a small `pulse` or `breathe` loop, a full-frame photo a
+  gentle `zoom` (Ken Burns), an audio clip `audio-fade-in` / `audio-fade-out`. Mirror the
+  entrance on exit. One in plus at most one loop is usually enough.
+- Audio honours only `in` and `out`. Text reveal effects (`typewriter`, `fade-words`,
+  `slide-up-lines`) are text-only and in-only.
 
-- *Fade in over the first second (window starts at 0):*
-  1. `add_keyframe({ time: 0, properties: { opacity: 0 }, easing: "ease-out" })`
-  2. `add_keyframe({ time: 1, properties: { opacity: 1 } })`
-- *Slide up:*
-  1. `add_keyframe({ time: 0, properties: { position: { x, y: yStart } } })`
-  2. `add_keyframe({ time: <end>, properties: { position: { x, y: yEnd } } })`
-- *Combine two properties* (e.g. fade **and** slide) by keying each property in
-  its own pair of `add_keyframe` calls at the same start/end times.
+```effects
+fade
+pop
+pulse
+breathe
+zoom
+slide
+audio-fade-in
+audio-fade-out
+```
 
-For multi-step motion (slide in → hold → slide out), add keyframes at each beat
-time — the same property at 3+ times.
+## Custom effects
 
-## Shaping the curve
+When `libi.effect` action `list` has no fitting motion, author one instead of baking it into a body:
+`libi.effect({ action: "add", id, name, family: "animation", phases, supports, params?, source })`, then
+apply it by its new id. `libi.effect({ action: "install_from_git", url })` installs a shared package;
+`libi.effect` actions `list_packages`, `update` and `remove` manage them. A
+rejected body or manifest returns the reason in `data.hint`: fix it and retry rather than
+falling back to a built-in that does not match.
 
-The `easing` on a keyframe governs the segment **leaving** it. Pass either a
-preset id from `EASING_PRESETS` or a `cubic-bezier(x1,y1,x2,y2)` literal:
+`source` is a pure function body `(progress, params) → TransformDelta`:
 
-- **Presets:** `linear`, `ease-in`, `ease-out`, `ease-in-out` (default),
-  `ease-in-strong`, `ease-out-strong`, `ease-in-out-strong`, `overshoot-in`,
-  `overshoot-out`, `bounce-out`, `elastic-out`.
-- **Custom:** `cubic-bezier(0.2, 0, 0, 1)` for a bespoke curve.
+- `progress` runs 0→1 across the slot's own window; pace motion off it, never off composition
+  frames.
+- Return any of `dx, dy, scale, scaleX, scaleY, rotateDeg, opacity, blurPx, clipReveal`; omit
+  a field for identity, return `{}` for no change.
+- Only the injected helpers (`interpolate`, `spring`, `clamp`, `lerp`, the easing functions)
+  exist. There is no canvas, `require`, `import`, `fetch`, DOM or other IO, and a body that
+  names one is rejected. The body runs only in libi's sandboxed effect worker, which samples
+  it at 1025 values of `progress`; the preview and export interpolate those numbers, so the
+  same inputs must give the same output and a sharp step reads as a step.
 
-Pick the feel: a fade-in reads best with `ease-out`; a slide-up entrance with
-`ease-out` or a little `overshoot-out`; a bouncy pop with `bounce-out` /
-`elastic-out`.
+```js
+return { dy: interpolate(progress, 0, 1, 24, 0), opacity: interpolate(progress, 0, 1, 0, 1) };
+```
 
-## Tracked overlays
+## Handing over
 
-A `tracked` overlay's POSITION is track-driven, so only **`opacity`** can be
-keyframed on it — `add_keyframe` drops any other property (position / scale /
-rotation) for a tracked overlay. Use it to fade a tracked label in/out without
-touching its tracked position.
+Keyframes and effects stay editable: the user drags diamonds and opens the Keyframes tab's
+curve editor, or the Effects panel. When your timing or curve is not quite it, do not keep
+guessing: point them at the control (`libi.highlight_effect` flashes an effect in the catalog
+or on a layer) and load `guiding-manual-edits`.
 
-## Workflow
-
-1. **Add / find the overlay.** Create the text/image/video overlay normally
-   (`libi.add_overlay`), or find an existing one with `libi.get_overlays`.
-2. **Animate the transform/opacity with keyframes.** For a simple entrance
-   (fade + slide, zoom in), two `add_keyframe` calls per property — the start
-   value and the end value. For multi-step motion, place `add_keyframe`s at each
-   beat time.
-3. **Shape the curve** with `easing` on the start keyframe (or
-   `set_keyframe_easing` after).
-4. **Verify.** `list_keyframes` to confirm the keyframes landed, then preview at
-   the start / mid / end of the window (or ask the user to scrub). The user sees
-   **diamonds on the timeline** and can open the **Effects & Keyframes panel →
-   Keyframes tab** to drag them or tweak the curve.
-
-## Look at what you made (required)
-
-After ANY layout, position, size, or typography change — before you tell the
-user it is done — render the affected times and look:
-
-`libi.render_overlay_frames({ pieceId, atTimes: [...], contactSheet: true })`
-
-Read the returned image. Check that text fits its box, that nothing overlaps
-or runs off frame (`overflow.touchesEdge` flags the obvious cases), and that
-`unresolvedFonts` is empty — a family listed there is rendering in a fallback
-face and will look wrong. Reasoning about coordinates is not verification:
-a real build got the brand mark overlapping its wordmark, a chip 90px too
-narrow for its text, and every text in a serif fallback, all of which one
-render made obvious.
-
-## Hand-off
-
-Because the motion lives in keyframes (not a draw function), the user can take
-over: the timeline diamonds are draggable, and the Keyframes tab exposes the
-curve editor. When your own timing/curve isn't quite what they wanted, don't
-keep re-guessing — point them at the Keyframes tab and let them dial it by hand.
-Load the **`guiding-manual-edits`** skill for the highlight-and-hand-off pattern.
+Render and look before you tell the user it is done (`libi.render_overlay_frames`, see the
+manual's "Putting results in front of the user"): check the start, middle and end of the window.

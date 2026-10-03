@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { compareStates, commitDraft, discardDraft, restoreSnapshot, getPieceState } from "@/lib/composition/lifecycle";
 import type { CompositionManifest, PersistedOverlay } from "@/lib/composition/persistence";
@@ -205,8 +205,14 @@ describe("saveManifest — has_draft flag", () => {
     const db = createTestDb();
     const [piece] = await db.insert(pieces).values({ name: "p", hasDraft: true }).returning();
     const originalUpdate = piece.updatedAt;
-    await new Promise((r) => setTimeout(r, 1100)); // updatedAt resolution = 1 second
-    await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] });
+    // updatedAt resolution = 1 second: move the clock past it instead of sleeping through it.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 2_000);
+      await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [] });
+    } finally {
+      vi.useRealTimers();
+    }
     const [after] = await db.select().from(pieces).where(eq(pieces.id, piece.id));
     expect(after.hasDraft).toBe(true);
     // updatedAt should not have changed because we skipped the UPDATE

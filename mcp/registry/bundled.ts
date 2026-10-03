@@ -305,21 +305,13 @@ export const STATIC_BUNDLED_MCP_SERVERS: BundledMcpDef[] = [
       "Local multi-object tracking engine (boxmot + ONNX). Installed the first time a tracking tool needs it, ~2 GB, on-device.",
     kind: "extension",
     toolPrefixes: [
-      "libi.compute_object_track",
-      "libi.compute_track_segment",
+      // `libi.track` and `libi.tracked_overlay` are the merged tools (compute / repair / list / delete a
+      // track; add / update / verify a tracked overlay): every action falls under the extension's approval
+      // gate and "which extension owns this?" answer, as the thirteen per-verb names did.
+      "libi.track",
+      "libi.tracked_overlay",
       "libi.install_tracking_engine",
       "libi.verify_install",
-      "libi.list_tracks",
-      "libi.list_track_segments",
-      "libi.list_identity_candidates",
-      "libi.delete_track",
-      "libi.ground_target",
-      "libi.pick_candidate",
-      "libi.skip_segment",
-      "libi.update_track_result",
-      "libi.add_tracked_overlay",
-      "libi.update_tracked_overlay",
-      "libi.verify_tracked_overlay",
       "libi.remove_background",
     ],
     npmUrl: null,

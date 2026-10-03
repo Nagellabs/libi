@@ -37,6 +37,7 @@ import { createTestDb, resetTestDb } from "@/__tests__/helpers/test-db";
 import { getDb } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema";
 import { suggestProvider, listProviders } from "@/mcp/tools/provider-tools";
+import { PROVIDER_CATALOG } from "@/lib/providers/catalog";
 
 /** The libi-owned rows the table holds since migration 0051 — nothing else. */
 function seedLibiRows() {
@@ -94,6 +95,32 @@ describe("libi.suggest_provider", () => {
     expect(data.status).toBe("card");
     expect(data.covered).toEqual([{ id: "fal", name: "fal.ai", via: "connected" }]);
     expect(data.suggested.map((s) => s.id)).toEqual(["higgsfield"]);
+  });
+
+  it("browser: in-app offers Playwright on a card; a connected Playwright entry covers it; the CLI gets its key-less commands", async () => {
+    const card = (await suggestProvider({ kind: "browser" }, { surface: "in-app" })).data as {
+      status: string;
+      suggested: Array<{ id: string; kind: string }>;
+    };
+    expect(card.status).toBe("card");
+    expect(card.suggested).toEqual([expect.objectContaining({ id: "playwright", kind: "remote-mcp" })]);
+
+    fetchProviders.mockResolvedValueOnce([
+      { agent: "claude", name: "playwright", providerId: "playwright", transport: "stdio", status: "connected" },
+    ]);
+    const covered = (await suggestProvider({ kind: "browser" }, { surface: "in-app" })).data as { status: string; covered: unknown[] };
+    expect(covered.status).toBe("none");
+    expect(covered.covered).toEqual([{ id: "playwright", name: "Playwright", via: "connected" }]);
+
+    fetchProviders.mockResolvedValueOnce([]);
+    const cli = (await suggestProvider({ kind: "browser" }, { surface: "cli" })).data as {
+      options: Array<{ id: string; auth?: string; commands: { claude: string; codex: string } }>;
+      note: string;
+    };
+    expect(cli.options[0]).toMatchObject({ id: "playwright", auth: "none" });
+    expect(cli.options[0].commands.claude).toBe("claude mcp add --scope user playwright -- npx @playwright/mcp@latest");
+    expect(JSON.stringify(cli.options)).not.toContain("<your key>");
+    expect(cli.note).toMatch(/`auth: "none"` \(Playwright\) needs neither/);
   });
 
   it("returns status cli with the same payload on a CLI", async () => {
@@ -351,7 +378,7 @@ describe("libi.list_providers", () => {
     const res = await listProviders();
     const data = res.data as { connected: unknown[]; catalog: Array<Record<string, unknown>> };
     expect(data.connected).toHaveLength(1);
-    expect(data.catalog).toHaveLength(7);
+    expect(data.catalog).toHaveLength(PROVIDER_CATALOG.length);
     for (const c of data.catalog) {
       expect(Object.keys(c).sort()).toEqual(["id", "kind", "kinds", "name"]);
     }

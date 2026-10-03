@@ -199,7 +199,7 @@ export function CaptionStyleGrid({
         )}
       </div>
 
-      {/* Footer hint — the agent can mint new styles on request (create_caption_style). */}
+      {/* Footer hint — the agent can mint new styles on request (libi.caption_style create). */}
       <p className="px-0.5 text-[10px] leading-tight text-muted-foreground">
         Need a specific look? Ask the agent to create a new style for you — it’ll
         show up here.

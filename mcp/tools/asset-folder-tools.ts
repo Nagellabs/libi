@@ -4,6 +4,32 @@ import {
   listChildAssetFolders, listAssetsAtLevel, recursiveAssetCounts,
 } from "@/lib/asset-folders/repo";
 import { deleteAssetFolder, moveAsset, moveAssetFolder } from "@/lib/asset-folders/lifecycle";
+import { getDb } from "@/lib/db/client";
+import { files } from "@/lib/db/schema/sqlite";
+import { eq } from "drizzle-orm";
+
+// The refresh a tool sends names the SCOPE it changed (a piece id; undefined = the global pool), because
+// the panel keys its queries by scope. `lifecycle.ts` also emits a refresh, but on the process it runs
+// in, and this runs in the MCP child, so the studio hears only what the tool sends. Read these BEFORE
+// a delete (the row is gone after). A failed read answers undefined: a refresh is never worth the call.
+
+/** The piece an asset folder lives in; undefined for a global folder or one that does not exist. */
+export function assetFolderPieceId(folderId: string): string | undefined {
+  try {
+    return getAssetFolder(folderId)?.pieceId ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The piece a file belongs to; undefined for a global file or one that does not exist. */
+export function filePieceId(fileId: string): string | undefined {
+  try {
+    return getDb().select({ pieceId: files.pieceId }).from(files).where(eq(files.id, fileId)).get()?.pieceId ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export async function listAssetsTool(params: {
   pieceId: string | null;

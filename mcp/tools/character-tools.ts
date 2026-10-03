@@ -85,7 +85,7 @@ export async function createCharacter(
     .find((c) => c.name === params.name);
   if (existing) {
     return err(
-      `Character "${params.name}" already exists (id ${existing.id}). Use update_character or link_character_to_asset instead.`,
+      `Character "${params.name}" already exists (id ${existing.id}). Use libi.character({ action: "update" }) or libi.character({ action: "link" }) instead.`,
     );
   }
 

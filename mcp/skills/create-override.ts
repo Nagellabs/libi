@@ -21,7 +21,7 @@ export type CreateOverrideResult =
 
 /**
  * The ONLY way an override (user row shadowing a bundled skill) is created.
- * Used by libi.fork_skill (body = bundled verbatim) and libi.update_skill's
+ * Used by libi.skill({ action: "fork" }) (body = bundled verbatim) and libi.skill update's
  * bundled-with-no-override branch (body = the agent's edited SKILL.md).
  *
  * Copies the bundled folder to ~/.libi/skills/<name>/, snapshots the bundled

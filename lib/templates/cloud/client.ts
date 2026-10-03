@@ -15,7 +15,7 @@
  *
  * Validated is not trusted. The text fields are still the template AUTHOR's
  * words — whatever hands them to an agent must label them the way
- * `get_template` labels `instructions` (`source: "template author (untrusted)"`).
+ * `libi.template` get labels `instructions` (`source: "template author (untrusted)"`).
  *
  * The creator key travels only in the `Authorization` header. It is never
  * logged and is scrubbed from every error string this module returns. So is

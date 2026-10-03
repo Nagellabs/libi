@@ -38,6 +38,26 @@ describe("AccountsStrip", () => {
     setKind.mockClear();
   });
 
+  it("rings the account an agent pointed at and scrolls it into view; the others are plain", () => {
+    accountsData = [account("ig1", "instagram", "nagellabs"), account("tt1", "tiktok", "nagellabs")];
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    render(<AccountsStrip focusAccountId="tt1" />);
+    const [ig, tt] = screen.getAllByTestId("account-card");
+    expect(tt).toHaveAttribute("data-focused", "true");
+    expect(ig).not.toHaveAttribute("data-focused");
+    expect(scroll).toHaveBeenCalledTimes(1);
+  });
+
+  it("an unknown focus id rings nothing and scrolls nowhere", () => {
+    accountsData = [account("ig1", "instagram", "nagellabs")];
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    render(<AccountsStrip focusAccountId="nope" />);
+    expect(screen.getByTestId("account-card")).not.toHaveAttribute("data-focused");
+    expect(scroll).not.toHaveBeenCalled();
+  });
+
   it("names every connected platform, not just the two libi composes for", () => {
     // The bug this pins: the label was a two-way ternary, so a Facebook or
     // YouTube account the user connected at the provider read as "TikTok".

@@ -1009,7 +1009,7 @@ export class SessionManager {
     sessionId: string,
     mcpServers: AcpMcpEntry[],
   ): Promise<Awaited<ReturnType<ClientSideConnection["loadSession"]>>> {
-    const params = { sessionId, cwd: this.getAgentDir() };
+    const params = { sessionId, cwd: this.getAgentDir(), _meta: sessionMetaFor(agentId) };
     try {
       return await conn.loadSession({ ...params, mcpServers });
     } catch (err) {
@@ -2823,7 +2823,7 @@ export class SessionManager {
    * the underlying claude-agent-acp session is torn down; that's expected
    * and the tool's instruction tells the agent to end its turn.
    *
-   * Used by `libi.restart_acp_session` from `mcp/bundled-mcps/install-tools.ts`.
+   * Used by `libi.extension({ action: "restart_session" })` from `mcp/bundled-mcps/install-tools.ts`.
    * Tier-2 install plans call it after the agent verifies the MCP is up so
    * the newly-installed tools become visible on the user's next message.
    *

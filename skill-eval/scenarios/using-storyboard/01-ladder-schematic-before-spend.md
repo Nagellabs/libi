@@ -1,7 +1,7 @@
 ---
 id: storyboard-ladder-schematic-before-spend
 title: Storyboard ladder — free schematic before paid keyframe; gpt-image-2 keyframe → Seedance clip
-skills: [using-storyboard, ai-asset-generation, ai-video-models, realistic-image-generation]
+skills: [using-storyboard, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -37,9 +37,9 @@ assertions:
 - Drafted **Tier-1 schematics first** (authored render-unit files / set blocks via the
   file-edit path) and **presented the board for approval before any paid generation** —
   honoring "don't spend until I've seen the plan."
-- Used the storyboard tools for paid/irreversible steps (`attach_storyboard_keyframe`,
-  `attach_storyboard_clip`, `approve_storyboard_stage`) and edited card files directly
-  for structural changes — did NOT look for nonexistent create/update-card tools.
+- Used the storyboard tools for paid/irreversible steps (`libi.storyboard_take` action `attach_clip`,
+  `libi.storyboard_take` action `select`) and edited card files directly for structural changes — did
+  NOT hand-write the manifest to bootstrap a board.
 - Generated each **keyframe with `gpt-image-2`**, conditioned on the card's schematic +
   a **single shared character reference carried across both scenes** (consistency).
 - Generated each **clip with Seedance image-to-video from the approved keyframe** (the

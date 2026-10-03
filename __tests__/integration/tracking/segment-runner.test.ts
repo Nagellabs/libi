@@ -2,18 +2,18 @@ import { describe, it, expect } from "vitest";
 import { trackingRunner } from "@/lib/jobs/runners/tracking";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 describe("compute_track_segment MCP surface (segment-runner file)", () => {
-  it("libi.compute_track_segment is registered on the libi-tracking MCP", () => {
+  it("libi.track compute_segment is registered on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.compute_track_segment");
+    expectTrackingAction(names, "libi.track", "compute_segment");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("libi.compute_track_segment IS registered on the core libi MCP (always-on)", () => {
+  it("libi.track compute_segment IS registered on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_track_segment");
+    expectTrackingAction(names, "libi.track", "compute_segment");
   });
 });
 

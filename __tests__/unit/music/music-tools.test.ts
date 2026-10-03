@@ -327,6 +327,9 @@ describe("generateMusic RunJobResult shapes", () => {
     const d = r.data ?? {};
     expect(d.attachedToRunning).toBe(true);
     expect(d.matchedExisting).toBeUndefined();
+    // What to tell the user about a joined run is in the result, not the tool description.
+    expect(d.note).toMatch(/Attached to an identical generation/);
+    expect(d.note).toMatch(/forceNew:true/);
     expect(d.existingJob).toEqual({
       jobId: "job-orig",
       pieceId: "p1",
@@ -372,6 +375,11 @@ describe("generateMusic RunJobResult shapes", () => {
     const d = r.data ?? {};
     expect(d.matchedExisting).toBe(true);
     expect(d.attachedToRunning).toBeUndefined();
+    // The reuse-or-regenerate rule that used to cite a CLAUDE.md libi no longer writes.
+    expect(d.note).toMatch(/NO new audio file/);
+    expect(d.note).toMatch(/forceNew:true/);
+    expect(d.note).toMatch(/over 7 days/);
+    expect(String(d.note)).not.toMatch(/CLAUDE\.md/);
     expect(d.existingJob).toEqual({
       jobId: "job-cached",
       pieceId: "p1",

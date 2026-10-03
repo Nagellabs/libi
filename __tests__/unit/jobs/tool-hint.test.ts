@@ -39,11 +39,10 @@ describe("JobManager tool hints", () => {
     });
     expect(mgr.getToolHint(jobId)).toMatchObject({ toolName: "libi.dev_slow_job" });
     await mgr.runToCompletion(jobId);
-    await new Promise((r) => setTimeout(r, 50));
 
-    const calls = vi.mocked(notify.jobProgress).mock.calls.map(([a]) => a);
-    const ours = calls.filter((c) => c.jobId === jobId);
-    expect(ours.length).toBeGreaterThan(0);
+    const oursNow = () => vi.mocked(notify.jobProgress).mock.calls.map(([a]) => a).filter((c) => c.jobId === jobId);
+    await vi.waitFor(() => expect(oursNow().length).toBeGreaterThan(0));
+    const ours = oursNow();
     expect(ours[0]).toMatchObject({
       toolName: "libi.dev_slow_job",
       toolArgs: { seconds: 10 },

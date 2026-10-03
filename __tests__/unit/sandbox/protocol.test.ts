@@ -44,6 +44,17 @@ describe("sandbox protocol — host → runtime", () => {
     expect(noFps).toBeNull();
     expect(bad).toBeNull();
   });
+  it("a render's piece clock (compositionTime, overlayStart, pieceDuration) rides through, and a non-finite one is refused", () => {
+    const at = (extra: Record<string, unknown>) =>
+      parseHostMessage({ t: "render", id: "o1", frame: 3, req: 7, size: { width: 100, height: 50 }, pixelRatio: 2, fps: 30, time: { ...timing, ...extra } });
+    const ok = at({ compositionTime: 11.4, overlayStart: 11.3, pieceDuration: 24 });
+    expect(ok && ok.t === "render" && ok.time).toMatchObject({ compositionTime: 11.4, overlayStart: 11.3, pieceDuration: 24 });
+    // Optional: a sender that predates them still parses.
+    expect(at({})?.t).toBe("render");
+    for (const bad of [{ compositionTime: Infinity }, { compositionTime: NaN }, { overlayStart: "1" }, { pieceDuration: -1 }, { pieceDuration: Infinity }]) {
+      expect(at(bad), JSON.stringify(bad)).toBeNull();
+    }
+  });
   it("accepts a render carrying words and transform3d in their real shapes", () => {
     const m = parseHostMessage({
       t: "render", id: "o1", frame: 3, req: 7, size: { width: 100, height: 50 }, pixelRatio: 2, fps: 30, time: timing,

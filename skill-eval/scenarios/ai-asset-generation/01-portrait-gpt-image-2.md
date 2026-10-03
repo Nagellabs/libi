@@ -1,7 +1,7 @@
 ---
 id: portrait-gpt-image-2
 title: Hero person portrait uses gpt-image-2 (not nano-banana)
-skills: [ai-asset-generation, realistic-image-generation]
+skills: [ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

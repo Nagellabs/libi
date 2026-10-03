@@ -145,4 +145,58 @@ describe("MCP snapshot tools", () => {
       expect(result.data.overlays.added).toBe(1);
     }
   });
+
+  describe("recoverable drafts (agent-speed C1)", () => {
+    const layer = (id: string, name: string) => ({ id, kind: "code" as const, displayName: name, startTime: 0, duration: 1, z: 0, rect: { x: 0, y: 0, width: 1920, height: 1080 }, opacity: 1, drawFunction: "" });
+    async function pieceWithDraft() {
+      const db = createTestDb();
+      const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
+      await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [layer("a", "v1")] });
+      await commitDraftTool({ pieceId: piece.id, summary: "base" });
+      await saveManifest(piece.id, { width: 1920, height: 1080, fps: 30, overlays: [layer("a", "v1"), layer("b", "unsaved")] });
+      return piece.id;
+    }
+
+    it("discard names the kept draft and how to bring it back; compare lists it; restore with its id brings it back", async () => {
+      const id = await pieceWithDraft();
+      const d = await discardDraftTool({ pieceId: id, confirm: true });
+      expect(d.success).toBe(true);
+      if (!d.success) return;
+      expect(d.data.recoverable).toMatchObject({ kind: "discarded", overlays: 2 });
+      expect(d.data.note).toContain(`snapshotId: "${d.data.recoverable!.id}"`);
+      expect(d.data.note).toContain("ask the user");
+
+      const c = await compareStatesTool({ pieceId: id });
+      expect(c.success && c.data.recoverable?.map((e) => e.id)).toEqual([d.data.recoverable!.id]);
+      expect(c.success && c.data.recoverableNote).toContain("not the user's saves");
+
+      const r = await restoreSnapshotTool({ pieceId: id, snapshotId: d.data.recoverable!.id, confirm: true });
+      expect(r).toMatchObject({ success: true, data: { recoveredDraft: true } });
+      const after = await compareStatesTool({ pieceId: id });
+      expect(after.success && after.data.hasDraft).toBe(true);
+      expect(after.success && after.data.overlays.added).toBe(1);
+      expect(after.success && "recoverable" in after.data).toBe(false);
+    });
+
+    it("the confirm rule is unchanged: restoring a kept draft without confirm is refused", async () => {
+      const id = await pieceWithDraft();
+      const d = await discardDraftTool({ pieceId: id, confirm: true });
+      // @ts-expect-error - missing confirm
+      const r = await restoreSnapshotTool({ pieceId: id, snapshotId: d.success ? d.data.recoverable!.id : "" });
+      expect(r.success).toBe(false);
+    });
+
+    it("discard of a piece with no draft says nothing about a kept draft", async () => {
+      const db = createTestDb();
+      const [piece] = await db.insert(pieces).values({ name: "p" }).returning();
+      const d = await discardDraftTool({ pieceId: piece.id, confirm: true });
+      expect(d).toEqual({ success: true, data: { pieceId: piece.id } });
+    });
+
+    it("compare of a piece with nothing kept has no recoverable field", async () => {
+      const id = await pieceWithDraft();
+      const c = await compareStatesTool({ pieceId: id });
+      expect(c.success && "recoverable" in c.data).toBe(false);
+    });
+  });
 });

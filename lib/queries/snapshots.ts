@@ -9,6 +9,7 @@ export const snapshotKeys = {
   state: (pieceId: string) => [...snapshotKeys.all, "state", pieceId] as const,
   compare: (pieceId: string) => [...snapshotKeys.all, "compare", pieceId] as const,
   history: (pieceId: string) => [...snapshotKeys.all, "history", pieceId] as const,
+  recoverable: (pieceId: string) => [...snapshotKeys.all, "recoverable", pieceId] as const,
   versionDiff: (pieceId: string, versionId: string) =>
     [...snapshotKeys.all, "version-diff", pieceId, versionId] as const,
 };
@@ -135,6 +136,28 @@ export function useVersionHistory(pieceId: string, enabled = true) {
   });
 }
 
+/** A draft a discard or a restore set aside (`lib/composition/recoverable.ts`); restore it with its `rec-` id. */
+export interface RecoverableDraftRow {
+  id: string;
+  kind: "discarded" | "before-restore" | "before-recover";
+  /** Unix seconds when it was kept. */
+  keptAt: number;
+  overlays: number;
+  audioClips: number;
+}
+
+export function useRecoverableDrafts(pieceId: string, enabled = true) {
+  return useQuery({
+    queryKey: snapshotKeys.recoverable(pieceId),
+    queryFn: async (): Promise<{ drafts: RecoverableDraftRow[]; days: number }> => {
+      const res = await fetch(`/api/pieces/${pieceId}/snapshot/recoverable`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+    enabled: enabled && !!pieceId,
+  });
+}
+
 export function useVersionDiff(pieceId: string, versionId: string | null, enabled = true) {
   return useQuery({
     queryKey: snapshotKeys.versionDiff(pieceId, versionId ?? ""),
@@ -186,6 +209,7 @@ export function useDiscardDraft() {
       void qc.invalidateQueries({ queryKey: snapshotKeys.state(pieceId) });
       void qc.invalidateQueries({ queryKey: snapshotKeys.compare(pieceId) });
       void qc.invalidateQueries({ queryKey: snapshotKeys.history(pieceId) });
+      void qc.invalidateQueries({ queryKey: snapshotKeys.recoverable(pieceId) });
       void qc.invalidateQueries({ queryKey: pieceKeys.composition(pieceId) });
     },
   });
@@ -207,6 +231,7 @@ export function useRestoreSnapshot() {
       void qc.invalidateQueries({ queryKey: snapshotKeys.state(pieceId) });
       void qc.invalidateQueries({ queryKey: snapshotKeys.compare(pieceId) });
       void qc.invalidateQueries({ queryKey: snapshotKeys.history(pieceId) });
+      void qc.invalidateQueries({ queryKey: snapshotKeys.recoverable(pieceId) });
       void qc.invalidateQueries({ queryKey: pieceKeys.composition(pieceId) });
     },
   });

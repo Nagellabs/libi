@@ -5,6 +5,7 @@ import {
   DEFAULT_INDEX_BUDGET_BYTES,
   ESSENTIAL_SECTION_KEYS,
   PROSE_EXAMPLE_SECTION_KEYS,
+  SECTION_CAP_BYTES,
   normalizeSectionKey,
   renderManualIndex,
   resolveManualSection,
@@ -90,7 +91,7 @@ describe("splitManual", () => {
       "## Extension self-healing",
       "",
       "Before relying on any libi extension (e.g. `youtube-download`, `whisper`), call",
-      "`libi.diagnose_mcp` and inspect the row's `serverStatus`:",
+      "`libi.extension` and inspect the row's `serverStatus`:",
       "",
       "- `up` — the server passed handshake.",
     ].join("\n");
@@ -143,11 +144,11 @@ describe("splitManual", () => {
       "",
       "### Before you start",
       "",
-      "Call `libi.diagnose_mcp` first. It tells you what is up.",
+      "Call `libi.extension` first. It tells you what is up.",
     ].join("\n");
     const { sections } = splitManual(manual);
     expect(sections[0].description).toBe(
-      "Call `libi.diagnose_mcp` first.",
+      "Call `libi.extension` first.",
     );
   });
 
@@ -265,6 +266,98 @@ describe("resolveManualSection", () => {
     expect(res.ok).toBe(true);
     if (res.ok) expect(res.text).toContain("`drawing-api`");
   });
+
+  describe("a name that is not a key (the benchmark's \"Audio\" and \"Timeline editing\")", () => {
+    const MANUAL = [
+      "# Manual",
+      "",
+      "## MCP Tools — Audio clips",
+      "",
+      "Clips and their levels.",
+      "",
+      "## MCP Tools — Overlays",
+      "",
+      "Overlays sit on the timeline.",
+      "",
+      "## Audio analysis flow",
+      "",
+      "Transcribe a file.",
+      "",
+      "## Batch edits across pieces",
+      "",
+      "One apply_ops for every copy.",
+    ].join("\n");
+
+    it("resolves when its words point at exactly one section, and says which one it read", () => {
+      const res = resolveManualSection(MANUAL, "batch edits");
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.text.startsWith('(Read "batch edits" as the section `batch-edits-across-pieces`.)')).toBe(true);
+      expect(res.text).toContain("## Batch edits across pieces");
+      const plural = resolveManualSection(MANUAL, "Overlay");
+      expect(plural.ok && plural.text).toContain("## MCP Tools — Overlays");
+    });
+
+    it("is an error naming the closest sections when it fits several or only a description", () => {
+      const several = resolveManualSection(MANUAL, "Audio");
+      expect(several.ok).toBe(false);
+      if (several.ok) return;
+      expect(several.message).toMatch(/Closest: "mcp-tools-audio-clips".*"audio-analysis-flow"/);
+      expect(several.message).toContain("Valid sections:");
+      const described = resolveManualSection(MANUAL, "Timeline editing");
+      expect(described.ok).toBe(false);
+      if (!described.ok) expect(described.message).toMatch(/Closest:.*"mcp-tools-overlays"/);
+    });
+
+    it("still fails plainly, with no guess, when nothing matches", () => {
+      const res = resolveManualSection(MANUAL, "zebra");
+      expect(res.ok).toBe(false);
+      if (!res.ok) {
+        expect(res.message).not.toContain("Closest:");
+        expect(res.message).toContain("mcp-tools-audio-clips");
+      }
+    });
+  });
+
+  describe("several sections in one call", () => {
+    it("returns each section's text, in the order asked, once", () => {
+      const res = resolveManualSection(FIXTURE, "workflow, drawing-api, Workflow");
+      expect(res.ok).toBe(true);
+      if (!res.ok) return;
+      expect(res.text.indexOf("## Workflow")).toBeLessThan(res.text.indexOf("## Drawing API"));
+      expect(res.text.match(/## Workflow/g)).toHaveLength(1);
+    });
+
+    it("names the part that does not resolve, and caps the count", () => {
+      const bad = resolveManualSection(FIXTURE, "workflow, nope");
+      expect(bad.ok).toBe(false);
+      if (!bad.ok) expect(bad.message).toContain('"nope"');
+      const many = resolveManualSection(FIXTURE, "a,b,c,d,e,f");
+      expect(many.ok).toBe(false);
+      if (!many.ok) expect(many.message).toMatch(/At most 5 sections/);
+      const all = resolveManualSection(FIXTURE, "workflow, all");
+      expect(all.ok && all.text).toBe(FIXTURE);
+    });
+
+    it("a heading that holds a comma is still one section", () => {
+      const manual = "# M\n\n## Cut, copy and paste\n\nText.\n";
+      const res = resolveManualSection(manual, "Cut, copy and paste");
+      expect(res.ok && res.text).toContain("## Cut, copy and paste");
+    });
+  });
+
+  it("on the real manual: the guesses from the Codex benchmark resolve or point at the right section", () => {
+    const manual = renderAgentInstructions("codex");
+    const audio = resolveManualSection(manual, "Audio");
+    expect(audio.ok).toBe(true);
+    if (audio.ok) expect(audio.text).toContain("`libi.audio_analyze`");
+    const timeline = resolveManualSection(manual, "Timeline editing");
+    expect(timeline.ok).toBe(false);
+    if (!timeline.ok) expect(timeline.message).toContain("Closest:");
+    const two = resolveManualSection(manual, "mcp-tools-audio-clips, batch-edits-across-pieces");
+    expect(two.ok && two.text).toContain("## Batch edits across pieces");
+    expect(two.ok && two.text).toContain("## MCP Tools — Audio clips");
+  });
 });
 
 describe("renderManualIndex", () => {
@@ -316,9 +409,49 @@ describe("against the real rendered manual", () => {
     expect(sections.length).toBeGreaterThanOrEqual(8);
     expect(sections.length).toBeLessThanOrEqual(40);
     for (const s of sections) {
-      expect(s.bytes, `${s.key} is ${s.bytes} bytes`).toBeLessThanOrEqual(30 * 1024);
+      expect(s.bytes, `${s.key} is ${s.bytes} bytes`).toBeLessThanOrEqual(SECTION_CAP_BYTES);
     }
   });
+
+  // The tool reference outgrew one section (it sat 40 bytes under the cap while more tools were
+  // queued), so it is a hub (`mcp-tools`) plus one `##` section per domain. New tools land in a
+  // domain section; this pins that each keeps real headroom and that the hub still names them all.
+  const MCP_TOOLS_SUBSECTIONS = [
+    "mcp-tools-composition-files-and-assets",
+    "mcp-tools-video-exports-and-processing",
+    "mcp-tools-audio-clips",
+    "mcp-tools-overlays",
+    "mcp-tools-overlay-craft",
+  ];
+
+  for (const dialect of ["claude", "codex"] as const) {
+    it(`[${dialect}] the mcp-tools family: every part within 70% of the cap, and the hub lists each`, () => {
+      const rendered = renderAgentInstructions(dialect);
+      const { sections } = splitManual(rendered);
+      const byKey = new Map(sections.map((s) => [s.key, s]));
+      const hub = byKey.get("mcp-tools");
+      expect(hub, "the `mcp-tools` hub section").toBeDefined();
+      for (const key of ["mcp-tools", ...MCP_TOOLS_SUBSECTIONS]) {
+        const s = byKey.get(key);
+        expect(s, `section ${key}`).toBeDefined();
+        expect(s!.bytes, `${key} is ${s!.bytes} bytes`).toBeLessThanOrEqual(
+          Math.floor(SECTION_CAP_BYTES * 0.7),
+        );
+      }
+      for (const key of MCP_TOOLS_SUBSECTIONS) {
+        expect(hub!.text, `hub names ${key}`).toContain(`\`${key}\``);
+        const res = resolveManualSection(rendered, key);
+        expect(res.ok).toBe(true);
+      }
+      // `section: "mcp-tools"` still works: the hub, with the argument-format rule every tool needs.
+      const viaKey = resolveManualSection(rendered, "mcp-tools");
+      expect(viaKey.ok && viaKey.text.startsWith("## MCP Tools\n")).toBe(true);
+      // Nothing in the family is one of the inlined essentials, so the index stays small.
+      const index = renderManualIndex(rendered);
+      expect(Buffer.byteLength(index, "utf8")).toBeLessThan(DEFAULT_INDEX_BUDGET_BYTES);
+      for (const key of MCP_TOOLS_SUBSECTIONS) expect(index).toContain(`\`${key}\``);
+    });
+  }
 
   it("every ESSENTIAL_SECTION_KEYS entry still resolves to a real heading", () => {
     const { sections } = splitManual(manual);

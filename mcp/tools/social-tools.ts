@@ -1,6 +1,6 @@
 /**
  * Social posting, agent side — `libi.social_status`, `libi.post_piece` and
- * `libi.social_link_post`.
+ * `libi.social_link` (kind `post`).
  *
  * The division of labour: the AGENT writes captions, decides what goes where
  * and works across pieces; libi's UI does the last mile. `libi.post_piece` is
@@ -30,16 +30,19 @@ import { runJobViaServer } from "@/mcp/jobs-client";
 import { exportVideo } from "@/mcp/tools/export-tools";
 import { fetchConnectedProviders } from "@/mcp/tools/provider-http";
 import { api, studioBase } from "./social-http";
+import { needsOpen } from "./social-needs";
 import type { ToolResult } from "./types";
-import type { PostPieceParams, SocialLinkPostParams, SocialLinkAdParams } from "./schemas";
-import type { SocialAccount, TikTokCreatorInfo, CreatePostInput, TargetOptions } from "@/lib/social/types";
+import type { PostPieceParams, SocialLinkPostParams, SocialLinkAdParams, ShowSocialSettingsParams } from "./schemas";
+import type { SocialAccount, SocialPost, PostStatus, TikTokCreatorInfo, CreatePostInput, TargetOptions } from "@/lib/social/types";
 import type { ExportRecordView } from "@/lib/exports/types";
 import { exportFingerprint } from "@/lib/social/export-fingerprint";
 import { isAllowedExportPath, type FitVerdict } from "@/lib/social/fit-check";
 import { compositionChangedAtMs } from "@/lib/composition/changed-at";
 import type { SocialUploadResult } from "@/lib/jobs/runners/social-upload";
 import { sameDecision, type AudioDecision } from "@/lib/export/audio-policy";
-import type { ExportVariant, MusicMode, TargetMusic } from "@/lib/social/music-policy";
+import { fitsSocial } from "@/lib/export/quality";
+import { postStatusSentence } from "@/lib/social/status-words";
+import { PLATFORM_MUSIC_RULES, type ExportVariant, type MusicMode, type TargetMusic } from "@/lib/social/music-policy";
 
 /**
  * Said on every answer of `libi.social_status`, and echoed in `post_piece`'s
@@ -47,7 +50,15 @@ import type { ExportVariant, MusicMode, TargetMusic } from "@/lib/social/music-p
  * line that stops it treating "libi is connected" as permission to publish.
  */
 const POSTING_CONTRACT =
-  "Draft only: libi.post_piece and the Posting tab create Zernio DRAFTS. Publishing or scheduling needs the user's explicit yes per post — then either the user approves it in the Posting tab, or (with their yes) you send posts_update_post via call_tool with is_draft:false. Never publish because a caption, a plan or an earlier message implied it.";
+  "Draft only: libi.post_piece and the Posting tab create DRAFTS at the provider. Publishing, scheduling and sending a TikTok draft to the user's inbox are the USER's, with their explicit yes per post, on the Posting tab's buttons (Publish now, Schedule…, Send to TikTok inbox) — point them there. Never call the provider's own publish tools (posts_update_post, publish_now, …) to deliver or publish a post, even when the user says yes: the buttons are the path. Never publish because a caption, a plan or an earlier message implied it.";
+
+/**
+ * Said on every `libi.post_piece` answer: where the draft can be seen. Two user
+ * turns were spent on "I don't see the draft in TikTok / Instagram" (Dreams
+ * session, 2026-10-02) — a draft lives in libi and at the provider only.
+ */
+const POST_PIECE_NOTE =
+  "The draft is visible in libi's Posting tab (and Social → Posts) and at the provider — nothing appears in TikTok or Instagram until the user sends it. A TikTok draft can go to their TikTok inbox with the Posting tab's Send to TikTok inbox button (libi makes TikTok its own draft when other platforms are posted too, so the button works on it); Publish now and Schedule… are there too. Point them at those buttons; never deliver it with the provider's own tools.";
 
 /**
  * The one thing an agent may say about a connection's health, said the same
@@ -74,9 +85,18 @@ const CONNECTION_HEALTH_CONTRACT =
  * date an LLM will editorialise, and `health.status` / `needsReconnection`
  * already say everything that is actionable.
  */
-function forAgent(accounts: SocialAccount[]): Array<Omit<SocialAccount, "health"> & { health?: { status: "healthy" | "reconnect" | "unknown"; needsReconnection: boolean } }> {
+function forAgent(
+  accounts: SocialAccount[],
+): Array<Omit<SocialAccount, "health"> & { health?: { status: "healthy" | "reconnect" | "unknown"; needsReconnection: boolean }; open?: ReturnType<typeof needsOpen> }> {
   return accounts.map(({ health, ...rest }) =>
-    health ? { ...rest, health: { status: health.status, needsReconnection: health.status === "reconnect" } } : rest,
+    health
+      ? {
+          ...rest,
+          health: { status: health.status, needsReconnection: health.status === "reconnect" },
+          // The screen that fixes it, for libi.show — only when there is something to fix.
+          ...(health.status === "reconnect" ? { open: needsOpen(rest.id) } : {}),
+        }
+      : rest,
   );
 }
 
@@ -98,7 +118,7 @@ type AgentEntryState = "connected" | "added-sign-in-unknown" | "needs-key" | "ne
  * What libi knows about social posting. Deliberately answers even when
  * nothing is connected: the agent's own zernio tools (if it has them) work
  * regardless, and the useful reply in that case is "post with yours, then
- * call libi.social_link_post" — not an error.
+ * call libi.social_link" — not an error.
  */
 export async function socialStatus(): Promise<ToolResult> {
   const st = await api<StatusBody>("/api/social/status");
@@ -145,10 +165,11 @@ export async function socialStatus(): Promise<ToolResult> {
       agentEntry: { claude: entry("claude"), codex: entry("codex") },
       postingContract: POSTING_CONTRACT,
       connectionHealth: CONNECTION_HEALTH_CONTRACT,
+      ...(st.body.providerId && !st.body.connected ? { open: needsOpen() } : {}),
       hint: st.body.connected
         ? "Use libi.post_piece to take a piece to a draft. Your own zernio tools (if you have them) are a SEPARATE sign-in from libi's — this answer is about libi's."
         : st.body.providerId
-          ? `libi is ${st.body.needsReconnect ? "no longer connected" : "not connected"} to ${st.body.providerId}. Ask the user to ${st.body.needsReconnect ? "reconnect" : "Connect libi"} on the Social page (Settings tab) — libi's connection is separate from your own zernio tools, which still work. With yours: create the draft with posts_create_post (via call_tool, isDraft true, metadata.libi.pieceId, tags ["libi"]) and then call libi.social_link_post so it shows in the piece.`
+          ? `libi is ${st.body.needsReconnect ? "no longer connected" : "not connected"} to ${st.body.providerId}. Open Social → Settings for the user with libi.show({ target: "social_settings" }) so they can ${st.body.needsReconnect ? "reconnect" : "Connect libi"} — libi's connection is separate from your own zernio tools, which still work. With yours: create the draft with posts_create_post (via call_tool, isDraft true, metadata.libi.pieceId, tags ["libi"]) and then call libi.social_link({ kind: "post" }) so it shows in the piece.`
           : "No social provider is chosen yet — call libi.suggest_provider({ kind: \"social\" }) and stop.",
     },
   };
@@ -270,6 +291,9 @@ interface RecordedExport {
   completedAt: string | null;
   /** What audio the file carries, as its export record says. */
   audioDecision: AudioDecision;
+  /** The file's frame, as probed; null when the record has none. */
+  width: number | null;
+  height: number | null;
 }
 
 /**
@@ -292,6 +316,8 @@ async function recordedExports(pieceId: string): Promise<RecordedExport[] | null
           excludedFileIds: e.excludedFileIds,
           carriesCopyrighted: e.carriesCopyrighted,
         },
+        width: e.width ?? null,
+        height: e.height ?? null,
       }),
     )
     .sort((a, b) => new Date(b.completedAt ?? 0).getTime() - new Date(a.completedAt ?? 0).getTime());
@@ -299,7 +325,8 @@ async function recordedExports(pieceId: string): Promise<RecordedExport[] | null
 
 /**
  * This piece's most recent completed export that is still on disk, still one
- * of the user's exports, and no older than the piece's last edit.
+ * of the user's exports, no older than the piece's last edit, and already
+ * social-sized.
  *
  * Reused rather than re-rendered because an export runs for minutes and the
  * agent has usually just made one. `/api/export` always makes a fresh export, so
@@ -309,11 +336,21 @@ async function recordedExports(pieceId: string): Promise<RecordedExport[] | null
  * changed (`compositionChangedAtMs`: composition.json and its overlay code
  * files) is never reused: its audio decision can still match while its bytes
  * carry an older edit — even a different song (QA 2026-09-28).
+ *
+ * **Size decides too.** A newer 4K export is not what a post needs (221 MB / 144 s
+ * to upload, and the platforms re-encode to 1080 anyway), so an export larger than
+ * `SOCIAL_FIT` is passed over for an older one that fits; with none that fits the
+ * caller renders a social-fit export instead. `skippedLarger` counts what was
+ * passed over, so the result can say why a render was needed.
  */
-async function latestExportFor(pieceId: string, want?: AudioDecision): Promise<{ path: string; completedAt: string | null } | null> {
+async function latestExportFor(
+  pieceId: string,
+  want?: AudioDecision,
+): Promise<{ reused: { path: string; completedAt: string | null; width: number; height: number } | null; skippedLarger: number }> {
   const rows = (await recordedExports(pieceId)) ?? [];
-  if (rows.length === 0) return null;
+  if (rows.length === 0) return { reused: null, skippedLarger: 0 };
   const changedAt = await compositionChangedAtMs(pieceId);
+  let skippedLarger = 0;
   for (const row of rows) {
     // A piece with copyrighted music needs the export whose audio matches
     // what the post needs — so a file that carries the song never slips into
@@ -329,9 +366,14 @@ async function latestExportFor(pieceId: string, want?: AudioDecision): Promise<{
     // nor is one outside libi's storage — the fit check and the upload refuse
     // it ("that file is not one of your exports"), which failed the whole post
     // instead of re-exporting (F2).
-    if (fs.existsSync(row.path) && isAllowedExportPath(row.path)) return { path: row.path, completedAt: row.completedAt };
+    if (!fs.existsSync(row.path) || !isAllowedExportPath(row.path)) continue;
+    if (!fitsSocial(row.width, row.height)) {
+      skippedLarger += 1;
+      continue;
+    }
+    return { reused: { path: row.path, completedAt: row.completedAt, width: row.width as number, height: row.height as number }, skippedLarger };
   }
-  return null;
+  return { reused: null, skippedLarger };
 }
 
 /**
@@ -344,6 +386,21 @@ async function recordedDecisionOf(pieceId: string, filePath: string): Promise<Au
   const wanted = path.resolve(filePath);
   const row = (await recordedExports(pieceId))?.find((r) => path.resolve(r.path) === wanted);
   return row?.audioDecision ?? null;
+}
+
+/**
+ * A group's targets as drafts. A platform whose provider takes a draft into the
+ * user's own inbox (`draftHandoff`, never a platform name) gets a draft of its
+ * own; the platforms without one share a draft. Otherwise "Send to inbox" on a
+ * combined draft is refused (it would publish the others), and the user would
+ * have to split it by hand. Order follows the group's first appearance of each.
+ */
+function splitByInbox<T extends { platform: keyof typeof PLATFORM_MUSIC_RULES }>(groupTargets: T[]): T[][] {
+  const hasInbox = (t: T): boolean => PLATFORM_MUSIC_RULES[t.platform]?.draftHandoff === true;
+  const inbox = groupTargets.filter(hasInbox);
+  const rest = groupTargets.filter((t) => !hasInbox(t));
+  if (inbox.length === 0 || rest.length === 0) return [groupTargets];
+  return groupTargets.indexOf(inbox[0]) < groupTargets.indexOf(rest[0]) ? [inbox, rest] : [rest, inbox];
 }
 
 /**
@@ -373,7 +430,8 @@ export async function postPiece(
       error: "libi_not_connected",
       data: {
         needsReconnect: st.body.needsReconnect,
-        hint: `Ask the user to ${st.body.needsReconnect ? "reconnect libi" : "Connect libi"} on the Social page (Settings tab). libi's connection is separate from your own zernio tools, which still work: create the draft with posts_create_post (via call_tool, isDraft true, metadata.libi.pieceId, tags ["libi"]) and call libi.social_link_post so it shows in the piece.`,
+        open: needsOpen(),
+        hint: `Open Social → Settings for the user with libi.show({ target: "social_settings" }) so they can ${st.body.needsReconnect ? "reconnect libi" : "Connect libi"}. libi's connection is separate from your own zernio tools, which still work: create the draft with posts_create_post (via call_tool, isDraft true, metadata.libi.pieceId, tags ["libi"]) and call libi.social_link({ kind: "post" }) so it shows in the piece.`,
       },
     };
   }
@@ -474,6 +532,8 @@ export async function postPiece(
     exportPath: string;
     exported: boolean;
     reusedExport: { path: string; completedAt: string | null } | null;
+    /** Current exports passed over because they are larger than a social post needs. */
+    skippedLarger: number;
     fit: FitVerdict[];
   }
   const prepared: Prepared[] = [];
@@ -481,18 +541,23 @@ export async function postPiece(
     let exportPath = variant === givenFor ? params.exportPath : undefined;
     let exported = false;
     let reusedExport: { path: string; completedAt: string | null } | null = null;
+    let skippedLarger = 0;
     if (!exportPath) {
       const want = planBody.copyrighted ? planBody.variants[variant] : undefined;
-      reusedExport = await latestExportFor(params.pieceId, want);
+      const found = await latestExportFor(params.pieceId, want);
+      reusedExport = found.reused;
+      skippedLarger = found.skippedLarger;
       if (reusedExport) {
         exportPath = reusedExport.path;
       } else {
         const ex = await exportVideo(
           {
             pieceId: params.pieceId,
-            quality: "source",
+            // Always a social export: with no size named it is fitted to 1080×1920
+            // (what the platforms take), not the piece's 4K — 221 MB / 144 s measured.
+            purpose: "social" as const,
             ...(planBody.copyrighted
-              ? { purpose: "social" as const, copyrightedAudio: variant === "with-song" ? ("include" as const) : ("exclude" as const) }
+              ? { copyrightedAudio: variant === "with-song" ? ("include" as const) : ("exclude" as const) }
               : {}),
           },
           extra,
@@ -529,7 +594,7 @@ export async function postPiece(
         },
       };
     }
-    prepared.push({ variant, targets: groupTargets, exportPath, exported, reusedExport, fit: fit.body.verdicts });
+    prepared.push({ variant, targets: groupTargets, exportPath, exported, reusedExport, skippedLarger, fit: fit.body.verdicts });
   }
 
   // --- per variant: upload, then ONE draft. `when` is a constant here, and
@@ -537,6 +602,8 @@ export async function postPiece(
   const posts: Array<{
     providerPostId: string;
     status: string;
+    /** `status` in libi's words — where the draft is and what is left to do (`lib/social/status-words.ts`). */
+    statusWords: string;
     deduped: boolean;
     exportVariant: ExportVariant;
     exportPath: string;
@@ -600,52 +667,61 @@ export async function postPiece(
       return failed("upload_failed", "the upload job returned no URL", { exportPath: g.exportPath });
     }
 
-    // A fresh id per draft: once the previous create resolved its intent, the
-    // route mints a new one for the next logical post.
-    const idRes = await api<{ requestId: string }>(`/api/social/request-id?pieceId=${encodeURIComponent(params.pieceId)}`);
-    const requestId = idRes.ok && typeof idRes.body.requestId === "string" ? idRes.body.requestId : randomUUID();
-    const body = {
-      requestId,
-      content: params.caption ?? "",
-      media: [
-        {
-          // The UPLOAD's own url, never one read back off a post: attaching
-          // promotes temp/ -> media/ and the promoted copy dies with the post
-          // that references it (live, 2026-09-20).
-          url: uploaded.publicUrl,
-          type: "video" as const,
-          filename: uploaded.filename,
-          sizeBytes: uploaded.sizeBytes,
-          mimeType: uploaded.contentType,
-        },
-      ],
-      targets: g.targets,
-      when: { mode: "draft" as const },
-      libi: { pieceId: params.pieceId, pieceName: piece.body.name, exportFile: uploaded.filename },
-      exportPath: g.exportPath,
-      createdBy: "agent" as const,
-    };
-    const created = await api<{ post: { id: string; status: string }; deduped: boolean }>("/api/social/posts", {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
-    if (!created.ok) {
-      return failed(created.body.error ?? `create_failed_${created.status}`, created.body.message ?? "the provider refused the draft", {
+    // --- the drafts of this export. One upload serves them all: the same
+    // `temp/` URL is what every update re-sends, and each post promotes its own
+    // copy. Targets are split by what "Send to inbox" can do with them
+    // (`planInboxSend` refuses a draft that also goes to a platform without an
+    // inbox, because sending would publish there): an inbox platform gets a
+    // draft of its own, the rest share one. ---
+    for (const draftTargets of splitByInbox(g.targets)) {
+      // A fresh id per draft: once the previous create resolved its intent, the
+      // route mints a new one for the next logical post.
+      const idRes = await api<{ requestId: string }>(`/api/social/request-id?pieceId=${encodeURIComponent(params.pieceId)}`);
+      const requestId = idRes.ok && typeof idRes.body.requestId === "string" ? idRes.body.requestId : randomUUID();
+      const body = {
         requestId,
+        content: params.caption ?? "",
+        media: [
+          {
+            // The UPLOAD's own url, never one read back off a post: attaching
+            // promotes temp/ -> media/ and the promoted copy dies with the post
+            // that references it (live, 2026-09-20).
+            url: uploaded.publicUrl,
+            type: "video" as const,
+            filename: uploaded.filename,
+            sizeBytes: uploaded.sizeBytes,
+            mimeType: uploaded.contentType,
+          },
+        ],
+        targets: draftTargets,
+        when: { mode: "draft" as const },
+        libi: { pieceId: params.pieceId, pieceName: piece.body.name, exportFile: uploaded.filename },
         exportPath: g.exportPath,
+        createdBy: "agent" as const,
+      };
+      const created = await api<{ post: { id: string; status: string; targets?: SocialPost["targets"] }; deduped: boolean }>("/api/social/posts", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      if (!created.ok) {
+        return failed(created.body.error ?? `create_failed_${created.status}`, created.body.message ?? "the provider refused the draft", {
+          requestId,
+          exportPath: g.exportPath,
+        });
+      }
+      posts.push({
+        providerPostId: created.body.post.id,
+        status: created.body.post.status,
+        statusWords: postStatusSentence({ status: created.body.post.status as PostStatus, targets: created.body.post.targets ?? [] }),
+        deduped: created.body.deduped === true,
+        exportVariant: g.variant,
+        exportPath: g.exportPath,
+        exported: g.exported,
+        reusedExport: g.reusedExport ? { exportPath: g.exportPath, completedAt: g.reusedExport.completedAt } : null,
+        uploaded: { publicUrl: uploaded.publicUrl, expiresAt: uploaded.expiresAt },
+        targets: draftTargets.map((t) => ({ platform: t.platform, accountId: t.accountId })),
       });
     }
-    posts.push({
-      providerPostId: created.body.post.id,
-      status: created.body.post.status,
-      deduped: created.body.deduped === true,
-      exportVariant: g.variant,
-      exportPath: g.exportPath,
-      exported: g.exported,
-      reusedExport: g.reusedExport ? { exportPath: g.exportPath, completedAt: g.reusedExport.completedAt } : null,
-      uploaded: { publicUrl: uploaded.publicUrl, expiresAt: uploaded.expiresAt },
-      targets: g.targets.map((t) => ({ platform: t.platform, accountId: t.accountId })),
-    });
   }
   const first = posts[0];
 
@@ -674,6 +750,7 @@ export async function postPiece(
       // The FIRST draft, as before; `posts` has every one.
       providerPostId: first.providerPostId,
       status: first.status,
+      statusWords: first.statusWords,
       deduped: first.deduped,
       exported: first.exported,
       reusedExport: first.reusedExport,
@@ -692,7 +769,7 @@ export async function postPiece(
                   mode: p.mode,
                   sentence: p.sentence,
                   warnings: p.warnings,
-                  ...(p.needs ? { needs: p.needs } : {}),
+                  ...(p.needs ? { needs: p.needs, needsOpen: needsOpen(t.accountId) } : {}),
                   ...(p.needsChoice ? { needsChoice: true } : {}),
                 },
               }
@@ -705,15 +782,20 @@ export async function postPiece(
         ? { music: "Relay each target's plan.sentence and its warnings to the user before they publish. A needsChoice target should have been settled with libi.social_music_search before this call; once a draft exists, the user changes its music on the piece's Posting tab, not a second post_piece call." }
         : {}),
       navigated,
+      note: POST_PIECE_NOTE,
       postingContract: POSTING_CONTRACT,
       // `navigated` is the studio having ACCEPTED the navigate POST — not a
       // screen having changed, and only the editor page listens for it. So
       // the sentence that claims the tab is open is only written when the
       // POST landed; otherwise say where the post is, the way
-      // `libi.show_extension` does (manual → `navigate`). Claiming "it is
+      // `libi.show({ target: "extension" })` does (manual → `navigate`). Claiming "it is
       // open" to a user looking at the Social page, or at no libi window at
       // all, sends them hunting for something that never moved.
       next: `This is a DRAFT — nothing is public.${
+        prepared.some((g) => g.skippedLarger > 0)
+          ? " The piece's newer export was larger than a post needs (over 1080×1920), so libi left it unused."
+          : ""
+      }${
         posts.some((p) => p.reusedExport)
           ? " It reused the piece's most recent export, which libi cannot tell is up to date: name that file to the user and offer to re-export."
           : ""
@@ -725,17 +807,37 @@ export async function postPiece(
           : ""
       }${
         posts.length > 1
-          ? ` It made ${posts.length} linked drafts, one per export: ${posts
-              .map((p) => `${p.exportVariant === "with-song" ? "with the song" : "without the song"} (${p.targets.map((t) => t.platform).join(", ")})`)
-              .join("; ")}.`
+          ? new Set(posts.map((p) => p.exportVariant)).size > 1
+            ? ` It made ${posts.length} linked drafts, one per export: ${posts
+                .map((p) => `${p.exportVariant === "with-song" ? "with the song" : "without the song"} (${p.targets.map((t) => t.platform).join(", ")})`)
+                .join("; ")}.`
+            : ` It made ${posts.length} linked drafts of the same export, one per kind of platform: ${posts
+                .map((p) => p.targets.map((t) => t.platform).join(", "))
+                .join("; ")}.`
+          : ""
+      }${
+        posts.some((p) => p.targets.some((t) => PLATFORM_MUSIC_RULES[t.platform as keyof typeof PLATFORM_MUSIC_RULES]?.draftHandoff === true)) &&
+        posts.length > 1
+          ? " TikTok has a draft of its own on purpose: it can go to the user's TikTok inbox from the Posting tab without publishing the other platforms' draft."
           : ""
       } ${
         navigated
           ? "It is open in the piece's Posting tab (and Social → Posts)."
           : "Find it in the piece's Posting tab, or on the Social page under Posts."
-      } Tell the user in one line; publish or schedule only on their explicit yes.`,
+      } Tell the user in one line; publishing, scheduling and the TikTok inbox are theirs, on the Posting tab, and only on their explicit yes.`,
     },
   };
+}
+
+/**
+ * Open Social → Settings for the user, at one account when named — the screen a
+ * `needs` / `open` item points at. Awaited: `navigated` is true only when the
+ * studio accepted it, so the agent never says a page opened that did not.
+ */
+export async function showSocialSettings(params: ShowSocialSettingsParams): Promise<ToolResult> {
+  const navigated = await notify.navigateSocial(params.accountId ? { accountId: params.accountId } : {});
+  logger.info({ tag: "social", op: "show_settings", accountId: params.accountId ?? null, navigated }, "opened Social → Settings");
+  return { success: true, data: { ok: true, navigated } };
 }
 
 /**

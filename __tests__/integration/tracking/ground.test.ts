@@ -12,19 +12,19 @@ describe("ground_target MCP surface", () => {
   // and leave the module registry clean for the vi.doMock-based behavioural tests below.
   afterEach(() => vi.resetModules());
 
-  it("libi.ground_target is registered on the libi-tracking MCP", async () => {
+  it("libi.track ground_target is registered on the libi-tracking MCP", async () => {
     const { createTrackingMcpServer } = await import("@/mcp/tracking-mcp/server");
-    const { registeredToolNames, TRACKING_TOOL_NAMES } = await import("@/__tests__/helpers/mcp-tools");
+    const { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } = await import("@/__tests__/helpers/mcp-tools");
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.ground_target");
+    expectTrackingAction(names, "libi.track", "ground_target");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("libi.ground_target IS registered on the core libi MCP (always-on)", async () => {
+  it("libi.track ground_target IS registered on the core libi MCP (always-on)", async () => {
     const { createLibiMcpServer } = await import("@/mcp/server");
-    const { registeredToolNames } = await import("@/__tests__/helpers/mcp-tools");
+    const { registeredToolNames, expectTrackingAction } = await import("@/__tests__/helpers/mcp-tools");
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.ground_target");
+    expectTrackingAction(names, "libi.track", "ground_target");
   });
 });
 

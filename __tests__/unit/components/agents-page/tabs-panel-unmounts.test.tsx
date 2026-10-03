@@ -20,7 +20,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
  * behind a hidden tab and this fails first.
  *
  * (The same unmount is load-bearing elsewhere in that file: the parked
- * `libi.show_extension` scroll intent exists precisely because the live
+ * `libi.show({ target: "extension" })` scroll intent exists precisely because the live
  * event has nobody to reach while the Skills tab is up.)
  */
 

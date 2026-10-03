@@ -8,16 +8,33 @@ import {
 } from "@/lib/providers/catalog";
 
 describe("PROVIDER_CATALOG", () => {
-  it("holds the seven entries the design names", () => {
+  it("holds the eight entries the design names", () => {
     expect(PROVIDER_CATALOG.map((p) => p.id).sort()).toEqual([
       "ace-step",
       "elevenlabs",
       "fal",
       "higgsfield",
       "kokoro",
+      "playwright",
       "whisper",
       "zernio",
     ]);
+  });
+
+  it("Playwright is a key-less local browser server, added at user scope, wrapped in cmd /c for Claude Code on Windows", () => {
+    const pw = findProvider("playwright");
+    expect(pw.kinds).toEqual(["browser"]);
+    expect(pw.kind).toBe("remote-mcp");
+    expect(pw.transport).toBe("stdio");
+    expect(pw.auth).toBe("none");
+    expect(pw.commands).toEqual({
+      claude: "claude mcp add --scope user playwright -- npx @playwright/mcp@latest",
+      codex: "codex mcp add playwright -- npx @playwright/mcp@latest",
+    });
+    expect(pw.windowsCommands?.claude).toBe("claude mcp add --scope user playwright -- cmd /c npx @playwright/mcp@latest");
+    expect(commandNeedsKey(pw.commands!.claude)).toBe(false);
+    expect(billsGenerationCredits(pw)).toBe(false);
+    expect(providersForKind("browser").map((p) => p.id)).toEqual(["playwright"]);
   });
 
   it("fal's docs link is the MCP setup page (the old model-context-protocol URL 404s)", () => {

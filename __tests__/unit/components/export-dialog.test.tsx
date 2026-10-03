@@ -40,6 +40,7 @@ function renderDialog(opts: {
   compositionHeight?: number;
   hasGraphics?: boolean;
   flow?: UseExportFlowResult;
+  initialPurpose?: "social" | "personal";
 }) {
   const flow = opts.flow ?? idleFlow();
   const view = render(
@@ -52,6 +53,7 @@ function renderDialog(opts: {
       flow={flow}
       hasSnapshot={opts.hasSnapshot}
       hasDraft={opts.hasDraft}
+      initialPurpose={opts.initialPurpose}
       openOverride
     />,
   );
@@ -92,7 +94,7 @@ describe("ExportDialog form seeding", () => {
       quality: "1080p",
       graphicsQuality: "1440p",
     };
-    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: true });
+    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: true, initialPurpose: "personal" });
     // The seeded format renders as the selected Segmented chip.
     expect(screen.getByRole("button", { name: "WebM" }).className).toContain("bg-primary");
     expect(within(mediaField()).getByRole("button", { name: "1080p" }).className).toContain(
@@ -106,8 +108,8 @@ describe("ExportDialog form seeding", () => {
 });
 
 describe("ExportDialog defaults with no stored settings", () => {
-  it("selects Original for videos & images and 4K for text, code & 3D", () => {
-    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: true });
+  it("selects Original for videos & images and 4K for text, code & 3D (a personal export)", () => {
+    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: true, initialPurpose: "personal" });
     expect(within(mediaField()).getByRole("button", { name: "Original" }).className).toContain(
       "bg-primary",
     );
@@ -198,6 +200,7 @@ describe("ExportDialog output hint", () => {
       hasGraphics: true,
       compositionWidth: 1080,
       compositionHeight: 1920,
+      initialPurpose: "personal",
     });
     // media=Original (1080x1920), graphics defaults to 4K (2160x3840) — the
     // larger of the two wins the output frame.
@@ -218,7 +221,7 @@ describe("ExportDialog start payload", () => {
 
   it("still sends graphicsQuality when hasGraphics is false (server ignores it)", () => {
     const flow = idleFlow();
-    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: false, flow });
+    renderDialog({ hasDraft: true, hasSnapshot: true, hasGraphics: false, flow, initialPurpose: "personal" });
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     expect(flow.start).toHaveBeenCalledWith(
       expect.objectContaining({ graphicsQuality: "4k" }),
@@ -312,14 +315,63 @@ describe("ExportDialog — after Start", () => {
     const selected = (field: HTMLElement) =>
       within(field).getAllByRole("button").find((b) => b.className.includes("bg-primary"))?.textContent;
 
-    it("opened from the composer, Videos & images and Text, code & 3D start at 1080p, and the user can change them", () => {
+    it("opened from the composer, the size is the social fit (shown, not a preset), and the user can change it", () => {
       const { rerender } = render(dialog({ openOverride: false, returnToPost: true }));
       rerender(dialog({ openOverride: true, returnToPost: true }));
-      expect(selected(mediaField())).toBe("1080p");
+      expect(selected(mediaField())).toBe("Original");
       expect(selected(graphicsField())).toBe("1080p");
       expect(screen.getByText("Output 1080×1920")).toBeInTheDocument();
+      expect(screen.getByTestId("export-social-fit")).toHaveTextContent(/at most 1080×1920/);
       fireEvent.click(within(mediaField()).getByRole("button", { name: "4K" }));
       expect(selected(mediaField())).toBe("4K");
+      expect(screen.queryByTestId("export-social-fit")).toBeNull();
+    });
+
+    it("a plain open on the Social purpose ignores a saved 4K default: it shows 1080×1920 and names no size to the server", () => {
+      exportDefaults.data = { format: "mp4", quality: "4k", graphicsQuality: "4k" };
+      try {
+        const flow = idleFlow();
+        render(<ExportDialog {...base} flow={flow} openOverride />);
+        expect(screen.getByText("Output 1080×1920")).toBeInTheDocument();
+        expect(screen.getByTestId("export-summary")).toHaveTextContent("MP4 · 1080×1920");
+        fireEvent.click(screen.getByRole("button", { name: "Export" }));
+        const sent = flow.start.mock.calls[0][0] as Record<string, unknown>;
+        expect(sent).toMatchObject({ pieceId: "p1", purpose: "social", format: "mp4" });
+        expect(sent).not.toHaveProperty("quality");
+        expect(sent).not.toHaveProperty("graphicsQuality");
+      } finally {
+        exportDefaults.data = undefined;
+      }
+    });
+
+    it("a size the user picks is sent, both tiers (the other keeps what was shown), and 4K stays opt-in", () => {
+      exportDefaults.data = { format: "mp4", quality: "4k", graphicsQuality: "4k" };
+      try {
+        const flow = idleFlow();
+        render(<ExportDialog {...base} flow={flow} openOverride />);
+        fireEvent.click(within(mediaField()).getByRole("button", { name: "4K" }));
+        // Media at 4K lifts the frame; the graphics tier stays the social 1080p that was shown.
+        expect(screen.getByText("Output 2160×3840")).toBeInTheDocument();
+        expect(selected(graphicsField())).toBe("1080p");
+        fireEvent.click(screen.getByRole("button", { name: "Export" }));
+        expect(flow.start).toHaveBeenCalledWith(expect.objectContaining({ purpose: "social", quality: "4k", graphicsQuality: "1080p" }));
+      } finally {
+        exportDefaults.data = undefined;
+      }
+    });
+
+    it("Personal keeps the saved defaults and sends them", () => {
+      exportDefaults.data = { format: "mp4", quality: "4k", graphicsQuality: "4k" };
+      try {
+        const flow = idleFlow();
+        render(<ExportDialog {...base} flow={flow} initialPurpose="personal" openOverride />);
+        expect(selected(mediaField())).toBe("4K");
+        expect(screen.queryByTestId("export-social-fit")).toBeNull();
+        fireEvent.click(screen.getByRole("button", { name: "Export" }));
+        expect(flow.start).toHaveBeenCalledWith(expect.objectContaining({ purpose: "personal", quality: "4k", graphicsQuality: "4k" }));
+      } finally {
+        exportDefaults.data = undefined;
+      }
     });
 
     it("a WebM default is MP4 here (Instagram and TikTok want it), changeable, never saved, and back on the next plain open", () => {
@@ -341,19 +393,15 @@ describe("ExportDialog — after Start", () => {
       }
     });
 
-    it("the next ordinary open is back to what it was before the preset", () => {
-      exportDefaults.data = { format: "mp4", quality: "4k", graphicsQuality: "4k" };
-      try {
-        const { rerender } = render(dialog({ openOverride: false, returnToPost: true }));
-        rerender(dialog({ openOverride: true, returnToPost: true }));
-        expect(selected(mediaField())).toBe("1080p");
-        rerender(dialog({ openOverride: false, returnToPost: false }));
-        rerender(dialog({ openOverride: true, returnToPost: false }));
-        expect(selected(mediaField())).toBe("4K");
-        expect(selected(graphicsField())).toBe("4K");
-      } finally {
-        exportDefaults.data = undefined;
-      }
+    it("a size picked in one open is not remembered by the next: it starts on the social fit again", () => {
+      const { rerender } = render(dialog({ openOverride: false, returnToPost: false }));
+      rerender(dialog({ openOverride: true, returnToPost: false }));
+      fireEvent.click(within(mediaField()).getByRole("button", { name: "4K" }));
+      expect(selected(mediaField())).toBe("4K");
+      rerender(dialog({ openOverride: false, returnToPost: false }));
+      rerender(dialog({ openOverride: true, returnToPost: false }));
+      expect(selected(mediaField())).toBe("Original");
+      expect(screen.getByText("Output 1080×1920")).toBeInTheDocument();
     });
   });
 

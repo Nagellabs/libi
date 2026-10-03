@@ -95,7 +95,7 @@ export function PostDetailSheet({ postId, onClose }: { postId: string | null; on
             <SheetHeader>
               <SheetTitle className="flex items-center gap-2">
                 <span className="truncate">{captionFirstLine(post.content) || "Untitled post"}</span>
-                <StatusChip status={post.status} />
+                <StatusChip post={post} />
               </SheetTitle>
             </SheetHeader>
 

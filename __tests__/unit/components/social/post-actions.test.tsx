@@ -10,6 +10,7 @@ import { PostActions } from "@/components/social/post-actions";
 const updateMutate = vi.fn();
 const deleteMutate = vi.fn();
 const retryMutate = vi.fn();
+const inboxMutate = vi.fn();
 
 const accounts: SocialAccount[] = [
   { id: "acct-ig", platform: "instagram", username: "nagellabs", displayName: "Nagel Labs", active: true },
@@ -25,6 +26,7 @@ vi.mock("@/lib/queries/social", async (importOriginal) => {
     useUpdateSocialPost: () => ({ mutate: updateMutate, isPending: false }),
     useDeleteSocialPost: () => ({ mutate: deleteMutate, isPending: false }),
     useRetrySocialPost: () => ({ mutate: retryMutate, isPending: false }),
+    useSendToInbox: () => ({ mutate: inboxMutate, isPending: false, error: null }),
   };
 });
 
@@ -54,10 +56,18 @@ describe("PostActions — the closed lifecycle list", () => {
     updateMutate.mockReset();
     deleteMutate.mockReset();
     retryMutate.mockReset();
+    inboxMutate.mockReset();
   });
 
-  it("draft: exactly Schedule…, Publish now, Edit, Delete", () => {
+  it("draft: exactly Schedule…, Publish now, Send to TikTok inbox, Edit, Delete", () => {
     render(<PostActions post={basePost({ status: "draft" })} onEdit={() => {}} />);
+    expect(buttonNames()).toEqual(["Schedule…", "Publish now", "Send to TikTok inbox", "Edit", "Delete"]);
+  });
+
+  it("an Instagram-only draft has no inbox to send to, so no such button", () => {
+    render(
+      <PostActions post={basePost({ status: "draft", targets: [{ platform: "instagram", accountId: "acct-ig", status: "pending" }] })} onEdit={() => {}} />,
+    );
     expect(buttonNames()).toEqual(["Schedule…", "Publish now", "Edit", "Delete"]);
   });
 
@@ -143,6 +153,60 @@ describe("PostActions — the closed lifecycle list", () => {
     const [args] = updateMutate.mock.calls[0];
     expect(args.id).toBe("post_1");
     expect(args.when).toEqual({ mode: "now" });
+  });
+
+  describe("Send to TikTok inbox", () => {
+    const tiktokOptions = {
+      platform: "tiktok" as const,
+      tiktok: { privacyLevel: "SELF_ONLY", allowComment: false, allowDuet: false, allowStitch: false, commercialContentType: "none" as const, contentPreviewConfirmed: true, expressConsentGiven: true },
+    };
+    const tiktokDraft = (over: Partial<SocialPost> = {}) =>
+      basePost({
+        status: "draft",
+        targets: [{ platform: "tiktok", accountId: "acct-tt", status: "pending" }],
+        libi: { pieceId: "p1", mediaUrl: "https://m/temp/x.mp4", targetOptions: [tiktokOptions] },
+        ...over,
+      });
+
+    it("on a TikTok-only draft libi made: confirm says nothing is posted, then the inbox mutation runs (not a publish)", () => {
+      render(<PostActions post={tiktokDraft()} />);
+      const button = screen.getByTestId("post-action-inbox");
+      expect(button).toBeEnabled();
+      fireEvent.click(button);
+      expect(screen.getByText(/Nothing is posted/)).toBeInTheDocument();
+      expect(screen.getByText(/open the TikTok app's notification to finish it there/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Send to TikTok inbox" }));
+      expect(inboxMutate).toHaveBeenCalledTimes(1);
+      expect(inboxMutate.mock.calls[0][0]).toEqual({ id: "post_1", requestId: expect.any(String) });
+      expect(updateMutate).not.toHaveBeenCalled();
+    });
+
+    it("on a draft that also goes to Instagram it is disabled and says why", () => {
+      render(
+        <PostActions
+          post={tiktokDraft({
+            targets: [
+              { platform: "instagram", accountId: "acct-ig", status: "pending" },
+              { platform: "tiktok", accountId: "acct-tt", status: "pending" },
+            ],
+            libi: { pieceId: "p1", targetOptions: [{ platform: "instagram", instagram: { contentType: "reel" } }, tiktokOptions] },
+          })}
+        />,
+      );
+      expect(screen.getByTestId("post-action-inbox")).toBeDisabled();
+      expect(screen.getByTestId("post-action-inbox-reason")).toHaveTextContent(/also goes to Instagram/);
+    });
+
+    it("on a draft libi holds no settings for it is disabled and says so", () => {
+      render(<PostActions post={tiktokDraft({ libi: undefined })} />);
+      expect(screen.getByTestId("post-action-inbox")).toBeDisabled();
+      expect(screen.getByTestId("post-action-inbox-reason")).toHaveTextContent(/does not have this draft's settings/);
+    });
+
+    it("a published post offers no inbox action", () => {
+      render(<PostActions post={tiktokDraft({ status: "published" })} />);
+      expect(screen.queryByTestId("post-action-inbox")).toBeNull();
+    });
   });
 
   it("Delete opens a confirm and calls the delete mutation with the post id", () => {

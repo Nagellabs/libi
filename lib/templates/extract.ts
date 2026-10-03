@@ -129,7 +129,7 @@ export function placeholderBodyFor(content: TrackedOverlay["content"], label: st
   const escaped = JSON.stringify(what).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
   return [
     `// Was a TRACKED ${content.kind} overlay following "${commentSafe(label)}" — re-track it with`,
-    `// libi.add_tracked_overlay, then remove this stand-in. See "Tracking to re-do" in index.md.`,
+    `// libi.tracked_overlay({ action: 'add' }), then remove this stand-in. See "Tracking to re-do" in index.md.`,
     "const { ctx, width, height } = context;",
     "ctx.save();",
     "ctx.font = `${Math.round(height * 0.5)}px sans-serif`;",
@@ -385,7 +385,7 @@ export async function extractScaffold(pieceId: string, opts: ExtractOptions = {}
       overlays.push({ ...omit(o, TRACKED_ONLY_KEYS), kind: "code", key, codeFile } as TemplateOverlay);
       trackingRedo.push(
         `- \`${key}\` followed **${label}** (${content.kind} content, fit \`${o.fit}\`, scale ${o.scale}); ` +
-          "re-track it with `libi.add_tracked_overlay` and remove the stand-in code overlay.",
+          "re-track it with `libi.tracked_overlay({ action: 'add' })` and remove the stand-in code overlay.",
       );
     }
   }

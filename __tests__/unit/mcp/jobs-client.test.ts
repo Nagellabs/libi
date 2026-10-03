@@ -481,7 +481,7 @@ describe("mcp/jobs-client", () => {
     });
 
     // Regression: a FAILED cached row must not become this call's answer.
-    // `libi.ground_target` failed once with `tracking_engine_not_installed`;
+    // `libi.track` ground_target failed once with `tracking_engine_not_installed`;
     // after the engine was installed and verify_install returned ok, the
     // identical retry still replayed that stored failure because it attached
     // to the terminal row and never re-ran. Only forceNew escapes it, so

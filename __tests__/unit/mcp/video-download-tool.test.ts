@@ -155,7 +155,7 @@ describe("libi.download_video", () => {
     vi.mocked(runJobViaServer).mockResolvedValue(completed({ fileId: "f1", filename: "clip.mp4", title: "clip", bytes: 42 }));
     const url = "https://www.youtube.com/watch?v=abc";
     await runWithToolCallContext("libi.download_video", { url }, () =>
-      downloadVideo({ url } as never, { sendNotification: vi.fn(async () => {}), _meta: { progressToken: 1 } } as never),
+      downloadVideo({ url, pieceId: null, audioOnly: false } as never, { sendNotification: vi.fn(async () => {}), _meta: { progressToken: 1 } } as never),
     );
     expect(notify.toolProgress).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -268,6 +268,91 @@ describe("libi.download_video", () => {
       error: "download_failed",
       data: { message: "yt-dlp failed (exit 1): ERROR: [youtube] abc: Video unavailable" },
     });
+  });
+});
+
+describe("libi.download_video search mode (agent-speed B4b)", () => {
+  const PICKED = { title: "Fleetwood Mac - Dreams (Official Audio)", url: "https://www.youtube.com/watch?v=mrZRURcb1cM", durationSec: 257 };
+
+  it("dispatches the job with the search (normalised, no url) and returns the picked result", async () => {
+    writeWrapper();
+    vi.mocked(runJobViaServer).mockResolvedValue(
+      completed({ fileId: "f1", filename: "dreams.mp3", title: "dreams", bytes: 9, picked: PICKED }),
+    );
+    const res = await downloadVideo({ search: "  fleetwood mac   dreams official audio ", pieceId: "p1", audioOnly: true });
+    expect(vi.mocked(runJobViaServer).mock.calls[0][0]).toBe("video_download");
+    expect(vi.mocked(runJobViaServer).mock.calls[0][1]).toEqual({
+      search: "fleetwood mac dreams official audio",
+      pieceId: "p1",
+      audioOnly: true,
+    });
+    expect(vi.mocked(runJobViaServer).mock.calls[0][2]).toMatchObject({ pieceId: "p1" });
+    expect(res).toEqual({
+      success: true,
+      data: { fileId: "f1", filename: "dreams.mp3", title: "dreams", bytes: 9, picked: PICKED },
+    });
+  });
+
+  it("refuses an empty or blank search, both url and search, and neither, without dispatching a job", async () => {
+    writeWrapper();
+    for (const params of [
+      { search: "", pieceId: null, audioOnly: false },
+      { search: " \n\t ", pieceId: null, audioOnly: false },
+      { search: "x", url: "https://youtu.be/abc", pieceId: null, audioOnly: false },
+      { pieceId: null, audioOnly: false },
+    ]) {
+      const res = await downloadVideo(params as never);
+      expect(res).toMatchObject({ success: false, error: "download_failed" });
+    }
+    expect(runJobViaServer).not.toHaveBeenCalled();
+  });
+
+  it("discloses the first-use install for a search too", async () => {
+    vi.mocked(runJobViaServer).mockResolvedValue(completed({ fileId: "f1", filename: "a.mp3", title: "a", bytes: 1, picked: PICKED }));
+    const res = await downloadVideo({ search: "dreams", pieceId: null, audioOnly: true });
+    expect(res).toMatchObject({ success: true, data: { ytDlpInstalled: true } });
+  });
+
+  describe("candidates: look before downloading", () => {
+    const LIST = [
+      { title: "Dreams (2004 Remaster)", url: "https://www.youtube.com/watch?v=5oWyMakvQew", durationSec: 258, uploader: "Fleetwood Mac" },
+      { title: "Fleetwood Mac - Dreams (Official Audio)", url: "https://www.youtube.com/watch?v=PgagPdVM7bk", durationSec: 258, uploader: "Fleetwood Mac" },
+    ];
+
+    it("lists the top results through the same job, a fresh search every time, and downloads nothing", async () => {
+      writeWrapper();
+      vi.mocked(runJobViaServer).mockResolvedValue(completed({ candidates: LIST }));
+      const res = await downloadVideo({ search: "  fleetwood mac   dreams official audio ", candidates: true } as never);
+      const [kind, params, opts] = vi.mocked(runJobViaServer).mock.calls[0];
+      expect(kind).toBe("video_download");
+      expect(params).toEqual({ search: "fleetwood mac dreams official audio", candidates: 5, pieceId: null, audioOnly: false });
+      expect(opts).toMatchObject({ forceNew: true });
+      expect(res).toMatchObject({ success: true, data: { candidates: LIST, note: expect.stringMatching(/Nothing was downloaded.*url/) } });
+      expect((res.data as Record<string, unknown>).fileId).toBeUndefined();
+    });
+
+    it("takes a count, needs no pieceId, and discloses the first-use install", async () => {
+      vi.mocked(runJobViaServer).mockResolvedValue(completed({ candidates: LIST }));
+      const res = await downloadVideo({ search: "dreams", candidates: true, count: 8 } as never);
+      expect(vi.mocked(runJobViaServer).mock.calls[0][1]).toMatchObject({ candidates: 8 });
+      expect(res).toMatchObject({ success: true, data: { ytDlpInstalled: true } });
+    });
+
+    it("refuses candidates with a url, and an empty result; a download still needs its pieceId", async () => {
+      writeWrapper();
+      expect(await downloadVideo({ url: "https://youtu.be/abc", candidates: true } as never)).toMatchObject({ success: false, data: { message: expect.stringMatching(/pass search/) } });
+      expect(runJobViaServer).not.toHaveBeenCalled();
+      vi.mocked(runJobViaServer).mockResolvedValue(completed({ candidates: [] }));
+      expect(await downloadVideo({ search: "x", candidates: true } as never)).toMatchObject({ success: false, error: "download_failed" });
+      expect(await downloadVideo({ search: "dreams", audioOnly: true } as never)).toMatchObject({ success: false, data: { message: expect.stringMatching(/pass pieceId/) } });
+    });
+  });
+
+  it("url mode still sends exactly { url, pieceId, audioOnly }", async () => {
+    writeWrapper();
+    vi.mocked(runJobViaServer).mockResolvedValue(completed({ fileId: "f", filename: "a.mp4", title: "a", bytes: 1 }));
+    await downloadVideo({ url: "https://youtu.be/abc", pieceId: null, audioOnly: false });
+    expect(vi.mocked(runJobViaServer).mock.calls[0][1]).toEqual({ url: "https://youtu.be/abc", pieceId: null, audioOnly: false });
   });
 });
 

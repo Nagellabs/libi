@@ -97,10 +97,9 @@ describe("publishTemplateSchema", () => {
     expect(publishTemplateSchema.safeParse({ templateId: "t", exampleVideo: { fileId: "f", path: "/tmp/a.mp4" } }).success).toBe(false);
   });
 
-  it("no longer requires confirm — an older skill copy that still sends confirm: true is accepted, and it is described as ignored", () => {
+  it("no longer requires confirm — an older skill copy that still sends confirm: true is silently accepted (and not advertised: see legacy-inputs.test.ts)", () => {
     expect(publishTemplateSchema.safeParse({ templateId: "t", exampleVideo: { fileId: "f" }, confirm: true }).success).toBe(true);
     expect(publishTemplateSchema.safeParse({ templateId: "t", exampleVideo: { fileId: "f" }, confirm: false }).success).toBe(true);
-    expect(publishTemplateSchema.shape.confirm.description).toMatch(/Ignored/);
   });
 });
 

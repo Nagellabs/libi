@@ -6,14 +6,15 @@
 #
 #   sh add-provider.sh <provider> <agent> <cli>
 #
-#   provider  fal, higgsfield, zernio or elevenlabs
+#   provider  fal, higgsfield, zernio, elevenlabs or playwright
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #
 # What it does:
 #   1. fal.ai: asks for your provider key without showing it as you type.
 #      Higgsfield, Zernio and ElevenLabs have no key: you sign in with your
-#      account for that provider in your browser instead.
+#      account for that provider in your browser instead. Playwright needs
+#      neither: it runs on your computer with npx (Node.js).
 #   2. Codex with fal.ai only: saves the key as FAL_KEY in your login shell
 #      profile, because Codex reads that key from its environment when it
 #      starts. A FAL_KEY line libi saved before is replaced, in that profile
@@ -33,12 +34,14 @@ cli=$3
 
 # Provider details. A libi test keeps this table, and the `mcp add` commands
 # below, the same as libi's provider catalog (lib/providers/catalog.ts).
-# auth is `key` for a provider key, `oauth` for signing in with your account.
+# auth is `key` for a provider key, `oauth` for signing in with your account,
+# `none` for a local server that needs neither.
 case $provider in
   fal)        name='fal.ai';     auth='key';   codex_key_env='FAL_KEY' ;;
   higgsfield) name='Higgsfield'; auth='oauth'; codex_key_env='' ;;
   zernio)     name='Zernio';     auth='oauth'; codex_key_env='' ;;
   elevenlabs) name='ElevenLabs'; auth='oauth'; codex_key_env='' ;;
+  playwright) name='Playwright'; auth='none';  codex_key_env='' ;;
   *) echo "add-provider.sh: unknown provider '$provider'" >&2; exit 2 ;;
 esac
 case $agent in
@@ -73,6 +76,10 @@ add_to_agent() {
       "$cli" mcp add --transport http --scope user elevenlabs https://api.us.elevenlabs.io/v1/mcp ;;
     elevenlabs/codex)
       "$cli" mcp add elevenlabs --url https://api.us.elevenlabs.io/v1/mcp ;;
+    playwright/claude)
+      "$cli" mcp add --scope user playwright -- npx @playwright/mcp@latest ;;
+    playwright/codex)
+      "$cli" mcp add playwright -- npx @playwright/mcp@latest ;;
   esac
 }
 
@@ -160,6 +167,12 @@ if [ "$auth" = oauth ]; then
   trap - HUP INT TERM
   printf '[libi sign-in end: %s]\n' "$provider"
   exit "$status"
+fi
+
+# Nothing to ask for: a local server the agent starts itself.
+if [ "$auth" = none ]; then
+  add_to_agent
+  exit
 fi
 
 # Claude Code, and every provider without a saved Codex key: the key goes

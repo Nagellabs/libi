@@ -16,7 +16,7 @@ import type { ReactNode } from "react";
  * - The finish toast's Open (`openExportInTab`) is such an event too: made from another page it
  *   is parked, then claimed as this page mounts — before the pieces list — and must beat the
  *   restore (Task B3, from Task A6's review).
- * - An event that opens NO piece (`show_folder`) must leave the restore alone.
+ * - An event that opens NO piece (`libi.show` folder) must leave the restore alone.
  *   It used to cancel it too, so the user got the "no piece open" state, the
  *   saved last piece / asset were overwritten with null, and a `?piece=` deep
  *   link was ignored and never stripped (Task 13 review, Minor 1).

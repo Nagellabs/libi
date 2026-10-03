@@ -14,13 +14,13 @@ cost: subscription-tokens
 
 ## Expected behavior
 - Agent composes a valid SKILL.md (frontmatter with name/description/tags +
-  body) and calls `libi.add_skill`.
+  body) and calls `libi.skill` action `add`.
 - The skill persists to the `skills` DB table (`source: "user"`), is written
   to `~/.libi/skills/agent-eval-probe/SKILL.md`, and the writer re-mirrors it
   into the workspace (`~/.libi/agent/.claude/skills/agent-eval-probe/SKILL.md`).
 
 ## Checks
-- [ ] `add_skill` succeeds (agent confirms with the skill name).
+- [ ] `libi.skill` action `add` succeeds (agent confirms with the skill name).
 - [ ] `~/.libi/skills/agent-eval-probe/SKILL.md` exists with the `testing` tag
       in frontmatter.
 - [ ] Workspace mirror exists: `~/.libi/agent/.claude/skills/agent-eval-probe/SKILL.md`.
@@ -30,7 +30,7 @@ cost: subscription-tokens
       — the new skill loads and the agent lists pieces + version.
 
 ## Cleanup
-- Delete the probe skill afterwards (`libi.remove_skill` or the Skills UI) so
+- Delete the probe skill afterwards (`libi.skill` action `remove` or the Skills UI) so
   it doesn't pollute the user's library — unless the run notes say keep it.
 
 ## Notes

@@ -53,6 +53,24 @@ afterEach(() => {
 });
 
 describe("POST /api/skill-eval/configure", () => {
+  // The speed benchmark (skill-eval/scenarios/_bench) wants a production-like skills list.
+  it('enables exactly the named bundled skills, or every bundled skill for ["*"]', async () => {
+    const { getDb } = await import("@/lib/db/client");
+    const { skills } = await import("@/lib/db/schema/sqlite");
+    const db = getDb();
+    const now = new Date();
+    for (const name of ["alpha", "beta"]) {
+      db.insert(skills).values({ name, description: name, source: "bundled", enabled: true, createdAt: now, updatedAt: now } as never).run();
+    }
+    const enabled = () => db.select().from(skills).all().filter((r) => r.enabled).map((r) => r.name).sort();
+    expect((await POST(post({ skills: ["beta"], mcps: [], agent: "claude-code" }))).status).toBe(200);
+    expect(enabled()).toEqual(["beta"]);
+    expect((await POST(post({ skills: ["*"], mcps: [], agent: "claude-code" }))).status).toBe(200);
+    expect(enabled()).toEqual(["alpha", "beta"]);
+    expect((await POST(post({ skills: [], mcps: [], agent: "claude-code" }))).status).toBe(200);
+    expect(enabled()).toEqual([]);
+  });
+
   // A15: a scenario that declares `approve:` runs under `auto`, so libi's permission handler
   // is asked (and the public-action card raised) on every host; nothing else is accepted.
   it("sets auto-with-generations by default, auto on request, and refuses any other mode", async () => {

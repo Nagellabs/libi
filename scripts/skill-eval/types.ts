@@ -216,6 +216,14 @@ export interface ParsedScenario {
    * product's gate is not touched.
    */
   approve: string[];
+  /**
+   * Repo-relative path to a hooks module (`seed` / `verify`, see `ScenarioHooks`) — the way a
+   * scenario seeds state no frontmatter key can express (several pieces in a folder sharing
+   * overlay ids, say) and asserts OUTCOMES on the pieces rather than on the trace. The module
+   * talks to the hermetic studio over HTTP only: like everything under `scripts/skill-eval/`,
+   * it may not import `@/lib` (the logger opens `<LIBI_HOME>/logs` at import, in the HOST home).
+   */
+  hooks?: string;
   covers: string[];
   /** The verbatim "## Prompt" body, trimmed. */
   prompt: string;
@@ -306,4 +314,51 @@ export interface RunResult {
   durationSec?: number;
   /** The agent's cumulative session cost, when its adapter reported one (ACP usage_update). */
   cost?: { amount: number; currency: string } | null;
+  /** Outcome checks from the scenario's `hooks` module (`verify`); part of `hardPass`. */
+  stateChecks?: StateCheck[];
+  /** Wall-clock window of each turn (ISO), prompt first — what `bench-metrics` buckets by. */
+  turnWindows?: Array<{ startedAt: string; endedAt: string }>;
+  /** Speed metrics from the agent's own session log (`bench-metrics.ts`), when one was found. */
+  metrics?: {
+    apiTurns: number;
+    toolCalls: number;
+    input: number;
+    cacheRead: number;
+    cacheWrite: number;
+    output: number;
+    wallSec: number | null;
+    /** Codex runs only: see `CodexExtras` in bench-metrics.ts. */
+    codex?: { execCalls: number; libiCalls: number; nestedSource: "executed" | "source"; reasoning: number };
+  };
+}
+
+/** One outcome check a scenario's `verify` hook made on the studio's state after the last turn. */
+export interface StateCheck {
+  name: string;
+  pass: boolean;
+  /** What was found — printed on failure, kept in `state-checks.json` either way. */
+  detail?: string;
+}
+
+/** What a hooks module may use: the hermetic studio this run booted, and nothing else. */
+export interface ScenarioHookContext {
+  /** `http://127.0.0.1:<port>` of the run's studio. */
+  base: string;
+  /** The run's hermetic LIBI_HOME. */
+  home: string;
+  /** The empty piece the harness created (1920×1080 unless `pieceDimensions`). */
+  pieceId: string;
+  /** Absolute staged paths of the scenario's `fixtures`, in declaration order. */
+  fixtures: string[];
+}
+
+export interface ScenarioHooks {
+  /**
+   * Runs after the harness's piece and templates exist, before the session and the prompt.
+   * `placeholders` resolve `{{seed:<key>}}` in the prompt and replies; `state` is handed back
+   * to `verify` untouched.
+   */
+  seed?: (ctx: ScenarioHookContext) => Promise<{ placeholders?: Record<string, string>; state?: unknown }>;
+  /** Runs after the last turn of a COMPLETED run, before teardown. */
+  verify?: (ctx: ScenarioHookContext & { state: unknown }) => Promise<StateCheck[]>;
 }

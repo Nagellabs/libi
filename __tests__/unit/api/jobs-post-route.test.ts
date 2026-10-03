@@ -122,12 +122,14 @@ describe("POST /api/jobs", () => {
     const pending = new Promise<void>((resolve) => {
       pendingResolvers.push(resolve);
     });
+    let runnerStarted = false;
     registerRunner({
       kind: "stub",
       maxConcurrent: 1,
       resumable: false,
       paramsSchema: z.object({ v: z.string() }),
       async run() {
+        runnerStarted = true;
         await pending;
         return { ok: true };
       },
@@ -146,8 +148,8 @@ describe("POST /api/jobs", () => {
     const json1 = await res1.json();
     expect(json1.status).toBe("new");
 
-    // Give the runner a moment to flip the row to running.
-    await new Promise((r) => setTimeout(r, 20));
+    // The row is running once its runner has been called (markRunning comes first).
+    await vi.waitFor(() => expect(runnerStarted).toBe(true));
 
     const res2 = await POST(
       new Request("http://x/api/jobs", {

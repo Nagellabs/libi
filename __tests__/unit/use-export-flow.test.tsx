@@ -42,6 +42,19 @@ describe("useExportFlow", () => {
     expect(result.current.queued).toEqual({ exportId: "exp_1", name: "X", pieceId: "p1" });
   });
 
+  it("a social export that names no size sends no quality at all, so the server fits it", async () => {
+    const { result } = renderHook(() => useExportFlow());
+    const { quality: _quality, ...noSize } = START;
+    void _quality;
+    await act(async () => {
+      await result.current.start({ ...noSize, purpose: "social" });
+    });
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ pieceId: "p1", purpose: "social" });
+    expect(body).not.toHaveProperty("quality");
+    expect(body).not.toHaveProperty("graphicsQuality");
+  });
+
   it("never blocks a second Start: another export queues while the first is still rendering", async () => {
     const { result } = renderHook(() => useExportFlow());
     await act(() => result.current.start(START));

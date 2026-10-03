@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerTrackingTools } from "./register-tracking-tools";
+import { installToolsListShaping } from "@/mcp/tools-list-shape";
 import { installArgCoercion } from "@/mcp/tools/coerce-args";
 import { trackToolUsed, wrapRegisterToolWithTracking } from "@/mcp/analytics";
 
@@ -23,5 +24,6 @@ export function createTrackingMcpServer(): McpServer {
       wrapRegisterToolWithTracking(orig as (...a: unknown[]) => unknown, trackToolUsed);
   }
   registerTrackingTools(server);
+  installToolsListShaping(server);
   return server;
 }

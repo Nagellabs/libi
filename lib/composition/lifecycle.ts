@@ -14,11 +14,21 @@ import {
   type Actor,
   type SnapshotHistoryEntry,
 } from "./snapshots";
+import {
+  keepDraft,
+  listRecoverableDrafts,
+  loadRecoverableDraft,
+  dropRecoverableDraft,
+  isRecoverableId,
+  RECOVERABLE_DAYS,
+  type RecoverableDraft,
+} from "./recoverable";
 import { serverLogger as logger } from "@/lib/logger";
 import {
   saveStoryboardSnapshot,
   restoreStoryboardFromSnapshot,
 } from "@/lib/storyboard/snapshot";
+import { saveStoryboard, clearStoryboard } from "@/lib/storyboard/repo";
 import { rethrowStoryboardBusyAsPartial } from "@/lib/storyboard/lock";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { EMPTY_MANIFEST } from "./persistence";
@@ -136,8 +146,23 @@ export async function commitDraft(
   return { snapshotId, summary: meta.summary, committedAt };
 }
 
-export async function discardDraft(pieceId: string): Promise<void> {
+/** The piece's draft kept before something replaced it, or null when there was no draft. */
+async function keepDraftIfAny(pieceId: string, kind: "discarded" | "before-restore" | "before-recover"): Promise<RecoverableDraft | null> {
+  const [row] = await getDb().select({ hasDraft: pieces.hasDraft }).from(pieces).where(eq(pieces.id, pieceId));
+  if (!row?.hasDraft) return null;
+  return keepDraft(pieceId, kind, await loadManifest(pieceId));
+}
+
+/**
+ * Drop the draft and return to the snapshot. The draft is KEPT first, as a hidden
+ * recoverable draft (see ./recoverable.ts): `restoreSnapshot` with its `rec-` id
+ * brings it back for {@link RECOVERABLE_DAYS} days. Returns what was kept (null
+ * when there was no draft).
+ */
+export async function discardDraft(pieceId: string): Promise<RecoverableDraft | null> {
   const db = getDb();
+  // Before anything changes: a failure here (a busy storyboard) is a clean refusal.
+  const kept = await keepDraftIfAny(pieceId, "discarded");
   const snap = await loadCurrentSnapshot(pieceId);
   if (!snap) {
     // No snapshot exists → reset to empty
@@ -148,12 +173,27 @@ export async function discardDraft(pieceId: string): Promise<void> {
   // The composition is already reset by now — see commitDraft.
   await restoreStoryboardFromSnapshot(pieceId).catch(rethrowStoryboardBusyAsPartial);
   await db.update(pieces).set({ hasDraft: false, updatedAt: new Date() }).where(eq(pieces.id, pieceId));
-  logger.info({ tag: "snapshot", op: "discard_draft", pieceId }, "discarded draft");
+  logger.info({ tag: "snapshot", op: "discard_draft", pieceId, keptId: kept?.id ?? null }, "discarded draft");
   navigationEmitter.emit("refresh_query", { queryKey: "piece-state", pieceId });
   navigationEmitter.emit("refresh_query", { queryKey: "composition", pieceId });
+  return kept;
 }
 
-export async function restoreSnapshot(pieceId: string, snapshotId: string): Promise<void> {
+export interface RestoreResult {
+  /** Set when a hidden recoverable draft came back as the draft (the id was a `rec-` one). */
+  recoveredDraft: boolean;
+  /** The draft that was kept so this restore can be undone; null when there was none. */
+  draftKept: RecoverableDraft | null;
+}
+
+/**
+ * Make a history snapshot current (the committed one is archived to history),
+ * or — for a `rec-` id from {@link listRecoverableDrafts} — bring a hidden
+ * recoverable draft back as the DRAFT. Either way the draft that was there is
+ * kept first as a hidden recoverable draft, so a restore can itself be undone.
+ */
+export async function restoreSnapshot(pieceId: string, snapshotId: string): Promise<RestoreResult> {
+  if (isRecoverableId(snapshotId)) return recoverDraft(pieceId, snapshotId);
   const db = getDb();
   const target = await loadHistorySnapshot(pieceId, snapshotId);
   if (!target) throw new Error(`Snapshot ${snapshotId} not found in history`);
@@ -166,6 +206,10 @@ export async function restoreSnapshot(pieceId: string, snapshotId: string): Prom
 
   const [pieceRow] = await db.select().from(pieces).where(eq(pieces.id, pieceId));
   if (!pieceRow) throw new Error(`Piece ${pieceId} not found`);
+
+  // The draft is about to be replaced: keep it (hidden) so this can be undone.
+  // Before anything changes, so a refusal leaves the piece as it was.
+  const draftKept = await keepDraftIfAny(pieceId, "before-restore");
 
   // Archive the current snapshot to history (so the user can come back),
   // preserving its original summary.
@@ -187,10 +231,33 @@ export async function restoreSnapshot(pieceId: string, snapshotId: string): Prom
   await db.update(pieces)
     .set({ hasDraft: false, snapshotSummary: targetEntry.summary, snapshotCommittedAt: new Date(), updatedAt: new Date() })
     .where(eq(pieces.id, pieceId));
-  logger.info({ tag: "snapshot", op: "restore_snapshot", pieceId, snapshotId }, "restored snapshot");
+  logger.info({ tag: "snapshot", op: "restore_snapshot", pieceId, snapshotId, keptId: draftKept?.id ?? null }, "restored snapshot");
   navigationEmitter.emit("refresh_query", { queryKey: "piece-state", pieceId });
   navigationEmitter.emit("refresh_query", { queryKey: "composition", pieceId });
+  return { recoveredDraft: false, draftKept };
 }
+
+/** Bring a hidden recoverable draft back as the piece's draft. */
+async function recoverDraft(pieceId: string, id: string): Promise<RestoreResult> {
+  const db = getDb();
+  const kept = await loadRecoverableDraft(pieceId, id);
+  if (!kept) {
+    throw new Error(`No recoverable draft ${id}: it is unknown or older than ${RECOVERABLE_DAYS} days. libi.snapshot compare lists what can be recovered.`);
+  }
+  // The draft being replaced is kept too: recovering is undoable like any restore.
+  const draftKept = await keepDraftIfAny(pieceId, "before-recover");
+  await saveManifest(pieceId, kept.manifest);
+  if (kept.storyboard) await saveStoryboard(pieceId, kept.storyboard).catch(rethrowStoryboardBusyAsPartial);
+  else await clearStoryboard(pieceId).catch(rethrowStoryboardBusyAsPartial);
+  await dropRecoverableDraft(pieceId, id);
+  await db.update(pieces).set({ hasDraft: true, updatedAt: new Date() }).where(eq(pieces.id, pieceId));
+  logger.info({ tag: "snapshot", op: "recover_draft", pieceId, recoveredId: id, keptId: draftKept?.id ?? null }, "recovered a kept draft");
+  navigationEmitter.emit("refresh_query", { queryKey: "piece-state", pieceId });
+  navigationEmitter.emit("refresh_query", { queryKey: "composition", pieceId });
+  return { recoveredDraft: true, draftKept };
+}
+
+export { listRecoverableDrafts, RECOVERABLE_DAYS, type RecoverableDraft };
 
 export async function getPieceState(pieceId: string): Promise<PieceState> {
   const db = getDb();

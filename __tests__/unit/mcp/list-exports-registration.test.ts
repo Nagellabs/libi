@@ -33,8 +33,10 @@ describe("libi.list_exports is reachable over MCP", () => {
     const tool = tools.find((t) => t.name === "libi.export_video")!;
     expect(tool.description).toMatch(/Exports tab/);
     expect(tool.description).not.toMatch(/configured export folder/);
-    const props = tool.inputSchema.properties as Record<string, { description?: string }>;
-    expect(props.destFolder.description).toMatch(/^REMOVED/);
+    // Refused at runtime (export-tool-dest-folder.test.ts) and said once in the description,
+    // but no longer a property the model is shown.
+    expect(tool.description).toMatch(/`destFolder` is refused/);
+    expect(Object.keys(tool.inputSchema.properties as object)).not.toContain("destFolder");
   });
 
   it("libi.export_video takes 1–10 variants", async () => {

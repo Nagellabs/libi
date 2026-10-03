@@ -41,4 +41,4 @@ assertions:
 - Told the user the canvas it actually got — **1080×1920 (9:16, vertical)**, or, if this
   install's Settings → General default aspect has been changed, that value — and did NOT
   state "1920x1080" or "Full HD" as the starting/default shape.
-- Answered the "tell me its size" part of the ask; did not stop at `libi.show_piece` alone.
+- Answered the "tell me its size" part of the ask; did not stop at `libi.show({ target: "piece" })` alone.

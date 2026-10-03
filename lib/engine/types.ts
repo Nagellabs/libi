@@ -351,7 +351,7 @@ export interface TrackedOverlay extends BaseOverlay {
    *  above the head). Rides the subject's scale for fit:"tight"/"head"; a
    *  constant px offset for fit:"rect" (whose art box doesn't scale). Absent
    *  ⇒ {0,0}. Written by the preview reposition drag and
-   *  libi.update_tracked_overlay. Does NOT modify the track — re-anchoring
+   *  libi.tracked_overlay({ action: "update" }). Does NOT modify the track — re-anchoring
    *  (manual anchors / segments) composes independently underneath it. */
   offset?: { x: number; y: number };
 }
@@ -539,6 +539,22 @@ export interface AudioClip {
   trimStart: number;
   /** 0..1 — multiplied with master volume at playback. */
   volume: number;
+  /** Static gain in dB, -60..+12 (absent = 0; -60 = silent). Multiplies with
+   *  `volume`, so a clip can be BOOSTED past what the 0..1 `volume` allows.
+   *  The one curve law is `lib/audio/clip-gain.ts` (preview AND export). */
+  gainDb?: number;
+  /** Volume envelope: `t` = seconds from the clip's START (clip-local, so moving
+   *  the clip moves its envelope; trimming the tail leaves the dips where they
+   *  are), `value` = dB OFFSET (-60..+12) on top of `gainDb` (0 = unchanged).
+   *  Linear in dB between keys, shaped by the LEFT key's `easing` (the same
+   *  presets as overlay keyframes), held before the first and after the last.
+   *  Absent = no envelope. Edited through `libi.add_keyframe({ clipId })`. */
+  volumeKeyframes?: Keyframed<number>;
+  /** Milliseconds (0..5000) the clip crossfades over the earlier clip of the
+   *  SAME file that overlaps its start: this one fades in while that one fades
+   *  out, linearly, over min(crossfadeMs, the overlap). No overlap, no effect.
+   *  Absent = 0. */
+  crossfadeMs?: number;
   /** Speaker toggle on the timeline; false = silent but kept on the timeline. */
   enabled: boolean;
   /** Set when `kind === 'inline'`. The clip follows this scene unless unlinked. */

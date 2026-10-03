@@ -26,7 +26,7 @@ const LINKED_SCAN_LIMIT = 100;
  * 2. **Linked.** The piece went out straight to an ad account and was never
  *    an organic post. Nothing on the provider ties that back to a piece, so
  *    libi keeps the link itself (`social_ad_links`, written by
- *    `libi.social_link_ad`).
+ *    `libi.social_link` kind `ad`).
  *
  * An account with no ads tree is an ordinary outcome, not a failure: it comes
  * back as an empty list plus the provider's own words in `unavailable`.

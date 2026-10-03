@@ -8,9 +8,10 @@ import {
 } from "@/mcp/tools/schemas";
 
 describe("snapshot tool schemas", () => {
-  it("getPieceStateSchema requires pieceId", () => {
-    expect(() => getPieceStateSchema.parse({})).toThrow();
+  it("getPieceStateSchema takes one pieceId or a pieceIds sweep (the tool checks one was given)", () => {
     expect(getPieceStateSchema.parse({ pieceId: "p1" }).pieceId).toBe("p1");
+    expect(getPieceStateSchema.parse({ pieceIds: ["p1", "p2"] }).pieceIds).toEqual(["p1", "p2"]);
+    expect(() => getPieceStateSchema.parse({ pieceIds: [] })).toThrow();
   });
 
   it("commitDraftSchema accepts optional summary", () => {

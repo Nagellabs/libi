@@ -435,7 +435,7 @@ export interface SaveAudioChunkInput {
   languageProbability?: number;
   /**
    * Who produced this chunk. Path B — the agent driving its own STT and
-   * saving chunks through `libi.analysis_save_audio_chunk` — cannot say, and
+   * saving chunks through `libi.analysis_save({ action: "audio_chunk" })` — cannot say, and
    * omits it; the server-side Whisper path knows and passes it, so the
    * aggregate is stamped correctly from the FIRST write instead of carrying
    * `provider: "external"` until the run's final re-stamp.
@@ -531,7 +531,7 @@ export async function aggregateTranscript(
       fileId,
       kind: "transcript",
       status: "failed",
-      errorMessage: `${failed.length} of ${chunks.length} audio chunks failed (${summary}). Call libi.analysis_transcribe_audio({ fileId, retry: true }) to re-run them with local Whisper (or re-save them via Path B), or libi.analysis_get_audio_chunks for details.`,
+      errorMessage: `${failed.length} of ${chunks.length} audio chunks failed (${summary}). Call libi.analysis_transcribe_audio({ fileId, retry: true }) to re-run them with local Whisper (or re-save them via Path B), or libi.analysis_query({ action: "audio_chunks" }) for details.`,
     });
     return;
   }

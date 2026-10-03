@@ -6,6 +6,7 @@ import { overlayHasKeyframes, overlayHasNonIdentityTransform, textNeedsBrowserRe
 import { baseTimeRange, resolveExportBase, streamCopyPreservesFraming } from "./export-base";
 import { MAX_SHADOW_LAYERS, shadowLayerCount } from "./text-runs";
 import { isUnfilledSlotFileId, unfilledSlotLabel } from "@/lib/templates/unfilled-slot";
+import { crossfadePlan, isPlainVolume } from "@/lib/audio/clip-gain";
 
 export type ExportShape =
   | { tag: "stream-copy-trim" }
@@ -185,12 +186,14 @@ export function classifyExportShape(comp: Composition): ExportShape {
   const hasTrimmedAssetOverlay =
     Array.isArray(overlays) &&
     overlays.some((o) => o.kind === "video" && o.trim != null && o.id !== base?.overlayId);
+  const crossfades = crossfadePlan(audioClips);
   const hasAudioTracks = audioClips.some((c) => {
     if (c.kind === "standalone") return true;
     // An inline clip that IS the base overlay's own audio, unmuted and at unity
     // volume, is plain passthrough — stream-copy carries it for free.
     const isBaseAudio = base != null && c.linkedOverlayId === base.overlayId;
-    if (c.kind === "inline" && isBaseAudio && c.enabled && c.volume === 1) return false;
+    // A boost, a volume envelope or a crossfade is audio processing too.
+    if (c.kind === "inline" && isBaseAudio && c.enabled && c.volume === 1 && isPlainVolume(c, crossfades)) return false;
     // Any other inline clip (muted, non-unity volume, or another layer's audio)
     // needs the mix graph.
     return true;

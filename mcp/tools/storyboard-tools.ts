@@ -98,8 +98,8 @@ export async function attachStoryboardClip(
 }
 
 /** Gated stage advance. Keyframe/clip generation is agent-driven: the agent
- *  calls fal via the ai-asset-generation/ai-video-models skills, then calls
- *  libi.attach_storyboard_keyframe / libi.attach_storyboard_clip to record the
+ *  calls fal via the ai-asset-generation/video-generation-craft skills, then calls
+ *  libi.storyboard_take (actions attach_keyframe / attach_clip) to record the
  *  produced file. This tool only flips the approval + advances the stage (clip
  *  approval places the scene on the timeline). */
 export async function setStoryboardGeneration(
@@ -116,7 +116,7 @@ export async function setStoryboardGeneration(
         error: "schema_cache_missing",
         apiUrl: rawSpec.apiUrl,
         model: rawSpec.model,
-        hint: "Fetch this endpoint's API schema and call libi.save_model_schema_cache, then retry.",
+        hint: "Fetch this endpoint's API schema and call libi.model_schema_cache({ action: \"save\", … }), then retry.",
       },
     };
   }

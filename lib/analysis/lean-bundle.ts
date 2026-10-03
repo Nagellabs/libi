@@ -1,7 +1,7 @@
 import type { AnalysisBundle, AnalysisKeyframe } from "./types";
 
 /**
- * Lean projection of an {@link AnalysisBundle} for the default `analysis_get`
+ * Lean projection of an {@link AnalysisBundle} for the default `libi.analysis_query` `get`
  * response. Dogfood finding F5: a fully-described analysis (e.g. 26 keyframes)
  * serializes the entire structured `FrameDescription` per frame, which blows
  * past the agent's per-tool token limit (~134 KB observed) — the result gets
@@ -11,7 +11,7 @@ import type { AnalysisBundle, AnalysisKeyframe } from "./types";
  * (which frames exist, their timestamps, whether they're described / skipped)
  * but replaces each frame's heavy `description`/`custom` blobs with a short
  * preview + boolean flags. Full per-frame data is still available via
- * `libi.analysis_search_frames` or `analysis_get` with `frameDetail: "full"`.
+ * `libi.analysis_query({ action: "search_frames" })` or `get` with `frameDetail: "full"`.
  */
 const DESCRIPTION_PREVIEW_CHARS = 160;
 
@@ -60,7 +60,7 @@ export function summarizeAnalysisBundle(
     frameDetail: "summary",
     note:
       "Keyframe descriptions are summarized to stay within the tool token budget. " +
-      'Use libi.analysis_search_frames for targeted frame details, or call ' +
-      'libi.analysis_get with frameDetail:"full" for the complete per-frame data.',
+      'Use libi.analysis_query({ action: "search_frames" }) for targeted frame details, or call ' +
+      'libi.analysis_query({ action: "get" }) with frameDetail:"full" for the complete per-frame data.',
   };
 }

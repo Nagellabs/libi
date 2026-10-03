@@ -8,7 +8,7 @@ import type { TemplateSummary } from "@/lib/templates/types";
 import { MODERATED_MESSAGE } from "@/lib/templates/cloud/constants";
 
 const openWith = vi.hoisted(() => vi.fn());
-// The tab is read from the URL, which is what `libi.show_templates` pushes —
+// The tab is read from the URL, which is what `libi.show({ target: "templates" })` pushes —
 // so the public-tab case drives it there rather than through a base-ui click.
 let search = vi.hoisted(() => "");
 

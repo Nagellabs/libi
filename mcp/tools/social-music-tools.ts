@@ -13,6 +13,7 @@
 import type { ToolResult } from "./types";
 import type { SocialMusicSearchParams } from "./schemas";
 import { api } from "./social-http";
+import { needsOpen } from "./social-needs";
 
 interface PlanBody {
   targets: Array<{
@@ -37,6 +38,24 @@ export async function socialMusicSearch(params: SocialMusicSearchParams): Promis
   if (composable && !params.accountId) {
     return { success: false, error: "account_required", data: { hint: "Pass accountId (libi.social_status lists the connected accounts)." } };
   }
+  // The catalog is read BEFORE the plan: a successful read records that the account can
+  // attach music (lib/social/music-facts.ts#recordCatalogOutcome), so the plan that follows
+  // never repeats a cached "Reconnect with Facebook Login" the user has already acted on.
+  let candidates: Array<{ id: string; title: string; artist?: string; durationSec?: number }> = [];
+  let unavailable: string | undefined;
+  if (composable) {
+    const q = params.platform === "instagram" && params.query ? `&q=${encodeURIComponent(params.query)}` : "";
+    const cat = await api<CatalogBody>(`/api/social/music/catalog?platform=${params.platform}&accountId=${encodeURIComponent(params.accountId!)}${q}`);
+    if (cat.ok && "tracks" in cat.body) {
+      candidates = cat.body.tracks.slice(0, MAX_CANDIDATES).map((t) => ({
+        id: t.id,
+        title: t.title,
+        ...(t.artist ? { artist: t.artist } : {}),
+        ...(t.durationSec !== undefined ? { durationSec: t.durationSec } : {}),
+      }));
+    } else if (cat.ok && "unavailable" in cat.body) unavailable = cat.body.unavailable.reason;
+  }
+
   const planRes = await api<PlanBody>("/api/social/music/plan", {
     method: "POST",
     body: JSON.stringify({ pieceId: params.pieceId, targets: [{ platform: params.platform, ...(params.accountId ? { accountId: params.accountId } : {}) }] }),
@@ -53,21 +72,6 @@ export async function socialMusicSearch(params: SocialMusicSearchParams): Promis
   }
   const { track, ...plan } = planRes.body.targets[0].plan;
 
-  let candidates: Array<{ id: string; title: string; artist?: string; durationSec?: number }> = [];
-  let unavailable: string | undefined;
-  if (composable) {
-    const q = params.platform === "instagram" && params.query ? `&q=${encodeURIComponent(params.query)}` : "";
-    const cat = await api<CatalogBody>(`/api/social/music/catalog?platform=${params.platform}&accountId=${encodeURIComponent(params.accountId!)}${q}`);
-    if (cat.ok && "tracks" in cat.body) {
-      candidates = cat.body.tracks.slice(0, MAX_CANDIDATES).map((t) => ({
-        id: t.id,
-        title: t.title,
-        ...(t.artist ? { artist: t.artist } : {}),
-        ...(t.durationSec !== undefined ? { durationSec: t.durationSec } : {}),
-      }));
-    } else if (cat.ok && "unavailable" in cat.body) unavailable = cat.body.unavailable.reason;
-  }
-
   // The export this plan implies. A social export's default leaves copyrighted
   // songs out, so the with-song variant has to say `include` explicitly.
   const copyrightedAudio = plan.exportVariant === "with-song" ? "include" : "exclude";
@@ -76,10 +80,18 @@ export async function socialMusicSearch(params: SocialMusicSearchParams): Promis
     ? "libi.post_piece exports Instagram and TikTok files itself, per this plan — use it rather than exporting. exportVideoArgs applies only if you post here with your own provider tools."
     : `To post on this platform, export with libi.export_video using exactly exportVideoArgs (${
         copyrightedAudio === "include" ? "the file keeps the song" : "the file leaves the copyrighted song out"
-      }; for several platforms in one call, pieceId goes at the top level and each \`variants\` entry carries only the rest), then post it with your own provider tools and link it with libi.social_link_post.`;
+      }; for several platforms in one call, pieceId goes at the top level and each \`variants\` entry carries only the rest), then post it with your own provider tools and link it with libi.social_link({ kind: "post", … }).`;
 
   return {
     success: true,
-    data: { plan, candidates, autoSelected: track?.id ?? null, ...(unavailable ? { unavailable } : {}), exportVideoArgs, exportNote },
+    data: {
+      // A `needs` item names the screen that fixes it: open it with libi.show instead of explaining menus.
+      plan: plan.needs ? { ...plan, needsOpen: needsOpen(params.accountId) } : plan,
+      candidates,
+      autoSelected: track?.id ?? null,
+      ...(unavailable ? { unavailable } : {}),
+      exportVideoArgs,
+      exportNote,
+    },
   };
 }

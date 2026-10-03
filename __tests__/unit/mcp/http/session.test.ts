@@ -59,7 +59,7 @@ describe("createAggregateSession", () => {
     // Names the registration this session actually is …
     expect(text).toContain(`\\"${LIBI_MCP_ENTRY_NAME}\\" registration`);
     // … covers the terminal reading …
-    expect(text).toContain("libi.show_asset");
+    expect(text).toContain("libi.show");
     // … and the in-app one, which is now a fault to report rather than a
     // sibling entry to retry on.
     expect(text).toContain("failed to replace");
@@ -93,7 +93,7 @@ describe("createAggregateSession", () => {
     const res = await client.callTool({ name: "libi.read_manual", arguments: {} });
     const text = manualText(res);
     expect(res.isError ?? false).toBe(false);
-    // The index lists `mcp-tools` without inlining its 25 KB of body.
+    // The index lists `mcp-tools` without inlining its body.
     expect(text).toContain("`mcp-tools`");
     expect(text).toContain('libi.read_manual({ section: "<key>" })');
     // …and it carries the workflow material needed before a first edit.

@@ -70,20 +70,22 @@ function smWith(parts: Array<{ toolCallId: string; toolId: string | null; args: 
 
 describe("SessionManager.sessionForToolCall (NAV-1)", () => {
   it("finds the chat by Claude's toolUseId", async () => {
-    const sm = await smWith([{ toolCallId: "toolu_1", toolId: "libi:libi.show_templates", args: {} }]).ready();
-    expect(sm.sessionForToolCall({ toolCallId: "toolu_1", toolName: "libi.show_templates" })).toBe("chat-2");
+    const sm = await smWith([{ toolCallId: "toolu_1", toolId: "libi:libi.show", args: { target: "templates" } }]).ready();
+    expect(sm.sessionForToolCall({ toolCallId: "toolu_1", toolName: "libi.show" })).toBe("chat-2");
   });
 
   it("finds it by the libi tool's name + args when there is no id (Codex)", async () => {
-    const sm = await smWith([{ toolCallId: "call_x", toolId: "libi:libi.show_extension", args: { extensionId: "whisper" } }]).ready();
-    expect(sm.sessionForToolCall({ toolName: "libi.show_extension", toolArgs: { extensionId: "whisper" } })).toBe("chat-2");
+    const sm = await smWith([{ toolCallId: "call_x", toolId: "libi:libi.show", args: { target: "extension", extensionId: "whisper" } }]).ready();
+    expect(sm.sessionForToolCall({ toolName: "libi.show", toolArgs: { target: "extension", extensionId: "whisper" } })).toBe("chat-2");
+    // The same merged tool with another target is a different call: the args subset keeps them apart.
+    expect(sm.sessionForToolCall({ toolName: "libi.show", toolArgs: { target: "templates" } })).toBeNull();
     // Another libi tool that no chat is running is not this chat's.
-    expect(sm.sessionForToolCall({ toolName: "libi.show_templates", toolArgs: {} })).toBeNull();
+    expect(sm.sessionForToolCall({ toolName: "libi.list_pieces", toolArgs: {} })).toBeNull();
   });
 
   it("a call no libi chat holds (a CLI agent's), or one already answered, is null", async () => {
-    const sm = await smWith([{ toolCallId: "call_y", toolId: "libi:libi.show_templates", args: {}, done: true }]).ready();
-    expect(sm.sessionForToolCall({ toolCallId: "toolu_unknown", toolName: "libi.show_templates", toolArgs: {} })).toBeNull();
+    const sm = await smWith([{ toolCallId: "call_y", toolId: "libi:libi.show", args: { target: "templates" }, done: true }]).ready();
+    expect(sm.sessionForToolCall({ toolCallId: "toolu_unknown", toolName: "libi.show", toolArgs: { target: "templates" } })).toBeNull();
     expect(sm.sessionForToolCall({})).toBeNull();
   });
 });

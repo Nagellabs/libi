@@ -15,7 +15,7 @@ clip. The background is optional — with no clip the card sits on the empty can
 
 1. Read the applied overlays: `libi.get_overlays({ pieceId })`.
 2. If `clip` is longer than 4 s, trim the `background` overlay: `libi.update_overlay({ pieceId, overlayId, duration: 4 })`. If `clip` is empty, skip this step.
-3. `libi.show_preview({ pieceId })`.
+3. `libi.show({ target: "preview", pieceId })`.
 
 ## Style rules
 

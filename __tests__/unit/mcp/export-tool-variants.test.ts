@@ -87,4 +87,16 @@ describe("libi.export_video with variants", () => {
     expect(r).toEqual({ success: false, data: { error: "dest_folder_removed", hint: DEST_FOLDER_REFUSAL, queued: [] } });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("says so when a variant was fitted for social (no size named), and only then", async () => {
+    const fitted = new Response(JSON.stringify({ jobId: "job-1", exportId: "exp_1", name: "Piece", chromiumDownloadMb: null, settings: { format: "mp4", width: 1080, height: 1920, bitrate: 1, quality: "source", socialFit: true } }));
+    fetchMock.mockResolvedValueOnce(fitted).mockResolvedValueOnce(enq(2, 3840, 2160));
+    const r = await exportVideoVariants({ pieceId: "p1", purpose: "social", variants: [{}, { quality: "4k" }] });
+    const note = (r.data as { note: string }).note;
+    expect(note).toContain(VARIANTS_NOTE);
+    expect(note).toContain("One was fitted for social");
+    fetchMock.mockResolvedValueOnce(enq(3, 3840, 2160));
+    const plain = await exportVideoVariants({ pieceId: "p1", variants: [{ quality: "4k" }] });
+    expect((plain.data as { note: string }).note).toBe(VARIANTS_NOTE);
+  });
 });

@@ -42,7 +42,7 @@ carries a `dependencies` array — find the entry with `binary: "uv"`:
 
 - `installed: true` — carry on to step 3.
 - `installed: false` — libi downloads it from the Agents → Libi MCP
-  tab: call `libi.show_extension({ extensionId: "local-music" })` and ask the user to
+  tab: call `libi.show({ target: "extension", extensionId: "local-music" })` and ask the user to
   press **Download** next to `uv` on that card, then re-run
   `libi.get_install_plan` to confirm before continuing. Do not try to install
   `uv` yourself, and do not go on to step 3 without it — the model download
@@ -109,7 +109,7 @@ Duration defaults to ~30s. Possible failure statuses:
 
 Pass `lyrics` for vocals or `instrumental: true` for a bed. The result
 is a stored audio file — add it to the composition with
-`libi.add_audio_track`.
+`libi.audio_add_clip`.
 
 ## 7. Model updates
 

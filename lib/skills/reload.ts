@@ -7,7 +7,7 @@ import { serverLogger as logger } from "@/lib/logger";
  *   1. Re-write `.claude/skills`, `.agents/skills` from current DB.
  *   2. Schedule a reload of every active ACP session so it re-reads the workspace.
  *
- * Mirrors the pattern used by `libi.restart_mcp_server` (whole-session reload).
+ * Mirrors the pattern used by `libi.extension({ action: "restart" })` (whole-session reload).
  * Errors are logged but never thrown — caller's mutation must still succeed
  * even if reload scheduling fails.
  */

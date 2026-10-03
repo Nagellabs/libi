@@ -1,6 +1,6 @@
 # Style catalog (copy + fill, do not invent pacing)
 
-These mirror the tested templates in `lib/engine/text-anim/templates.ts`. Each
+These are tested templates. Each
 body destructures element-local timing from `context` and paces off `progress`.
 Fill TEXT / fonts / colors; keep the pacing math.
 
@@ -40,6 +40,7 @@ ctx.globalAlpha=Math.min(1,p*1.5); ctx.font="bold 80px Inter,sans-serif"; ctx.fi
 ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText("SALE",0,0); ctx.restore(); ctx.globalAlpha=1;
 ```
 
-(For slide-up-lines, gradient-sweep, and lower-third, the same element-local
-`progress` pacing applies — see `lib/engine/text-anim/templates.ts` for the
-exact bodies; ask the engine maintainer if a server-side template tool lands.)
+Slide-up lines, gradient sweep and lower-third use the same element-local `progress` pacing:
+write them from the shapes above (offset y by `(1 - easeOutCubic(p)) * 24` for the slide,
+sweep a gradient stop with `progress` for the shine, draw a bar behind the text for the
+lower-third).

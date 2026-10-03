@@ -199,7 +199,7 @@ export async function clonePieceInto(
       // Detach the piece_dup job(s) from the shell piece BEFORE deleting it.
       // `jobs.pieceId` has ON DELETE CASCADE → deleting the shell would also
       // delete the job row, leaving JobManager unable to mark it `failed` and
-      // the agent's `get_job_status` poll returning a confusing 404/500. The
+      // the agent's `libi.job` (status) poll returning a confusing 404/500. The
       // job must survive as a `failed`, retryable row.
       db.update(jobs).set({ pieceId: null }).where(eq(jobs.pieceId, newPieceId)).run();
     } catch (detachErr) {

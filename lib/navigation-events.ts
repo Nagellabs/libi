@@ -2,7 +2,7 @@ import { EventEmitter } from "events";
 
 /**
  * Global event emitter for navigation events from MCP tools to the UI.
- * Used by libi.show_piece and libi.show_asset to navigate the editor.
+ * Used by libi.show({ target: "piece" }) and libi.show({ target: "asset" }) to navigate the editor.
  * The SSE endpoint subscribes to these events and forwards them to clients.
  *
  * Navigation events broadcast to ALL SSE connections (not scoped per chat window).
@@ -59,7 +59,7 @@ export interface OverlayErrorEvent {
   message: string;
 }
 
-/** Send the user to the Agents page (`libi.show_extension`,
+/** Send the user to the Agents page (`libi.show({ target: "extension" })`,
  *  `libi.start_onboarding`). The client pushes `/agents?tab=<tab>` with the
  *  optional focus ids as `extension=` / `provider=`. */
 export interface NavigateAgentsEvent {
@@ -76,10 +76,20 @@ export interface NavigateAgentsEvent {
   navId?: string;
 }
 
-/** Send the user to the Templates page (`libi.show_templates`). The client
+/** Send the user to the Templates page (`libi.show({ target: "templates" })`). The client
  *  pushes `/templates?tab=mine` and, when given, `&template=<id>`. */
 export interface NavigateTemplatesEvent {
   templateId?: string;
+  /** As on `NavigateAgentsEvent`. */
+  fromSessionId?: string;
+  navId?: string;
+}
+
+/** Send the user to the Social page's Settings tab (`libi.show({ target: "social_settings" })`), optionally at one
+ *  connected account. The client pushes `/social?tab=settings` and, when given, `&account=<id>`. */
+export interface NavigateSocialEvent {
+  /** The connected account to point at (its provider id, from `libi.social_status`). */
+  accountId?: string;
   /** As on `NavigateAgentsEvent`. */
   fromSessionId?: string;
   navId?: string;

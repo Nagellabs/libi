@@ -218,13 +218,13 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
   }, 15_000);
 
   // =========================================================================
-  // 4. show_piece
+  // 4. show (target: piece)
   // =========================================================================
-  it("libi.show_piece returns navigated: true", async () => {
+  it("libi.show({ target: 'piece' }) returns navigated: true", async () => {
     const result = parseResult(
       await client.callTool({
-        name: "libi.show_piece",
-        arguments: { pieceId: PIECE_1 },
+        name: "libi.show",
+        arguments: { target: "piece", pieceId: PIECE_1 },
       }),
     );
     expect(result.success).toBe(true);
@@ -232,12 +232,12 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
   }, 15_000);
 
   // =========================================================================
-  // 5. update_piece_name
+  // 5. update_piece (name)
   // =========================================================================
-  it("libi.update_piece_name updates the piece name", async () => {
+  it("libi.update_piece updates the piece name", async () => {
     const result = parseResult(
       await client.callTool({
-        name: "libi.update_piece_name",
+        name: "libi.update_piece",
         arguments: { pieceId: PIECE_1, name: "Renamed Piece" },
       }),
     );
@@ -253,12 +253,12 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
   }, 15_000);
 
   // =========================================================================
-  // 6. update_piece_description
+  // 6. update_piece (description only)
   // =========================================================================
-  it("libi.update_piece_description updates the description", async () => {
+  it("libi.update_piece updates only the description", async () => {
     const result = parseResult(
       await client.callTool({
-        name: "libi.update_piece_description",
+        name: "libi.update_piece",
         arguments: { pieceId: PIECE_1, description: "Updated description" },
       }),
     );
@@ -270,6 +270,15 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
       .where(eq(pieces.id, PIECE_1))
       .all();
     expect(row.description).toBe("Updated description");
+    expect(row.name).toBe("Renamed Piece"); // a description-only call leaves the name alone
+  }, 15_000);
+
+  it("libi.update_piece with neither name nor description says what it needs", async () => {
+    const result = parseResult(
+      await client.callTool({ name: "libi.update_piece", arguments: { pieceId: PIECE_1 } }),
+    );
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/name.*description/);
   }, 15_000);
 
   // =========================================================================
@@ -365,13 +374,13 @@ describe("MCP tools integration", { timeout: 120_000 }, () => {
   // 16–17. Video scene tools
   // =========================================================================
   // =========================================================================
-  // 21. show_asset
+  // 21. show (target: asset)
   // =========================================================================
-  it("libi.show_asset returns navigated: true", async () => {
+  it("libi.show({ target: 'asset' }) returns navigated: true", async () => {
     const result = parseResult(
       await client.callTool({
-        name: "libi.show_asset",
-        arguments: { pieceId: PIECE_1, fileId: VIDEO_FILE_ID },
+        name: "libi.show",
+        arguments: { target: "asset", pieceId: PIECE_1, fileId: VIDEO_FILE_ID },
       }),
     );
     expect(result.success).toBe(true);

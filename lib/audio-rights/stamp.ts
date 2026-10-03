@@ -33,6 +33,10 @@ export interface YtDlpInfo {
   creator?: string;
   album?: string;
   title?: string;
+  /** Seconds. */
+  duration?: number;
+  uploader?: string;
+  channel?: string;
 }
 
 export function downloadStamp(info: YtDlpInfo | null, fallbackUrl: string, now?: Date): AudioRights {

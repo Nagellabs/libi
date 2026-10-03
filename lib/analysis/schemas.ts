@@ -122,7 +122,7 @@ export type VideoSummary = z.infer<typeof videoSummarySchema>;
 //   - libi's own path, local Whisper (`lib/whisper/transcribe.ts`), which
 //     emits real word tokens only — no spacing, no audio events, no speakers;
 //   - a diarizing transcription MCP the user connected themselves, whose
-//     results the agent saves through `libi.analysis_save_audio_chunk`
+//     results the agent saves through `libi.analysis_save({ action: "audio_chunk" })`
 //     (Path B) — libi never calls that provider and cannot constrain it.
 //
 // So the optional fields are tolerance for the second kind, not a description

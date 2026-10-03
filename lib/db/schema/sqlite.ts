@@ -52,7 +52,7 @@ export const pieces = sqliteTable("pieces", {
    * When this piece was last OPENED in the editor — distinct from `updatedAt`,
    * which moves on every mutation the agent makes. Stamped by
    * POST /api/editor/open-piece, the one chokepoint every open already flows
-   * through (UI clicks, restore-on-boot, and the agent's `libi.show_piece`,
+   * through (UI clicks, restore-on-boot, and the agent's `libi.show({ target: "piece" })`,
    * which lands here via the SSE navigation event).
    *
    * Nullable on purpose: pieces created before this column existed, and pieces
@@ -862,7 +862,7 @@ export const templates = sqliteTable(
      *  linked to another catalog than this process reads is not linked here
      *  (lib/templates/cloud/catalog-source.ts). Null only with no link. */
     cloudSource: text("cloud_source"),
-    /** Bumps on every update_template / re-extract. */
+    /** Bumps on every libi.template update / re-extract. */
     version: integer("version").notNull().default(1),
     /** Lineage only — nulled when the source piece goes. */
     createdFromPieceId: text("created_from_piece_id").references(() => pieces.id, {

@@ -61,6 +61,7 @@ import {
   ytDlpBinaryPath,
   resolveYtDlpSpawn,
   videoDownloadRunner,
+  type VideoDownloadResult,
   SIGKILL_AFTER_MS,
   StreamProgress,
   UNKNOWN_SIZE_REPORT_MS,
@@ -116,7 +117,7 @@ interface Reported {
 }
 
 function makeCtx(
-  params: { url: string; pieceId: string | null; audioOnly: boolean },
+  params: { url?: string; search?: string; pieceId: string | null; audioOnly: boolean; candidates?: number },
   reported: Reported[] = [],
   shouldCancel: () => boolean = () => false,
   onFirstProgress?: () => void,
@@ -592,8 +593,8 @@ describe("videoDownloadRunner", () => {
     expect(storeFile).toHaveBeenCalledTimes(1);
     expect(storeFile.mock.calls[0][0].filename).toBe("Morning_vibe_happyhippie.mp4");
     expect(storeFile.mock.calls[0][0].buffer.toString()).toBe("video-bytes");
-    expect(result.filename).toBe("Morning_vibe_happyhippie.mp4");
-    expect(result.title).toBe("Morning_vibe_happyhippie");
+    expect((result as VideoDownloadResult).filename).toBe("Morning_vibe_happyhippie.mp4");
+    expect((result as VideoDownloadResult).title).toBe("Morning_vibe_happyhippie");
   });
 
   /** Fail honestly rather than register the abandoned stream. */
@@ -972,5 +973,156 @@ describe("videoDownloadRunner", () => {
     expect(infoAt).toBeGreaterThan(-1);
     expect(args[infoAt - 1]).toBe("-o");
     expect(infoAt).toBeLessThan(mediaAt);
+  });
+
+  describe("search mode (agent-speed B4b)", () => {
+    const SEARCH = "fleetwood mac dreams official audio";
+    const INFO = JSON.stringify({
+      webpage_url: "https://www.youtube.com/watch?v=mrZRURcb1cM",
+      extractor: "youtube",
+      title: "Fleetwood Mac - Dreams (Official Audio)",
+      duration: 257.4,
+      uploader: "Fleetwood Mac",
+    });
+
+    it("runs yt-dlp on ytsearch1:<words>, skips the url guard, stamps copyrighted from the PICKED page, and returns it", async () => {
+      const argsFile = path.join(home, "args.txt");
+      writeFakeYtDlp(
+        `printf '%s\\n' "$@" > "${argsFile}"\n` +
+          `printf '%s' '${INFO}' > "$OUTDIR/libi-meta.info.json"\n` +
+          `printf 'mp3' > "$OUTDIR/Fleetwood_Mac_-_Dreams_Official_Audio.mp3"\n`,
+      );
+      const result = await videoDownloadRunner.run(
+        makeCtx({ search: `  ${SEARCH}\n `, pieceId: "piece-9", audioOnly: true }) as never,
+      );
+      const args = fs.readFileSync(argsFile, "utf-8").trimEnd().split("\n");
+      expect(args.at(-1)).toBe(`ytsearch1:${SEARCH}`);
+      expect(args).toContain("--no-write-playlist-metafiles");
+      expect(args).toContain("-x");
+      // No url, so nothing to resolve or vet.
+      expect(dnsLookup).not.toHaveBeenCalled();
+      expect(depCalls).toEqual(["ensureDep:youtube-download/uv", "ensureDep:youtube-download/yt-dlp"]);
+
+      const stored = storeFile.mock.calls[0][0];
+      expect(stored.filename).toBe("Fleetwood_Mac_-_Dreams_Official_Audio.mp3"); // never the info json
+      expect(stored.description).toBe("Downloaded from https://www.youtube.com/watch?v=mrZRURcb1cM");
+      expect(stored.audioRights).toMatchObject({
+        class: "copyrighted",
+        source: { url: "https://www.youtube.com/watch?v=mrZRURcb1cM", site: "youtube" },
+        decidedBy: "provenance",
+      });
+      expect(result).toEqual({
+        fileId: "file-1",
+        filename: "Fleetwood_Mac_-_Dreams_Official_Audio.mp3",
+        title: "Fleetwood_Mac_-_Dreams_Official_Audio",
+        bytes: 3,
+        picked: {
+          title: "Fleetwood Mac - Dreams (Official Audio)",
+          url: "https://www.youtube.com/watch?v=mrZRURcb1cM",
+          durationSec: 257,
+          uploader: "Fleetwood Mac",
+        },
+      });
+    });
+
+    it("never stores a stray info json as the media, even one under another name", async () => {
+      writeFakeYtDlp(
+        `printf '%s' '${INFO}' > "$OUTDIR/libi-meta.info.json"\n` +
+          `printf '%s' '${INFO}${" ".repeat(5000)}' > "$OUTDIR/Playlist_search.info.json"\n` +
+          `printf 'mp3' > "$OUTDIR/Dreams.mp3"\n`,
+      );
+      await videoDownloadRunner.run(makeCtx({ search: SEARCH, pieceId: null, audioOnly: true }) as never);
+      expect(storeFile.mock.calls[0][0].filename).toBe("Dreams.mp3");
+    });
+
+    it("still stamps copyrighted, with the search as the source, when yt-dlp wrote no info json", async () => {
+      writeFakeYtDlp(`printf 'mp3' > "$OUTDIR/Dreams.mp3"\n`);
+      const result = await videoDownloadRunner.run(makeCtx({ search: SEARCH, pieceId: null, audioOnly: true }) as never);
+      const stored = storeFile.mock.calls[0][0];
+      expect(stored.description).toBe(`Downloaded from ytsearch1:${SEARCH}`);
+      expect(stored.audioRights).toMatchObject({ class: "copyrighted" });
+      expect((result as VideoDownloadResult).picked).toMatchObject({ title: "Dreams" });
+    });
+
+    it("names the search when yt-dlp found nothing, and stores nothing", async () => {
+      writeFakeYtDlp(`exit 0\n`);
+      await expect(
+        videoDownloadRunner.run(makeCtx({ search: "zzzz qqqq", pieceId: null, audioOnly: true }) as never),
+      ).rejects.toThrow(/no search results for "zzzz qqqq"/);
+      expect(storeFile).not.toHaveBeenCalled();
+    });
+
+    it("refuses an empty search, both url and search, and neither, before anything runs", () => {
+      const schema = videoDownloadRunner.paramsSchema;
+      expect(schema.safeParse({ search: "   ", pieceId: null }).success).toBe(false);
+      expect(schema.safeParse({ search: "x", url: PUBLIC_URL, pieceId: null }).success).toBe(false);
+      expect(schema.safeParse({ pieceId: null }).success).toBe(false);
+      expect(schema.safeParse({ search: "x", pieceId: null }).success).toBe(true);
+    });
+
+    describe("candidates: the top results, nothing downloaded", () => {
+      const FLAT = JSON.stringify({
+        _type: "playlist",
+        entries: [
+          { id: "5oWyMakvQew", title: "Dreams (2004 Remaster)", url: "https://www.youtube.com/watch?v=5oWyMakvQew", duration: 257.6, uploader: null, channel: "Fleetwood Mac" },
+          { id: "PgagPdVM7bk", title: "Fleetwood Mac - Dreams (Official Audio)", url: "https://www.youtube.com/watch?v=PgagPdVM7bk", duration: 258, uploader: "Fleetwood Mac" },
+          { id: "noTitle", url: "https://www.youtube.com/watch?v=noTitle" },
+          { id: "onlyId", title: "Live in 1977", duration: null },
+        ],
+      });
+
+      it("runs a flat ytsearchN: listing (no media args, no output dir use), stores nothing, and maps the entries", async () => {
+        const argsFile = path.join(home, "args.txt");
+        writeFakeYtDlp(`printf '%s\\n' "$@" > "${argsFile}"\nprintf '%s' '${FLAT}'\n`);
+        const result = await videoDownloadRunner.run(makeCtx({ search: ` ${SEARCH} `, pieceId: null, audioOnly: false, candidates: 4 }) as never);
+        const args = fs.readFileSync(argsFile, "utf-8").trimEnd().split("\n");
+        expect(args.at(-1)).toBe(`ytsearch4:${SEARCH}`);
+        expect(args).toEqual(expect.arrayContaining(["--flat-playlist", "-J", "--ignore-config"]));
+        expect(args).not.toContain("-f");
+        expect(args).not.toContain("-x");
+        expect(storeFile).not.toHaveBeenCalled();
+        expect(dnsLookup).not.toHaveBeenCalled();
+        expect(depCalls).toEqual(["ensureDep:youtube-download/uv", "ensureDep:youtube-download/yt-dlp"]);
+        expect(result).toEqual({
+          candidates: [
+            { title: "Dreams (2004 Remaster)", url: "https://www.youtube.com/watch?v=5oWyMakvQew", durationSec: 258, uploader: "Fleetwood Mac" },
+            { title: "Fleetwood Mac - Dreams (Official Audio)", url: "https://www.youtube.com/watch?v=PgagPdVM7bk", durationSec: 258, uploader: "Fleetwood Mac" },
+            // An entry with no title is not a candidate; one with a title and an id only gets its watch page.
+            { title: "Live in 1977", url: "https://www.youtube.com/watch?v=onlyId" },
+          ],
+        });
+      });
+
+      it("names the search when there are no results, and when yt-dlp fails", async () => {
+        writeFakeYtDlp(`printf '%s' '{"entries":[]}'\n`);
+        await expect(videoDownloadRunner.run(makeCtx({ search: "zzzz", pieceId: null, audioOnly: false, candidates: 5 }) as never)).rejects.toThrow(/no search results for "zzzz"/);
+        writeFakeYtDlp(`echo 'ERROR: HTTP Error 429' >&2\nexit 1\n`);
+        await expect(videoDownloadRunner.run(makeCtx({ search: "zzzz", pieceId: null, audioOnly: false, candidates: 5 }) as never)).rejects.toThrow(/yt-dlp search failed \(exit 1\).*429/);
+        writeFakeYtDlp(`printf 'not json'\n`);
+        await expect(videoDownloadRunner.run(makeCtx({ search: "zzzz", pieceId: null, audioOnly: false, candidates: 5 }) as never)).rejects.toThrow(/not JSON/);
+      });
+
+      it("params: candidates needs search and 1-10; absent, the params are exactly what they were", () => {
+        const schema = videoDownloadRunner.paramsSchema;
+        expect(schema.safeParse({ search: "x", pieceId: null, candidates: 5 }).success).toBe(true);
+        expect(schema.safeParse({ url: PUBLIC_URL, pieceId: null, candidates: 5 }).success).toBe(false);
+        expect(schema.safeParse({ search: "x", pieceId: null, candidates: 0 }).success).toBe(false);
+        expect(schema.safeParse({ search: "x", pieceId: null, candidates: 11 }).success).toBe(false);
+        expect(JSON.stringify(schema.parse({ search: "x", pieceId: null }))).toBe(JSON.stringify({ search: "x", pieceId: null, audioOnly: false }));
+      });
+    });
+
+    it("leaves url mode's params, args and result exactly as they were", async () => {
+      // The dedupe hash of a url download must not move: no `search` key in the parsed params.
+      const parsed = videoDownloadRunner.paramsSchema.parse({ url: PUBLIC_URL, pieceId: "p", audioOnly: false });
+      expect(JSON.stringify(parsed)).toBe(JSON.stringify({ url: PUBLIC_URL, pieceId: "p", audioOnly: false }));
+      const argsFile = path.join(home, "args.txt");
+      writeFakeYtDlp(`printf '%s\\n' "$@" > "${argsFile}"\nprintf 'v' > "$OUTDIR/v.mp4"\n`);
+      const result = await videoDownloadRunner.run(makeCtx({ url: PUBLIC_URL, pieceId: null, audioOnly: false }) as never);
+      const args = fs.readFileSync(argsFile, "utf-8").trimEnd().split("\n");
+      expect(args.at(-1)).toBe(PUBLIC_URL);
+      expect(args).not.toContain("--no-write-playlist-metafiles");
+      expect(result).not.toHaveProperty("picked");
+    });
   });
 });

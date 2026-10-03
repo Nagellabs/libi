@@ -23,7 +23,7 @@ aspect ratio (e.g. "a 6-second 9:16 name card that slides in from the left").>
 2. If `clip` is longer than 6 s, trim the `background` overlay: `libi.update_overlay({ pieceId, overlayId, duration: 6 })`.
 3. Re-time the `headline` overlay to start 0.5 s after the clip's first cut: `libi.update_overlay({ pieceId, overlayId, startTime })`.
 4. If the user gave a brand colour, set it on the `headline` overlay's `color` and on the `sparkle` code overlay's `ACCENT` constant (edit its `codeFilePath`).
-5. `libi.show_preview({ pieceId })`.
+5. `libi.show({ target: "preview", pieceId })`.
 
 ## Style rules
 

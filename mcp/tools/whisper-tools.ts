@@ -9,6 +9,7 @@ import {
   LibiServerUnavailableError,
 } from "@/mcp/jobs-client";
 import type { ToolResult } from "./types";
+import { attachedDownloadNote, matchedDownloadNote } from "./job-notes";
 import type {
   WhisperListModelsParams,
   WhisperDownloadModelParams,
@@ -84,6 +85,7 @@ export async function whisperDownloadModel(
             clientKey: resp.clientKey,
             attachedToRunning: true,
             existingJob: resp.existingJob,
+            note: attachedDownloadNote({ what: "a download of this model", restartArg: "forceNew:true" }),
           },
         };
       }
@@ -99,6 +101,7 @@ export async function whisperDownloadModel(
             model: params.model,
             matchedExisting: true,
             existingJob: resp.existingJob,
+            note: matchedDownloadNote({ restartArg: "forceNew:true" }),
             ...(installed
               ? {}
               : {

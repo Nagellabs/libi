@@ -85,7 +85,7 @@ export async function createItem(
     .find((c) => c.name === params.name);
   if (existing) {
     return err(
-      `Item "${params.name}" already exists (id ${existing.id}). Use update_item or link_item_to_asset instead.`,
+      `Item "${params.name}" already exists (id ${existing.id}). Use libi.catalog_item({ action: "update" }) or libi.catalog_item({ action: "link" }) instead.`,
     );
   }
 

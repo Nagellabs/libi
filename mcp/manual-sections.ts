@@ -15,6 +15,8 @@
  * manual is rendered by the caller (`mcp/workspace.ts`).
  */
 
+import { MERGED_TOOL_MAP_KEY } from "@/mcp/merged-tool-map";
+
 /** One top-level (`##`) section of the manual. */
 export interface ManualSection {
   /** Lookup key shown in the index, e.g. `drawing-helper-functions`. */
@@ -39,7 +41,7 @@ export interface SplitManual {
 /**
  * Sections inlined verbatim into the no-argument index, in priority order —
  * what an agent needs before its FIRST edit. Deliberately NOT the big
- * reference material (`MCP Tools` is 25 KB, `Canvas Dimensions` 10 KB): those
+ * reference material (the `MCP Tools` family, `Canvas Dimensions` 11 KB): those
  * are a single follow-up call away, and the tool description says so.
  *
  * Security and storyboard-first already live in the instructions core, so they
@@ -50,6 +52,9 @@ export interface SplitManual {
  */
 export const ESSENTIAL_SECTION_KEYS: readonly string[] = [
   "workflow",
+  // Generated (mcp/merged-tool-map.ts), not in the template: where an agent that looks for a VERB (split,
+  // undo, duck) finds the merged tool that does it.
+  MERGED_TOOL_MAP_KEY,
   "working-with-pieces",
   "canvas-coordinate-system",
   "planning-workflow-storyboard-first-for-video",
@@ -75,8 +80,26 @@ export const ESSENTIAL_SECTION_KEYS: readonly string[] = [
  * well. Under the overlay sandbox the DrawContext is the exact list of what a
  * body may read, so both body sections are pinned as inlined too
  * (`manual-truth.test.ts`). With every essential inlined the index is ~17.9 KB.
+ *
+ * Raised to 24_576 on 2026-10-02: the generated merged-tool map (`mcp/merged-tool-map.ts`, ~3.8 KB, the
+ * essential that tells an agent which noun a verb such as "split" now lives under) took the Codex index to
+ * ~22.5 KB, 4 KB over the old ceiling, and the Storyboard-first section was the first essential to be
+ * pushed out. Nothing less useful was left to trim: every index line and every other essential is pinned
+ * by a test. 24 KiB is still a quarter of the ~100 KB at which a client spools the result.
+ *
+ * Raised to 28_672 on 2026-10-03: the agent-speed tools (apply_ops, the piece clock in DrawContext, insert_time,
+ * audio_analyze, code_outline) each add a map line or an essential line, and the 1 KB headroom the map test keeps
+ * was gone — agents had started trimming each other's glosses to fit. The index is read once per session (~1K
+ * tokens more), against batch tools that save dozens of calls; still well under the spool size.
  */
-export const DEFAULT_INDEX_BUDGET_BYTES = 18_432;
+export const DEFAULT_INDEX_BUDGET_BYTES = 28_672;
+
+/**
+ * The per-section ceiling a section must stay under so a client reads it in one result.
+ * Not enforced at runtime; `manual-sections.test.ts` pins it (and a 70% working margin for the
+ * `mcp-tools-*` reference sections, where new tools keep landing).
+ */
+export const SECTION_CAP_BYTES = 30 * 1024;
 
 /** The reserved key that returns the manual unchanged. */
 export const ALL_SECTIONS_KEY = "all";
@@ -218,8 +241,12 @@ function firstSentence(body: string): string {
  * Split the rendered manual on its top-level `##` headings. `##` lines inside
  * fenced code blocks are body text, not headings.
  *
- * `##` is the level that yields ~25 sections of 0.2–25 KB on the current
- * manual; no section exceeds 30 KB, so no deeper split is needed.
+ * `##` is the level that yields ~35 sections of 0.2–14 KB on the current
+ * manual. A section nears its 30 KB cap by being SPLIT into more `##` sections, not
+ * by a deeper key level: the tool reference is `mcp-tools` (the hub: argument
+ * format, background jobs, and the list of its sub-sections) plus one `## MCP Tools — <domain>`
+ * section per domain. `manual-sections.test.ts` pins every one of them at ≤ 70% of
+ * {@link SECTION_CAP_BYTES}, so the next tools have room to land.
  */
 export function splitManual(manual: string): SplitManual {
   const lines = manual.split("\n");
@@ -336,11 +363,74 @@ export function renderManualIndex(
 /** A resolved `libi.read_manual` response, or a message explaining the miss. */
 export type ManualLookup = { ok: true; text: string } | { ok: false; message: string };
 
+/** The most sections one `section: "a, b, c"` call returns. */
+export const MAX_SECTIONS_PER_CALL = 5;
+
+const FILLER_WORDS = new Set(["and", "the", "for", "with", "how", "to", "of", "in", "on", "a", "an"]);
+
+/** Words of a request that can name a section: lowercase, no filler, a plural or "-ing" dropped ("editing" finds "edit"). */
+function requestWords(request: string): string[] {
+  return (request.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter((w) => w.length >= 3 && !FILLER_WORDS.has(w))
+    .map((w) => (w.length > 5 && w.endsWith("ing") ? w.slice(0, -3) : w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w));
+}
+
+/**
+ * Sections a request that is not a key or a heading probably means. A guess like "Audio" or "Timeline editing"
+ * (words an agent invents from the task, not from the index) otherwise costs a failed call and a 40-key list to
+ * choose from. `titleHits` count the request's words found in the key and heading: when exactly one section holds
+ * them all, it is the answer. `near` is every section that shares a word with its key, heading or description,
+ * best first, for the error to name.
+ */
+function looseMatches(sections: ManualSection[], request: string): { sole: ManualSection | null; near: ManualSection[] } {
+  const words = requestWords(request);
+  if (words.length === 0) return { sole: null, near: [] };
+  const scored = sections.map((s) => {
+    const title = `${s.key} ${s.heading}`.toLowerCase();
+    const full = `${title} ${s.description}`.toLowerCase();
+    return { s, titleHits: words.filter((w) => title.includes(w)).length, allHits: words.filter((w) => full.includes(w)).length };
+  });
+  const complete = scored.filter((x) => x.titleHits === words.length);
+  return {
+    sole: complete.length === 1 ? complete[0].s : null,
+    near: scored
+      .filter((x) => x.allHits > 0)
+      .sort((a, b) => b.titleHits - a.titleHits || b.allHits - a.allHits)
+      .map((x) => x.s),
+  };
+}
+
+function exactSection(sections: ManualSection[], request: string): ManualSection | undefined {
+  const wanted = normalizeSectionKey(request);
+  return (
+    sections.find((s) => normalizeSectionKey(s.key) === wanted) ??
+    sections.find((s) => normalizeSectionKey(s.heading) === wanted)
+  );
+}
+
+function unknownSection(sections: ManualSection[], requested: string, near: ManualSection[]): ManualLookup {
+  const keys = [...sections.map((s) => s.key), ALL_SECTIONS_KEY].map((k) => `"${k}"`).join(", ");
+  const closest = near.slice(0, 3);
+  return {
+    ok: false,
+    message:
+      `Unknown manual section "${requested}".` +
+      (closest.length > 0 ? ` Closest: ${closest.map((s) => `"${s.key}" (${s.description || s.heading})`).join("; ")}.` : "") +
+      ` Valid sections: ${keys}. ` +
+      "Call `libi.read_manual` with no arguments for the index.",
+  };
+}
+
 /**
  * Resolve one `libi.read_manual` call. No section (or a blank one) yields the
- * index; `"all"` the untouched manual; a key the single section. An unknown
- * key is an ERROR carrying the valid keys — never an empty success, which the
- * agent would read as "this section is empty".
+ * index; `"all"` the untouched manual; a key the single section; several keys
+ * separated by commas (`"mcp-tools-audio-clips, batch-edits-across-pieces"`, at most
+ * {@link MAX_SECTIONS_PER_CALL}) those sections in one result. A name that is
+ * neither a key nor a heading still resolves when it points at exactly one section
+ * by its words (`"Audio"` is `mcp-tools-audio-clips`): the result opens with a line
+ * saying which. Otherwise an unknown key is an ERROR carrying the closest sections
+ * and the valid keys — never an empty success, which the agent would read as "this
+ * section is empty".
  */
 export function resolveManualSection(manual: string, section?: string): ManualLookup {
   const requested = (section ?? "").trim();
@@ -348,17 +438,25 @@ export function resolveManualSection(manual: string, section?: string): ManualLo
   if (normalizeSectionKey(requested) === ALL_SECTIONS_KEY) return { ok: true, text: manual };
 
   const { sections } = splitManual(manual);
-  const wanted = normalizeSectionKey(requested);
-  const hit =
-    sections.find((s) => normalizeSectionKey(s.key) === wanted) ??
-    sections.find((s) => normalizeSectionKey(s.heading) === wanted);
+  const hit = exactSection(sections, requested);
   if (hit) return { ok: true, text: hit.text };
 
-  const keys = [...sections.map((s) => s.key), ALL_SECTIONS_KEY].map((k) => `"${k}"`).join(", ");
-  return {
-    ok: false,
-    message:
-      `Unknown manual section "${requested}". Valid sections: ${keys}. ` +
-      "Call `libi.read_manual` with no arguments for the index.",
-  };
+  const parts = requested.includes(",") ? requested.split(",").map((p) => p.trim()).filter(Boolean) : [requested];
+  if (parts.length > MAX_SECTIONS_PER_CALL) {
+    return { ok: false, message: `At most ${MAX_SECTIONS_PER_CALL} sections per call (got ${parts.length}): ask for fewer, or "all" for the whole manual.` };
+  }
+
+  const texts: string[] = [];
+  const seen = new Set<string>();
+  for (const part of parts) {
+    if (normalizeSectionKey(part) === ALL_SECTIONS_KEY) return { ok: true, text: manual };
+    const found = exactSection(sections, part);
+    const loose = found ? null : looseMatches(sections, part);
+    const resolved = found ?? loose?.sole ?? null;
+    if (!resolved) return unknownSection(sections, part, loose?.near ?? []);
+    if (seen.has(resolved.key)) continue;
+    seen.add(resolved.key);
+    texts.push(found ? resolved.text : `(Read "${part}" as the section \`${resolved.key}\`.)\n\n${resolved.text}`);
+  }
+  return { ok: true, text: texts.join("\n\n") };
 }

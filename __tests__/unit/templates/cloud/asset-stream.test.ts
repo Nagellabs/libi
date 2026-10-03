@@ -10,7 +10,7 @@ import { EventEmitter } from "node:events";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import { PassThrough, Readable } from "node:stream";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __setAssetStreamDepsForTests,
   ASSET_STREAM_IMAGE_MAX_BYTES,
@@ -293,9 +293,8 @@ describe("openAssetStream — a refused upstream is closed, never drained (fix-r
       }
       const ok = await open("https://media.example.com/redir");
       expect(await text(ok.body)).toBe("hello");
-      await new Promise((r) => setTimeout(r, 500));
       for (const p of ["/html", "/huge", "/e404", "/redir"]) {
-        expect(net.stats[p].closedAt, `${p} socket still open`).not.toBeNull();
+        await vi.waitFor(() => expect(net.stats[p].closedAt, `${p} socket still open`).not.toBeNull(), { timeout: 5_000 });
         expect(net.stats[p].written, `${p} kept downloading`).toBeLessThan(BOUND);
       }
     } finally {
@@ -311,8 +310,7 @@ describe("openAssetStream — a refused upstream is closed, never drained (fix-r
       const failed = new Promise<unknown>((resolve) => s.body.on("error", resolve));
       s.body.resume(); // a steady drip: never stalls long enough for the idle deadline, never reaches the cap
       expect(((await failed) as AssetStreamRefusal).code).toBe("timeout");
-      await new Promise((r) => setTimeout(r, 200));
-      expect(net.stats["/drip.mp4"].closedAt).not.toBeNull();
+      await vi.waitFor(() => expect(net.stats["/drip.mp4"].closedAt).not.toBeNull(), { timeout: 5_000 });
     } finally {
       await net.close();
     }

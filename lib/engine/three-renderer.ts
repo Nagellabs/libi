@@ -19,6 +19,12 @@ export interface ThreeFrameApi {
   totalFrames: number;
   duration: number;
   progress: number;
+  /** The piece clock, as in a code body's context: this frame's absolute time on
+   *  the timeline, where the overlay starts, how long the piece runs (seconds).
+   *  Optional because the host-built 3D-TEXT path does not set them. */
+  compositionTime?: number;
+  overlayStart?: number;
+  pieceDuration?: number;
   /** Gizmo-driven 3D transform applied to the scene root this frame. A template
    *  MAY read it (most won't — the renderer already applies it via
    *  applyTransform before render). Identity/absent ⇒ no transform. */

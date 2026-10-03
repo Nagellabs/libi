@@ -19,8 +19,8 @@ export interface TrackSegment {
    *  boxes. Mixing them under one overlay `fit` is the torso-emoji bug. */
   objectKind?: "face" | "object";
   /** Who authored this segment. Drives deriveSamples override precedence:
-   *  manual (user re-anchor) > agent (compute_track_segment) > engine
-   *  (compute_object_track / shot fan-out / legacy). Absent ⇒ inferred on
+   *  manual (user re-anchor) > agent (libi.track compute_segment) > engine
+   *  (libi.track compute / shot fan-out / legacy). Absent ⇒ inferred on
    *  read by normalizeTrack (legacy tracks); new writes always set it. */
   provenance?: "manual" | "agent" | "engine";
   /** ms epoch the segment was written. Tiebreak within equal provenance
@@ -155,7 +155,7 @@ export function inferSegmentProvenance(
  * (`seg-<startMs>-<endMs>`) — so a recompute over a not-byte-identical range
  * (task-39: sot [0,19.021] repairing the failed engine [0,18.933]) minted a
  * NEW id and appended, leaving both overlapping segments in the table
- * forever (stale rows in list_track_segments/perSegment, and — on legacy
+ * forever (stale rows in libi.track list_segments/perSegment, and — on legacy
  * sidecars — stitch-resurrection of the superseded samples).
  *
  * Rules (per sibling, vs the incoming `seg`):

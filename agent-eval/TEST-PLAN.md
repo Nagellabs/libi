@@ -39,7 +39,7 @@ Scenarios are ordered so earlier ones create the state later ones reuse
 | 04 | `04-file-upload.md` | `upload_file` from local path, storage, proxy-gen job, SSE `refresh_query` | tokens |
 | 05 | `05-background-job-progress.md` | `runJobViaServer` HTTP+SSE jobs bridge (`trim_video`), Jobs UI | tokens |
 | 07 | `07-skill-loading-ugc.md` | Skill mirror discovery (`<workspace>/.claude/skills/`), ugc-product-video loads | tokens |
-| 09 | `09-skill-creation.md` | `libi.add_skill` → DB row + workspace re-mirror + Skills UI | tokens |
+| 09 | `09-skill-creation.md` | `libi.skill` action `add` → DB row + workspace re-mirror + Skills UI | tokens |
 | 10 | `10-memories-update.md` | `update_memories` consent flow → `memories.md` → instructions regen | tokens |
 | 11 | `11-connect-folder.md` | `libi connect` registration + skills mirror in a folder outside libi, without touching the user's own files | tokens |
 | 12 | `12-parallel-instances-shared-home.md` | Two instances on one Libi Home: one MCP aggregator each, port file, shared DB, SSE | tokens |

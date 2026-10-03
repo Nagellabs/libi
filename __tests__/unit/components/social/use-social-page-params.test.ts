@@ -17,8 +17,10 @@ describe("parseSocialPageParams", () => {
 
   it("reads the post deep link independently of the tab", () => {
     const params = parseSocialPageParams(new URLSearchParams("tab=posts&post=abc123"));
-    expect(params).toEqual({ tab: "posts", post: "abc123" });
+    expect(params).toEqual({ tab: "posts", post: "abc123", account: null });
     expect(parseSocialPageParams(new URLSearchParams("tab=posts")).post).toBeNull();
+    expect(parseSocialPageParams(new URLSearchParams("tab=settings&account=acc-ig")).account).toBe("acc-ig");
+    expect(parseSocialPageParams(new URLSearchParams("tab=settings")).account).toBeNull();
   });
 });
 

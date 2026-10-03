@@ -47,6 +47,7 @@ const socialSettings = vi.hoisted(() => ({ setSocialSettings: vi.fn() }));
 vi.mock("@/lib/db/settings", () => ({ getSocialSettings: () => ({ providerId: "zernio" }), setSocialSettings: socialSettings.setSocialSettings }));
 const socialPost = { id: "x", status: "draft" };
 const adapter = vi.hoisted(() => ({
+  getPost: vi.fn(),
   createPost: vi.fn(),
   updatePost: vi.fn(),
   deletePost: vi.fn(),
@@ -73,6 +74,7 @@ import { POST as permission } from "@/app/api/sessions/[sessionId]/permission/ro
 import { POST as createPost } from "@/app/api/social/posts/route";
 import { PATCH as patchPost, DELETE as deletePost } from "@/app/api/social/posts/[postId]/route";
 import { POST as retryPost } from "@/app/api/social/posts/[postId]/retry/route";
+import { POST as sendToInbox } from "@/app/api/social/posts/[postId]/inbox/route";
 import { POST as oauthStart } from "@/app/api/social/oauth/start/route";
 import { POST as oauthDisconnect } from "@/app/api/social/oauth/disconnect/route";
 import { POST as report } from "@/app/api/templates/cloud/report/route";
@@ -121,6 +123,7 @@ const ROUTES: Array<[string, string, Call, number?]> = [
   ["edit a social post", "posts.update_refused", (h) => patchPost(req("/api/social/posts/x", "PATCH", { requestId: "00000000-0000-4000-8000-000000000002", createdBy: "ui", content: "edited" }, h), params({ postId: "x" }))],
   ["delete a social post", "posts.delete_refused", (h) => deletePost(req("/api/social/posts/x", "DELETE", undefined, h), params({ postId: "x" }))],
   ["retry a social post", "posts.retry_refused", (h) => retryPost(req("/api/social/posts/x/retry", "POST", {}, h), params({ postId: "x" }))],
+  ["send a draft to a platform inbox", "posts.inbox_refused", (h) => sendToInbox(req("/api/social/posts/x/inbox", "POST", { requestId: "00000000-0000-4000-8000-000000000003" }, h), params({ postId: "x" }))],
   ["connect social accounts", "oauth.start_refused", (h) => oauthStart(req("/api/social/oauth/start", "POST", {}, h))],
   ["disconnect social accounts", "oauth.disconnect_refused", (h) => oauthDisconnect(req("/api/social/oauth/disconnect", "POST", {}, h))],
   ["report a catalog template", "report_refused", (h) => report(req("/api/templates/cloud/report", "POST", { cloudId: "abcdefghijklmnopqrst", reason: "spam" }, h))],
@@ -134,6 +137,22 @@ const ROUTES: Array<[string, string, Call, number?]> = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // A draft libi made for TikTok only: the one shape "send to inbox" accepts.
+  adapter.getPost.mockResolvedValue({
+    id: "x",
+    status: "draft",
+    content: "",
+    createdAt: "2026-10-03T00:00:00.000Z",
+    media: [],
+    tags: [],
+    targets: [{ platform: "tiktok", accountId: "tt1", status: "pending" }],
+    libi: {
+      pieceId: "p1",
+      targetOptions: [
+        { platform: "tiktok", tiktok: { privacyLevel: "SELF_ONLY", allowComment: false, allowDuet: false, allowStitch: false, commercialContentType: "none", contentPreviewConfirmed: true, expressConsentGiven: true } },
+      ],
+    },
+  });
   adapter.createPost.mockResolvedValue({ post: socialPost, deduped: false });
   adapter.updatePost.mockResolvedValue({ post: socialPost, deduped: false });
   adapter.deletePost.mockResolvedValue(undefined);
@@ -151,6 +170,7 @@ describe("user-only actions refuse a header-less loopback caller", () => {
     // Nothing behind the check ran.
     expect(approval.resolve).not.toHaveBeenCalled();
     expect(approval.restart).not.toHaveBeenCalled();
+    expect(adapter.getPost).not.toHaveBeenCalled();
     expect(adapter.createPost).not.toHaveBeenCalled();
     expect(adapter.updatePost).not.toHaveBeenCalled();
     expect(adapter.deletePost).not.toHaveBeenCalled();

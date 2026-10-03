@@ -63,6 +63,9 @@ export async function fetchTemplateMusic(
       volume: c.volume,
       enabled: c.enabled ?? true,
       label: entry.track.title,
+      ...(c.gainDb !== undefined ? { gainDb: c.gainDb } : {}),
+      ...(c.volumeKeyframes ? { volumeKeyframes: c.volumeKeyframes } : {}),
+      ...(c.crossfadeMs !== undefined ? { crossfadeMs: c.crossfadeMs } : {}),
       ...(c.duck ? { duck: { ...c.duck, sidechainClipIds: c.duck.sidechainClipIds.filter((s) => liveClipIds.has(s)) } } : {}),
     });
   }

@@ -1,7 +1,6 @@
 ---
 name: generic-video
-description: Create a genre-agnostic AI video — either recreating a source (handed over by mimic-video) or from a fresh brief. Owns the creative intake (fidelity, theme/style, pacing, duration, stitch-vs-fully-AI, model, voice) and the build flow. References ugc-craft for prompt craft, ai-video-models for per-engine rules, ai-asset-generation for mechanics.
-when_to_use: User wants to create or recreate a video that is NOT specifically a UGC/product ad or a music video — a vlog, explainer, cinematic, b-roll, timelapse, meme, stylized reinterpretation, etc. Invoked directly ("make me a 10s video of X") or handed a source by mimic-video.
+description: "Make a video that is not a UGC product ad or a music video (vlog, explainer, cinematic, b-roll, timelapse, meme, stylized take) from a fresh brief ('make me a 10s video of X'), or as the build step after mimic-video hands over a source. Not for product ads (ugc-product-video) or music videos (music-video-creation)."
 tags:
   - generation
   - recreate
@@ -9,142 +8,37 @@ tags:
 
 # Generic Video Creation
 
-## Provider gate — read this first
+Needs a **video** provider: one in your tool list, or a libi extension (those count). Read the `references/providers/<id>.md` here for the provider you use before your first call. With none, call `libi.suggest_provider({ kind: "video" })` and stop; the full rule is `libi.read_manual({ section: "providers" })`.
 
-You need a **video** provider. libi generates no media itself.
+Done looks like: a video that matches what the user asked for (or the source they wanted recreated), built through the storyboard, every AI clip checked before it counts, voiced as agreed, with any on-screen text added as overlays and the result verified against the plan before commit.
 
-1. **Check your tool list.** If you already have a provider that can do video, use it.
-   If this skill ships a reference for it — `references/providers/<id>.md` under this
-   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
-   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
-   reference file for your provider, use the provider's own tool docs (its
-   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
-   constraint rules in this skill. **libi's own extension tools count as a provider**
-   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
-   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
-   not generation). Prefer them by default: they are free and on-device. If one answers
-   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
-   tools) instead of switching provider.
-2. **If you have none** — no remote provider tool and no libi extension for video — call
-   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
-   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
-   back to a tool that cannot do video.
-   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
-   for video is already connected or already installed, and its `covered` list names it.
-   Do not open anything or ask for a key — use what `covered` names, or, if that
-   cannot do what was asked, say plainly what libi cannot do.
+Two ways in: `mimic-video` hands you a source with its analysis and block plan, or the user gives a fresh brief. Either way, settle the intake, plan, build, verify.
 
-`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
-for a general "what's connected?". When the user asks about a provider that is not in your tool
-list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+## Intake: ask only what you cannot infer
 
-Genre-agnostic AI video creation. Two entry modes: (a) `mimic-video` handed you a source +
-analysis to recreate; (b) a direct from-scratch brief. Either way: run the intake, then build.
+- **Fidelity** (recreation only): a faithful copy, or a reinterpretation in a new theme or style.
+- **Look and feel**: theme, mood, palette, era; pacing (calm, normal, punchy) and cut rhythm.
+- **Target duration.**
+- **Stitch or fully AI** (recreation only): reuse the source's own clips with AI around them, or regenerate everything. A stitch goes to `stitching-multi-clip`; the rest of this skill covers the fully-AI path.
+- **Model**: recommend a default and verify it at runtime with your provider's schema and pricing tools (the provider reference names them). The engine's prompting rules are in `video-generation-craft`.
+- **Voice**: the voice-line intake in `ai-asset-generation`, asked once per brief: a spoken line, or no line and then an offer of a music bed (`music-creation`, or the user's own music provider) or ambient only. Native model audio stays on either way.
 
-**Load by reference (never duplicate):**
-- `video-planning` — the senior-editor planning/director layer: decompose the source/brief into
-  building blocks (source-vs-AI, combine-vs-split, style inheritance) BEFORE building cards. Owns
-  Step 3's beat plan.
-- `ugc-craft` — the 9-layer prompt formula, the **clip-duration methodology (≤15s one
-  multi-beat clip; do NOT fragment a short ad into many 3–6s clips)**, realism cues, negative
-  lists.
-- `ai-video-models` — the per-engine prompting guide for your chosen model.
-- `ai-asset-generation` — the call + save mechanics (model pick / schema / pricing / polling /
-  import) and the universal video invariants (**no in-video text**; **native audio on**).
-- `realistic-image-generation` — the keyframe / portrait image craft (gpt-image-2 default).
-- `physical-action-video` — manipulation-beat craft (FLF-first, decomposition, model ladder) when
-  a beat physically manipulates an object.
-- `voiceover-production` — the generation-time audio/voice authority (native audio always; multi-clip voice carry).
-- `voice-replacement` — re-voice / dub an EXISTING video (clone or new voice + lip-sync); user-triggered, only when asked.
+## Plan, then build through the storyboard
 
-## The Storyboard is the build spine (default — not optional)
+Load `video-planning` and produce the block breakdown before authoring any card. In a recreation, refine the plan `mimic-video` extracted. Then build through `using-storyboard`, for every AI video including a one-clip request; it owns the card, schematic, generation-spec and take mechanics. The mapping that matters here: a card is one generated clip and a beat is a jump cut inside it, so a short video is one card. Group beats into the fewest clips the model's own per-clip max allows (a 30-second video is about two clips, never one per shot); `ugc-product-video` states the reasoning in full. Skip the storyboard only if the user says to.
 
-You build the video **through the Storyboard** — it is the mechanism, not an optional planning
-step. Invoke **`using-storyboard`** and follow it; this skill owns the genre-agnostic *intake*
-(below) and hands the beat plan to the board to realize. This is the default for **every** AI
-video, including a single-clip request.
+Set every card's clip and keyframe aspect ratio to the piece's canvas, or in a recreation to the source's actual aspect. The provider does not read the piece, so an unset ratio inherits the model's default.
 
-**Card = a generated clip = a timeline scene. A beat is a jump-cut INSIDE a card.** So a single
-≤15s one-shot is **ONE card** (do NOT make one card per beat); a 30s video is ~2 cards; an
-extend chain is ONE card (the extend versions are its takes); a multi-clip / stitch is N cards
-(link consecutive cards with `set_storyboard_reference` `reference_video` for continuity). For
-each card: author its schematic (free blocking review) → its generation spec (keyframe + clip
-params, carrying any consistency reference) → `libi.show_storyboard` → schematic approval (free
-pre-spend gate) → generate the take → validate (Step 5) → `libi.select_storyboard_take` to place
-the scene. Placement-by-select-take fills the timeline as each card lands.
+## Generate and check each clip
 
-**Opt-off is a rare, explicit user exception** — ONLY if the user directly says "skip the
-storyboard / just generate" do you drop to direct generation + `libi.add_overlay({ kind: "video" })`. Never
-your default; never offered proactively.
+Generate through `ai-asset-generation` (call, cost disclosure, import), writing each prompt with the engine guide in `video-generation-craft`. A manipulation beat or a realistic person has its own reference there; read it when the brief needs it.
 
-## Step 1 — Intake (ASK; do not assume)
-Skip any the user already answered:
-1. **Fidelity** (recreate mode only) — faithful copy vs reinterpret (new theme/style)?
-2. **Theme / style** — look, mood, palette, era.
-3. **Speed / pacing** — calm / normal / punchy; cut rhythm.
-4. **Target duration.**
-5. **Stitch vs fully-AI** — reuse the original's clips, or regenerate everything with AI?
-6. **Model** — recommend a default, then VERIFY it at runtime with your provider's own
-   schema and pricing tools (`references/providers/<id>.md` under this skill names them),
-   and read its prompting guide in `ai-video-models`.
-7. **Voice / audio** — the voice-line intake from `ai-asset-generation` Step 6.6: a spoken
-   line (what it says, or "write it for me"), or no line — and if no line, offer a music bed
-   (libi's free on-device ACE-Step via `music-creation`, or the user's music provider) or
-   ambient only. Native model audio stays ON either way.
+- **No readable text inside the video.** Titles and captions are overlays added afterwards.
+- **Native audio on for every clip**, with a beat's dialogue taken from its card's `voiceover.line`. One voice across several clips: `video-generation-craft`'s voice reference.
+- **Validate before a clip counts.** Run each generated clip through `video-analysis` and look at the frames: extra or missing fingers, illegible text, broken physics and off-model drift are failures. Grade each clip and record it as `ugc-product-video`'s validation gate does (the `validation=` entry on the notes lineage line). Regenerate a rejected clip with a prompt aimed at the failure, as a new take on the same card, then `libi.storyboard_take` action `select` so the timeline fills as clips land.
 
-## Step 2 — Branch on stitch-vs-fully-AI
-- **Stitch** → hand to `stitching-multi-clip` (reuse the source's segments as separate scenes).
-- **Fully-AI** → continue.
+## Audio, text, verify
 
-## Step 3 — Plan first via `video-planning` (living)
-**Load `video-planning` and produce the block breakdown before authoring cards.** Recreate mode:
-reverse-engineer the source's build algorithm into building blocks (or refine the plan
-`mimic-video` already extracted). Direct mode: decompose the brief into blocks. For each block
-decide source-vs-AI, combine-vs-split, and style inheritance, then present the plan for the free
-pre-spend review and capture the editorial intent in the storyboard **overview**. Keep it a LIVING
-plan you update as beats land / re-roll. Honor the ≤15s one-clip rule from `ugc-craft` — a 30s
-video is ~2 clips, not 7. The blocks map 1:1 to storyboard cards (Step 4).
+Layer a music bed (`music-creation`) if the intake called for it; a separate voice-over only when the user opted out of native audio (`video-generation-craft`'s voice reference); captions and titles are overlays (`speech-captions`, `animated-text-overlays`). Clips stay separate overlays, never pre-joined: joining is an export concern. Before committing, read the composition back and confirm the clip count and order, the audio shape and the overlays match the plan, and render and look at the text before telling the user it is done (the manual's "Putting results in front of the user"). Then commit.
 
-## Step 4 — Generate (per card)
-Each clip is a Storyboard **card's take**. Compose its prompt using the chosen engine's guide
-(`ai-video-models`) + `ugc-craft` craft, then generate via `ai-asset-generation`. **No in-video
-text** — captions are overlays (Step 7). Voice: `generate_audio=true` on every beat; a
-beat's dialogue is its card's `voiceover.line` from the intake. After Step 5 validation, `libi.attach_storyboard_clip` the take to its card and
-`libi.select_storyboard_take` to place the scene (a regen is a new take on the same card).
-
-## Step 5 — Validate every clip
-Invoke `video-analysis` on each generated clip; grade for AI-failure modes (extra/missing
-fingers, illegible text, broken physics, off-model drift); record severity; branch
-ok / minor / reject (regenerate rejects with a targeted prompt patch).
-
-## Step 6 — Audio
-Scenes are already placed incrementally via `libi.select_storyboard_take` (Step 4) — one SEPARATE
-scene per card, never pre-concatenated (the editor smooths seams; concatenation is FINAL-EXPORT
-only). Apply the audio plan here: native voice from generation; add a music bed / VO via
-`ai-asset-generation` if wanted.
-
-## Step 7 — Captions / overlays + verify-before-commit
-Add on-screen text as overlays (never baked into the video). Before committing, read the
-composition back and confirm scene count/order, audio shape, and overlays match the plan; then
-commit.
-
-## Look at what you made (required)
-
-After ANY layout, position, size, or typography change — before you tell the
-user it is done — render the affected times and look:
-
-`libi.render_overlay_frames({ pieceId, atTimes: [...], contactSheet: true })`
-
-Read the returned image. Check that text fits its box, that nothing overlaps
-or runs off frame (`overflow.touchesEdge` flags the obvious cases), and that
-`unresolvedFonts` is empty — a family listed there is rendering in a fallback
-face and will look wrong. Reasoning about coordinates is not verification:
-a real build got the brand mark overlapping its wordmark, a chip 90px too
-narrow for its text, and every text in a serif fallback, all of which one
-render made obvious.
-
-## Cross-skill references
-- `video-planning` (the planning/director layer that produces the block plan — Step 3),
-  `using-storyboard` (the build spine — schematic + generation-spec + take/select mechanics),
-  `ugc-craft`, `ai-video-models`, `ai-asset-generation`, `video-analysis`,
-  `stitching-multi-clip`, `using-snapshot-draft`.
+Related: `video-planning`, `using-storyboard`, `video-generation-craft`, `ai-asset-generation`, `video-analysis`, `stitching-multi-clip`, `voice-replacement` (changing the voice of an existing video, only when the user asks).

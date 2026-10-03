@@ -211,8 +211,16 @@ jobs:
         # 0.1.6 and 0.1.7 all published with no maps uploaded. This job builds
         # the code that actually reaches users — the shells only wrap the
         # published runtime — so this is the one upload that matters.
+        #
+        # RELEASE_TZ is the operator's zone, and the script applies it to the
+        # commits it MAKES (`npm version`, the notices amend) and to nothing
+        # else — not to the tests this step runs. A runner's clock is UTC, so
+        # 0.1.17's version commit read "Thu 21:51 +0000": the same instant as
+        # Fri 04:51 +0700, but the public record showed a work day. The
+        # instant is real either way; only the offset git writes changes.
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          RELEASE_TZ: ${{ vars.RELEASE_TZ || 'Asia/Bangkok' }}
         run: |
           node scripts/release-npm.js ${{ inputs.bump }} --ci ${{ inputs.dry_run && '--dry-run' || '' }}
           v=$(node -p "require('./package.json').version")

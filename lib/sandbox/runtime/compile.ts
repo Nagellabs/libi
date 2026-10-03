@@ -86,6 +86,15 @@ export interface DrawBodyContext {
   totalFrames: number;
   duration: number;
   progress: number;
+  /** This frame's ABSOLUTE time on the piece's timeline, in seconds
+   *  (`overlayStart + time`). Pace off this, never off a hard-coded
+   *  composition second, so retiming the overlay or the piece edits no body. */
+  compositionTime: number;
+  /** Where this overlay starts on the piece's timeline, in seconds. */
+  overlayStart: number;
+  /** How long the piece runs, in seconds (the end of its latest overlay or
+   *  audio clip — what the ruler and an export use). */
+  pieceDuration: number;
   words?: CaptionCueWord[];
   /** This piece's image files, keyed by fileId (spec §4.3, §4.8). */
   images: Record<string, ImageBitmap>;
@@ -112,6 +121,11 @@ export function buildDrawBodyContext(input: {
     totalFrames: input.time.totalFrames,
     duration: input.time.duration,
     progress: input.time.progress,
+    // A request that predates the piece clock reads the overlay's own clock as
+    // the piece's: start 0, so `compositionTime` is `time`.
+    compositionTime: input.time.compositionTime ?? (input.time.overlayStart ?? 0) + input.time.time,
+    overlayStart: input.time.overlayStart ?? 0,
+    pieceDuration: input.time.pieceDuration ?? input.time.duration,
     images: input.images,
   };
   if (input.words) c.words = input.words;

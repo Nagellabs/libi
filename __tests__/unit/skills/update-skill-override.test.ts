@@ -71,18 +71,18 @@ describe("updateSkill creates an override for a bundled skill", () => {
   });
 
   /** The fork mechanism `ugc-product-video`'s SKILL.md now points at.
-   *  `RECOMMENDED_VIDEO_MODEL` was moved BACK into SKILL.md because `libi.update_skill`
+   *  `RECOMMENDED_VIDEO_MODEL` was moved BACK into SKILL.md because `libi.skill` update
    *  is the only write path that (a) exists for a forked skill's tunable default and
    *  (b) calls `syncSkillsToWorkspace()`, so the workspace copy the agent actually reads
    *  is not stale. Nothing writes under `references/` at all. */
-  it("fork mechanism: update_skill rewrites the tunable default on disk and re-syncs", async () => {
+  it("fork mechanism: libi.skill update rewrites the tunable default on disk and re-syncs", async () => {
     vi.mocked(syncSkillsToWorkspace).mockClear();
     const body =
       `---\nname: ${NAME}\ndescription: edited desc\n---\n` +
       "## Recommended model\n\n```\nRECOMMENDED_VIDEO_MODEL = bytedance/seedance-2.0\n```\n";
     const res = JSON.parse((await updateSkill(ctx, { name: NAME, body })).content[0].text);
     expect(res.success).toBe(true);
-    // Landed in the USER copy's SKILL.md — the file `libi.update_skill` owns.
+    // Landed in the USER copy's SKILL.md — the file `libi.skill` update owns.
     const userCopy = fs.readFileSync(
       path.join(getLibiSkillsDir(), NAME, "SKILL.md"),
       "utf-8",

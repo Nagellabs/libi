@@ -2,22 +2,22 @@ import { describe, it, expect } from "vitest";
 import { ComputeTrackSegmentSchema, SkipSegmentSchema, ListTrackSegmentsSchema } from "@/mcp/tools/schemas";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 describe("segment tools MCP surface", () => {
   it("compute_track_segment, skip_segment, list_track_segments are on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.compute_track_segment");
-    expect(names).toContain("libi.skip_segment");
-    expect(names).toContain("libi.list_track_segments");
+    expectTrackingAction(names, "libi.track", "compute_segment");
+    expectTrackingAction(names, "libi.track", "skip_segment");
+    expectTrackingAction(names, "libi.track", "list_segments");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
   it("segment tools ARE on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_track_segment");
-    expect(names).toContain("libi.skip_segment");
-    expect(names).toContain("libi.list_track_segments");
+    expectTrackingAction(names, "libi.track", "compute_segment");
+    expectTrackingAction(names, "libi.track", "skip_segment");
+    expectTrackingAction(names, "libi.track", "list_segments");
   });
 });
 

@@ -1,32 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
 import { isKnownEffectId, listEffects } from "@/lib/effects/registry";
+import { loadSkillGraph, resolveSkills } from "../../helpers/skill-graph";
 
-/** Extract effect ids declared in a ```effects fenced block (one id per line). */
-function effectsNamedInSkill(md: string): string[] {
-  const m = md.match(/```effects\n([\s\S]*?)```/);
-  if (!m) return [];
-  return m[1].split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+/** Extract effect ids declared in ```effects fenced blocks (one id per line). */
+function effectsNamed(md: string): string[] {
+  const out: string[] = [];
+  for (const m of md.matchAll(/```effects\n([\s\S]*?)```/g)) {
+    out.push(...m[1].split("\n").map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#")));
+  }
+  return out;
 }
 
 describe("skill ↔ effects registry drift", () => {
-  it("every effect id named in any SKILL.md exists in the registry", () => {
-    const skillsRoot = join(process.cwd(), "mcp", "skills");
+  it("every effect id named in any skill file exists in the registry", () => {
     const offenders: string[] = [];
-    for (const name of readdirSync(skillsRoot)) {
-      const file = join(skillsRoot, name, "SKILL.md");
-      if (!existsSync(file)) continue;
-      for (const id of effectsNamedInSkill(readFileSync(file, "utf8"))) {
-        if (!isKnownEffectId(id)) offenders.push(`${name}: ${id}`);
+    for (const skill of loadSkillGraph().values()) {
+      for (const file of skill.files) {
+        for (const id of effectsNamed(file.text)) {
+          if (!isKnownEffectId(id)) offenders.push(`${skill.id}/${file.rel}: ${id}`);
+        }
       }
     }
     expect(offenders, `Skill names effects not in the registry: ${offenders.join(", ")}`).toEqual([]);
   });
 
-  it("using-effects names at least the core defaults", () => {
-    const md = readFileSync(join(process.cwd(), "mcp", "skills", "using-effects", "SKILL.md"), "utf8");
-    const named = effectsNamedInSkill(md);
+  it("the skill that owns effect choice names at least the core defaults", () => {
+    const named = resolveSkills(["animating-overlays"]).flatMap((s) => s.files.flatMap((f) => effectsNamed(f.text)));
     for (const must of ["fade", "pop", "pulse", "audio-fade-in"]) expect(named).toContain(must);
   });
 

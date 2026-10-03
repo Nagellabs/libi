@@ -64,7 +64,7 @@ assertions:
   - { transcript_contains: "[tool-call mcp__libi__libi_create_template_from_piece]", turn: 1, expect: present }
   - { transcript_contains: "private on this machine, or publish it to the public catalog", turn: 1, scope: agent_text, expect: present }
   - { transcript_contains: "[tool-call mcp__libi__libi_publish_template]", turn: 1, expect: absent }
-  - { transcript_contains: "[tool-call mcp__libi__libi_show_templates]", turn: 1, expect: absent }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_show\][^\n]*"target":\s*"templates"', turn: 1, expect: absent }
   # Turn 2: say what becomes public, ask for the example — and prepare nothing yet.
   - { transcript_contains: "[tool-call mcp__libi__libi_publish_template]", turn: 2, expect: absent }
   - { transcript_contains: ["anyone", "Anyone"], turn: 2, scope: agent_text, expect: present }
@@ -100,4 +100,4 @@ assertions:
   `nickname: "eval-bot"` (a `confirm` is harmless, it is ignored); on
   `awaiting_your_confirmation` told the user it is ready for THEM to publish on the Templates
   page (review, then Publish publicly) and did not claim it was published or give a URL;
-  `libi.show_templates` came last, if at all.
+  `libi.show({ target: "templates" })` came last, if at all.

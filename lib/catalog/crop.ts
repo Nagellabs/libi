@@ -34,7 +34,7 @@ export function buildCropArgs(input: BuildCropArgsInput): string[] {
   // ffmpeg crop needs ABSOLUTE PIXELS. Auto-detect a normalized bbox — every
   // coord ≤ 1, which no real pixel bbox satisfies (a sub-pixel width/height is
   // meaningless) — and scale by the source dimensions. This lets
-  // `create_character({ fromAsset: { bbox } })` accept the analysis bbox
+  // `libi.character({ action: "create", fromAsset: { bbox } })` accept the analysis bbox
   // directly (the common auto-catalog case) instead of flooring 0.38→0 into a
   // degenerate 0×0 crop.
   const isNormalized =

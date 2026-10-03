@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Readable } from "node:stream";
 import { toWebReadable } from "@/lib/http/streams";
 
@@ -27,8 +27,7 @@ describe("toWebReadable", () => {
     const reader = web.getReader();
     await reader.read();
     await reader.cancel();
-    await new Promise((r) => setTimeout(r, 20));
-    expect(destroyed).toBe(true);
+    await vi.waitFor(() => expect(destroyed).toBe(true));
   });
 
   it("swallows post-close enqueue errors (no uncaught)", async () => {

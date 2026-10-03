@@ -1,12 +1,27 @@
 import { describe, it, expect } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
+import { renderDialect } from "@/lib/instructions/dialect";
 
 const file = path.join(process.cwd(), "mcp", "instructions-core.md");
 
 describe("mcp/instructions-core.md", () => {
-  it("stays inside the 1,900-character budget", () => {
-    expect(fs.statSync(file).size).toBeLessThanOrEqual(1900);
+  const raw = () => fs.readFileSync(file, "utf-8");
+
+  // The budget is what an agent RECEIVES: the file carries a Codex-only block, so the raw size says little.
+  it.each(["claude", "codex"] as const)("stays inside the 1,900-character budget (%s rendering)", (dialect) => {
+    expect(renderDialect(raw(), dialect).length).toBeLessThanOrEqual(1900);
+  });
+
+  it("each dialect's block is its one tool-loading hint and nothing else; the other's rendering has none of it", () => {
+    const codex = renderDialect(raw(), "codex");
+    const claude = renderDialect(raw(), "claude");
+    expect(codex).toContain('ALL_TOOLS.filter(t => t.name.startsWith("mcp__libi__")).map(t => t.name)');
+    expect(codex).toMatch(/Never filter on `description`/);
+    expect(claude).not.toMatch(/ALL_TOOLS|Codex: list/);
+    expect(codex).not.toMatch(/ToolSearch|Editing\?/);
+    // Removing each dialect's block leaves the two renderings identical: each is one self-contained line.
+    expect(codex.replace(/\nCodex: list libi tool NAMES first:[^\n]*/, "")).toBe(claude.replace(/\nEditing\? ONE ToolSearch[^\n]*/, ""));
   });
 
   it("carries the provider gate and the no-key rule", () => {
@@ -30,7 +45,10 @@ describe("mcp/instructions-core.md", () => {
   });
 
   it("names tools by their libi. names, never by a wire prefix", () => {
-    expect(fs.readFileSync(file, "utf-8")).not.toMatch(/mcp__libi/);
+    // Outside the dialect blocks: Codex's hint IS the wire-name filter (Code Mode lists tools by wire name), and
+    // Claude's is a ToolSearch `select:` (which takes wire names only).
+    expect(renderDialect(raw(), "claude").replace(/Editing\? ONE ToolSearch[^\n]*/, "")).not.toMatch(/mcp__libi/);
+    expect(renderDialect(raw(), "codex").replace(/ALL_TOOLS[^\n]*/, "")).not.toMatch(/mcp__libi/);
   });
 
   // Final review I3: a user's own Claude Code / Codex sees this core without

@@ -7,7 +7,7 @@ export const APPEARANCE_TAU = 0.78;
 export interface Range { start: number; end: number; }
 
 /** A concrete, actionable quality problem in a track, with the time
- *  window it occurs in so the agent can target `compute_track_segment`
+ *  window it occurs in so the agent can target `libi.track` compute_segment
  *  / `skip_segment` at exactly that range instead of guessing. */
 export interface TrackIssue {
   kind: string;
@@ -80,7 +80,7 @@ function iou(a: TrackSample, b: TrackSample): number {
  *    box: the classic "followed a background person" signature.
  *
  * Every issue carries the time `range` so the agent can repair exactly
- * that window via `compute_track_segment` / `skip_segment`.
+ * that window via `libi.track` compute_segment / `skip_segment`.
  */
 export function summarizeTrack(
   track: Track,
@@ -228,7 +228,7 @@ export function summarizeTrack(
       range: r,
       detail:
         "Box is far larger than a typical subject here (likely a bad detection / wrong subject). " +
-        "Re-seed this window with a tight anchor via compute_track_segment, or skip_segment if untrackable.",
+        "Re-seed this window with a tight anchor via libi.track compute_segment, or libi.track skip_segment if untrackable.",
     });
   }
 
@@ -254,7 +254,7 @@ export function summarizeTrack(
         detail:
           "Box is far larger than this track's typical size here, so the overlay balloons/flashes. " +
           "This is a SIZE problem, not position: keep sizeMode:'stabilized' (default) or lower maxBoxScale " +
-          "via update_tracked_overlay. Only re-anchor if the box is a grossly wrong detection.",
+          "via libi.tracked_overlay update. Only re-anchor if the box is a grossly wrong detection.",
       });
     }
   }
@@ -274,7 +274,7 @@ export function summarizeTrack(
         range: r,
         detail:
           "Box stuck to a frame edge for a sustained period — usually a background person/cameraman, " +
-          "not the intended subject. Re-anchor this window (ground_target + compute_track_segment) or skip_segment.",
+          "not the intended subject. Re-anchor this window (libi.track ground_target + libi.track compute_segment) or libi.track skip_segment.",
       });
     }
   }
@@ -321,9 +321,9 @@ export function summarizeTrack(
         range: r,
         detail:
           "Tracked box no longer resembles the anchored subject here — the tracker is on a " +
-          "DIFFERENT subject. Re-anchor this exact window: ground_target (or the analysis bbox) " +
-          "→ compute_track_segment({ trackId, range, method:'yoloe+botsort', anchors:[…] }). " +
-          "Do NOT skip_segment — skipping hides a wrong-subject lock and the overlay still " +
+          "DIFFERENT subject. Re-anchor this exact window: libi.track ground_target (or the analysis bbox) " +
+          "→ libi.track({ action: 'compute_segment', trackId, range, method:'yoloe+botsort', anchors:[…] }). " +
+          "Do NOT libi.track skip_segment — skipping hides a wrong-subject lock and the overlay still " +
           "renders the wrong subject around it.",
       });
       break; // first sustained real switch is enough to drive the repair loop
@@ -352,8 +352,8 @@ export function summarizeTrack(
             range: { start: a.t, end: b.t },
             detail:
               "Tracked box teleported to a disjoint region and stayed there — the tracker likely switched " +
-              "to a different subject. Re-anchor from this time onward (ground_target + compute_track_segment " +
-              "over [switch, end]) or skip_segment if the real subject is gone.",
+              "to a different subject. Re-anchor from this time onward (libi.track ground_target + libi.track compute_segment " +
+              "over [switch, end]) or libi.track skip_segment if the real subject is gone.",
           });
           break;
         }
@@ -366,7 +366,7 @@ export function summarizeTrack(
   // at all (an empty track, or samples that are all absent/degenerate). This
   // is an ENGINE MISS, not a subject-absent nuance — it is the exact hole the
   // portrait "seven empty tracks" bug fell through (summarizeTrack returned
-  // total:0 with flags:[]). Distinct + BLOCKING so add_tracked_overlay refuses
+  // total:0 with flags:[]). Distinct + BLOCKING so libi.tracked_overlay add refuses
   // it and computeObjectTrack surfaces it. The low_visibility block below is
   // division-based and skips samples.length===0; this catches BOTH the empty
   // and the all-lost cases.
@@ -377,7 +377,7 @@ export function summarizeTrack(
       range: { start: 0, end: Number.isFinite(opts.clipDurationSec) ? opts.clipDurationSec : 0 },
       detail:
         "The tracker produced NO visible samples for this track — the engine bound the subject in 0 frames. " +
-        "This is an ENGINE failure, not a subject-absent window. Isolate it: run ground_target at 2-3 in-clip " +
+        "This is an ENGINE failure, not a subject-absent window. Isolate it: run libi.track ground_target at 2-3 in-clip " +
         "timestamps; if it returns the subject at high confidence, the LOCAL engine failed on this footage — " +
         "report it to the user (or try method:'sot'). Do NOT attach an overlay to this track and do NOT " +
         "silently hand-animate a keyframe overlay as a fallback.",
@@ -403,7 +403,7 @@ export function summarizeTrack(
       detail:
         `Track is visible only ${visCount}/${samples.length} samples — it renders nothing for most of the clip. ` +
         "The subject was absent for most of the track's duration. " +
-        "Re-anchor the lost windows (ground_target + compute_track_segment) or skip_segment if genuinely gone — " +
+        "Re-anchor the lost windows (libi.track ground_target + libi.track compute_segment) or libi.track skip_segment if genuinely gone — " +
         "do NOT attach an overlay to this track as-is.",
     });
   }

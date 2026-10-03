@@ -34,6 +34,10 @@
 import { z } from "zod/v3";
 import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { coerceInputSchema } from "@/mcp/tools/coerce-args";
+import { actionRunnerFor, type ActionToolDef } from "@/mcp/tools/action-tool";
+import { templateTool } from "@/mcp/tools/families/template";
+import { layerEffectTool } from "@/mcp/tools/families/layer-effect";
+import { effectTool } from "@/mcp/tools/families/effect";
 import {
   TrimVideoSchema,
   UploadFontSchema,
@@ -43,16 +47,12 @@ import {
   getPieceStateSchema,
   RemoveOverlaySchema,
   ReorderOverlaysSchema,
-  addEffectSchema,
-  removeEffectSchema,
-  applyLayerEffectSchema,
   createTemplateFromPieceSchema,
   applyTemplateSchema,
-  deleteTemplateSchema,
-  listTemplatesSchema,
   publishTemplateSchema,
   audioAddClipSchema,
 } from "@/mcp/tools/schemas";
+import { applyTemplateAdvertisedSchema, publishTemplateAdvertisedSchema } from "@/mcp/tools/advertised-schemas";
 
 /** Each tool's `inputSchema` exactly as `mcp/server.ts` passes it to `registerTool`. */
 export const RUN_TOOL_INPUT_SCHEMAS = {
@@ -64,16 +64,17 @@ export const RUN_TOOL_INPUT_SCHEMAS = {
   "libi.get_piece_state": getPieceStateSchema.shape,
   "libi.remove_overlay": RemoveOverlaySchema,
   "libi.reorder_overlays": ReorderOverlaysSchema,
-  "libi.add_effect": addEffectSchema,
-  "libi.remove_effect": removeEffectSchema,
-  "libi.apply_layer_effect": applyLayerEffectSchema,
   "libi.create_template_from_piece": createTemplateFromPieceSchema,
-  "libi.apply_template": applyTemplateSchema,
-  "libi.delete_template": deleteTemplateSchema,
-  "libi.list_templates": listTemplatesSchema,
-  "libi.publish_template": publishTemplateSchema,
+  "libi.apply_template": applyTemplateAdvertisedSchema,
+  "libi.publish_template": publishTemplateAdvertisedSchema,
   "libi.audio_add_clip": audioAddClipSchema,
 } as const;
+
+/** A tool that advertises a looser schema than it validates (mcp/tools/advertised-schemas.ts): the full one, run second. */
+const RUN_TOOL_FULL_SCHEMAS: Partial<Record<RunToolName, z.ZodTypeAny>> = {
+  "libi.apply_template": applyTemplateSchema,
+  "libi.publish_template": publishTemplateSchema,
+};
 
 export type RunToolName = keyof typeof RUN_TOOL_INPUT_SCHEMAS;
 
@@ -126,11 +127,56 @@ export function parseErrorMessage(error: unknown): string {
 export async function validateToolInput(tool: RunToolName, args: unknown): Promise<ToolInputCheck> {
   const schema = coerceInputSchema(RUN_TOOL_INPUT_SCHEMAS[tool]);
   const obj = toObjectSchema(schema) ?? (schema as z.ZodTypeAny);
-  const parsed = await obj.safeParseAsync(args);
+  let parsed = await obj.safeParseAsync(args);
+  const full = RUN_TOOL_FULL_SCHEMAS[tool];
+  if (parsed.success && full) parsed = await full.safeParseAsync(parsed.data);
   if (parsed.success) return { ok: true, args: parsed.data as Record<string, unknown> };
   const text = new McpError(
     ErrorCode.InvalidParams,
     `Input validation error: Invalid arguments for tool ${tool}: ${parseErrorMessage(parsed.error)}`,
   ).message;
   return { ok: false, refusal: { content: [{ type: "text", text }], isError: true } };
+}
+
+/**
+ * Merged ("action") tools the route can run: `libi.<noun>` with an `action` (mcp/tools/action-tool.ts),
+ * and the ONLY actions the e2e specs drive. The route runs the family's own action through the same
+ * runner the MCP handler uses (`createActionRunner`: aliases, the action's schema, its `check`, its
+ * handler), so a spec walks the agent's path and cannot drift from it. Any other action of the tool
+ * (`libi.effect` `install_from_git` clones an arbitrary URL) is refused here; add one when a spec needs it.
+ */
+const RUN_ACTION_TOOLS: Readonly<Record<string, { def: ActionToolDef; actions: readonly string[] }>> = {
+  "libi.template": { def: templateTool, actions: ["list", "delete"] },
+  "libi.layer_effect": { def: layerEffectTool, actions: ["apply"] },
+  "libi.effect": { def: effectTool, actions: ["add", "remove"] },
+};
+
+export function isRunActionTool(tool: string): boolean {
+  return Object.hasOwn(RUN_ACTION_TOOLS, tool);
+}
+
+export type ActionToolRun =
+  | { ok: true; result: unknown }
+  | { ok: false; refusal: ToolInputRefusal };
+
+const runners = new Map<string, ReturnType<typeof actionRunnerFor>>();
+
+function refuse(text: string): { ok: false; refusal: ToolInputRefusal } {
+  return { ok: false, refusal: { content: [{ type: "text", text }], isError: true } };
+}
+
+/** Run one action of a merged tool the route allows: the `action` must be one of the listed ones, then
+ *  the family's own runner validates and runs it. A refusal is returned; a handler's throw propagates. */
+export async function runActionTool(tool: string, args: Record<string, unknown>): Promise<ActionToolRun> {
+  const entry = RUN_ACTION_TOOLS[tool];
+  let runner = runners.get(tool);
+  if (!runner) runners.set(tool, (runner = actionRunnerFor(entry.def)));
+  const action = args[runner.discriminator];
+  if (typeof action !== "string" || !entry.actions.includes(action)) {
+    return refuse(`${tool} needs \`${runner.discriminator}\`: one of ${entry.actions.join(", ")}.`);
+  }
+  const { [runner.discriminator]: _picked, ...rest } = args;
+  void _picked;
+  const outcome = await runner.run(action, rest, undefined);
+  return outcome.ok ? outcome : refuse(outcome.error);
 }

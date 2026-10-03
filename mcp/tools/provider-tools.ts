@@ -18,11 +18,11 @@ import type { ToolResult } from "./types";
 import type { SuggestProviderParams } from "./schemas";
 
 /**
- * Every provider the catalog knows, by name with its kinds, for the provider tools' descriptions. Claude Code keeps
+ * Every provider the catalog knows, by name (the kinds ride in `suggest_provider`'s `kind` enum), for the provider tools' descriptions. Claude Code keeps
  * MCP tools out of the prompt until a search finds them, and an agent asked "is fal.ai available?" searches for
  * "fal": a description that never names fal.ai is never found, and the agent answers in prose with no card.
  */
-export const PROVIDER_NAMES_FOR_DESCRIPTIONS = PROVIDER_CATALOG.map((d) => `${d.name}: ${d.kinds.join(", ")}`).join("; ");
+export const PROVIDER_NAMES_FOR_DESCRIPTIONS = PROVIDER_CATALOG.map((d) => d.name).join(", ");
 
 /**
  * Said on every answer, whatever its status: a provider connected after the chat started shows up in `covered` but
@@ -60,7 +60,7 @@ interface CoveredProvider {
 }
 
 /** Install states in which a libi extension's tools actually work. The same
- *  pair `libi.retry_mcp_server` and the dependency manager treat as ready. */
+ *  pair `libi.extension({ action: "retry" })` and the dependency manager treat as ready. */
 const USABLE_INSTALL_STATUS = new Set(["installed", "not_required"]);
 
 /**
@@ -213,7 +213,7 @@ export async function suggestProvider(
         codexNote: d.codexNote,
         ...(base ? { agentsPageUrl: agentsPageUrlFor(base, d, opts.dialect) } : {}),
       })),
-      note: "Show the command for the user's agent verbatim. A command with a literal <your key> placeholder needs the user's own key — they replace it and run it themselves. Never ask them to paste the key to you. An option with `auth: \"oauth\"` has no key: the user signs in with their own account in the browser — Codex's add starts that sign-in itself, and `signInCommands` holds each agent's sign-in command. A new MCP is only picked up in a NEW session. `agentsPageUrl` is the same choice inside libi's own window. " +
+      note: "Show the command for the user's agent verbatim. A command with a literal <your key> placeholder needs the user's own key — they replace it and run it themselves. Never ask them to paste the key to you. An option with `auth: \"oauth\"` has no key: the user signs in with their own account in the browser — Codex's add starts that sign-in itself, and `signInCommands` holds each agent's sign-in command. An option with `auth: \"none\"` (Playwright) needs neither: it runs on the user's computer with npx (Node.js). A new MCP is only picked up in a NEW session. `agentsPageUrl` is the same choice inside libi's own window. " +
         missingToolsNote(opts.surface),
     },
   };

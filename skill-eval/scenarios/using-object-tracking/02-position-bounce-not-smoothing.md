@@ -6,7 +6,7 @@ mcps: []
 agent: claude-code
 runs: 1
 timeoutSec: 1200
-covers: [add_tracked_overlay, update_tracked_overlay, positionMode, smoothing, position-jitter]
+covers: [tracked_overlay, add, update, verify, positionMode, smoothing, position-jitter]
 ---
 
 ## Prompt
@@ -22,13 +22,13 @@ assertions: []
 - The agent treated the bounce as POSITION jitter handled by the render-time
   default `positionMode:"stabilized"` — it checked the overlay's current
   positionMode (via get_overlays / the overlay record) and restored
-  `"stabilized"` via `update_tracked_overlay` if it had been set to `"raw"`,
+  `"stabilized"` via `libi.tracked_overlay` action `update` if it had been set to `"raw"`,
   rather than recomputing the track.
 - It did NOT claim `smoothing:"catmull-rom"` (or any `smoothing` change) fixes
   jitter — smoothing is sub-frame interpolation, not a denoiser.
-- It did NOT re-anchor / `compute_track_segment` to fix a pure position-jitter
+- It did NOT re-anchor / `libi.track` action `compute_segment` to fix a pure position-jitter
   complaint on the correct subject.
 - It did NOT blame or rewrite the emoji content draw code (an emoji content
   has no animation code).
-- If it changed anything, it verified visually via `verify_tracked_overlay`
+- If it changed anything, it verified visually via `libi.tracked_overlay` action `verify`
   afterwards rather than declaring success blind.

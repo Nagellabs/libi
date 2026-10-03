@@ -1,7 +1,7 @@
 ---
 id: voice-line-default-when-unanswerable
 title: A video request that never mentions audio gets a spoken line, not an ambient-only clip
-skills: [ai-asset-generation, using-storyboard, voiceover-production]
+skills: [ai-asset-generation, using-storyboard, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1
@@ -21,8 +21,11 @@ assertions:
   # drafted from the brief. Native audio on, dialogue in the prompt.
   - { tool: submit_job, endpoint_id: "bytedance/seedance-2.0/*", where: "input.generate_audio != false", expect: present }
   - { transcript_contains: ["says:", "says \"", "says “", "VO:", "voice-over:", "Voiceover:"], expect: present }
-  # The exact phrase the silent ad shipped with — deciding "no line" for the user.
-  - { transcript_contains: ["no speech, no music", "no speech; no music", "no dialogue, no music", "nobody speaks", "no one speaks", "no dialogue."], expect: absent }
+  # The exact phrase the silent ad shipped with — deciding "no line" for the user. Scoped to what the AGENT
+  # wrote (its own text, and the arguments of its fal calls), not the whole transcript: a skill reference the
+  # agent READS (video-generation-craft/references/voice.md says "...carries no dialogue.") renders into it too.
+  - { transcript_contains: ["no speech, no music", "no speech; no music", "no dialogue, no music", "nobody speaks", "no one speaks", "no dialogue."], scope: agent_text, expect: absent }
+  - { transcript_matches: '\[tool-call mcp__fal-ai__(submit_job|run_model)\][^\n]*(no speech, no music|no speech; no music|no dialogue, no music|nobody speaks|no one speaks|no dialogue\.)', expect: absent }
 ```
 
 ## Behavioral expectations

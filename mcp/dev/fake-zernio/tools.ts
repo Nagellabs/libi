@@ -80,13 +80,23 @@ function publish(state: FakeState, post: Row): void {
       row.publishAttempts = Number(row.publishAttempts ?? 0) + 1;
       continue;
     }
-    const platformPostId = newId(row.platform === "instagram" ? "17999" : "tt");
+    // Live (2026-10-02): a TikTok row sent with `tiktokSettings.draft: true` goes to the
+    // account's INBOX — the provider still answers `published`, records a
+    // `v_inbox_url~…` publish id and no public URL.
+    const specific = asRow(row.platformSpecificData);
+    const inbox = row.platform === "tiktok" && asRow(specific.tiktokSettings).draft === true;
+    const platformPostId = inbox ? `v_inbox_url~${newId("v2")}` : newId(row.platform === "instagram" ? "17999" : "tt");
     row.status = "published";
     row.platformPostId = platformPostId;
-    row.platformPostUrl =
-      row.platform === "instagram"
-        ? `https://www.instagram.com/reel/${platformPostId}/`
-        : `https://www.tiktok.com/@nagellabs/video/${platformPostId}`;
+    if (inbox) {
+      row.platformSpecificData = { ...specific, tiktokBusinessPublishId: platformPostId };
+      delete row.platformPostUrl;
+    } else {
+      row.platformPostUrl =
+        row.platform === "instagram"
+          ? `https://www.instagram.com/reel/${platformPostId}/`
+          : `https://www.tiktok.com/@nagellabs/video/${platformPostId}`;
+    }
     delete row.errorMessage;
   }
   const failed = rows.filter((r) => r.status === "failed").length;

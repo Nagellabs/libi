@@ -4,7 +4,7 @@
  * rows. Refreshed when the Templates page asks (every 10 minutes while it is
  * open, every minute while one of this install's own publishes, hides or
  * shows isn't in the copy yet — `noteOwnCatalogChange`) and, behind the
- * answer, when `list_templates` / `search_templates` read a stale copy —
+ * answer, when `libi.template` list / search read a stale copy —
  * only a read with no copy at all waits on the network.
  *
  * Best effort throughout: offline is a normal state. A failed refresh keeps

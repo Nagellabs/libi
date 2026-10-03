@@ -152,6 +152,23 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
   }
   const catalogCreator = catalogCreatorRaw as ParsedScenario["catalogCreator"];
 
+  // A hooks module (see ParsedScenario.hooks): repo-relative like `fixtures`, and checked
+  // here so a typo fails before a paid run boots.
+  let hooks: string | undefined;
+  if (data.hooks !== undefined) {
+    if (typeof data.hooks !== "string" || !data.hooks.trim()) {
+      throw new Error(`Scenario ${sourcePath}: frontmatter "hooks" must be a repo-relative path`);
+    }
+    const rel = data.hooks.trim();
+    if (isAbsolute(rel)) {
+      throw new Error(`Scenario ${sourcePath}: "hooks" must be repo-relative; got absolute "${rel}"`);
+    }
+    if (normalize(rel).split(sep).includes("..")) {
+      throw new Error(`Scenario ${sourcePath}: "hooks" may not escape the repo with ".."; got "${rel}"`);
+    }
+    hooks = rel;
+  }
+
   const prompt = sectionBody(content, "Prompt");
   if (!prompt) {
     throw new Error(`Scenario ${sourcePath}: a "## Prompt" section is required`);
@@ -274,6 +291,7 @@ export function parseScenario(markdown: string, sourcePath: string): ParsedScena
     ...(catalogCreator !== undefined ? { catalogCreator } : {}),
     replies,
     approve,
+    ...(hooks !== undefined ? { hooks } : {}),
     covers,
     prompt,
     assertions,

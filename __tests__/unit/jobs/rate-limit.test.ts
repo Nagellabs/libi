@@ -107,6 +107,7 @@ describe("paid job classification", () => {
       "remote_fetch",
       "analysis_describe_frame",
       "dev_slow",
+      "audio_measure",
     ]) {
       expect(isPaidJobKind(kind)).toBe(false);
     }

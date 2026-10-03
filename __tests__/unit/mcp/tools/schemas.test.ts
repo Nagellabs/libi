@@ -1,8 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   getCompositionSchema,
-  updatePieceNameSchema,
-  updatePieceDescriptionSchema,
+  updatePieceSchema,
   saveAssetSchema,
 } from "@/mcp/tools/schemas";
 
@@ -12,23 +11,27 @@ describe("getCompositionSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects missing pieceId", () => {
-    const result = getCompositionSchema.safeParse({});
-    expect(result.success).toBe(false);
+  it("takes the multi-piece and view forms; which one is given is checked by the tool (it says what to send)", () => {
+    expect(getCompositionSchema.safeParse({ pieceIds: ["a", "b"], view: "timeline" }).success).toBe(true);
+    expect(getCompositionSchema.safeParse({ folderId: "f", view: "timeline" }).success).toBe(true);
+    expect(getCompositionSchema.safeParse({ pieceId: "a", view: "full" }).success).toBe(true);
+    expect(getCompositionSchema.safeParse({ pieceId: "a", view: "wide" }).success).toBe(false);
+    expect(getCompositionSchema.safeParse({ pieceIds: [] }).success).toBe(false);
+    expect(getCompositionSchema.safeParse({ pieceIds: Array.from({ length: 25 }, (_, i) => `p${i}`) }).success).toBe(false);
   });
 });
 
-describe("updatePieceNameSchema", () => {
+describe("updatePieceSchema", () => {
   it("accepts name only", () => {
-    const result = updatePieceNameSchema.safeParse({
-      pieceId: "piece-1",
-      name: "Cool Video",
-    });
-    expect(result.success).toBe(true);
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", name: "Cool Video" }).success).toBe(true);
+  });
+
+  it("accepts description only", () => {
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", description: "A brief overview" }).success).toBe(true);
   });
 
   it("accepts name and description", () => {
-    const result = updatePieceNameSchema.safeParse({
+    const result = updatePieceSchema.safeParse({
       pieceId: "piece-1",
       name: "Cool Video",
       description: "A cool description",
@@ -36,74 +39,23 @@ describe("updatePieceNameSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects missing name", () => {
-    const result = updatePieceNameSchema.safeParse({
-      pieceId: "piece-1",
-      description: "Only desc",
-    });
-    expect(result.success).toBe(false);
+  it("leaves 'at least one of name, description' to the handler, so the advertised schema stays a plain object", () => {
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1" }).success).toBe(true);
   });
 
   it("rejects missing pieceId", () => {
-    const result = updatePieceNameSchema.safeParse({ name: "No Piece" });
-    expect(result.success).toBe(false);
+    expect(updatePieceSchema.safeParse({ name: "No Piece" }).success).toBe(false);
+    expect(updatePieceSchema.safeParse({ description: "No piece" }).success).toBe(false);
   });
 
-  it("rejects name exceeding 100 characters", () => {
-    const result = updatePieceNameSchema.safeParse({
-      pieceId: "piece-1",
-      name: "x".repeat(101),
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("accepts name exactly 100 characters", () => {
-    const result = updatePieceNameSchema.safeParse({
-      pieceId: "piece-1",
-      name: "x".repeat(100),
-    });
-    expect(result.success).toBe(true);
+  it("rejects name exceeding 100 characters, accepts exactly 100", () => {
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", name: "x".repeat(101) }).success).toBe(false);
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", name: "x".repeat(100) }).success).toBe(true);
   });
 
   it("rejects description exceeding 500 characters", () => {
-    const result = updatePieceNameSchema.safeParse({
-      pieceId: "piece-1",
-      name: "Valid",
-      description: "x".repeat(501),
-    });
-    expect(result.success).toBe(false);
-  });
-});
-
-describe("updatePieceDescriptionSchema", () => {
-  it("accepts a valid description", () => {
-    const result = updatePieceDescriptionSchema.safeParse({
-      pieceId: "piece-1",
-      description: "A brief overview",
-    });
-    expect(result.success).toBe(true);
-  });
-
-  it("rejects missing description", () => {
-    const result = updatePieceDescriptionSchema.safeParse({
-      pieceId: "piece-1",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects missing pieceId", () => {
-    const result = updatePieceDescriptionSchema.safeParse({
-      description: "No piece",
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it("rejects description exceeding 500 characters", () => {
-    const result = updatePieceDescriptionSchema.safeParse({
-      pieceId: "piece-1",
-      description: "y".repeat(501),
-    });
-    expect(result.success).toBe(false);
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", name: "Valid", description: "x".repeat(501) }).success).toBe(false);
+    expect(updatePieceSchema.safeParse({ pieceId: "piece-1", description: "y".repeat(501) }).success).toBe(false);
   });
 });
 

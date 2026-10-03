@@ -430,3 +430,34 @@ describe("toCreateBody — music", () => {
     expect(toInstagramTrack({ audioId: Number.NaN, title: "x" }, "search").id).toBe("");
   });
 });
+
+describe("zernio normalize: an inbox upload is not a public post", () => {
+  // Shape measured 2026-10-02: the provider answers `published` and PUBLIC_TO_EVERYONE for an
+  // inbox upload, with the inbox only visible in the row's own data.
+  const row = (over: Record<string, unknown> = {}) => ({
+    platform: "tiktok",
+    accountId: { _id: "tt1" },
+    status: "published",
+    platformSpecificData: { tiktokSettings: { draft: true, privacy_level: "PUBLIC_TO_EVERYONE" }, tiktokBusinessPublishId: "v_inbox_url~v2.1" },
+    ...over,
+  });
+  const post = (platforms: unknown[], libi?: unknown) => ({ _id: "p1", status: "published", platforms, metadata: libi ? { libi } : {} });
+
+  it("marks a published TikTok row that carries the inbox flag", () => {
+    expect(toPost(post([row()])).targets[0].delivery).toBe("inbox");
+  });
+
+  it("recognises it from the inbox publish id alone, or from libi's own draft-handoff stamp", () => {
+    expect(toPost(post([row({ platformSpecificData: { tiktokBusinessPublishId: "v_inbox_url~v2.9" } })])).targets[0].delivery).toBe("inbox");
+    expect(toPost(post([row({ platformSpecificData: undefined, platformPostId: "v_inbox_url~v2.5" })])).targets[0].delivery).toBe("inbox");
+    const stamped = toPost(post([row({ platformSpecificData: undefined })], { pieceId: "pc", targetOptions: [{ platform: "tiktok", music: { mode: "draft" }, tiktok: { privacyLevel: "SELF_ONLY" } }] }));
+    expect(stamped.targets[0].delivery).toBe("inbox");
+  });
+
+  it("a normal publish, a not-yet-published row and another platform are not inbox", () => {
+    expect(toPost(post([row({ platformSpecificData: {}, platformPostId: "7512345" })])).targets[0].delivery).toBeUndefined();
+    expect(toPost(post([row({ status: "pending" })])).targets[0].delivery).toBeUndefined();
+    expect(toPost(post([row({ platform: "instagram" })])).targets[0].delivery).toBeUndefined();
+  });
+});
+

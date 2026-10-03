@@ -7,7 +7,7 @@ import { inProgress, outProgress, loopPhase } from "./phase-timing";
  * param DEFAULTS (from its manifest) with the applied ref's params layered on
  * top. Built-in effects default each param internally (`params.x ?? 12`), but a
  * custom effect's `animate.js` typically reads `params.x` directly — so an
- * applied ref with NO params (the common case: `apply_layer_effect` stores just
+ * applied ref with NO params (the common case: `libi.layer_effect` apply stores just
  * `{ effectId }`) would feed `undefined` and produce NaN deltas → no visible
  * animation. Merging the manifest defaults here makes every effect animate with
  * its declared defaults, matching what the inspector already shows.

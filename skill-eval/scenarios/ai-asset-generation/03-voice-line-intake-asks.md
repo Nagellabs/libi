@@ -1,7 +1,7 @@
 ---
 id: voice-line-no-line-means-music-offer
 title: A user who says "no spoken line" gets native audio kept and a music bed offered, not a silenced clip
-skills: [ai-asset-generation, using-storyboard, voiceover-production]
+skills: [ai-asset-generation, using-storyboard, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

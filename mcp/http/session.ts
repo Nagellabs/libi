@@ -98,9 +98,9 @@ function unknownToolText(name: string, surface: AgentSurface): string {
       `"${name}" renders into the libi app's chat, and this MCP session is not ` +
       `attached to one — it is the "${LIBI_MCP_ENTRY_NAME}" registration a terminal ` +
       `agent uses. If you are in a terminal, this tool is not available to you: use ` +
-      `libi.show_asset and give the user the printed URL. If you ARE running inside ` +
+      `libi.show({ target: "asset", pieceId, fileId }) and give the user the printed URL. If you ARE running inside ` +
       `the libi app, then libi's in-app registration failed to replace the terminal ` +
-      `one for this session — say so to the user, and use libi.show_asset meanwhile.`
+      `one for this session — say so to the user, and use libi.show({ target: "asset" }) meanwhile.`
     );
   }
   return `Unknown tool "${name}". Call tools/list — the set may have changed.`;
@@ -165,7 +165,7 @@ export async function createAggregateSession(opts: {
     }
     // `_meta` is forwarded whole, not dropped. claude-agent-acp propagates the
     // ACP `sessionId` in it, and tools such as `libi.show_in_chat` and
-    // `libi.restart_acp_session` resolve their session from
+    // `libi.extension({ action: "restart_session" })` resolve their session from
     // `extra._meta.sessionId` — over the in-memory hop there is no transport
     // session id to fall back to, so dropping `_meta` left them with "".
     const meta = req.params._meta;

@@ -45,10 +45,8 @@ describe("JobManager progress notify bridge", () => {
     const jobId = jobIdOf(await mgr.enqueue("k", {}));
     await mgr.runToCompletion(jobId);
 
-    // The chain is async — give it a moment to settle.
-    await new Promise((r) => setTimeout(r, 50));
-
-    expect(notify.jobProgress).toHaveBeenCalled();
+    // The chain is async — wait for the notification, not a fixed time.
+    await vi.waitFor(() => expect(notify.jobProgress).toHaveBeenCalled());
     const calls = vi.mocked(notify.jobProgress).mock.calls;
     const ourCalls = calls.filter(([arg]) => arg.jobId === jobId);
     expect(ourCalls.length).toBeGreaterThan(0);
@@ -74,12 +72,9 @@ describe("JobManager progress notify bridge", () => {
     mgr.attachToolCallId(jobId, "tool-call-abc");
     await mgr.runToCompletion(jobId);
 
-    await new Promise((r) => setTimeout(r, 50));
-
-    const calls = vi
-      .mocked(notify.jobProgress)
-      .mock.calls.filter(([arg]) => arg.jobId === jobId);
-    expect(calls.length).toBeGreaterThan(0);
+    const ours = () => vi.mocked(notify.jobProgress).mock.calls.filter(([arg]) => arg.jobId === jobId);
+    await vi.waitFor(() => expect(ours().length).toBeGreaterThan(0));
+    const calls = ours();
     expect(calls[calls.length - 1][0].toolCallId).toBe("tool-call-abc");
   });
 
@@ -100,12 +95,10 @@ describe("JobManager progress notify bridge", () => {
     mgr.attachToolCallId(jobId, "tool-call-2");
     await mgr.runToCompletion(jobId);
 
-    await new Promise((r) => setTimeout(r, 50));
-
-    const calls = vi
-      .mocked(notify.jobProgress)
-      .mock.calls.filter(([arg]) => arg.jobId === jobId);
-    expect(calls.length).toBeGreaterThan(0);
+    // Both fan-out emits, not just the first to land.
+    const ours = () => vi.mocked(notify.jobProgress).mock.calls.filter(([arg]) => arg.jobId === jobId);
+    await vi.waitFor(() => expect(new Set(ours().map(([arg]) => arg.toolCallId)).size).toBeGreaterThanOrEqual(2));
+    const calls = ours();
     // Should see emits for both toolCallIds.
     const toolCallIds = new Set(calls.map(([arg]) => arg.toolCallId));
     expect(toolCallIds).toContain("tool-call-1");

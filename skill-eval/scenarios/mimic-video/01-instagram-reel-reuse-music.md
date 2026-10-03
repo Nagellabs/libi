@@ -1,7 +1,7 @@
 ---
 id: mimic-video-instagram-reel-reuse-music
 title: Mimic an Instagram reel — download, analyze, plan, storyboard, reuse original music, generate
-skills: [mimic-video, video-planning, video-analysis, audio-analysis, using-storyboard, generic-video, ugc-product-video, music-video-creation, music-creation, ugc-craft, ai-asset-generation, ai-video-models, realistic-image-generation, physical-action-video, voiceover-production, stitching-multi-clip, speech-captions, animated-text-overlays, using-asset-folders, using-snapshot-draft, using-character-library]
+skills: [mimic-video, video-planning, video-analysis, audio-analysis, using-storyboard, generic-video, ugc-product-video, music-video-creation, music-creation, ai-asset-generation, video-generation-craft, stitching-multi-clip, speech-captions, animated-text-overlays, using-character-library]
 mcps: [youtube-download, whisper, fal-ai, elevenlabs, local-tts, local-music]
 agent: claude-code
 runs: 1
@@ -9,7 +9,7 @@ runs: 1
 # reel (`libi.download_video`, the youtube-download extension), analyze it (frames +
 # transcript + identify the music), plan it as building blocks (video-planning), build it
 # through the Storyboard with sketched keyframes, REUSE the original music track (extract +
-# attach — the music-creation Stage 0.5 reuse path), and generate the clips via fake-fal.
+# attach — the music-creation reuse-or-generate path), and generate the clips via fake-fal.
 # Expected wall-clock 25-45 min; whisper bootstraps its model
 # in the hermetic temp home (network) and each fake-fal video placeholder is a real ~1-2 min
 # ffmpeg encode, so a TIMEOUT here is a hardware/network artifact, NOT a skill regression.
@@ -57,7 +57,7 @@ assertions:
    with a **sketched keyframe schematic** per card, then generated through the board
    (schematic → spec → take). It did NOT generate clips outside the storyboard.
 6. **Reused the original music** — extracted the source audio (`libi.extract_audio`) and attached
-   it under the visuals (`libi.audio_add_clip`), exercising the `music-creation` Stage 0.5 reuse
+   it under the visuals (`libi.audio_add_clip`), exercising the `music-creation` reuse-or-generate
    path. It did NOT generate a new track, and did NOT leave the recreation silent.
 7. **Generation prompts make sense** — the image/video prompts sent to fal describe the subjects,
    look, and motion that the analysis found in the source (the recreation is faithful to what the

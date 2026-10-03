@@ -210,10 +210,31 @@ function toStoredTargetOptions(raw: unknown): TargetOptions[] | undefined {
   return out.length ? out : undefined;
 }
 
+/**
+ * Whether a published TikTok target is an INBOX upload, not a public post.
+ *
+ * The provider calls both `published`, and an inbox upload even carries the
+ * account's configured privacy level (`PUBLIC_TO_EVERYONE`), so neither field
+ * tells them apart. What does (measured 2026-10-02 on a real account): the row
+ * echoes `platformSpecificData.tiktokSettings.draft: true` and a
+ * `tiktokBusinessPublishId` of `v_inbox_url~…`, and the platform id recorded on
+ * publish carries the same `v_inbox` prefix. libi's own stamp (`music.mode ===
+ * "draft"` in `metadata.libi.targetOptions`) says the same when libi sent it.
+ */
+function isInboxUpload(platform: KnownPlatform, status: TargetStatus, row: R, stamped: TargetOptions | undefined): boolean {
+  if (platform !== "tiktok" || status !== "published") return false;
+  const data = rec(row.platformSpecificData);
+  if (rec(data.tiktokSettings).draft === true) return true;
+  if ((str(data.tiktokBusinessPublishId) ?? str(row.platformPostId))?.startsWith("v_inbox")) return true;
+  const music = stamped && stamped.platform === "tiktok" ? (stamped.music as { mode?: string } | undefined) : undefined;
+  return music?.mode === "draft";
+}
+
 export function toPost(raw: unknown): SocialPost {
   const r = rec(raw);
   const status = (POST_STATUSES as string[]).includes(String(r.status)) ? (r.status as PostStatus) : "draft";
-  const targets: SocialTarget[] = (Array.isArray(r.platforms) ? r.platforms : []).map((p) => {
+  const storedOptions = toStoredTargetOptions(rec(rec(r.metadata).libi).targetOptions);
+  const targets: SocialTarget[] = (Array.isArray(r.platforms) ? r.platforms : []).map((p, i) => {
     const row = rec(p);
     // The verified invariant: a platform row's `accountId` is an OBJECT
     // ({ _id, platform, username, displayName, profilePicture, profileId,
@@ -223,14 +244,16 @@ export function toPost(raw: unknown): SocialPost {
     const accountId = typeof accountIdRaw === "string" ? accountIdRaw : id(rec(accountIdRaw));
     const platform = platformOf(row.platform);
     const ts: TargetStatus = ["pending", "published", "failed", "cancelled"].includes(String(row.status)) ? (row.status as TargetStatus) : "pending";
+    const platformPostId = str(row.platformPostId);
     return {
       platform,
       accountId,
       status: ts,
-      platformPostId: str(row.platformPostId),
+      platformPostId,
       url: str(row.platformPostUrl),
       error: str(row.errorMessage),
       options: targetOptions(platform, row, r),
+      ...(isInboxUpload(platform, ts, row, storedOptions?.[i]) ? { delivery: "inbox" as const } : {}),
     };
   });
   const libi = rec(rec(r.metadata).libi);
@@ -263,7 +286,7 @@ export function toPost(raw: unknown): SocialPost {
           exportFile: str(libi.exportFile),
           appVersion: str(libi.appVersion),
           requestId: str(libi.requestId),
-          targetOptions: toStoredTargetOptions(libi.targetOptions),
+          targetOptions: storedOptions,
           // The URL the upload produced. NOT `mediaItems[].url` — that one is
           // the promoted `media/` copy, which 404s and fails any update it is
           // re-sent on.

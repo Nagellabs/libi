@@ -24,7 +24,7 @@ Every generation spends the user's own Higgsfield plan credits, and the amount d
 model and the resolution. Source: https://higgsfield.ai/mcp ("How does pricing work?").
 
 Before the first generation, tell the user it spends their Higgsfield credits and that the
-cost depends on the model and resolution, and wait for a yes (SKILL.md Step 5). Quote a number
+cost depends on the model and resolution, and wait for a yes (the cost step in SKILL.md). Quote a number
 only when a Higgsfield tool gave you one; never invent a price.
 
 ## Adding, signing in and removing
@@ -45,6 +45,6 @@ the entry is gone `mcp logout` has nothing to find.
 
 ## Provenance
 
-Fill SKILL.md Step 9's `aiGeneration` with `provider: "higgsfield"` (the catalog id) and
+Fill SKILL.md's `aiGeneration` block with `provider: "higgsfield"` (the catalog id) and
 `model` exactly as the Higgsfield tool named it. Add `costEstimate` only with an amount a
 Higgsfield tool returned.

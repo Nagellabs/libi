@@ -50,7 +50,7 @@ export interface CaptionWord {
 
 /** Params for the word-timing-driven caption styles (cumulative / word-by-word
  *  / karaoke). The `words[]` come straight from the STT word array
- *  (analysis_get_audio_chunks), converted to element-local seconds. */
+ *  (libi.analysis_query action audio_chunks), converted to element-local seconds. */
 export interface WordCaptionParams {
   words: CaptionWord[];
   font?: string;

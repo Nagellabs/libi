@@ -22,10 +22,10 @@ covers: [social-music, set_audio_rights, post_piece-music, social_music_search, 
 > Instagram's sentence must mention reconnecting; YouTube is not a `post_piece` target, so its plan
 > comes from `social_music_search` and its file from a with-song social export. Two exports in all.
 >
-> **Why `platforms.*`.** Both Instagram (strip) and TikTok (attach) take the without-song export,
-> so they share ONE draft, and its `platforms[]` follows the order of the `targets` the agent
-> passed — which the agent is free to choose. `*` matches any element, so the assertion holds
-> wherever the TikTok row sits.
+> **Why `platforms.*`.** Both Instagram (strip) and TikTok (attach) take the without-song export
+> (one export, one upload), but TikTok gets a draft of its own so it can go to the inbox: two
+> `posts_create_post` calls, and which one comes first follows the `targets` the agent passed.
+> `*` matches any element of either call's `platforms[]`, so the assertion holds either way.
 >
 > **Two exports.** The draft's without-song file comes from `libi.post_piece` itself (its result
 > says `exported: true`, or names a `reusedExport` — reuse only ever picks a file whose audio fits

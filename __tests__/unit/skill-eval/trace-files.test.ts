@@ -150,8 +150,8 @@ describe("every scenario that asserts on the catalog carries the canary", () => 
 });
 
 describe("templates-01's covers", () => {
-  it("no longer claims show_templates, which the one-turn run only asserts is absent", () => {
+  it("no longer claims show, which the one-turn run only asserts is absent", () => {
     const f = path.join(process.cwd(), "skill-eval/scenarios/templates/01-create-from-piece.md");
-    expect(parseScenario(fs.readFileSync(f, "utf8"), f).covers).not.toContain("show_templates");
+    expect(parseScenario(fs.readFileSync(f, "utf8"), f).covers).not.toContain("show");
   });
 });

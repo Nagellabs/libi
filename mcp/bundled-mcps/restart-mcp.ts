@@ -28,7 +28,7 @@ export type RestartMcpServerResult =
  *   2. Schedules a session reload — the current ACP session is torn down and
  *      recreated with the fresh mcpServers list
  *   3. Returns a message telling the agent its turn is ending (the in-flight
- *      prompt gets cancelled by the reload — same as restart_acp_session)
+ *      prompt gets cancelled by the reload — same as `libi.extension` restart_session)
  *
  * All MCPs restart together — not just the target. Acceptable trade-off
  * given the lack of upstream support for narrower restart. If
@@ -93,7 +93,7 @@ export async function restartMcpServer(
 
   serverLogger.warn(
     { tag: "mcp-config", op: "restart_mcp_server", mcpId: input.mcpId, reason: "no_session_id" },
-    `restart_mcp_server: no sessionId threaded in _meta — refreshed config + standby only`,
+    `libi.extension restart: no sessionId threaded in _meta — refreshed config + standby only`,
   );
   return {
     success: true,

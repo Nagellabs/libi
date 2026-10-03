@@ -2,7 +2,7 @@
  * Following a prompt the user handed to the agent from a page with no chat.
  *
  * The chat, and the only listener for the agent's `navigate` events
- * (libi.show_piece / show_preview / apply_template …), live on `/editor`. The
+ * (libi.show with target piece / preview, apply_template …), live on `/editor`. The
  * Templates page's Use and the Social page's Ask-the-agent send a prompt from
  * elsewhere, so `useDispatchToAgent` routes to `/editor` right after a
  * successful send. The editor then usually mounts long before the agent's
@@ -130,7 +130,7 @@ export function routeOffEditorNavigate(
     return false;
   }
   if (decision !== "follow") return false;
-  // The latest wins: show_piece then show_preview should land on the preview.
+  // The latest wins: show(piece) then show(preview) should land on the preview.
   s.pending = event;
   return true;
 }

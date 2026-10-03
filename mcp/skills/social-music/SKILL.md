@@ -1,12 +1,12 @@
 ---
 name: social-music
-description: Music rights across a piece's life — copyrighted vs generated or owned audio, confirming a song's identity, asking what an export is for, relaying each platform's music plan before posting (attach the platform's licensed copy, a TikTok draft to finish in the app, keep, or strip), and fetching a template's left-out song only on the user's yes. Use whenever a piece has downloaded or uploaded music, when exporting or posting a piece with music, or when a template's music was not included.
+description: "Music rights for a piece: copyrighted versus generated or owned audio, confirming a song, what an export is for, and each platform's music plan before posting. Load when a piece has downloaded or uploaded music, when exporting or posting one, or when a template's song was left out. Not for making music (music-creation)."
 ---
 
 # Social music
 
 A song the user did not make is someone else's. libi keeps it in the preview so the piece sounds
-right, but it decides — per export and per platform — whether the song travels, and it SAYS what
+right, but it decides — per export and per platform — whether the song travels, and it says what
 will happen before it happens. Your job is to ask the two questions only the user can answer (what
 is this export for; is this really *Title* by *Artist*), relay libi's per-platform sentences, and
 never claim rights the user did not give.
@@ -25,6 +25,12 @@ never claim rights the user did not give.
   online), stamp it copyrighted the same way — with the track in the same call when they named it:
   `libi.set_audio_rights({ pieceId, fileId, class: "copyrighted", track: { title, artist } })`.
   Without that, the song counts as theirs and travels everywhere unchanged.
+- **A file you made from another libi file inherits its rights.** (A louder, quieter, dipped or spliced
+  bed needs no new file: gain, the volume envelope and crossfades are set on the clip, see `music-creation`.)
+  An ffmpeg render, re-encode or mix of
+  a song goes in with `libi.upload_file({ …, derivedFromFileId })`: copyrighted stays copyrighted,
+  generated stays generated. Without it the upload reads as the user's own and the song would travel
+  unflagged. You can never make a file `owned` this way.
 - **Tell libi what the song is when you add it.** When you know — you downloaded it, or the user
   named it — pass it on the add: `libi.audio_add_clip({ …, rights: { class: "copyrighted", track: { title, artist } } })`.
   That stamps the file and, in the same call, matches the song on every connected platform that can
@@ -44,10 +50,10 @@ never claim rights the user did not give.
   result `libi.set_audio_rights` returns exactly as for `libi.audio_add_clip` — never claim a match
   it didn't report.
 - **Music you generated yourself.** Import it with `libi.upload_file({ …, aiGeneration })` and it is
-  stamped generated. If you imported it any other way — e.g. an ElevenLabs track fetched from its
-  output URL with `libi.import_remote_files` — it lands as copyrighted: stamp it right away with
-  `libi.set_audio_rights({ pieceId, fileId, class: "generated" })`. Stamp `generated` ONLY for a
-  file you imported from your own generation tool's output in this same turn. Never otherwise.
+  stamped generated. If you imported it any other way (a track fetched from a generation provider's
+  output URL with `libi.import_remote_files`, say) it lands as copyrighted: stamp it right away with
+  `libi.set_audio_rights({ pieceId, fileId, class: "generated" })`. Stamp `generated` only for a
+  file you imported from your own generation tool's output in this same turn, never otherwise.
 - **Never set `owned`.** The tool refuses it. When the user says the music is theirs, tell them:
   "Open the file's details (or the audio clip's inspector) and switch on **I own this**."
 - Generated and owned music always stays in the video, in every export and on every platform, and
@@ -59,14 +65,14 @@ never claim rights the user did not give.
 - `libi.export_video` refuses a piece with copyrighted music until you pass `purpose`
   (`purpose_required`). When the user asks for an export and did not say what it is for — and did
   not ask to post it — ask first, in one line: "Is this export for a social post or for personal
-  use?" Ask ONLY that — not the song's title or artist in the same question; a song's identity
+  use?" Ask only that, not the song's title or artist in the same question; a song's identity
   matters when they post (§3), not to export. Don't guess, and don't call the tool to find out.
 - `purpose: "social"` leaves copyrighted songs out (at posting, each platform gets its own
   treatment); `"personal"` keeps them. `copyrightedAudio` overrides that default, `includeFileIds`
   keeps chosen files in. The result's `audioDecision.carriesCopyrighted` says what the file
   carries — tell the user in one line.
-- If they want to POST it, don't export first: `libi.post_piece` exports per platform itself.
-- Several exports at once — a with-song and a without-song cut, or one per platform — are ONE
+- If they want to post it, don't export first: `libi.post_piece` exports per platform itself.
+- Several exports at once — a with-song and a without-song cut, or one per platform — are one
   `libi.export_video` call with `variants` (the tool's own argument: each entry its own `purpose` /
   `copyrightedAudio`; unrelated to the posting plan's with-song / without-song `exportVariant`, which
   only names which audio cut a post uses). It returns at once with what was queued;
@@ -96,6 +102,11 @@ What libi does with a copyrighted song, in words:
   from the inbox notification in TikTok and adds the song from the sound library. Keeping the song
   in the video likely posts it silent. An account whose type libi doesn't know yet gets the same
   draft, and the plan's `needs` asks the user to set Business or Personal in Social → Settings.
+- **TikTok, either account, with a browser tool:** when TikTok's plan ends in "finish it in the app"
+  and you have a browser automation MCP (Playwright), the `browser-posting` skill can finish it for the
+  user instead: the without-song export uploaded in TikTok Studio on the web, with TikTok's own copy of
+  the song added from its sound library, posted only on the user's yes. Offer it; it is the default
+  TikTok route for a piece that needs platform music.
 - **Instagram (connected with Facebook Login):** attaches Instagram's licensed copy found by search;
   otherwise posts without the song. Connected with Instagram Login: posts without it and asks the
   user to reconnect with Facebook Login.
@@ -105,7 +116,7 @@ What libi does with a copyrighted song, in words:
 - **Facebook, X:** post without the song; keeping it risks a mute, a block, or (X) a DMCA report
   that counts toward suspending the account.
 
-Choices — settle them BEFORE posting. Every `libi.post_piece` call mints a fresh request and makes
+Choices: settle them before posting. Every `libi.post_piece` call mints a fresh request and makes
 a NEW draft, so a second call to change the music leaves the user with two drafts:
 - First, for each Instagram and TikTok target, call
   `libi.social_music_search({ pieceId, platform, accountId, query })`. Its `plan` is the one
@@ -118,7 +129,7 @@ a NEW draft, so a second call to change the music leaves the user with two draft
   (§1), fix it with `libi.set_audio_rights({ pieceId, fileId, track: { title, artist } })`, then
   search again — a confirmed identity is matched automatically.
 - No exact match: offer the `candidates` and let the user pick (or accept the fallback).
-- Then call `libi.post_piece` ONCE, with each pick as `targets[].music: { mode: "attach", trackId }`.
+- Then call `libi.post_piece` once, with each pick as `targets[].music: { mode: "attach", trackId }`.
 - Never re-run `libi.post_piece` to change the music on a draft that already exists — tell the user
   to change it on the piece's Posting tab.
 - Keeping a copyrighted song where it isn't the default (`mode: "include"`) only on the user's
@@ -133,8 +144,11 @@ a NEW draft, so a second call to change the music leaves the user with two draft
   `platform: "twitter"`): get the plan with `libi.social_music_search({ pieceId, platform })`,
   relay it, export with exactly its
   `exportVideoArgs` — `libi.export_video({ pieceId, purpose: "social", copyrightedAudio: "include" })`
-  when the plan keeps the song (YouTube), `copyrightedAudio: "exclude"` when it strips it — then
-  post with your own provider tools and link the post with `libi.social_link_post`.
+  when the plan keeps the song (YouTube), `copyrightedAudio: "exclude"` when it strips it. For
+  several platforms make one call with `pieceId` at the top level and `variants`, each entry carrying
+  its platform's `exportVideoArgs` minus `pieceId` (an entry takes only per-export fields; a `pieceId`
+  inside one is refused). Export before creating the post, then
+  post with your own provider tools and link the post with `libi.social_link` kind `post`.
 - Finishing by hand: libi shows the links on the Posting tab — "Open TikTok to finish" (with a QR
   code), "Open in YouTube Studio", "Replace the audio in the Instagram app".
 
@@ -154,25 +168,8 @@ a NEW draft, so a second call to change the music leaves the user with two draft
 - Making a template: a copyrighted song is named, not included (the create result warns). Tell the
   author which songs will not travel.
 
-## 5. Provider notes — Zernio
+## 5. Provider notes
 
-libi's own connection makes these calls; with your own Zernio tools they are unlisted full-shaped
-tools reached through `call_tool`:
-- `accounts_list_tik_tok_commercial_music { account_id, country_code? }` — TikTok's Commercial Music
-  Library: the 100 trending tracks, not paged, NO search. Use `tracks[].id` (or `clip.id`) as
-  `tiktokSettings.musicSoundInfo.musicSoundId`, never `commercialMusicId` (TikTok rejects it).
-  Only for accounts connected through the TikTok for Business app. `musicSoundInfo` is ignored on drafts
-  sent to the TikTok inbox (`tiktokSettings.draft: true`); at most 5 pending inbox drafts per 24 h;
-  Business-app video direct posts are public only.
-- `instagram_search_instagram_audio { account_id, audio_type: "music", q? }` — ~30 results; no
-  `q` = trending. `instagram_get_instagram_audio { account_id, audio_id }` refreshes a track (its
-  `downloadUrl` preview expires after ~1.5 days) and re-validates it before a scheduled publish.
-  An Instagram-Login account answers 400 `instagram_audio_requires_facebook_login`: the user
-  reconnects choosing the Facebook option.
-- Payload: Instagram `platformSpecificData.audioConfiguration { audioId, audioVolume, videoVolume }`
-  and `platformSpecificData.audioName` (the Reel's own sound, set once); TikTok per target
-  `platformSpecificData.tiktokSettings { musicSoundInfo { musicSoundId, musicSoundVolume,
-  musicSoundStart, musicSoundEnd }, videoOriginalSoundVolume }`. The `social-posting` skill §2 puts
-  TikTok's options in the root `tiktok_settings`; both places are valid, and a per-target
-  `tiktokSettings` wins over the root one. Volumes are 0–100; start and end are milliseconds into the
-  track.
+The provider-specific calls (TikTok's commercial music library, Instagram audio search, the payload fields)
+are in `references/providers/zernio.md`. libi's own connection makes them; read the reference only when you
+build a post with your own provider tools.

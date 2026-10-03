@@ -33,7 +33,7 @@ export const YT_DLP_UNAVAILABLE = "yt-dlp unavailable:";
 
 /** How long yt-dlp's entry point gets to answer `--version`. A cold first run on Windows (the `.exe`
  *  trampoline, pyc compile, a Defender scan) can take several seconds on a healthy install, so 3 s read
- *  as "too slow" there (G2 review M9). Used by `diagnose_mcp` and the launcher-only repair. */
+ *  as "too slow" there (G2 review M9). Used by `libi.extension` diagnose and the launcher-only repair. */
 export const YT_DLP_VERSION_TIMEOUT_MS = 10_000;
 
 /** Where the agent's user finds the extension's chips (Download / Retry /

@@ -923,6 +923,9 @@ describe("syncSkillInstalls", () => {
     expect(loadEnabledSkills).toHaveBeenCalledTimes(1);
     release();
     await Promise.all([first, second, third]);
+    // The queued pass runs after the first resolves: wait for it…
+    await vi.waitFor(() => expect(loadEnabledSkills).toHaveBeenCalledTimes(2));
+    // …then a short window in which a THIRD pass (the bug "exactly one more" rules out) would show.
     await new Promise((r) => setTimeout(r, 20));
     expect(loadEnabledSkills).toHaveBeenCalledTimes(2);
   });

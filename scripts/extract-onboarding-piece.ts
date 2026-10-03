@@ -1027,7 +1027,7 @@ function writeOverlayCodeFiles(
  *
  *  - Object tracking needs a local model libi provisions on FIRST USE
  *    (`requireDeps("libi", ["tracking-pyenv"])` inside
- *    `libi.compute_object_track`). A brand-new user has not installed it, so
+ *    `libi.track({ action: "compute" })`). A brand-new user has not installed it, so
  *    the demo would be showing off the one feature they cannot yet run.
  *  - A real tracked overlay puts tracking controls in the inspector, bound to
  *    a track the user cannot regenerate. That reads as "libi tracked this for

@@ -27,12 +27,12 @@ covers: [templates, create_template_from_piece, index-md, private-or-public]
 > template ("keep \"Sale card\" private on this machine, or publish it to the public catalog
 > …"), so the needle is the part of the skill's sentence that survives that substitution.
 >
-> **The question must come BEFORE `libi.show_templates`, so in a one-turn run the page is never
-> shown.** `show_templates` takes the user to the Templates page, which has no chat; Task 13's
+> **The question must come BEFORE `libi.show({ target: "templates" })`, so in a one-turn run the page is never
+> shown.** `libi.show` target `templates` takes the user to the Templates page, which has no chat; Task 13's
 > walk-through and runs 3–4 of this scenario showed the page first and asked afterwards, so the
 > question landed where nobody could see it. The skill now says ask, end the turn, and show the
 > page only after the answer. This harness cannot answer, so the correct run asks and stops:
-> `show_templates` present is the regression, and its absence alongside the question is the
+> that `show` call present is the regression, and its absence alongside the question is the
 > ordering assertion.
 >
 > **No export for the preview (skill 1.21.1).** `create_template_from_piece` now starts the
@@ -50,7 +50,7 @@ promo and sale, and make the headline a required text slot called headline.
 assertions:
   - { transcript_contains: "[tool-call mcp__libi__libi_add_overlay]", expect: present }
   - { transcript_contains: "[tool-call mcp__libi__libi_create_template_from_piece]", expect: present }
-  - { transcript_contains: "[tool-call mcp__libi__libi_show_templates]", expect: absent }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_show\][^\n]*"target":\s*"templates"', expect: absent }
   - { transcript_contains: '"slots"', expect: present }
   - { transcript_contains: "private on this machine, or publish it to the public catalog", expect: present }
   - { transcript_contains: "[tool-call mcp__libi__libi_export_video]", expect: absent }
@@ -68,7 +68,7 @@ assertions:
 - Asked the skill's private-or-public question (naming the template in place of "this template"
   is fine) and did NOT claim anything was published (the
   template is saved locally either way; with nobody to answer, it stays private).
-- Ended the turn on that question: did NOT call `libi.show_templates` (it comes only after the
+- Ended the turn on that question: did NOT call `libi.show({ target: "templates" })` (it comes only after the
   user's answer) and asked nothing after it.
 - Did NOT export the piece or otherwise make a preview: the tool renders the template's preview
   by itself (saying so to the user is welcome, not required).

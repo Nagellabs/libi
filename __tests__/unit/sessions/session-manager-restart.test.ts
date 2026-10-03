@@ -139,7 +139,10 @@ describe.each([["claude-code"], ["codex"]] as const)("restartSession (%s)", (age
 
     expect(result).toEqual({ agentId, processRestarted: false });
     expect(c.closeSession).toHaveBeenCalledWith({ sessionId: id });
-    expect(c.loadSession).toHaveBeenCalledWith({ sessionId: id, cwd: "/tmp/libi-test-agent", mcpServers: [LIBI_ENTRY] });
+    expect(c.loadSession).toHaveBeenCalledWith({ sessionId: id, cwd: "/tmp/libi-test-agent", mcpServers: [LIBI_ENTRY], _meta: expect.any(Object) });
+    // The load carries the same per-agent meta a new session gets (thinking display, PATH, `--chrome`), so a
+    // reopened chat is configured like a fresh one: the claude bag for Claude, nothing for Codex.
+    expect("claudeCode" in c.loadSession.mock.calls[0][0]._meta).toBe(agentId === "claude-code");
     // close strictly before the load: a load on a session the adapter still holds returns early
     // (claude-agent-acp's fingerprint) or re-attaches without re-reading config (codex).
     expect(c.closeSession.mock.invocationCallOrder[0]).toBeLessThan(c.loadSession.mock.invocationCallOrder[0]);
@@ -566,7 +569,7 @@ describe("a deactivation that retires an in-flight prompt ends its turn exactly 
     return { chat, sending, settle: (v: { stopReason: string }) => settle(v) };
   }
 
-  it("scheduleSessionReload mid-turn (libi.restart_acp_session), the adapter answering the close first", async () => {
+  it("scheduleSessionReload mid-turn (libi.extension restart_session), the adapter answering the close first", async () => {
     const { chat, sending, settle } = await midTurn("claude-code", "reload-mid");
     const events = eventsOf(chat);
 

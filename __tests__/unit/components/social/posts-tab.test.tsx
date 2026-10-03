@@ -22,6 +22,7 @@ vi.mock("@/lib/queries/social", async (importOriginal) => {
       return analytics;
     },
     useRetrySocialPost: mutation,
+    useSendToInbox: mutation,
     useUpdateSocialPost: mutation,
     useDeleteSocialPost: mutation,
   };

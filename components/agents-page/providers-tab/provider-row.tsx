@@ -22,6 +22,7 @@ const KIND_LABEL: Record<ProviderKind, string> = {
   sfx: "Sound effects",
   transcription: "Transcription",
   social: "Social posting",
+  browser: "Browser automation",
 };
 
 /**
@@ -68,6 +69,13 @@ export function ProviderRow({
         <p className="text-[11px] leading-relaxed text-muted-foreground">
           No key: you sign in with your {def.name} account in your browser
           {billsGenerationCredits(def) ? <>, and generations use your {def.name} credits.</> : "."}
+        </p>
+      ) : null}
+
+      {def.auth === "none" ? (
+        <p className="text-[11px] leading-relaxed text-muted-foreground">
+          No key or sign-in: it runs on your computer with npx (needs Node.js) and opens its own browser window,
+          where you sign in to a site once.
         </p>
       ) : null}
 

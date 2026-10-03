@@ -196,7 +196,7 @@ describe("audio chunk save + auto-aggregate", () => {
   /**
    * `aggregateTranscript` defaults `provider` to `"external"` — right
    * for path B (the agent driving its own STT through
-   * `libi.analysis_save_audio_chunk`, which cannot name a vendor), wrong for
+   * `libi.analysis_save` action `audio_chunk`, which cannot name a vendor), wrong for
    * the server-side Whisper path, which knows exactly what produced the words.
    * `transcribeAudio` used to correct it with a re-stamp AFTER the loop, so
    * the aggregate spent the gap claiming a local on-device transcription came

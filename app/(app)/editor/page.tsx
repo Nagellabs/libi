@@ -132,10 +132,10 @@ function EditorWorkspace() {
   const deepLinkPostId = searchParams.get("post");
   const [activePieceId, setActivePieceId] = useState<string | null>(null);
 
-  // Folder reveal request in the resources panel (driven by libi.show_folder).
+  // Folder reveal request in the resources panel (driven by libi.show({ target: "folder" })).
   // A monotonic `nonce` lets a repeated reveal of the SAME folder id re-fire —
   // requestAnimationFrame is unreliable for this (it never runs when the
-  // window is backgrounded, which is exactly when the agent calls show_folder).
+  // window is backgrounded, which is exactly when the agent calls libi.show for a folder).
   const [revealFolder, setRevealFolder] = useState<{ id: string; nonce: number } | null>(null);
 
   // Track whether we've already attempted to restore the previously-opened
@@ -546,7 +546,7 @@ function EditorWorkspace() {
         try {
           const res = await fetch(`/api/files/by-id/${targetFileId}`);
           if (!res.ok) {
-            console.warn(`show_asset: file ${targetFileId} fetch failed (${res.status})`);
+            console.warn(`libi.show asset: file ${targetFileId} fetch failed (${res.status})`);
             return;
           }
           const { file } = (await res.json()) as { file: FileRecord };
@@ -557,7 +557,7 @@ function EditorWorkspace() {
             setSelectedAsset(file);
           }
         } catch (err) {
-          console.warn("show_asset: navigation failed", err);
+          console.warn("libi.show asset: navigation failed", err);
         }
       })();
     } else if (event.target === "preview" && event.pieceId) {
@@ -579,8 +579,8 @@ function EditorWorkspace() {
     }
   }, [resourcesVisible, toggleResources, setAssetOriginFolderId, setAssetCurrentFolderId]);
 
-  // Subscribe to the global navigate emitter so show_piece / show_asset /
-  // show_preview ALWAYS reach the editor — even the first one of a turn,
+  // Subscribe to the global navigate emitter so libi.show (piece / asset /
+  // preview) ALWAYS reach the editor — even the first one of a turn,
   // which used to race the per-session useAgentChat onNavigate handler and
   // get silently dropped (user then had to ask "show me the piece"). This
   // mirrors useGlobalRefreshQuerySubscription; the per-session onNavigate

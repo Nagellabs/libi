@@ -8,6 +8,7 @@ import {
   type RefreshQueryEvent,
   type NavigateAgentsEvent,
   type NavigateTemplatesEvent,
+  type NavigateSocialEvent,
   type OverlayErrorEvent,
   type HighlightEvent,
   type HighlightEffectEvent,
@@ -27,6 +28,7 @@ export async function GET(req: Request) {
   let systemHandlerRef: ((event: SystemEvent) => void) | null = null;
   let navAgentsHandlerRef: ((e: NavigateAgentsEvent) => void) | null = null;
   let navTemplatesHandlerRef: ((e: NavigateTemplatesEvent) => void) | null = null;
+  let navSocialHandlerRef: ((e: NavigateSocialEvent) => void) | null = null;
   let overlayErrorHandlerRef: ((e: OverlayErrorEvent) => void) | null = null;
   let highlightHandlerRef: ((e: HighlightEvent) => void) | null = null;
   let highlightEffectHandlerRef: ((e: HighlightEffectEvent) => void) | null = null;
@@ -47,6 +49,7 @@ export async function GET(req: Request) {
     if (systemHandlerRef) sm.offSystemEvent(systemHandlerRef);
     if (navAgentsHandlerRef) navigationEmitter.off("navigate_agents", navAgentsHandlerRef);
     if (navTemplatesHandlerRef) navigationEmitter.off("navigate_templates", navTemplatesHandlerRef);
+    if (navSocialHandlerRef) navigationEmitter.off("navigate_social", navSocialHandlerRef);
     if (overlayErrorHandlerRef)
       navigationEmitter.off("overlay_error", overlayErrorHandlerRef);
     if (highlightHandlerRef) navigationEmitter.off("highlight", highlightHandlerRef);
@@ -143,6 +146,20 @@ export async function GET(req: Request) {
       };
       navTemplatesHandlerRef = navTemplatesHandler;
       navigationEmitter.on("navigate_templates", navTemplatesHandler);
+
+      const navSocialHandler = (event: NavigateSocialEvent) => {
+        try {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ type: "navigate_social", ...event })}\n\n`,
+            ),
+          );
+        } catch {
+          navigationEmitter.off("navigate_social", navSocialHandler);
+        }
+      };
+      navSocialHandlerRef = navSocialHandler;
+      navigationEmitter.on("navigate_social", navSocialHandler);
 
       const overlayErrorHandler = (event: OverlayErrorEvent) => {
         try {

@@ -23,6 +23,7 @@ vi.mock("@/lib/queries/social", async (importOriginal) => {
     useUpdateSocialPost: () => ({ mutate: vi.fn(), isPending: false }),
     useDeleteSocialPost: () => ({ mutate: vi.fn(), isPending: false }),
     useRetrySocialPost: () => ({ mutate: vi.fn(), isPending: false }),
+    useSendToInbox: () => ({ mutate: vi.fn(), isPending: false, error: null }),
   };
 });
 

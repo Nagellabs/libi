@@ -477,7 +477,7 @@ describe("templates-06's hard invariants", () => {
   const s = load("06-apply-left-out.md");
   const APPLY = `[tool-call mcp__libi__libi_apply_template] {"cloudId":"ddddddddddddddddddd5","newPiece":{},"slotValues":{"headline":"Launch day"}}`;
   const RESULT = `[tool-result mcp__libi__libi_apply_template ok] "{\\"leftOut\\":[\\"layer 1 (text-ab12): outline not recognised\\",\\"layer 1 (text-ab12): exit effect not available\\"]}"`;
-  const GET = `[tool-result mcp__libi__libi_get_template ok] "{\\"effects\\":{\\"out\\":{\\"effectId\\":\\"author-sparkle-burst\\"}},\\"stroke\\":{\\"color\\":\\"author-neon-glow\\"}}"`;
+  const GET = `[tool-result mcp__libi__libi_template ok] "{\\"effects\\":{\\"out\\":{\\"effectId\\":\\"author-sparkle-burst\\"}},\\"stroke\\":{\\"color\\":\\"author-neon-glow\\"}}"`;
   const run = (say: string) => viewOf([{ all: [APPLY, RESULT, GET], say: [say] }]);
 
   it("passes a run that names what was left out in libi's words", () => {

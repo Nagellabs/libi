@@ -97,7 +97,7 @@ export interface PreviewSurfaceProps {
   onEditOverlay: (id: string) => void;
   onOverlayCommit: (content: string) => void;
   onOverlayCancel: () => void;
-  /** A pending navigation seek (set by show_scene/show_preview); consumed once. */
+  /** A pending navigation seek (set by libi.show preview); consumed once. */
   pendingSeek: PendingSeek | null;
   /** True while the active piece's composition query is refetching — the
    *  auto-show seek waits for this to settle (behavior parity with the editor page). */

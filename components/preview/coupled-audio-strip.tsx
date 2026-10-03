@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Unlink, Volume2, VolumeX } from "lucide-react";
 import type { AudioClip } from "@/lib/engine/types";
 import { Waveform } from "./waveform";
+import { ClipGainOverlay } from "./clip-gain-overlay";
 import { dragToTiming } from "@/lib/preview/audio-clip-drag";
 import { CopyrightBadge } from "./copyright-badge";
 
@@ -219,6 +220,7 @@ export function CoupledAudioStrip({
             />
           </div>
         )}
+        {clip && <ClipGainOverlay clip={clip} />}
         <button
           type="button"
           onMouseDown={(e) => {

@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registeredToolNames } from "@/__tests__/helpers/mcp-tools";
+import { registeredMergedTools } from "@/mcp/tools/action-registry";
 
 let storageRoot: string;
 let pieceDir: string;
@@ -40,12 +41,13 @@ const writeManifest = (m: object) =>
 const readManifest = () =>
   JSON.parse(readFileSync(join(pieceDir, "composition.json"), "utf-8"));
 
-describe("libi.audio_relink_overlay registration", () => {
-  it("is registered as an MCP tool on the core libi MCP", async () => {
+describe("libi.audio_clip relink_overlay registration", () => {
+  it("is a declared action of the merged audio_clip tool on the core libi MCP", async () => {
     const { createLibiMcpServer } = await import("@/mcp/server");
     const server = createLibiMcpServer();
     const names = registeredToolNames(server);
-    expect(names).toContain("libi.audio_relink_overlay");
+    expect(names).toContain("libi.audio_clip");
+    expect(registeredMergedTools().get("libi.audio_clip")?.actions).toContain("relink_overlay");
   });
 });
 

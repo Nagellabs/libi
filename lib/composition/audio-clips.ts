@@ -1,3 +1,4 @@
+import { splitVolumeKeyframes } from "@/lib/audio/clip-gain";
 import type {
   CompositionManifest,
   PersistedAudioClip,
@@ -140,9 +141,14 @@ export function splitClip(
   const localOffset = t - orig.startTime;
   if (localOffset <= 0 || localOffset >= orig.duration) return null;
 
+  // The volume envelope is clip-local seconds: each half keeps what it played
+  // before the cut (the tail's keys move to its own start). A crossfade belongs
+  // to the clip's START, so only the head keeps it.
+  const keys = splitVolumeKeyframes(orig, localOffset);
   const head: PersistedAudioClip = {
     ...orig,
     duration: localOffset,
+    ...(keys ? { volumeKeyframes: keys.head } : {}),
   };
   const tail: PersistedAudioClip = {
     ...orig,
@@ -150,7 +156,9 @@ export function splitClip(
     startTime: t,
     duration: orig.duration - localOffset,
     trimStart: orig.trimStart + localOffset,
+    ...(keys ? { volumeKeyframes: keys.tail } : {}),
   };
+  delete tail.crossfadeMs;
 
   const next = [...clips];
   next.splice(idx, 1, head, tail);

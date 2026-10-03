@@ -196,15 +196,15 @@ describe("startMcpHttpChild", () => {
       restartDelayMs: 1,
       onGaveUp,
     });
-    for (const c of children.slice(0, 3)) {
+    for (const [n, c] of children.slice(0, 3).entries()) {
       c.exitCode = 1;
       c.emit("exit", 1, null);
-      await new Promise((r) => setTimeout(r, 10));
+      await waitFor(() => spawn.mock.calls.length === n + 2, `restart ${n + 1}`);
     }
     expect(spawn).toHaveBeenCalledTimes(4);
     children[3].exitCode = 1;
     children[3].emit("exit", 1, null);
-    await new Promise((r) => setTimeout(r, 10));
+    await waitFor(() => onGaveUp.mock.calls.length === 1, "giving up");
     expect(spawn).toHaveBeenCalledTimes(4);
     expect(onGaveUp).toHaveBeenCalledTimes(1);
     expect(handle.status()).toBe("gave-up");

@@ -1,6 +1,6 @@
 /** One timed token from an STT engine, in seconds. Local Whisper emits
  *  `type: "word"` with `speaker_id: null`; a diarizing provider saved through
- *  Path B (analysis_save_audio_chunk) may carry `spacing` / `audio_event`
+ *  Path B (libi.analysis_save action audio_chunk) may carry `spacing` / `audio_event`
  *  tokens and real speaker ids. Same shape as `transcriptWordSchema`. */
 export interface SttWord {
   text: string;

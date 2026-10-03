@@ -1,51 +1,21 @@
 <!-- Adapted from krusemediallc/arcads-claude-code (MIT, © Caleb Kruse / Kruse Media LLC).
-     Reworked for libi tooling (ai-asset-generation flow, provider model ids, libi.upload_file). -->
+     Reworked for libi tooling. -->
 
-# Brief intake — six questions before any script
+# Brief intake
 
-Run this **before** picking a format ([ad-formats.md](ad-formats.md)) or writing
-a line of dialogue ([script-craft.md](script-craft.md)). A UGC video built
-without a brief becomes a feasible-but-pointless slideshow of test shots. The
-brief is what makes it an *ad*.
+A UGC video built without a brief is a feasible but pointless slideshow of test shots; the brief is what makes it an ad. Ask these before picking a format or writing a line, skipping what the user already said. If an answer is vague, push for the specific rather than filling the gap with a guess.
 
-Ask the user these six. If they answer one vaguely, push for the specific —
-don't fill the gap with a guess.
+| # | Question | Good looks like |
+| --- | --- | --- |
+| 1 | **Audience**, in one sentence | "Women 25 to 35 who already buy retinol and want a gentler swap", not "everyone" |
+| 2 | **Job to be done**: what should the viewer feel or do after | "Tap the link and try the 2-week sample", not "be aware of us" |
+| 3 | **Offer and proof**: product name, one concrete benefit, optional social proof | "Aurora Serum, visibly less redness in 14 days, 4.8 stars from 2k buyers" |
+| 4 | **Hook**: the first one or two seconds | "I almost returned this." / "POV: your skincare actually works." |
+| 5 | **CTA**: the exact words, spoken or on screen | "Shop the drop." / "Comment GLOW for the link." |
+| 6 | **Constraints**: length, aspect ratio, platform, banned topics, brand words to avoid | "15 s, 9:16, TikTok, never say 'cure'" |
 
-| # | Question | What good looks like |
-|---|---|---|
-| 1 | **Audience** — who is this for? (one sentence) | "Women 25–35 who already buy retinol and want a gentler swap." Not "everyone." |
-| 2 | **Job-to-be-done** — what should the viewer feel or do after watching? | "Tap the link and try the 2-week sample." Not "be aware of us." |
-| 3 | **Offer + proof** — product name, one concrete benefit, optional social proof | "Aurora Serum — visibly less redness in 14 days, 4.8★ from 2k buyers." |
-| 4 | **Hook** — the first 1–2 seconds: pattern interrupt, curiosity, or relatable moment | "I almost returned this." / "POV: your skincare actually works." |
-| 5 | **CTA** — the exact words, if spoken or on-screen | "Shop the drop." / "Comment GLOW for the link." Not "drive conversions." |
-| 6 | **Constraints** — length, aspect ratio, platform, banned topics, brand words to avoid | "15s, 9:16, TikTok, never say 'cure'." |
+Translate mood words into visual specifics before composing, since a model renders materials, wardrobe, locations and pace, not "premium": premium is brushed metal, linen wardrobe, a quiet minimal room, slow deliberate camera; fun is bright daylight, quick cuts, a hoodie, a real laugh; trustworthy is direct eye contact, unhurried pacing, real skin texture, no music bed; energetic is handheld movement, faster cuts, gestures with the product. Check the result against the banned words in [craft](../references/craft.md).
 
-## Translate vague adjectives into visual specifics
+Compose one paragraph of clear direction (subject, setting, camera and motion, lighting, audio mood) rather than a bag of keywords.
 
-If the brief leans on a mood word, convert it before composing. A model can't
-render "premium" — it renders materials, wardrobe, locations, and pace.
-
-| Vague | Translate to |
-|---|---|
-| "premium" | brushed-metal product, neutral linen wardrobe, quiet minimalist room, slow deliberate camera |
-| "fun" | bright daylight, quick jump cuts, casual hoodie, an actual laugh in the dialogue |
-| "trustworthy" | direct eye contact, unhurried pacing, real skin texture, no music bed |
-| "energetic" | handheld movement, faster cuts, gestures with the product, up-tempo delivery |
-
-Watch for forbidden tokens while you do this — see
-[forbidden-words.md](forbidden-words.md) (`cinematic`, `professional`,
-`studio`, etc. all need paraphrasing).
-
-## Compose, don't keyword-dump
-
-Prefer **one paragraph of clear direction** over a bag of keywords. Name the
-subject, setting, camera/motion, lighting, and audio mood as a coherent scene —
-that reads far better to a video model than a comma-soup of tags.
-
-## Where the answers go
-
-These six answers feed **Stage 3 (Script)** directly: the hook seeds
-[copywriting-angles.md](copywriting-angles.md), the CTA becomes the verdict beat,
-the constraints set duration in [script-craft.md](script-craft.md). Record the
-brief in the storyboard **overview** (`libi.add_storyboard_card({ overview })`) so it
-persists and the rest of the pipeline (and a later re-run) can read it back.
+The answers feed the script: the hook seeds [copywriting-angles](copywriting-angles.md), the CTA becomes the verdict beat, the constraints set duration. Record the brief in the storyboard overview (`libi.add_storyboard_card({ overview })`) so a later session can read it back.

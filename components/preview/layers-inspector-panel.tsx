@@ -959,6 +959,11 @@ function AudioDetailsBody({
       {file && <AudioRightsSection fileId={file.fileId} />}
       <dl className="space-y-0.5 text-[11px] text-muted-foreground">
         <InfoRow k="Volume" v={`${Math.round(clip.volume * 100)}%`} />
+        {clip.gainDb ? <InfoRow k="Gain" v={`${clip.gainDb > 0 ? "+" : ""}${Math.round(clip.gainDb * 10) / 10} dB`} /> : null}
+        {clip.volumeKeyframes?.keyframes.length ? (
+          <InfoRow k="Envelope" v={`${clip.volumeKeyframes.keyframes.length} volume key${clip.volumeKeyframes.keyframes.length === 1 ? "" : "s"}`} />
+        ) : null}
+        {clip.crossfadeMs ? <InfoRow k="Crossfade" v={`${clip.crossfadeMs} ms`} /> : null}
         <InfoRow k="Trim start" v={`${clip.trimStart.toFixed(2)}s`} />
         <InfoRow k="Audible" v={clip.enabled ? "yes" : "muted"} />
       </dl>

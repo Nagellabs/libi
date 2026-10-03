@@ -12,6 +12,7 @@ import {
   LibiServerUnavailableError,
 } from "@/mcp/jobs-client";
 import type { ToolResult } from "./types";
+import { attachedDownloadNote, matchedDownloadNote } from "./job-notes";
 import type {
   TtsListVoicesParams,
   TtsDownloadModelParams,
@@ -71,6 +72,7 @@ export async function ttsDownloadModel(
             clientKey: resp.clientKey,
             attachedToRunning: true,
             existingJob: resp.existingJob,
+            note: attachedDownloadNote({ what: "a download of this model", restartArg: "forceNew:true" }),
           },
         };
       }
@@ -85,6 +87,7 @@ export async function ttsDownloadModel(
             status: installed ? "installed" : "not_installed",
             matchedExisting: true,
             existingJob: resp.existingJob,
+            note: matchedDownloadNote({ restartArg: "forceNew:true" }),
             ...(installed
               ? {}
               : {

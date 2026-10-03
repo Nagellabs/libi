@@ -11,6 +11,27 @@ import { buildUvEnv } from "@/lib/uv-env/spawn-env";
 import { uvNetworkFailureMessage } from "@/lib/uv-env/network-failure";
 import { isInstalling } from "./in-flight";
 
+/** Warm-up probe: import faster_whisper AND decode a tiny generated WAV through
+ *  its own `decode_audio`. An import alone passed on the env that crashed every
+ *  transcription with "open() got an unexpected keyword argument
+ *  'metadata_errors'" (PyAV newer than faster-whisper 1.1.1 supports), so the
+ *  chip said installed while the first real transcription failed. */
+export const WHISPER_ENV_SELF_CHECK = [
+  "import io, wave",
+  "import faster_whisper",
+  "from faster_whisper.audio import decode_audio",
+  "b = io.BytesIO()",
+  "w = wave.open(b, 'wb')",
+  "w.setnchannels(1)",
+  "w.setsampwidth(2)",
+  "w.setframerate(16000)",
+  "w.writeframes(b'\\0\\0' * 1600)",
+  "w.close()",
+  "b.seek(0)",
+  "assert len(decode_audio(b)) > 0",
+  "print('ok')",
+].join("\n");
+
 class WhisperEnvInstallError extends Error {
   constructor(message: string) {
     super(message);
@@ -61,7 +82,7 @@ export const whisperEnvVirtualDep: VirtualDep = {
       ...WHISPER_WITH_SPECS.flatMap((s) => ["--with", s]),
       "python",
       "-c",
-      "import faster_whisper; print('ok')",
+      WHISPER_ENV_SELF_CHECK,
     ];
     await new Promise<void>((resolve, reject) => {
       const child = spawn(uv, args, {

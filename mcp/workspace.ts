@@ -3,6 +3,7 @@ import path from "path";
 import { serverLogger as logger } from "@/lib/logger";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
 import { getInstructions, testModeCoreBanner } from "@/mcp/instructions";
+import { renderDialect } from "@/lib/instructions/dialect";
 import { getDb } from "@/lib/db/client";
 import { mcpServers } from "@/lib/db/schema/sqlite";
 import { buildExtensionsSection } from "@/mcp/registry/instruction-builder";
@@ -78,8 +79,10 @@ function coreCandidates(): string[] {
  * `LIBI_TEST_MODE` is set. The core's own job is to tell the agent to call
  * `libi.read_manual` for everything else, a section at a time.
  *
- * `dialect` is accepted for symmetry with `renderAgentInstructions` and is
- * currently unused: both CLIs read the same core.
+ * `dialect` selects the core's `<!-- libi-agent:… -->` blocks (lib/instructions/dialect.ts), exactly as the
+ * manual's. Today that is ONE sentence, for Codex: its in-app Code Mode runs a filter over every tool
+ * description before it has read `libi.read_manual`, and libi's instructions prefix every description, so a
+ * "list tool NAMES first" hint kept only in the manual arrives too late. Claude's rendering has no block.
  *
  * DELIBERATELY IGNORES `readInstructionsOverride()`. A user's override
  * replaces the MANUAL (it reaches the agent through `read_manual`, via
@@ -93,7 +96,6 @@ export function renderInstructionsCore(
   dialect: "claude" | "codex",
   opts: { fakesAttached?: boolean } = {},
 ): string {
-  void dialect;
   let core: string | null = null;
   for (const filePath of coreCandidates()) {
     if (fs.existsSync(filePath)) {
@@ -106,6 +108,7 @@ export function renderInstructionsCore(
       `instructions-core.md not found (tried: ${coreCandidates().join(", ")})`,
     );
   }
+  core = renderDialect(core, dialect);
   if (!isTestMode()) return core;
   // `fakesAttached` comes from the studio process, which owns the flag
   // (`lib/mcp-config.ts#testModeFakesEnabled`) and ships it to this one in the

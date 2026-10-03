@@ -14,6 +14,11 @@ describe("finish links", () => {
     expect(finishLinkFor(t({ status: "pending" }), { mode: "draft" }, true)).toBeNull();
     expect(finishLinkFor(t({}), { mode: "attach", track: { id: "x", title: "y" }, musicVolume: 1, originalVolume: 1 }, true)).toBeNull();
   });
+  it("an inbox upload the provider reports gets the finish link whoever sent it (no libi music stamp needed)", () => {
+    expect(finishLinkFor(t({ delivery: "inbox" }), undefined, false)).toMatchObject({ kind: "tiktok-inbox", href: TIKTOK_APP_URL });
+    expect(finishLinkFor(t({ delivery: "inbox", status: "pending" }), undefined, false)).toBeNull();
+    expect(finishLinkFor(t({ platformPostId: "7512345" }), undefined, false)).toBeNull();
+  });
   it("YouTube with the song: YouTube Studio's editor for that video", () => {
     expect(youtubeStudioEditorUrl("abc_123")).toBe("https://studio.youtube.com/video/abc_123/editor");
     expect(finishLinkFor(t({ platform: "youtube", platformPostId: "abc_123" }), undefined, true)).toEqual({ kind: "youtube-studio-editor", label: "Open in YouTube Studio", href: "https://studio.youtube.com/video/abc_123/editor" });

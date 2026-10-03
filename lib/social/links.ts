@@ -27,7 +27,7 @@ export interface SocialPostLink {
  *
  * **`createdBy` is written once and never rewritten.** It is provenance — the
  * row's chip reads "in libi" or "by agent" — and linking is not authorship: a
- * single idempotent `libi.social_link_post` (or the reindex sweep, which has
+ * single idempotent `libi.social_link` (kind `post`) (or the reindex sweep, which has
  * to assume "agent" for every post it finds) used to flip a post the user had
  * composed in the UI to "by agent" (QA 2026-09-21, finding 9). Whoever created
  * the row created the post; a later linker only says where it belongs.

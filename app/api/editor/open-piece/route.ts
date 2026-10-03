@@ -18,7 +18,7 @@ export async function POST(request: Request) {
   // Stamp the open so the "No piece open" panel can offer a real recents list.
   // This route is the single chokepoint every open flows through — a click in
   // the resources tree, the restore-last-piece effect on boot, and the agent's
-  // `libi.show_piece` (which reaches the editor as an SSE navigation event and
+  // `libi.show({ target: "piece" })` (which reaches the editor as an SSE navigation event and
   // ends up here like any other open).
   //
   // `updatedAt` is deliberately NOT touched: it means "last modified", it

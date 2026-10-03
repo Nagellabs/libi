@@ -1,23 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as tools from "@/mcp/tools";
-import {
-  ComputeObjectTrackShape,
-  AddTrackedOverlaySchema,
-  UpdateTrackedOverlaySchema,
-  DeleteTrackSchema,
-  ListTracksSchema,
-  UpdateTrackResultSchema,
-  ComputeTrackSegmentSchema,
-  SkipSegmentSchema,
-  ListTrackSegmentsSchema,
-  GroundTargetSchema,
-  VerifyInstallSchema,
-  VerifyTrackedOverlayShape,
-  ListIdentityCandidatesSchema,
-  PickCandidateSchema,
-  RemoveBackgroundSchema,
-} from "@/mcp/tools/schemas";
-import { notify } from "@/mcp/notify";
+import { VerifyInstallSchema, RemoveBackgroundSchema } from "@/mcp/tools/schemas";
+import { registerActionTool } from "@/mcp/tools/action-tool";
+import { TRACKING_MERGED_TOOLS } from "@/mcp/tools/families/tracking";
 
 // Accepts both the loose `ToolResult` and the canonical generic
 // `ToolResultOf<…>` (tracking tools return the latter) — the sink only
@@ -34,39 +19,6 @@ function makeError(err: unknown) {
   };
 }
 
-type McpBlock =
-  | { type: "text"; text: string }
-  | { type: "image"; data: string; mimeType: string };
-
-export function buildVerifyContent(result: tools.AnyToolResult): {
-  content: McpBlock[];
-  isError?: boolean;
-} {
-  if (!result.success) {
-    return {
-      content: [{ type: "text", text: JSON.stringify({ success: false, error: result.error }) }],
-      isError: true,
-    };
-  }
-  const data = (result.data ?? {}) as {
-    frames?: { pngBase64?: string }[];
-  } & Record<string, unknown>;
-  const frames = data.frames ?? [];
-  const blocks: McpBlock[] = [];
-  for (const f of frames) {
-    if (f.pngBase64) blocks.push({ type: "image", data: f.pngBase64, mimeType: "image/png" });
-  }
-  const lean = {
-    ...data,
-    frames: frames.map((f) => {
-      const { pngBase64, ...rest } = f;
-      return { ...rest, hasImage: !!pngBase64 };
-    }),
-  };
-  blocks.push({ type: "text", text: JSON.stringify({ success: true, data: lean }) });
-  return { content: blocks };
-}
-
 /**
  * Register the tracking + background-removal tools on a given MCP server.
  *
@@ -80,7 +32,8 @@ export function buildVerifyContent(result: tools.AnyToolResult): {
  *  - `mcp/tracking-mcp/server.ts#createTrackingMcpServer()` — the standalone
  *    `libi serve-mcp-tracking` CLI entry, kept for packaging parity.
  *
- * The tool implementation functions + schemas are unchanged — they still
+ * The two merged tools (`libi.track`, `libi.tracked_overlay`) replace the old per-verb tools; the
+ * implementation functions + schemas are unchanged — they still
  * call the Next.js server over HTTP via runJobViaServer, so which MCP hosts
  * them is behavior-neutral. The heavy Python tracking engine stays lazy
  * (tier-2): tools return a structured `tracking_engine_not_installed` error
@@ -88,190 +41,14 @@ export function buildVerifyContent(result: tools.AnyToolResult): {
  * ~1 GB / 10-min engine install is still deferred off the boot path.
  */
 export function registerTrackingTools(server: McpServer): void {
-  server.registerTool(
-    "libi.compute_object_track",
-    {
-      description:
-        "STOP — before using this you MUST invoke the `using-object-tracking` skill via the Skill " +
-        "tool and follow it (anchor density, the in-between verification grid, the repair loop). " +
-        "Reading the SKILL.md via Read/grep/ToolSearch is NOT a substitute for invoking the Skill tool. " +
-        "DEFAULT tracker — local, free. Track a subject across the whole clip. Auto-detects shots " +
-        "and computes one segment per shot (recompute a bad window later with libi.compute_track_segment). " +
-        "Returns {trackId, segments[], summary{perSegment,visibleRanges,lostRanges,flags}}. " +
-        "Returns a trackId compatible with libi.add_tracked_overlay. " +
-        "Dedup is handled per-segment inside the shot fan-out — sub-job markers " +
-        "(attachedToRunning/matchedExisting) are not surfaced at the fan-out result. " +
-        "Pass forceNew:true to force every per-shot segment recompute (e.g., after the " +
-        "source video changed); default false reuses recently-computed matching segments.",
-      inputSchema: ComputeObjectTrackShape,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.computeObjectTrack(params, extra);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.add_tracked_overlay",
-    {
-      description:
-        "Pin an overlay (emoji, text, image, video, code, or blur/pixelate effect) to a moving subject. Requires a trackId from libi.compute_object_track. `fit` controls how the bbox maps to overlay size: 'tight'=face bbox, 'head'=bbox extended upward for full head, 'rect'=use overlay.rect size centered on bbox. `scale` is a multiplier on top of fit — set per case to cover the subject as desired (1.0 = bbox-tight; 1.2-1.4 typical for emoji on faces; agent decides).",
-      inputSchema: AddTrackedOverlaySchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.addTrackedOverlay(params);
-        if (result.success) notify.refreshQuery({ queryKey: "composition", pieceId: params.pieceId });
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.update_tracked_overlay",
-    {
-      description:
-        "Update any field of a tracked overlay (track binding, content, timing, rect, z, opacity, fit, scale, smoothing). Only provided fields are changed. Set offset ({x,y} in fractions of the tracked box, e.g. {x:0,y:-1} = one box-height above the head) to reposition the content while it keeps following the track — this never modifies the track itself. Position bounce: positionMode 'stabilized' (the default) already applies render-time One-Euro position smoothing; 'raw' opts out for a deliberately bouncy look. Do NOT change `smoothing` to fix jitter — it is sub-frame interpolation, not a denoiser.",
-      inputSchema: UpdateTrackedOverlaySchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.updateTrackedOverlay(params);
-        if (result.success) notify.refreshQuery({ queryKey: "composition", pieceId: params.pieceId });
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.delete_track",
-    {
-      description:
-        "Delete a track (DB row + JSON sidecar). Tracked overlays that reference this trackId will fail to render until they're updated or removed.",
-      inputSchema: DeleteTrackSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.deleteTrack(params);
-        if (result.success && result.data?.pieceId) {
-          notify.refreshQuery({ queryKey: "composition", pieceId: result.data.pieceId });
-        }
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.list_tracks",
-    {
-      description: "List all tracks computed for a source file.",
-      inputSchema: ListTracksSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.listTracks(params);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.update_track_result",
-    {
-      description:
-        "Write externally-computed tracking samples into libi's track store. " +
-        "Use when you ran tracking outside libi (e.g., via a different MCP or external tool) and want to write the result into libi's track store. " +
-        "Returns a trackId you can pass to libi.add_tracked_overlay. " +
-        "Replace-only semantics: passing the same trackId twice discards prior samples.",
-      inputSchema: UpdateTrackResultSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.updateTrackResult(params);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.compute_track_segment",
-    {
-      description:
-        "STOP — invoke the `using-object-tracking` skill (Skill tool) and follow it before using this; " +
-        "this tool is the repair step of that skill's loop. " +
-        "Compute or replace ONE time-range segment of a track with a chosen method (yoloe+botsort | yoloe-text | sot). Recomputes only this window; other segments untouched. Returns per-segment quality `summary` (visibleRanges, lostRanges, flags).",
-      inputSchema: ComputeTrackSegmentSchema,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.computeTrackSegment(params, extra);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.skip_segment",
-    {
-      description:
-        "Mark a time range as intentionally untracked (e.g. subject not visible / back to camera). Renders nothing there. Honest — prefer this over a bad track.",
-      inputSchema: SkipSegmentSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.skipSegment(params);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.list_track_segments",
-    {
-      description:
-        "List a track's segments with per-segment status/quality (ok|lost|skipped, visible/total counts, reason).",
-      inputSchema: ListTrackSegmentsSchema,
-    },
-    async (params) => {
-      try {
-        const result = await tools.listTrackSegments(params);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
-
-  server.registerTool(
-    "libi.ground_target",
-    {
-      description:
-        "STOP — invoke the `using-object-tracking` skill (Skill tool) and follow it before any tracking work. " +
-        "Stage-0 grounding (set-of-marks): detect candidate objects at a timestamp and return NUMBERED boxes. " +
-        "LOOK at the frame, pick the index matching the user's target, then pass that bbox as the anchor to " +
-        "libi.compute_track_segment / libi.compute_object_track. Do NOT hand-guess pixel coordinates.",
-      inputSchema: GroundTargetSchema,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.groundTarget(params, extra);
-        return makeContent(result);
-      } catch (err) { return makeError(err); }
-    },
-  );
+  // `libi.track` + `libi.tracked_overlay`: the thirteen per-verb tools, merged (mcp/tools/families/tracking.ts).
+  for (const merged of TRACKING_MERGED_TOOLS) registerActionTool(server, merged);
 
   server.registerTool(
     "libi.verify_install",
     {
       description:
-        "Check whether the libi-tracking engine (uv Python env + ONNX models) is installed and its self-test passes. " +
-        "Returns {ok, installed, missing[], versions}. Call it with NO arguments. " +
-        "It speaks ONLY for libi-tracking: `missing[]` always lists the tracking engine's dependencies, never another extension's, " +
-        "so a call naming a different extension (e.g. mcpId:'local-music') is refused rather than answered. " +
-        "To verify any OTHER extension, re-call the tool that returned status:\"needs_install\", or read the `dependencies` array on libi.get_install_plan. " +
-        "Call this if a tracking tool returned tracking_engine_not_installed (if not installed, " +
-        "libi.install_tracking_engine runs the actual install), and again after installing to confirm. " +
-        "On success this ALSO closes the lazy-install loop — it persists the tracking engine as installed in the dependency registry the tracking gate reads, so the next tracking call is unblocked with no manual DB patch and no update_dep_status needed.",
+        "Check that the libi-tracking engine (uv Python env + ONNX models) is installed and its self-test passes; call it with NO arguments. Returns {ok, installed, missing[], versions}. It speaks ONLY for libi-tracking (another extension's name is refused): to verify others re-call the tool that returned status \"needs_install\", or read `dependencies` on libi.get_install_plan. Call it after tracking_engine_not_installed and after libi.install_tracking_engine; success persists the install the tracking gate reads.",
       inputSchema: VerifyInstallSchema,
     },
     async (params) => {
@@ -283,96 +60,10 @@ export function registerTrackingTools(server: McpServer): void {
   );
 
   server.registerTool(
-    "libi.verify_tracked_overlay",
-    {
-      description:
-        "STOP — invoke the `using-object-tracking` skill (Skill tool) and follow it. " +
-        "Read-only visual verify: renders the tracked overlay on the source footage at the " +
-        "frames most likely to be wrong (every issue/lost/flagged range + the final seconds, " +
-        "anchor frames excluded) and returns those frames as images plus per-frame tracking " +
-        "context + the track summary. LOOK at the returned frames; if a window is wrong, fix it " +
-        "with libi.compute_track_segment / libi.skip_segment, then verify again. Pre-attach: " +
-        "pass {fileId,trackId,content,fit} (+ optional offset to spot-check a follow-offset " +
-        "placement, sizeMode/maxBoxScale to spot-check a non-default box-size policy, " +
-        "and/or positionMode to spot-check the position-stabilization policy, " +
-        "before attaching — post-attach the overlay's own values win). Post-attach: pass " +
-        "{pieceId,overlayId}. It never re-tracks and never writes the track.",
-      inputSchema: VerifyTrackedOverlayShape,
-    },
-    async (params) => {
-      try {
-        const result = await tools.verifyTrackedOverlay(params);
-        return buildVerifyContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    "libi.list_identity_candidates",
-    {
-      description:
-        "STOP — invoke the `using-object-tracking` skill (Skill tool) and follow it. " +
-        "Identity disambiguation: when a window is ambiguous (≥2 similar subjects the " +
-        "appearance gate cannot separate — e.g. a cameraman in matching clothing), " +
-        "re-runs detect→track over the window and returns the competing candidate tracklets " +
-        "as differently-colored frames for visual inspection. " +
-        "Returns {ambiguous, candidates:[{candidateId,meanTargetSim,frameCount}], frames:[…]}. " +
-        "LOOK at the returned frames, identify the correct subject by candidateId, then call " +
-        "libi.pick_candidate to lock that candidate as an authoritative agent segment. " +
-        "Not a paid tool — runs the local engine (same as libi.compute_track_segment).",
-      inputSchema: ListIdentityCandidatesSchema,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.listIdentityCandidates(params, extra);
-        return buildVerifyContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
-    "libi.pick_candidate",
-    {
-      description:
-        "STOP — invoke the `using-object-tracking` skill (Skill tool) and follow it. " +
-        "Pick one candidate from libi.list_identity_candidates by candidateId. " +
-        "Writes the chosen tracklet's boxes as a provenance:'agent' segment that authorita­tively " +
-        "owns its window regardless of appearance/positional thresholds (stronger than the engine, " +
-        "weaker than a user manual drag). Stores the pick in agentAnchors so later recomputes " +
-        "re-seed from the correct subject. " +
-        "Returns {trackId, segmentId, summary} — verify with libi.verify_tracked_overlay after. " +
-        "Not a paid tool — runs the local engine (same as libi.compute_track_segment).",
-      inputSchema: PickCandidateSchema,
-    },
-    async (params, extra) => {
-      try {
-        const result = await tools.pickCandidate(params, extra);
-        return makeContent(result);
-      } catch (err) {
-        return makeError(err);
-      }
-    },
-  );
-
-  server.registerTool(
     "libi.remove_background",
     {
       description:
-        "STOP — before using this you MUST invoke the `removing-and-replacing-backgrounds` skill via the Skill " +
-        "tool and follow it (subject pick, local-vs-paid-provider routing, the verify-pixels step, " +
-        "compose/transplant). " +
-        "Produce an alpha CUTOUT asset (subject isolated, background transparent) from a VIDEO file. " +
-        "LOCAL + FREE by default (MatAnyone, seeded from libi's subject masks) — a long job with live progress. " +
-        "Returns {cutoutFileId} — a VP9-alpha WebM you place with libi.add_overlay over any new background " +
-        "(add the background as a full-frame overlay too, at a LOWER z); export honors the alpha as-is. " +
-        "subject: omit for auto (largest person) or pass a libi.ground_target candidate bbox. " +
-        "Photos + non-person/low-quality cases route to the PAID provider path — the skill owns that flow " +
-        "and its references/providers/<id>.md names the endpoints; engine:'fal' here only returns " +
-        "those instructions.",
+        "STOP — load the `removing-and-replacing-backgrounds` skill first and follow it (subject pick, local-vs-paid routing, verify-pixels, compose/transplant). Makes an alpha CUTOUT (subject isolated, background transparent) from a VIDEO file: LOCAL + FREE by default (MatAnyone, seeded from libi's subject masks), a long job with live progress. Returns {cutoutFileId}, a VP9-alpha WebM to place with libi.add_overlay over a full-frame background overlay at a LOWER z. `subject`: omit for auto (largest person) or pass a libi.track ground_target bbox. Photos and hard cases use the PAID provider path, owned by the skill; engine:'fal' here only returns its instructions.",
       inputSchema: RemoveBackgroundSchema,
     },
     async (params, extra) => {

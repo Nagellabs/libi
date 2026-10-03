@@ -8,7 +8,7 @@ schematic regenerates from this unit and visibly updates. It uses only the injec
 
 Each block's `rect` is normalized 0..1; we convert to `%` so layout is resolution-free.
 The look is a clean schematic (labeled outlined boxes on a neutral frame), NOT a doodle —
-that keeps it usable as a gpt-image-2 composition reference.
+that keeps it usable as an image-model composition reference.
 
 ```js
 // render.jsx — satori unit body. Returns an element built with the injected `h`.

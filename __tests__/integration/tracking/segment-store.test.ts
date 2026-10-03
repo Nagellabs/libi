@@ -8,23 +8,23 @@ import { upsertSegment } from "@/lib/tracking/segment-store";
 import { readTrack } from "@/lib/tracking/storage";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 describe("segment-store backing tools — MCP surface", () => {
   it("tools backed by the segment store are on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
     // compute_track_segment and skip_segment both write through the segment store
-    expect(names).toContain("libi.compute_track_segment");
-    expect(names).toContain("libi.skip_segment");
-    expect(names).toContain("libi.list_track_segments");
+    expectTrackingAction(names, "libi.track", "compute_segment");
+    expectTrackingAction(names, "libi.track", "skip_segment");
+    expectTrackingAction(names, "libi.track", "list_segments");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
   it("segment-store-backed tools ARE on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_track_segment");
-    expect(names).toContain("libi.skip_segment");
-    expect(names).toContain("libi.list_track_segments");
+    expectTrackingAction(names, "libi.track", "compute_segment");
+    expectTrackingAction(names, "libi.track", "skip_segment");
+    expectTrackingAction(names, "libi.track", "list_segments");
   });
 });
 

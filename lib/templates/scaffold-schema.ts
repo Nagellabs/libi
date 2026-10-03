@@ -176,7 +176,8 @@ export const OVERLAY_KEYS_BY_KIND: Readonly<Record<"text" | "image" | "video" | 
 };
 
 /** Keys a scaffold audio clip may carry (`PersistedAudioClip` + `effects`, the
- *  volume envelope a clip stores like an overlay does, + the scaffold's own). */
+ *  in/out fades a clip stores like an overlay does, + the clip's loudness shape:
+ *  `gainDb`, the `volumeKeyframes` envelope and `crossfadeMs`, + the scaffold's own). */
 export const CLIP_KEYS: readonly string[] = [
   "key",
   "kind",
@@ -191,6 +192,9 @@ export const CLIP_KEYS: readonly string[] = [
   "label",
   "duck",
   "effects",
+  "gainDb",
+  "volumeKeyframes",
+  "crossfadeMs",
 ];
 
 /** A shallow copy of `o` holding only `keys` (absent/undefined values dropped). */
@@ -533,6 +537,24 @@ const clipSchema = z
     label: z.string().max(120).optional(),
     duck: duckSchema.optional(),
     effects: effectsSchema.optional(),
+    /** Static gain in dB (AudioClip.gainDb). An older reader strips it: the clip plays at plain volume. */
+    gainDb: z.number().min(-60).max(12).optional(),
+    /** Volume envelope (AudioClip.volumeKeyframes): `t` seconds from the clip's start, `value` a dB offset. */
+    volumeKeyframes: z
+      .object({
+        keyframes: z
+          .array(
+            z.object({
+              t: z.number().min(0),
+              value: z.number().min(-60).max(12),
+              easing: z.string().max(40).optional(),
+            }),
+          )
+          .max(200),
+      })
+      .optional(),
+    /** Milliseconds the clip crossfades over the earlier clip of the same file (AudioClip.crossfadeMs). */
+    crossfadeMs: z.number().min(0).max(5000).optional(),
     source: sourceSchema,
   })
   .strip()
@@ -674,4 +696,4 @@ export type TemplateAudioClip = TemplateScaffold["audioClips"][number];
  *
  * Recompute with: node -e 'const s=require("fs").readFileSync("lib/templates/scaffold-schema.ts","utf8").replace(/SCAFFOLD_SCHEMA_SHA256 = "[0-9a-f]*"/,"SCAFFOLD_SCHEMA_SHA256 = \"\"");console.log(require("crypto").createHash("sha256").update(s).digest("hex"))'
  */
-export const SCAFFOLD_SCHEMA_SHA256 = "3536c190f79845bed09954686424721e2a38716e73ebb58420bd02a23b496870";
+export const SCAFFOLD_SCHEMA_SHA256 = "f035fe0b2ad4de833ecf536d8defd9b0827fba993490ec940cd76390f2fce628";

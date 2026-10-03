@@ -69,7 +69,7 @@ export function PostRow({
             {postEntryLabel(post)}
           </span>
         </div>
-        <StatusChip status={post.status} />
+        <StatusChip post={post} />
         {when && <span className="text-xs text-muted-foreground">{when}</span>}
         <div className="ml-auto">
           <PostActions post={post} compact onEdit={onEdit ? () => onEdit(post.id) : undefined} />

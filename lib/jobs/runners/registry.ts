@@ -24,6 +24,7 @@ import { templatePublishRunner } from "@/lib/jobs/runners/template-publish";
 import { templatePublishPrepareRunner } from "@/lib/jobs/runners/template-publish-prepare";
 import { templateInstallRunner } from "@/lib/jobs/runners/template-install";
 import { templateExampleRunner } from "@/lib/jobs/runners/template-example";
+import { audioMeasureRunner } from "@/lib/jobs/runners/audio-measure";
 
 /**
  * Process-local runner registry. Populated lazily on first
@@ -102,6 +103,7 @@ export function registerBuiltinRunners(): void {
     templatePublishPrepareRunner,
     templateInstallRunner,
     templateExampleRunner,
+    audioMeasureRunner,
   ]) {
     if (!getRunner(r.kind)) {
       registerRunner(r as JobRunner<unknown, unknown>);

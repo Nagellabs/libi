@@ -75,7 +75,7 @@ describe("snapshotFromRow", () => {
     expect(snap.progressDone).toBe(50);
   });
 
-  // This read path is what `libi.get_job_status` hands the agent, so a frozen
+  // This read path is what `libi.job({ action: "status" })` hands the agent, so a frozen
   // number here becomes a confident wrong answer in chat.
   it("ages a running job's ETA by the time since its last tick", () => {
     const now = 1_000_000;
@@ -130,7 +130,7 @@ describe("snapshotFromRow", () => {
   // `rows.map(snapshotFromRow)` in GET /api/jobs passed the ELEMENT INDEX as the
   // clock — `now = 0` for row 0. Every job then reported msSinceProgress 0 and an
   // undecayed ETA, silently defeating the staleness rule on the very endpoint
-  // `libi.list_jobs` reads. Caught by watching a live job, not by a test.
+  // `libi.job({ action: "list" })` reads. Caught by watching a live job, not by a test.
   //
   // The options-object signature now makes that call a COMPILE error, which is
   // the real fix — hence the cast below, which is the only way to still express

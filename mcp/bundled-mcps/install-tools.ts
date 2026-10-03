@@ -169,7 +169,7 @@ export type UpdateDepStatusResult =
  * Record an install-progress update from the agent. The agent calls this
  * after each step in a `bundled-mcps/plans/*.md` install plan. We write
  * to the DB and invalidate the MCP-config cache so newly-spawned ACP
- * sessions (or a manual restart_acp_session) see the updated state.
+ * sessions (or a manual `libi.extension` restart_session) see the updated state.
  *
  * Tier-1 MCPs are rejected — their state is owned by libi's Category A
  * install loop and the agent must not touch it.

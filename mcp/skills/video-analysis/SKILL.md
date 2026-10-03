@@ -1,232 +1,37 @@
 ---
 name: video-analysis
-description: Analyze a video's visual content. Default to the free agent-driven flow (extract keyframes, describe each, produce VideoSummary) — this covers most tasks. Only mention the paid script flow on your own video provider (fal's `fal-ai/video-understanding`) when the task genuinely needs audio/music understanding or the user explicitly asks for it.
-when_to_use: User asks to summarize, analyze, or search visual content of a video. For audio-only files, use audio-analysis instead.
+description: "Analyze a video's visuals: summarize it, describe what happens, or search its content ('what's in this video', 'summarize this clip'). Keyframe-based and free by default; audio or music understanding is a paid extra the user must ask for. For spoken words use audio-analysis."
 ---
 
 # Video Analysis (Frames + Summary)
 
-## Provider gate — read this first
+Done looks like: the video's keyframes described and saved, a structured summary saved, and, for anyone worth tracking or cataloging later, a bounding box on every frame they appear in.
 
-You need a **video** provider. libi generates no media itself.
+Spoken words are `audio-analysis`; run it for the transcript (it chunks long files itself). Recreating or remaking the video is not this skill's job: this is the analysis engine, and `mimic-video` calls it, then routes to a creation skill. Do not generate clips from the analysis.
 
-1. **Check your tool list.** If you already have a provider that can do video, use it.
-   If this skill ships a reference for it — `references/providers/<id>.md` under this
-   skill, where `<id>` is the provider's catalog id (`fal`, `elevenlabs`, `higgsfield`,
-   `ace-step`, `kokoro`, `whisper`) — **read that file and follow it**. If there is no
-   reference file for your provider, use the provider's own tool docs (its
-   `get_model_schema` / `list_models` / equivalent) and keep to the capability and
-   constraint rules in this skill. **libi's own extension tools count as a provider**
-   for their kind — `libi.generate_music` (music), `libi.generate_speech` (voice),
-   `libi.analysis_transcribe_audio` (transcription), `libi.remove_background` (matting,
-   not generation). Prefer them by default: they are free and on-device. If one answers
-   `needs_install`, follow its install flow (`libi.get_install_plan` / the download
-   tools) instead of switching provider.
-2. **If you have none** — no remote provider tool and no libi extension for video — call
-   `libi.suggest_provider({ kind: "video" })`, tell the user what it showed, and
-   **stop**. Do not improvise a provider, do not ask for an API key, and do not fall
-   back to a tool that cannot do video.
-   If it answers `status: "none"`, there is nothing to connect: everything libi knows of
-   for video is already connected or already installed, and its `covered` list names it.
-   Do not open anything or ask for a key — use what `covered` names, or, if that
-   cannot do what was asked, say plainly what libi cannot do.
+## Two flows
 
-`libi.list_providers()` gives you the same picture without putting a card in the chat — use it
-for a general "what's connected?". When the user asks about a provider that is not in your tool
-list, call `libi.suggest_provider` instead, so the chat shows the buttons to connect it.
+**(A) Agent-driven, the default and free.** You extract keyframes, look at them yourself, and save structured descriptions with `libi.analysis_save`. It needs no provider: run it whether or not one is connected, and never stop for the lack of one. It gives per-frame boxes (needed for tracking and the character catalog) and control over what to look for; it is weak on continuity across shots, cannot hear audio, and is slow on long videos. It covers nearly every task, including most recreation work, so just run it without mentioning (B).
 
-Use this skill when the user wants visual analysis of a video — keyframe extraction, per-frame description, and/or a structured summary. For the transcript step, see the `audio-analysis` skill — it handles long files via chunking automatically.
+**(B) Full-video script, paid, on the user's own video provider.** One model call sees the whole video and hears it: real shot boundaries, music and sound design, a production script. libi does not run it; you run it on the provider and save the result into the analysis store. `references/providers/<id>.md` (here, for your provider) has the model, the call and the save shapes. Offer (B) only when the user asks for it, or when the task turns on what only it provides (matching a song's beats and mood, audio dynamics driving the cut, a holistic script of a long video, the user calling the source audio-heavy, or a creation skill's motion check on a generated manipulation beat, since a still frame cannot show whether the action happened). Say it is the user's provider credits, disclose the cost, and get a yes before the call. If it would help but they did not ask, stay silent and run (A). With no video-understanding provider connected and the user asking for it, say so, call `libi.suggest_provider({ kind: "video", reason: "paid full-video analysis" })`, and let them choose between connecting one and the free flow. Never improvise a provider or ask for a key. `libi.list_providers()` shows what is connected without putting a card in the chat.
 
-## Pick a flow before running anything
+(B) adds to (A) rather than replacing it: its script has no boxes and no word timings, so run (A) as well for tracking or cataloging, and `audio-analysis` for word-level captions.
 
-Two flows produce analysis for a video. Default to (A); only branch to (B) when the user's intent fits.
+## Frames
 
-**(A) Agent-driven flow (default, FREE).** You — the agent — extract keyframes, run your own vision on each, and write structured `FrameDescription` / `VideoSummary` via `libi.analysis_save_*`. Strengths: free, gives per-frame bboxes (needed for tracking and character catalog), gives you control over what to look for. Weaknesses: per-frame independent (weak cross-shot continuity), can't hear audio (no structured music/SFX), slow on long videos.
+1. **Extract** with `libi.analysis_extract` action `frames` (the schema has the arguments; the judgment is how many). Density matters when the subject will be tracked: about one frame every 3 s under 5 minutes (`count` about `ceil(durationSec / 3)`), one every 10 s beyond; request explicit `timestamps` for specific moments. Dense anchors are what hold identity through duets and crowds. Use this tool for all frame inspection, never `libi.generate_thumbnails`: extracted frames stay in the analysis Frames tab out of the way, while thumbnails land as throwaway JPGs in the piece's assets.
+2. **Describe** each frame (`frame_v1`; the required fields and their types are in `references/shapes.md`, because the tool's schema does not list them). The ones that matter: `scene`, `people[].name` for identifiable subjects, `objects[].name`, `tags`, `text_on_screen`, `shot`. For any person or object the user might track later, include `bbox`: estimate it from the full source frame, not the thumbnail you see, and know that a missing box leaves the tracker with no anchor on that frame. Do it for trackable products, logos and props too.
+3. **Record text treatment, not only wording**, when the video may be recreated: colour, glow, weight, position, and whether the text is flat (level baseline, constant size, parallel to the screen) or in the scene's perspective (on a road or floor, anchored at the vanishing point, tilting with the surface, growing toward the camera). One still cannot show the animation, so for a caption whose look matters extract three or four frames across its on-screen window and compare: growth, recession or movement means it is animated. Record the motion, but do not rule "flat 2D" versus "3D" yourself: a scale punch and a dolly toward the camera look the same in a still, and that call belongs to the recreation step, which asks the user.
+4. **Save** in batches of 10-20 with `libi.analysis_save` action `frames` (upsert by frame index; nothing is deleted). To re-extract at another density, clear first with `libi.analysis_save` action `remove_step`. Mark unusable frames (black, blurred) skipped with a reason.
 
-**(B) Model-driven script flow (PAID, opt-in, runs on YOUR video provider).** libi does not
-run this for you — you run it on your own provider and write the result back into libi's
-analysis store. On fal the model is **`fal-ai/video-understanding`** (Gemini 2.5 Pro behind
-it, ~$0.002 per second of video): put the video on the provider's CDN with the provider's own
-upload tool, call it with a prompt asking for a structured production script (shot list with
-camera / lighting / mood / dialogue per shot, structured music and sound design, overall
-style, pacing), then save what comes back:
+## Summary
 
-- **Production script** → `libi.analysis_save_summary({ fileId, summary })`. Compose a
-  `video_v1` `VideoSummary` from the model's answer and put the per-shot script text under
-  `summary.custom.script`. No `analysis_start` call is needed — `analysis_save_summary` is
-  keyed by `fileId`.
-- **Caption recreation spec** (the `mimic-video-captions` flow) → ask the model for the
-  per-caption spec instead — each caption's words, anchor world-vs-screen, motion keyframes
-  with center + height-fraction, reveal schedule, orientation, colour/glow — and save it with
-  `libi.analysis_update_summary_custom({ fileId, path: "caption_spec", value: <the spec> })`.
-  That tool writes INTO the file's `summary` step, so one must exist first — run flow (A),
-  or save a minimal `video_v1` summary with `libi.analysis_save_summary` before the spec.
-  Minimal means exactly the required keys of `videoSummarySchema`:
-  `{ schema_version: "video_v1", overview: "<one sentence>", duration: <seconds>, subjects: [], sections: [], recurring_objects: [] }`.
+Read what exists with `libi.analysis_query` action `get`, compose a `video_v1` summary (subjects, sections, recurring objects, audio summary, visual style; empty arrays are fine when unknown; shape in `references/shapes.md`) and save it with `libi.analysis_save` action `summary`. If frames or the summary cannot be produced, mark the step failed with `libi.analysis_save` action `step_failed` and a message the user will see.
 
-Strengths: hears audio, sees the whole video at once (real shot boundaries, real music cues),
-one call. Weaknesses: paid (the user's provider credits), no per-frame bboxes, no word-level
-transcript timing. **Disclose the cost and get approval before the call** — it is the user's
-money on their provider account.
-
-### When to suggest (B)
-
-**Default behavior: just run (A) without asking.** (A) is free and covers nearly all real tasks — search, captioning, character extraction, summary, even most recreation work. Do NOT mention (B) for ordinary asks. The user doesn't need to know it exists for routine work.
-
-Only consider surfacing (B) when ONE of these is true:
-
-1. **The user explicitly asks for it** — they say "use Gemini", "do the paid analysis", "full audio analysis", "I want a script for re-creation", or similar.
-2. **The task genuinely needs what only (B) provides** — i.e. structured music/SFX understanding or full-video continuity that per-frame (A) can't deliver. Concrete triggers:
-   - Music video work where matching the song's beats, mood, or instruments is the point
-   - Re-creating a video where audio dynamics (laughter, applause, ambient cues) drive the cut
-   - Long videos (>5 min) where dense per-frame description would be slow AND the user wants a holistic script
-   - The user describes the source as "audio-heavy" or specifically mentions music/sound design as important
-
-If neither applies — run (A) silently. **Recreation ≠ "needs (B)"** for the *analysis* choice
-(A is enough). But note: if the user wants to **recreate / remake / mimic** the source video
-(not just understand it), that is NOT your job here — you are the analysis engine. Return control
-to the `mimic-video` dispatcher (which calls this skill for the analysis step, then routes the
-recreation to the right creation skill). Do NOT generate clips directly from this analysis.
-
-### Before offering (B), check the provider
-
-If you ARE going to surface (B), first verify the user can actually run it: (B) needs a
-`video` provider that hosts a video-understanding model. Check your tool list.
-
-When (B) is unavailable:
-
-- **If the user explicitly asked for it:** say you have no video-understanding provider
-  connected, call `libi.suggest_provider({ kind: "video", reason: "paid full-video analysis" })`,
-  and ask whether they want to connect one (then re-run) or whether the free flow is fine.
-- **If (B) would have been useful but the user didn't ask:** stay silent about it and just
-  run (A). Don't make the user feel like they're missing something they didn't ask for.
-
-When (B) is available AND warranted, surface it with a short message and let them choose:
-
-> "I can analyze this video two ways:
-> - **Free** — I'll watch each keyframe and write up what I see. No audio detection, no music description. Good for editing tasks.
-> - **Paid (your provider's credits)** — the paid script flow on your own video provider (fal's `fal-ai/video-understanding`) returns a full production script with shots, music, dialogue, and mood — designed to feed back into a text-to-video model. Best when audio/music drives the structure.
-> Which do you want?"
-
-### After running (B), decide if (A) is also needed
-
-The saved script from (B) doesn't include per-frame bboxes or word-timed transcript. If the user's downstream task needs those, run (A) on top — they're additive (script rows and frames/transcript rows coexist on the same `analysis_steps` table). Heuristic:
-
-| Downstream task | Need (A) on top of (B)? |
-|---|---|
-| Feed shots to a text-to-video model | No — `Script` is sufficient |
-| Build tracked overlays (blur a face, pin a label) | Yes — need `bbox` on `people[]` / `objects[]` |
-| Build word-level caption overlays | Yes — need the `audio-analysis` skill (word-level transcript) |
-| Add subjects to the character/item catalog | Yes — need `people[].name` + `bbox` on frames |
-| User just wants to read what's in the video | No — show them the script |
-
-When unsure, ask: "I have the script. Do you also want me to extract per-frame bboxes (for tracking/character cataloging) or a word-timed transcript (for captions)?" If they say yes, continue with the existing (A) flow on the same `fileId`.
-
-## Frames flow
-
-1. **Extract keyframes** with `libi.analysis_extract_frames`. The tool's schema gives the exact
-   args; the part that's YOUR judgment is **how many** — density matters, and a flat 8 is NOT
-   enough when the subject will be tracked:
-   - video **< 5 min** → one frame every **~3 s** → `count ≈ ceil(durationSec / 3)`
-   - video **≥ 5 min** → one frame every **~10 s** → `count ≈ ceil(durationSec / 10)`
-
-   (e.g. a 38 s clip → ~13 frames; a 4 min clip → ~80; a 12 min clip → ~72.) Evenly spaced; for
-   specific extra moments request explicit timestamps instead of a count. This dense pass is what
-   makes subject anchors dense enough to hold identity through duets/crowds — describe the
-   subject's name + bbox on every frame they appear in. The tool returns frame paths + indices
-   and does NOT write to the DB yet.
-
-   **Use `libi.analysis_extract_frames` for ALL frame inspection — never
-   `libi.generate_thumbnails`.** `analysis_extract_frames` returns frame paths you
-   read directly (for your vision) and keeps the stills as analysis artifacts in
-   the **Frames tab**, auto-managed and out of the way. `generate_thumbnails`
-   instead writes throwaway JPGs into the **piece's assets**, cluttering the asset
-   grid with dozens of `-thumb-NN.jpg` files the user then sees as piece content —
-   even a "just let me glance at the captions" peek must go through
-   `analysis_extract_frames`, not a thumbnail dump you later have to delete.
-
-2. **Describe each frame** using your own vision. For each, build a `frame_v1` `FrameDescription`
-   — the tool's input schema defines the exact fields; the ones that carry weight are `scene`
-   (one-sentence description), `people[].name` for identifiable subjects, `objects[].name`,
-   `tags`, `text_on_screen`, and `shot` (close-up / medium / wide / extreme-wide).
-
-   **Tracking bboxes (important judgment call):** for any named person or object the user might
-   want to track later, include its `bbox`. The schema documents the exact format (normalized
-   0..1, relative to the source frame); the judgment the schema can't give you is that you must
-   **estimate from the full source frame, not the thumbnail you see**, and that **omitting bbox
-   leaves the tracker with no anchor** on that frame (large gaps). Add it for trackable people AND
-   for trackable products / logos / props.
-
-   **On-screen text — record the TREATMENT, not just the words.** When a frame has captions /
-   lyrics / kinetic typography (especially if the video may be recreated), note in `text_on_screen`
-   (or a `custom` note) not only the wording but the *look*: colour, glow, weight, position — and
-   crucially **whether the text is FLAT (screen-space) or placed IN the scene's PERSPECTIVE**.
-   Flat = level baseline, constant size, parallel to the screen. Perspective = mapped onto a
-   road/floor, anchored at the **vanishing point**, baseline **tilting/curving with the surface**,
-   **growing as the camera moves toward it**. This flat-vs-perspective tell is the cue that later
-   decides a flat 2D caption recreation (`animated-text-overlays`) versus a 3D one
-   (`three-overlays`) — a 2D zoom/scale punch is NOT perspective, so don't mistake one for the
-   other.
-
-   **One frame can't show the ANIMATION — and the animation is often the design.** A single
-   still freezes a caption that may actually be dollying toward the camera or rushing up from
-   the vanishing point; frozen, it just looks like flat text. So when a caption's treatment
-   matters (recreation), extract **multiple frames ACROSS a single caption's on-screen window**
-   (3–4 over its ~1s life), not one, and compare them: if the text **grows / recedes / moves
-   through the scene** between consecutive frames, it is ANIMATED (and usually 3D/in-scene).
-   Record the *motion* (static · grows-toward-camera · slides · recedes), not just the static
-   look — downstream caption recreation needs the motion to choose flat-2D vs 3D, and the
-   per-frame still alone will quietly under-call it as flat. **But do NOT yourself rule
-   "flat 2D" vs "3D" for a caption you'll recreate** — a centered scale-punch and a 3D
-   dolly-toward-camera are indistinguishable in a still, so "it's just a 2D scale punch" is
-   not a call you can make here. Just describe what you observe (the text zooms in / grows /
-   sits at the vanishing point) and leave the 2D-vs-3D decision to the recreation step, which
-   asks the user.
-
-3. **Save in batches** with `libi.analysis_save_frames` (upsert by frame index). For long videos,
-   save 10–20 frames per call; later calls add or update frames. Saving does NOT delete prior
-   frames — if you want a clean reset before re-extracting at a different density, clear the
-   frames step first with `libi.analysis_remove_step`. For unusable frames (black, extreme blur),
-   mark the entry skipped with a reason instead of describing it.
-
-## Summary flow
-
-After describing frames (and ideally after the transcript step, but that's optional):
-
-1. Read existing analysis with `libi.analysis_get`.
-2. Compose a `video_v1` `VideoSummary` aggregating subjects, sections, recurring objects, audio
-   summary, and visual style.
-3. Save it with `libi.analysis_save_summary` (pass the summary as a structured object).
-
-The tool's schema defines the required fields (`overview`, `duration`, and the `subjects` /
-`sections` / `recurring_objects` arrays). Empty arrays are fine when unknown.
-
-## On failure
-
-If you can't describe frames (vision unavailable, model refuses, etc.), mark the step failed with
-`libi.analysis_mark_step_failed` (kind `frames`, with a message). Same for the summary. The user
-sees the message in the analysis tab and can ask you to retry.
+After saving, take the recurring central subjects (the presenter, the product shown, a named character who reappears) through `using-character-library`'s auto-catalog workflow and report inline; skip one-off extras and generic objects.
 
 ## Search
 
-After frames are saved with structured descriptions:
+`libi.analysis_query` action `search_frames` filters ready frames by subject, objects, on-screen text, tags, time range or shot; `libi.analysis_query` action `search_transcript` matches transcript words. Use them for "every frame where X appears" and "where does the speaker mention Y".
 
-- `libi.analysis_search_frames` — filter ready frames by subject, objects, on-screen text, tags,
-  time range, or shot type.
-- `libi.analysis_search_transcript` — substring match against transcript words.
-
-Use these to answer follow-up questions like "find every frame where X appears" or "where does
-the speaker mention Y".
-
-## When NOT to use this skill
-
-- The user only asks for a transcript: use `audio-analysis` directly.
-- The user uploaded an audio-only file: only `audio-analysis` applies; visual fields don't exist.
-- The user asks about the catalog directly (browsing, renaming, deleting, linking an existing character/item): that's `using-character-library`'s job, not this skill's — hand off to it.
-- The user wants to **recreate / mimic / remake** the video (not just analyze it): start from the
-  `mimic-video` dispatcher — it calls this skill for the analysis step, then routes to a creation
-  skill.
-
-## Cross-reference
-
-After saving the video summary (and the frame descriptions it's built from), review the recurring named subjects you set — `people[].name` in frame descriptions, `subjects[].name` in the summary. For each subject who is a clearly-recurring CENTRAL figure or object in the video (the presenter, the product being shown, a named character who reappears), follow the `using-character-library` skill's auto-catalog workflow: check the catalog, create if missing, and report inline with the representative image — don't just note the name and move on. Skip one-off extras, generic unbranded objects, and incidental strangers; those never get cataloged. The two skills compose: this one analyzes the video, that one persists and surfaces recurring identities.
+Browsing, renaming or linking existing catalog entries is `using-character-library`; an audio-only file has no visual fields, so only `audio-analysis` applies.

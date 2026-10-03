@@ -8,8 +8,15 @@
  * oldest unresolved call is the one actually executing. (The old
  * newest-first name fallback attributed obama's tracking job to the
  * jobs-speech row — see .superpowers/qa/2026-07-04-chatui-verify.md.)
+ *
+ * A MERGED tool (`libi.show`, `libi.keyframe`, … — lib/agents/merged-tools.ts) is
+ * several former tools under one name, so the name alone no longer tells two calls
+ * apart: a call whose args name another action/target is never the match, and the
+ * name-only degrade below does not apply to that difference. (A part whose args have
+ * not streamed in yet carries no action and stays a candidate, as before.)
  */
-import type { McpToolId } from "@/lib/agents/mcp-tool-id";
+import { parseMcpToolId, type McpToolId } from "@/lib/agents/mcp-tool-id";
+import { mergedToolAction } from "@/lib/agents/merged-tools";
 
 export interface ToolCallCandidate {
   toolCallId: string;
@@ -52,13 +59,23 @@ export function argsSubsetMatches(partArgs: unknown, toolArgs: unknown): boolean
   );
 }
 
+/** True when `c` is a call of a merged tool whose action/target differs from the one `toolArgs` carries. */
+function otherAction(c: ToolCallCandidate, toolArgs: unknown): boolean {
+  if (toolArgs === undefined || c.toolId === null) return false;
+  const toolName = parseMcpToolId(c.toolId)?.toolName;
+  if (!toolName) return false;
+  const wanted = mergedToolAction(toolName, toolArgs);
+  const had = mergedToolAction(toolName, c.args);
+  return wanted !== null && had !== null && wanted !== had;
+}
+
 export function matchToolCall(
   candidates: ToolCallCandidate[],
   hint: { toolIds: McpToolId[]; toolArgs?: unknown },
 ): string | null {
   const idSet = new Set(hint.toolIds);
   const byName = candidates
-    .filter((c) => c.toolId !== null && idSet.has(c.toolId))
+    .filter((c) => c.toolId !== null && idSet.has(c.toolId) && !otherAction(c, hint.toolArgs))
     .sort((a, b) => a.order - b.order);
   if (byName.length === 0) return null;
   if (hint.toolArgs !== undefined) {

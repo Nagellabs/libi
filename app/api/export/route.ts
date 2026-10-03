@@ -6,7 +6,14 @@ import { getJobManager } from "@/lib/jobs/manager";
 import { isCancelledError } from "@/lib/jobs/types";
 import { loadComposition, type CompositionManifest } from "@/lib/composition/persistence";
 import { loadCurrentSnapshot } from "@/lib/composition/snapshots";
-import { resolveExportSettingsWithTier, hasGraphicsOverlays } from "@/lib/export/quality";
+import {
+  resolveExportSettingsWithTier,
+  hasGraphicsOverlays,
+  usesSocialFit,
+  SOCIAL_FIT,
+  SOCIAL_DEFAULT_QUALITY,
+  SOCIAL_DEFAULT_GRAPHICS_QUALITY,
+} from "@/lib/export/quality";
 import { getExportDefaults } from "@/lib/db/settings";
 import { exportLogger } from "@/lib/logger";
 import { chromiumInstalled, CHROMIUM_DOWNLOAD_MB } from "@/lib/export/ensure-chromium";
@@ -147,8 +154,12 @@ export async function POST(req: Request): Promise<Response> {
 
   const defaults = getExportDefaults();
   const format = body.format ?? defaults.format;
-  const requestedQuality = body.quality ?? defaults.quality;
-  const requestedGraphicsQuality = body.graphicsQuality ?? defaults.graphicsQuality;
+  // A social export that names no size is fitted to 1080×1920 (the platforms'
+  // ceiling), whatever the stored defaults say: 4K is opt-in, by naming
+  // `quality`, `graphicsQuality` or custom dimensions (lib/export/quality.ts).
+  const socialFit = usesSocialFit(body);
+  const requestedQuality = socialFit ? SOCIAL_DEFAULT_QUALITY : (body.quality ?? defaults.quality);
+  const requestedGraphicsQuality = socialFit ? SOCIAL_DEFAULT_GRAPHICS_QUALITY : (body.graphicsQuality ?? defaults.graphicsQuality);
   if (!GRAPHICS_QUALITIES.includes(requestedGraphicsQuality)) {
     return NextResponse.json(
       { error: `graphicsQuality must be one of ${GRAPHICS_QUALITIES.join(", ")}` },
@@ -179,6 +190,7 @@ export async function POST(req: Request): Promise<Response> {
     sourceHeight: height,
     customWidth: body.customWidth,
     customHeight: body.customHeight,
+    ...(socialFit ? { fitWithin: SOCIAL_FIT } : {}),
   });
 
   // Default filename = piece.name. The record's name is unique within the
@@ -289,6 +301,7 @@ export async function POST(req: Request): Promise<Response> {
       quality: settings.quality,
       graphicsQuality: settings.graphicsQuality,
       hasGraphics,
+      socialFit,
       width: settings.width,
       height: settings.height,
     },
@@ -312,6 +325,8 @@ export async function POST(req: Request): Promise<Response> {
       // True when the request named no graphicsQuality and the stored default
       // was used — the case the tool's "default to 4K" note describes.
       graphicsQualityDefaulted: body.graphicsQuality === undefined,
+      // True when a social export named no size and was fitted to 1080×1920.
+      socialFit,
     },
   });
 }

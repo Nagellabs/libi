@@ -17,7 +17,7 @@ import type { BundledMcpDef } from "@/mcp/registry/types";
  *
  * Core `libi` never hits this because it's `core: true` and skipped by the
  * prober entirely. `libi-tracking` is `core: false` and IS probed — reachable
- * via `libi.diagnose_mcp` (mcp/bundled-mcps/diagnose.ts) and the install/probe
+ * via `libi.extension({ action: "diagnose" })` (mcp/bundled-mcps/diagnose.ts) and the install/probe
  * path (mcp/registry/server-prober.ts), not just the session path — so the
  * shared resolver must hand back the in-repo tsx entry — exactly the same
  * thing `buildTrackingEntry()` produces — in every path that spawns it, and
@@ -103,7 +103,7 @@ describe("libi-tracking spawn resolution (prober/session shared resolver)", () =
  * `electron/main.ts`'s chdir to the runtime root).
  *
  * Two of this resolver's three call sites run in the libi MCP CHILD, not the
- * server: `libi.diagnose_mcp` (`mcp/bundled-mcps/diagnose.ts`) and the
+ * server: `libi.extension({ action: "diagnose" })` (`mcp/bundled-mcps/diagnose.ts`) and the
  * install/probe path (`mcp/registry/server-prober.ts`, reached from
  * `mcp/bundled-mcps/install-tools.ts`'s `libi.update_dep_status`). The ACP
  * adapter spawns that child with cwd = the AGENT WORKSPACE (`~/.libi/agent/`)
@@ -112,7 +112,7 @@ describe("libi-tracking spawn resolution (prober/session shared resolver)", () =
  * and `mcp/registry/spawn-env.ts` both already document this and resolve
  * package files from `__dirname` for exactly that reason.
  *
- * So `libi.diagnose_mcp({ mcpId: "libi-tracking" })` threw the
+ * So `libi.extension({ action: "diagnose", mcpId: "libi-tracking" })` threw the
  * "could not resolve the in-repo MCP entry point" diagnostic instead of
  * returning a diagnosis — the tool an agent reaches for precisely WHEN
  * libi-tracking is misbehaving.

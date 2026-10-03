@@ -1,10 +1,10 @@
 """faster-whisper entrypoint. Run via the bundled uv:
 
-  uv run --with faster-whisper==1.1.1 python mcp/whisper/transcribe.py \
+  uv run --with faster-whisper==1.1.1 --with 'av>=15,<19' python mcp/whisper/transcribe.py \
       <audio> --model small --download-root <dir> [--language en]
 
   # download-only (no audio arg needed):
-  uv run --with faster-whisper==1.1.1 python mcp/whisper/transcribe.py \
+  uv run --with faster-whisper==1.1.1 --with 'av>=15,<19' python mcp/whisper/transcribe.py \
       --download-only --model small --download-root <dir>
 
 Prints exactly ONE JSON object to stdout. Errors -> stderr + exit 1.

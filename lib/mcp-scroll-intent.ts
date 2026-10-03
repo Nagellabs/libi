@@ -1,5 +1,5 @@
 /**
- * The hand-off between `libi.show_extension` (which arrives as a
+ * The hand-off between `libi.show({ target: "extension" })` (which arrives as a
  * `navigate_agents` SSE broadcast, handled in `lib/editor-state-context.tsx`)
  * and the card it wants scrolled into view (`McpServersView`).
  *

@@ -17,6 +17,6 @@ and similar); for the strongest English vocals instead, see this skill's
 ## The visual half is unchanged
 
 Escalating the music changes nothing about the clips — the endpoint table for the video
-half is the **`ai-video-models`** skill's `references/providers/fal.md`. Rule 4 in
-`SKILL.md` still applies to the swap: sweep the stale captions, beat-synced scenes and
-ducking rules before the new track goes under the visuals.
+half is the `video-generation-craft` skill's `references/providers/fal.md`. The swap rule
+in `SKILL.md` still applies: sweep the stale captions, beat-synced overlays and ducking
+rules before the new track goes under the visuals.

@@ -80,9 +80,36 @@ describe("LayerEngine — code layers", () => {
     // no ink, so there is no early exit), and the LAST call paints this frame.
     expect(seen).toHaveLength(probeFrames(timing.totalFrames).length + 1);
     const c = seen[seen.length - 1] as Record<string, unknown>;
-    expect(Object.keys(c).sort()).toEqual(["ctx", "duration", "fps", "frame", "height", "images", "progress", "time", "totalFrames", "width"]);
+    expect(Object.keys(c).sort()).toEqual(["compositionTime", "ctx", "duration", "fps", "frame", "height", "images", "overlayStart", "pieceDuration", "progress", "time", "totalFrames", "width"]);
     expect(c.width).toBe(200);
     expect(c.frame).toBe(6);
+  });
+  it("a body sees the piece clock the request carries, on the frame AND on every probe frame", async () => {
+    const seen: Array<[number, number, number, number]> = [];
+    (globalThis as unknown as { __clock: (c: Record<string, number>) => void }).__clock = (c) => seen.push([c.time, c.compositionTime, c.overlayStart, c.pieceDuration]);
+    const { e } = engine();
+    await e.load(load({ source: "__clock(context);" }));
+    e.render(render({ time: { ...timing, time: 0.2, compositionTime: 11.5, overlayStart: 11.3, pieceDuration: 24 } }));
+    // Every call, probe or paint, has compositionTime = overlayStart + its own time.
+    expect(seen.length).toBeGreaterThan(1);
+    for (const [time, compositionTime, overlayStart, pieceDuration] of seen) {
+      expect(compositionTime).toBeCloseTo(11.3 + time, 9);
+      expect([overlayStart, pieceDuration]).toEqual([11.3, 24]);
+    }
+    expect(seen[seen.length - 1]).toEqual([0.2, 11.5, 11.3, 24]);
+  });
+  it("re-probes the fit when the overlay moves on the timeline or the piece grows (a body paced off compositionTime draws differently)", async () => {
+    const measure = vi.fn(() => ({ x: 0, y: 0, width: 200, height: 100 }));
+    const { e } = engine({ measureContentBox: measure as never });
+    await e.load(load());
+    const at = (extra: Record<string, number>) => render({ time: { ...timing, compositionTime: 5, overlayStart: 4.8, pieceDuration: 20, ...extra } });
+    e.render(at({}));
+    e.render(render({ req: 2, time: { ...timing, compositionTime: 5.1, overlayStart: 4.8, pieceDuration: 20 } }));
+    expect(measure).toHaveBeenCalledTimes(1); // same overlay, same piece: cached
+    e.render(render({ req: 3, time: { ...timing, compositionTime: 8.2, overlayStart: 8, pieceDuration: 20 } }));
+    expect(measure).toHaveBeenCalledTimes(2); // retimed
+    e.render(render({ req: 4, time: { ...timing, compositionTime: 8.2, overlayStart: 8, pieceDuration: 23 } }));
+    expect(measure).toHaveBeenCalledTimes(3); // piece grew
   });
   it("does not recompile for the same sourceHash, recompiles for a new one", async () => {
     const { e } = engine();
@@ -528,6 +555,16 @@ describe("LayerEngine — three layers", () => {
     e.dispose("t");
     expect(inst.dispose).toHaveBeenCalled();
     expect(deps.release).toHaveBeenCalledWith("t");
+  });
+  it("a three body's per-frame api carries the same piece clock", async () => {
+    const { deps, inst } = threeDeps();
+    const { e } = engine({ three: deps });
+    await e.load(load({ id: "t", kind: "three", source: "return () => {};" }));
+    e.render(render({ id: "t", time: { ...timing, time: 0.5, compositionTime: 12.5, overlayStart: 12, pieceDuration: 30 } }));
+    expect(inst.update).toHaveBeenCalledWith(expect.objectContaining({ compositionTime: 12.5, overlayStart: 12, pieceDuration: 30 }));
+    // A request without one reads the overlay's own clock.
+    e.render(render({ id: "t", req: 2 }));
+    expect(inst.update).toHaveBeenLastCalledWith(expect.objectContaining({ compositionTime: timing.time, overlayStart: 0, pieceDuration: timing.duration }));
   });
   it("a reload with a changed body releases the old renderer before acquiring again", async () => {
     const { deps } = threeDeps();

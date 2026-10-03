@@ -24,7 +24,7 @@ the captions; do NOT generate any new video or audio clips.
 ## Hard invariants
 ```yaml
 # The caption-mimic flow drives libi-core tools (render_overlay_frames, add_overlay,
-# analysis_update_summary_custom) which are NOT recorded in the fal/elevenlabs trace —
+# analysis_save summary_custom) which are NOT recorded in the fal/elevenlabs trace —
 # so they're judged behaviorally below, not asserted here. With `mcps: []` the agent has
 # no provider at all, so the one mechanical guarantee is that reproducing captions on an
 # existing reel must NOT generate any new clips.
@@ -43,10 +43,10 @@ assertions:
   `libi.add_overlay({ kind: "text" })`. The "glowing cyan + grows" cue does not flatten
   it to a 2D scale-punch.
 - Ran the caption-focused analysis on its OWN provider (`fal-ai/video-understanding`) and
-  saved the spec with `libi.analysis_update_summary_custom` — it did not look for a libi
+  saved the spec with `libi.analysis_save` action `summary_custom` — it did not look for a libi
   tool to do the paid analysis for it. With no provider connected in this run, explaining
   that it WOULD run `fal-ai/video-understanding` on the user's provider (disclosing the
-  ~$0.002/s cost) and save via `libi.analysis_update_summary_custom` also passes; asking
+  ~$0.002/s cost) and save via `libi.analysis_save` action `summary_custom` also passes; asking
   for a libi-side paid-analysis tool, or an API key, is a FAIL.
 - **Ran the render-verify loop:** after adding the 3D caption, called
   `libi.render_overlay_frames` and then OPENED the returned PNG path(s) with its Read tool

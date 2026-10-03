@@ -44,6 +44,7 @@ import { GET as getAccounts } from "@/app/api/social/accounts/route";
 import { GET as listPosts, POST as createPost } from "@/app/api/social/posts/route";
 import { GET as getOnePost, PATCH as patchPost, DELETE as deleteOnePost } from "@/app/api/social/posts/[postId]/route";
 import { POST as retryPost } from "@/app/api/social/posts/[postId]/retry/route";
+import { POST as inboxPost } from "@/app/api/social/posts/[postId]/inbox/route";
 import { GET as postAnalytics } from "@/app/api/social/posts/[postId]/analytics/route";
 import { GET as piecePosts } from "@/app/api/social/pieces/[pieceId]/posts/route";
 import { GET as creatorInfo } from "@/app/api/social/tiktok/creator-info/route";
@@ -524,6 +525,75 @@ describe("/api/social/posts/:postId/retry", () => {
   });
 });
 
+describe("/api/social/posts/:postId/inbox", () => {
+  const TIKTOK_OPTIONS = {
+    platform: "tiktok" as const,
+    tiktok: { privacyLevel: "SELF_ONLY", allowComment: false, allowDuet: false, allowStitch: false, commercialContentType: "none" as const, contentPreviewConfirmed: true, expressConsentGiven: true },
+  };
+  const tiktokDraft = {
+    ...post,
+    id: "tt-draft",
+    status: "draft" as const,
+    targets: [{ platform: "tiktok" as const, accountId: "tt1", status: "pending" as const }],
+    libi: { pieceId: "p1", mediaUrl: "https://media.example/temp/x.mp4", targetOptions: [TIKTOK_OPTIONS] },
+  };
+  const call = (postId: string) =>
+    inboxPost(new Request("http://x", { method: "POST", headers: PAGE, body: JSON.stringify({ requestId: randomUUID() }) }), { params: Promise.resolve({ postId }) });
+
+  it("sends a TikTok-only draft as an inbox upload and tracks send_to_inbox", async () => {
+    let patch: Record<string, unknown> | null = null;
+    stubService({
+      getPost: async () => tiktokDraft,
+      updatePost: async (_id: string, p: Record<string, unknown>) => {
+        patch = p;
+        return { post: { ...tiktokDraft, status: "published" }, deduped: false };
+      },
+    });
+    const res = await call("tt-draft");
+    expect(res.status).toBe(200);
+    const sent = patch as unknown as { when: unknown; targets: Array<{ options: { music: unknown } }>; media: unknown[] };
+    expect(sent.when).toEqual({ mode: "now" });
+    expect(sent.targets[0].options.music).toEqual({ mode: "draft" });
+    expect(sent.media).toEqual([{ url: "https://media.example/temp/x.mp4", type: "video" }]);
+    expect(tracked.calls).toEqual([["social_post_action", { provider: "zernio", action: "send_to_inbox" }]]);
+    expect(navEvents.some((e) => e.event === "refresh_query")).toBe(true);
+  });
+
+  it("refuses with the reason, and sends nothing, when the draft also goes to Instagram", async () => {
+    const updatePost = vi.fn();
+    stubService({
+      getPost: async () => ({
+        ...tiktokDraft,
+        targets: [{ platform: "instagram", accountId: "ig1", status: "pending" }, ...tiktokDraft.targets],
+        libi: { pieceId: "p1", targetOptions: [{ platform: "instagram", instagram: { contentType: "reel" } }, TIKTOK_OPTIONS] },
+      }),
+      updatePost,
+    });
+    const res = await call("tt-draft");
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.error).toBe("other_targets");
+    expect(body.message).toMatch(/Instagram/);
+    expect(updatePost).not.toHaveBeenCalled();
+    expect(tracked.calls).toEqual([]);
+  });
+
+  it("a draft the agent made with the provider's own tools (no libi stamp) is refused, not guessed at", async () => {
+    const updatePost = vi.fn();
+    stubService({ getPost: async () => ({ ...tiktokDraft, libi: undefined }), updatePost });
+    const res = await call("tt-draft");
+    expect(res.status).toBe(422);
+    expect((await res.json()).error).toBe("no_settings");
+    expect(updatePost).not.toHaveBeenCalled();
+  });
+
+  it("needs a request id", async () => {
+    stubService({ getPost: async () => tiktokDraft });
+    const res = await inboxPost(new Request("http://x", { method: "POST", headers: PAGE, body: "{}" }), { params: Promise.resolve({ postId: "tt-draft" }) });
+    expect(res.status).toBe(400);
+  });
+});
+
 describe("/api/social/posts/:postId/analytics", () => {
   it("answers the adapter's PostAnalytics", async () => {
     stubService({ postAnalytics: async () => ({ postId: post.id, syncStatus: "ready", perTarget: [] }) });
@@ -751,7 +821,7 @@ describe("/api/social/links", () => {
   });
 
   /** QA 2026-09-21, finding 9: linking is not authorship. One idempotent
-   *  `libi.social_link_post` on a post the user composed in the UI flipped
+   *  `libi.social_link` (kind post) on a post the user composed in the UI flipped
    *  its row chip from "in libi" to "by agent". */
   it("never rewrites who made a post when it is linked again", async () => {
     const [p] = getDb().insert(pieces).values({ name: "mine" }).returning().all();

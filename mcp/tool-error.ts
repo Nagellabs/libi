@@ -8,7 +8,7 @@ export const STORYBOARD_BUSY_TOOL_ERROR =
   `${STORYBOARD_BUSY_MESSAGE} Safe to retry: the blocked change was not applied. ` +
   "(For an edit_storyboard_card call with several changes, re-read the card first: earlier changes in the same call may already have landed.)";
 
-/** Text for a busy error from commit_draft / discard_draft: the composition
+/** Text for a busy error from libi.snapshot commit / discard: the composition
  *  step already ran before the storyboard step timed out, so the call is NOT
  *  a clean retry (a repeated commit pushes a duplicate history entry). */
 export const STORYBOARD_BUSY_PARTIAL_TOOL_ERROR =

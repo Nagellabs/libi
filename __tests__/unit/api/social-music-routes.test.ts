@@ -16,7 +16,7 @@ vi.mock("@/lib/logger", () => ({ serverLogger: logSpies, mcpLogger: logSpies }))
 import { createTestDb, resetTestDb, seedPiece } from "@/__tests__/helpers/test-db";
 import { createTempStorageDir, cleanupTempDir } from "@/__tests__/helpers/test-storage";
 import { getDb } from "@/lib/db/client";
-import { setSocialSettings } from "@/lib/db/settings";
+import { getAccountMusicFacts, setAccountMusicFacts, setSocialSettings } from "@/lib/db/settings";
 import { __setSocialServiceForTests } from "@/lib/social/service";
 import { SocialError } from "@/lib/social/errors";
 import type { SocialAdapter } from "@/lib/social/adapter";
@@ -77,6 +77,25 @@ describe("GET /api/social/music/catalog", () => {
     expect(a.musicCatalog).toHaveBeenCalledWith("ig", { platform: "instagram", query: "espresso" });
     await catalogRoute(get("/api/social/music/catalog?platform=tiktok&accountId=tt&q=espresso"));
     expect(a.musicCatalog).toHaveBeenLastCalledWith("tt", { platform: "tiktok" });
+  });
+
+  it("a successful read clears a cached 'Reconnect with Facebook Login' fact, so the next plan no longer says it", async () => {
+    // The user reconnected Instagram through Facebook Login inside the fact's hour.
+    setAccountMusicFacts("zernio:ig", { instagramFacebookLogin: { value: false, source: "detected", checkedAt: new Date().toISOString() } });
+    stubService({ providerId: "zernio", musicCatalog: vi.fn(async () => ({ tracks: [{ id: "i1", title: "Espresso", kind: "search" }] })) });
+    expect(getAccountMusicFacts("zernio:ig").instagramFacebookLogin?.value).toBe(false);
+    const res = await catalogRoute(get("/api/social/music/catalog?platform=instagram&accountId=ig&q=espresso"));
+    expect(res.status).toBe(200);
+    expect(getAccountMusicFacts("zernio:ig").instagramFacebookLogin?.value).toBe(true);
+  });
+
+  it("a refusal naming Facebook Login records it; a plain error leaves the fact alone", async () => {
+    stubService({ providerId: "zernio", musicCatalog: vi.fn(async () => ({ unavailable: { reason: "needs_facebook_login" } })) });
+    await catalogRoute(get("/api/social/music/catalog?platform=instagram&accountId=ig"));
+    expect(getAccountMusicFacts("zernio:ig").instagramFacebookLogin?.value).toBe(false);
+    stubService({ providerId: "zernio", musicCatalog: vi.fn(async () => ({ unavailable: { reason: "error" } })) });
+    await catalogRoute(get("/api/social/music/catalog?platform=instagram&accountId=ig2"));
+    expect(getAccountMusicFacts("zernio:ig2")).toEqual({});
   });
 
   it("refuses a platform with no catalog, and a missing account", async () => {

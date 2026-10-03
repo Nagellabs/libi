@@ -65,8 +65,9 @@ describe("audio-analysis/02 — the honest-refusal needle", () => {
 
 describe("audio-analysis/03 — the flat text is never saved as the file's transcript", () => {
   const scenario = load("03-elevenlabs-plain-text-upload.md");
+  // Both save variants are actions of the merged libi.analysis_save tool.
   const saves = scenario.assertions.filter(
-    (a) => typeof a.transcript_contains === "string" && a.transcript_contains.includes("analysis_save_audio_chunk"),
+    (a) => typeof a.transcript_matches === "string" && a.transcript_matches.includes("libi_analysis_save"),
   );
 
   it("asserts both save variants absent", () => {
@@ -74,11 +75,16 @@ describe("audio-analysis/03 — the flat text is never saved as the file's trans
     for (const s of saves) expect(s.expect).toBe("absent");
   });
 
-  it("fails a run that saved the text through Path B", () => {
-    for (const tool of ["mcp__libi__libi_analysis_save_audio_chunk", "mcp__libi__libi_analysis_save_audio_chunk_from_file"]) {
-      const results = evaluate([], saves, view("Saved.", `[tool-call ${tool}] {"chunkId":"c1","text":"x","words":[]}`));
-      expect(results.some((r) => !r.pass), tool).toBe(true);
+  it("fails a run that saved the text through Path B, whichever variant", () => {
+    for (const action of ["audio_chunk", "audio_chunk_from_file"]) {
+      const results = evaluate([], saves, view("Saved.", `[tool-call mcp__libi__libi_analysis_save] {"action":"${action}","chunkId":"c1","text":"x","words":[]}`));
+      expect(results.filter((r) => !r.pass), action).toHaveLength(1);
     }
+  });
+
+  it("passes a run that used analysis_save for something else, or no save at all", () => {
+    const other = view("Saved.", '[tool-call mcp__libi__libi_analysis_save] {"action":"summary","fileId":"f","summary":{}}');
+    expect(evaluate([], saves, other).every((r) => r.pass)).toBe(true);
     expect(evaluate([], saves, view("Here is the text: …")).every((r) => r.pass)).toBe(true);
   });
 });

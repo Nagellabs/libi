@@ -5,6 +5,8 @@
 import { getCurrentPort } from "@/lib/libi-home";
 import type { AnalyticsEventName, AnalyticsParams } from "@/lib/analytics/events";
 import type { AgentSurface } from "@/lib/mcp/agent-surface";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { boundedActionOf } from "@/mcp/tools/action-registry";
 
 function serverUrl(): string | null {
   try {
@@ -30,9 +32,11 @@ export function trackMcpEvent(name: AnalyticsEventName, params?: AnalyticsParams
   });
 }
 
-/** Every libi.* tool call emits `tool_used`. */
-export function trackToolUsed(toolName: string): void {
-  trackMcpEvent("tool_used", { tool_name: toolName });
+/** Every libi.* tool call emits `tool_used`. A merged tool (`libi.keyframe`, …) adds
+ *  `action`: the discriminator value, bounded to the tool's declared actions
+ *  (`boundedActionOf`), so it stays a low-cardinality param. */
+export function trackToolUsed(toolName: string, action?: string): void {
+  trackMcpEvent("tool_used", action ? { tool_name: toolName, action } : { tool_name: toolName });
 }
 
 /** A session opened on libi's HTTP endpoint from the user's OWN CLI — any
@@ -63,20 +67,35 @@ export function trackMcpMilestone(name: string, event: AnalyticsEventName): void
   });
 }
 
+const trackingSuppressed = new AsyncLocalStorage<true>();
+
+/**
+ * Run `fn` with the per-handler `tool_used` event turned off. `libi.apply_ops` runs a tool handler once per
+ * piece for every op; it reports each OP once itself (`trackToolUsed`), rather than ops x pieces times.
+ */
+export function withToolUsedSuppressed<T>(fn: () => Promise<T>): Promise<T> {
+  return trackingSuppressed.run(true, fn);
+}
+
 type RegisterFn = (...args: unknown[]) => unknown;
 
 /** Wrap an McpServer.registerTool so every handler invocation calls `tracker`
- *  with the tool name first. Tracker errors are swallowed. */
+ *  with the tool name first — and, for a merged tool, the action the call
+ *  carries as a second argument. Tracker errors are swallowed. */
 export function wrapRegisterToolWithTracking(
   register: RegisterFn,
-  tracker: (toolName: string) => void,
+  tracker: (toolName: string, action?: string) => void,
 ): RegisterFn {
   return (...args: unknown[]) => {
     const name = args[0] as string;
     const handler = args[args.length - 1] as (...h: unknown[]) => unknown;
     const wrappedHandler = async (...hargs: unknown[]) => {
       try {
-        tracker(name);
+        if (!trackingSuppressed.getStore()) {
+          const action = boundedActionOf(name, hargs[0]);
+          if (action) tracker(name, action);
+          else tracker(name);
+        }
       } catch {
         // analytics must never affect tool execution
       }

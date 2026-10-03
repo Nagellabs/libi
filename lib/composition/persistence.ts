@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { getStorage } from "@/lib/storage";
 import { getAnalysis } from "@/lib/analysis/manager";
 import { removeAnalysisForFile } from "@/lib/analysis/cleanup";
@@ -5,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { pieces } from "@/lib/db/schema/sqlite";
 import { saveCurrentSnapshot, loadCurrentSnapshot } from "./snapshots";
+import { activeManifestTxn } from "./manifest-txn-scope";
 import { navigationEmitter } from "@/lib/navigation-events";
 import { hydrateOverlayCode, stripOverlayCode, stripRevealMirror } from "@/lib/overlays/hydrate";
 import { writeOverlayCode, listOverlayDirs, deleteOverlayDir } from "@/lib/overlays/code-files";
@@ -16,7 +18,9 @@ import type { PendingMusic } from "@/lib/templates/pending-music";
 import { serverLogger as logger } from "@/lib/logger";
 import { unresolvedFamilies, familyFromFont } from "@/lib/fonts/resolve";
 import { sanitizeDuck } from "@/lib/audio/duck-params";
+import { sanitizeClipGain } from "@/lib/audio/clip-gain";
 import { z } from "zod/v3";
+import type { Keyframed } from "@/lib/engine/animatable";
 import type {
   CaptionBackground,
   CaptionStroke,
@@ -37,6 +41,10 @@ export interface PersistedAudioClip {
   duration: number;
   trimStart: number;
   volume: number;
+  /** See AudioClip.gainDb / volumeKeyframes / crossfadeMs (lib/engine/types.ts). */
+  gainDb?: number;
+  volumeKeyframes?: Keyframed<number>;
+  crossfadeMs?: number;
   enabled: boolean;
   /** Inline clip whose audio comes from a video OVERLAY. */
   linkedOverlayId?: string;
@@ -338,6 +346,18 @@ export async function hasManifest(pieceId: string): Promise<boolean> {
 }
 
 /**
+ * A fingerprint of the piece's composition.json AS ON DISK (a hash of its bytes; "" when there is none).
+ * A draft transaction compares it at the start and again just before it commits, so a batch refuses to
+ * overwrite a manifest someone else changed while it ran. Reads the disk even inside a transaction.
+ */
+export async function manifestFingerprint(pieceId: string): Promise<string> {
+  const storage = await getStorage();
+  if (!(await storage.exists(pieceId, MANIFEST_FILE))) return "";
+  const data = await storage.read(pieceId, MANIFEST_FILE);
+  return createHash("sha1").update(data).digest("hex");
+}
+
+/**
  * True only when the DB positively has no row for this piece — i.e. it was deleted. An open
  * editor keeps asking for a deleted piece's composition for a moment, and the first-snapshot
  * write below would re-create `<storage>/<pieceId>/snapshots/current.json` after the piece
@@ -409,6 +429,10 @@ export async function loadManifest(pieceId: string): Promise<CompositionManifest
 
 /** `loadManifest`, plus how many legacy canvas scenes the file held (dropped). */
 async function readManifest(pieceId: string): Promise<{ manifest: CompositionManifest; legacyScenes: number }> {
+  // Inside a draft transaction (manifest-transaction.ts) the piece's manifest is the transaction's
+  // private copy, handed out as a clone like any read (callers mutate what they receive).
+  const txn = activeManifestTxn(pieceId);
+  if (txn) return { manifest: structuredClone(txn.working), legacyScenes: txn.legacyScenes };
   const storage = await getStorage();
 
   if (!(await storage.exists(pieceId, MANIFEST_FILE))) {
@@ -446,6 +470,8 @@ async function readManifest(pieceId: string): Promise<{ manifest: CompositionMan
   // export and the tools all see the same shape.
   for (const clip of manifest.audioClips ?? []) {
     if (clip.duck) clip.duck = sanitizeDuck(clip.duck);
+    // B3 gain fields: clamp and sort what a hand-edited manifest could get wrong.
+    sanitizeClipGain(clip);
   }
 
   // Hydrate code-bearing overlays (code/three/tracked-code) from their files.
@@ -459,10 +485,12 @@ async function readManifest(pieceId: string): Promise<{ manifest: CompositionMan
   return { manifest, legacyScenes };
 }
 
-/** Save the composition manifest */
-export async function saveManifest(pieceId: string, manifest: CompositionManifest): Promise<void> {
-  const storage = await getStorage();
-
+/**
+ * The in-place normalization every save applies before anything is written (point-text rects, the
+ * unresolved-font warning). Pure apart from the log line, and shared by the disk save and a draft
+ * transaction's save so both leave the manifest identical.
+ */
+function normalizeManifestForSave(pieceId: string, manifest: CompositionManifest): void {
   // Recompute the DERIVED rect for every point-text overlay (text + anchor +
   // position). The point-text placement is the source of truth; the rect is a
   // stand-in used for export x/y + hit-test fallback. The server has no canvas,
@@ -505,6 +533,20 @@ export async function saveManifest(pieceId: string, manifest: CompositionManifes
       "text overlay names a font family that will not resolve — it will render in a fallback face",
     );
   }
+}
+
+/** Save the composition manifest (to disk; inside a draft transaction, to its in-memory copy). */
+export async function saveManifest(pieceId: string, manifest: CompositionManifest): Promise<void> {
+  normalizeManifestForSave(pieceId, manifest);
+  // Inside a draft transaction the save lands in the transaction's copy, normalized exactly as a disk
+  // save would have left it; nothing is written until the transaction commits (a real save, below).
+  const txn = activeManifestTxn(pieceId);
+  if (txn) {
+    txn.working = structuredClone(manifest);
+    txn.dirty = true;
+    return;
+  }
+  const storage = await getStorage();
 
   // Write each code-bearing overlay's body to its file (from the ORIGINAL
   // manifest whose overlays still hold the bodies), then serialize a stripped

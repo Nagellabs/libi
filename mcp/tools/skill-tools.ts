@@ -20,6 +20,7 @@ import { readPromptFiles, writePromptFile, promptFileExists, removePromptFile } 
 import { syncSkillsToWorkspace } from "@/mcp/skills/sync-workspace";
 import { createSkillOverride, getOverrideBaseDir } from "@/mcp/skills/create-override";
 import { computeOverrideStatus } from "@/mcp/skills/override-status";
+import { findRetiredSkillRefs } from "@/mcp/skills/retired";
 import { getBundledSkillDigests, listChangedFiles } from "@/mcp/skills/digest";
 import type { ToolContext } from "./types";
 import type {
@@ -62,6 +63,8 @@ export async function listSkills(
   return ok({
     skills: rows.map((r) => {
       const status = r.source === "user" ? overrideStatus.get(r.name) : undefined;
+      // A user copy older than a skill merge still names skills that are gone; say which, never rewrite it.
+      const retiredSkillRefs = r.source === "user" ? findRetiredSkillRefs(r.body) : [];
       return {
         id: r.id,
         name: r.name,
@@ -74,6 +77,7 @@ export async function listSkills(
               bundledUpdatedSinceFork: status.bundledUpdatedSinceFork,
             }
           : {}),
+        ...(retiredSkillRefs.length > 0 ? { retiredSkillRefs } : {}),
       };
     }),
   });
@@ -285,9 +289,9 @@ function resolveUserSkillDir(skillName: string): { dir: string } | { error: Skil
     .where(and(eq(skillsTable.name, skillName), eq(skillsTable.source, "bundled")))
     .get();
   if (bundledRow) {
-    return { error: err(`"${skillName}" is a bundled skill — fork it first with libi.fork_skill before editing its prompts.`) };
+    return { error: err(`"${skillName}" is a bundled skill — fork it first with libi.skill({ action: "fork" }) before editing its prompts.`) };
   }
-  return { error: err(`No skill named "${skillName}". Create it first with libi.add_skill.`) };
+  return { error: err(`No skill named "${skillName}". Create it first with libi.skill({ action: "add" }).`) };
 }
 
 export async function listSkillPrompts(
@@ -310,7 +314,7 @@ export async function addSkillPrompt(
   const resolved = resolveUserSkillDir(params.skillName);
   if ("error" in resolved) return resolved.error;
   if (promptFileExists(resolved.dir, params.name)) {
-    return err(`Prompt "${params.name}" already exists on "${params.skillName}". Use update_skill_prompt.`);
+    return err(`Prompt "${params.name}" already exists on "${params.skillName}". Use libi.skill({ action: "update_prompt" }).`);
   }
   try {
     writePromptFile(resolved.dir, params.name, params.body);
@@ -328,7 +332,7 @@ export async function updateSkillPrompt(
   const resolved = resolveUserSkillDir(params.skillName);
   if ("error" in resolved) return resolved.error;
   if (!promptFileExists(resolved.dir, params.name)) {
-    return err(`Prompt "${params.name}" does not exist on "${params.skillName}". Use add_skill_prompt.`);
+    return err(`Prompt "${params.name}" does not exist on "${params.skillName}". Use libi.skill({ action: "add_prompt" }).`);
   }
   try {
     writePromptFile(resolved.dir, params.name, params.body);

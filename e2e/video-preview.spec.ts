@@ -31,10 +31,8 @@ test.describe.serial("Video preview", () => {
     const beforeText = (await frameCounter.textContent())?.trim() ?? "";
 
     await page.locator('[data-testid="preview-play"]').click();
-    await page.waitForTimeout(800);
-
-    const afterText = (await frameCounter.textContent())?.trim() ?? "";
-    expect(afterText).not.toBe(beforeText);
+    // The playhead moving IS the assertion: auto-waits for it instead of sleeping 800 ms.
+    await expect(frameCounter).not.toHaveText(beforeText, { timeout: 10_000 });
 
     // Pause so the DOM settles before the next test.
     await page.locator('[data-testid="preview-play"]').click();
@@ -57,10 +55,7 @@ test.describe.serial("Video preview", () => {
     if (!box) throw new Error("no timeline bounding box");
     await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
 
-    // Give React a tick to propagate the seek.
-    await page.waitForTimeout(100);
-
-    const after = (await frameCounter.textContent())?.trim() ?? "";
-    expect(after).not.toBe(before);
+    // The seek reaches the counter on React's next render: auto-wait for it.
+    await expect(frameCounter).not.toHaveText(before);
   });
 });

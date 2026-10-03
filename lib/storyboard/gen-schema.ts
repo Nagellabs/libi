@@ -82,7 +82,7 @@ export function validateParams(
 const FIELD_TYPES: GenFieldType[] = ["text", "number", "boolean", "url", "enum", "image", "video", "audio", "svg", "pdf"];
 
 /** Pure: validate that an agent-supplied schema is a well-formed GenFieldDef[].
- *  Used by save_model_schema_cache so a malformed cache can never be stored. */
+ *  Used by libi.model_schema_cache (action save) so a malformed cache can never be stored. */
 export function validateFieldDefs(fields: unknown): { ok: boolean; error?: string } {
   if (!Array.isArray(fields)) return { ok: false, error: "fields must be an array" };
   for (const f of fields) {

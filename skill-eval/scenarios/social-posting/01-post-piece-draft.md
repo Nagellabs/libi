@@ -51,8 +51,12 @@ assertions:
   # The gate ran, and the default path was taken — not a hand-rolled upload.
   - { transcript_contains: "[tool-call mcp__libi__libi_social_status]", expect: present }
   - { transcript_contains: "[tool-call mcp__libi__libi_post_piece]", expect: present }
-  # ONE post, and it is a draft.
-  - { provider: zernio, tool: posts_create_post, count: "==1" }
+  # TWO drafts from one export: TikTok gets a draft of its own so Send to TikTok inbox can take
+  # it without publishing Instagram; no draft carries both platforms.
+  - { provider: zernio, tool: posts_create_post, count: "==2" }
+  - { provider: zernio, tool: posts_create_post, where: "input.platforms.*.platform == tiktok", count: "==1" }
+  - { provider: zernio, tool: posts_create_post, where: "input.platforms.*.platform == instagram", count: "==1" }
+  - { provider: zernio, tool: posts_create_post, where: "input.platforms.1 exists", expect: absent }
   - { provider: zernio, tool: posts_create_post, where: "input.is_draft == true", expect: present }
   - { provider: zernio, tool: posts_create_post, where: "input.is_draft == false", expect: absent }
   # Stamped back to the piece, so the Posting tab can find it.

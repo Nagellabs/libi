@@ -177,6 +177,13 @@ async function installFontDefault(font: FontPayload): Promise<void> {
   (self as unknown as { fonts: FontFaceSet }).fonts.add(face);
 }
 
+/** The three body's per-frame api carries the same piece clock a code body's
+ *  context does, with the same fallback when a request predates it. */
+function pieceClockOf(t: RenderMessage["time"]): { compositionTime: number; overlayStart: number; pieceDuration: number } {
+  const overlayStart = t.overlayStart ?? 0;
+  return { compositionTime: t.compositionTime ?? overlayStart + t.time, overlayStart, pieceDuration: t.pieceDuration ?? t.duration };
+}
+
 function threeKeyOf(msg: LoadMessage): string | null {
   return msg.kind === "three" ? `${msg.three?.cameraPreset ?? "billboard"}::${msg.sourceHash}` : null;
 }
@@ -369,6 +376,7 @@ export class LayerEngine {
           totalFrames: msg.time.totalFrames,
           duration: msg.time.duration,
           progress: msg.time.progress,
+          ...pieceClockOf(msg.time),
           transform3d: msg.transform3d,
           words: msg.words,
         });
@@ -493,6 +501,10 @@ export class LayerEngine {
             // populates them, and so does `measureCodeContentBox`).
             duration: probeCtx.duration ?? 0,
             progress: probeCtx.progress ?? 0,
+            // The probe frames are overlay-local: the piece clock is this
+            // overlay's start plus the probe's own time, on this render's piece.
+            ...(msg.time.overlayStart === undefined ? {} : { compositionTime: msg.time.overlayStart + probeCtx.time, overlayStart: msg.time.overlayStart }),
+            ...(msg.time.pieceDuration === undefined ? {} : { pieceDuration: msg.time.pieceDuration }),
           },
           words: msg.words,
           images: entry.images,

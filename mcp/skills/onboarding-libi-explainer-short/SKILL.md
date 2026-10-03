@@ -1,7 +1,6 @@
 ---
 name: onboarding-libi-explainer-short
-description: "Run ONLY during first-run onboarding when the user clicks \"show me how it works\" (or asks for the libi intro/demo). Builds libi's own 52-second explainer film into a real piece with a single call to libi.build_onboarding_piece (~15 MB download, no generation), reveals it, then tells the user honestly that the film is pre-made but was itself built in libi and is fully editable — and asks what they want to make."
-when_to_use: "First-run onboarding demo only — the one place libi.build_onboarding_piece is ever called. Do not use for real user projects."
+description: "First-run onboarding only: when the user clicks 'show me how it works' or asks for libi's intro or demo, build libi's own explainer film into a piece with one call. Never for a real project."
 ---
 
 # Onboarding: libi explainer demo
@@ -19,13 +18,13 @@ you are not building anything here.
 
 2. **Build it:** `libi.build_onboarding_piece({})` — no arguments. That single call
    downloads the media, verifies it, and assembles the whole composition. It returns a
-   `pieceId` and a `description` of the film. Do **not** call any generation tool at all —
-   no provider, no libi generation tool — do not import anything, and do not add or edit layers.
+   `pieceId` and a `description` of the film. Call no generation tool: no provider, no libi
+   generation tool. Do not import anything and do not add or edit layers.
 
    If the result comes back `reused: true` / `bytes: 0`, this machine had already built
    the film and **nothing was downloaded on this call** — don't tell them it was.
 
-3. **Reveal it:** `libi.show_piece({ pieceId })`.
+3. **Reveal it:** `libi.show({ target: "piece", pieceId })`.
 
 4. **Close the conversation** with the message below.
 
@@ -53,7 +52,7 @@ errors:
   end: everything in libi still works, and building their own thing is the better demo
   anyway. Do not offer to try the demo again unless they ask for it.
 
-## Required closing message (transparency — do NOT skip)
+## Required closing message (honesty, not optional)
 
 Say this in chat, in your own warm voice, keeping every honest point:
 
@@ -71,7 +70,7 @@ Say this in chat, in your own warm voice, keeping every honest point:
   with libi's real object tracking; those boxes are where it put them. They can point it
   at their own footage whenever they like, and libi sets the tracking model up the first
   time they ask for it — no settings to find, it just takes a moment on first use.
-- Every layer of it is **live and editable right now** — the scenes, the overlays, the
+- Every layer of it is **live and editable right now** — the clips, the overlays, the
   voice-over, the music. Give one or two concrete things they could try immediately,
   e.g. *"change the end-card tagline to my product's name"* or *"turn the music down
   under the voice-over"*.

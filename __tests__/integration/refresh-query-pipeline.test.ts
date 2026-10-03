@@ -91,8 +91,12 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
     cleanupTempDir(tempDir);
   });
 
-  async function waitForNotify(ms = 200): Promise<void> {
-    // notify.refreshQuery is fire-and-forget; give the event loop a tick.
+  /** notify.refreshQuery is fire-and-forget: wait until `count` notifications have ARRIVED. */
+  async function waitForNotify(count: number): Promise<void> {
+    await vi.waitFor(() => expect(captured.length).toBeGreaterThanOrEqual(count));
+  }
+  /** For a call that must send NOTHING there is no event to wait for: a window long enough for a send to land. */
+  async function noNotifyWindow(ms = 200): Promise<void> {
     await new Promise((r) => setTimeout(r, ms));
   }
 
@@ -105,14 +109,14 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
     return JSON.parse(content[0].text) as Record<string, unknown>;
   }
 
-  it("libi.update_piece_name fires piece refresh", async () => {
-    const r = await callTool("libi.update_piece_name", {
+  it("libi.update_piece fires piece refresh", async () => {
+    const r = await callTool("libi.update_piece", {
       pieceId: PIECE_ID,
       name: "Renamed",
     });
     expect(r.success).toBe(true);
 
-    await waitForNotify();
+    await waitForNotify(1);
 
     expect(captured).toHaveLength(1);
     expect(captured[0].body).toEqual({
@@ -134,7 +138,7 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
     });
     expect(r.success).toBe(false);
 
-    await waitForNotify();
+    await noNotifyWindow();
     expect(captured).toHaveLength(0);
   });
 
@@ -146,7 +150,7 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
     const newPieceId = (r.data as { id: string }).id;
     expect(newPieceId).toBeTruthy();
 
-    await waitForNotify();
+    await waitForNotify(2);
 
     expect(captured).toHaveLength(2);
     expect(captured.map((c) => c.body)).toEqual(
@@ -172,7 +176,7 @@ describe("MCP tool → notify.refreshQuery pipeline", () => {
       });
       expect(r.success).toBe(true);
 
-      await waitForNotify();
+      await waitForNotify(1);
 
       expect(captured).toHaveLength(1);
       expect(captured[0].body).toEqual({

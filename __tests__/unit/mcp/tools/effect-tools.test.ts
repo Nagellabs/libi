@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { listEffectsTool, applyLayerEffect, highlightEffect } from "@/mcp/tools/effect-tools";
 
-describe("list_effects tool", () => {
+describe("effect list action (listEffectsTool)", () => {
   it("returns built-in effects with meta", async () => {
     const r = await listEffectsTool({});
     expect(r.success).toBe(true);

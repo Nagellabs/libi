@@ -1,8 +1,8 @@
 // lib/composition/clip-ops.ts
 //
 // Shared core for the three timeline "clip" gestures — cut (split), delete, and
-// duplicate — used IDENTICALLY by the MCP tools (libi.split_clip /
-// libi.delete_clip / libi.duplicate_clip) and the timeline right-click menu's
+// duplicate — used IDENTICALLY by the MCP tools (the libi.clip
+// tool's split / delete / duplicate actions) and the timeline right-click menu's
 // REST route. One transactional `loadManifest → mutate → saveManifest` per op.
 //
 // A "clip" here is either timeline entity family, auto-detected from a single
@@ -27,6 +27,16 @@ import {
   findInlineClipForOverlay,
 } from "./audio-clips";
 import { rippleCloseGap } from "./ripple";
+import {
+  rippleInsertTime,
+  type InsertTimeError,
+  type InsertTimeReport,
+  type StretchOption,
+} from "./ripple-insert";
+import { splitVolumeKeyframes } from "@/lib/audio/clip-gain";
+import { inArray } from "drizzle-orm";
+import { getDb } from "@/lib/db/client";
+import { files } from "@/lib/db/schema";
 
 /** Minimum half-duration a split may produce (one frame at 30fps). */
 const MIN_DURATION_SEC = 1 / 30;
@@ -245,6 +255,10 @@ async function splitOverlay(
   if (head.kind === "video") {
     const inline = findInlineClipForOverlay(m, overlayId);
     if (inline) {
+      // The envelope is clip-local: cut it where the video was cut (the inline
+      // clip's own start may differ from the overlay's by the time we get here).
+      const keys = splitVolumeKeyframes(inline, atTime - inline.startTime);
+      if (keys) inline.volumeKeyframes = keys.head;
       inline.startTime = head.startTime;
       inline.duration = head.duration;
       inline.trimStart = head.kind === "video" ? head.trim?.start ?? inline.trimStart : inline.trimStart;
@@ -255,7 +269,9 @@ async function splitOverlay(
         startTime: tail.startTime,
         duration: tail.duration,
         trimStart: tail.kind === "video" ? tail.trim?.start ?? 0 : 0,
+        ...(keys ? { volumeKeyframes: keys.tail } : {}),
       };
+      delete tailClip.crossfadeMs;
       m.audioClips = [...(m.audioClips ?? []), tailClip];
     }
   }
@@ -334,4 +350,44 @@ async function duplicateOverlay(
 
   await saveManifest(pieceId, m);
   return { ok: true, family: "overlay", newId: copy.id };
+}
+
+// ─── insert time (ripple insert) ─────────────────────────────────────────────
+
+export interface InsertTimeArgs {
+  at: number;
+  seconds: number;
+  stretch?: StretchOption;
+  extendTarget?: string;
+}
+
+export type InsertTimeOpResult =
+  | { ok: true; report: InsertTimeReport }
+  | { ok: false; error: InsertTimeError; message: string };
+
+/** Media length per file id for every file the manifest plays, read in one query. */
+function mediaDurations(m: CompositionManifest): Map<string, number | null> {
+  const ids = new Set<string>();
+  for (const o of m.overlays ?? []) if (o.kind === "video") ids.add(o.fileId);
+  for (const c of m.audioClips ?? []) ids.add(c.fileId);
+  if (ids.size === 0) return new Map();
+  const rows = getDb()
+    .select({ id: files.id, mediaDuration: files.mediaDuration })
+    .from(files)
+    .where(inArray(files.id, [...ids]))
+    .all();
+  return new Map(rows.map((r) => [r.id, r.mediaDuration]));
+}
+
+/** Ripple INSERT: open `seconds` of time at `at` (the inverse of the ripple delete). One transactional
+ *  load -> mutate -> save; a refusal saves nothing. See ./ripple-insert.ts for the rules. */
+export async function insertTime(pieceId: string, params: InsertTimeArgs): Promise<InsertTimeOpResult> {
+  const m = await loadManifest(pieceId);
+  const durations = mediaDurations(m);
+  const result = rippleInsertTime(m, { ...params, mediaDuration: (id) => durations.get(id) });
+  if (!result.ok) return { ok: false, error: result.error, message: result.message };
+  const r = result.report;
+  const moved = r.shifted.length + r.stretched.length + r.extended.length;
+  if (moved > 0) await saveManifest(pieceId, result.manifest);
+  return { ok: true, report: r };
 }

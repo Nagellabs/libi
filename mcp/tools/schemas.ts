@@ -6,6 +6,7 @@ import { z } from "zod/v3";
 import { aiGenerationMetaSchema } from "@/lib/ai-generation/types";
 import { PROSE_EXAMPLE_SECTION_KEYS } from "@/mcp/manual-sections";
 import { TEMPLATE_KEY_RE, TEMPLATE_LIMITS } from "@/lib/templates/scaffold";
+import { APPLY_OPS_ALLOWED } from "@/lib/agents/apply-ops-allowlist";
 
 /**
  * The one place `mcpId` / `extensionId` is collapsed to a single id.
@@ -44,7 +45,14 @@ export const layerEffectsSchema = z.object({
 export type LayerEffectsInput = z.infer<typeof layerEffectsSchema>;
 
 export const listEffectsSchema = z.object({
-  kind: z.enum(["text", "image", "video", "code", "three", "tracked", "scene", "audio"]).optional()
+  // `scene` is the retired base-scene layer kind: nothing resolves to it any
+  // more (every video is a video overlay), so it is no longer advertised.
+  // A caller that still sends it gets the video overlay's effects.
+  kind: z
+    .preprocess(
+      (v) => (v === "scene" ? "video" : v),
+      z.enum(["text", "image", "video", "code", "three", "tracked", "audio"]).optional(),
+    )
     .describe("Filter to effects that support this layer kind"),
   phase: z.enum(["in", "out", "loop"]).optional().describe("Filter to effects valid for this slot"),
   family: z.literal("animation").optional(),
@@ -52,9 +60,9 @@ export const listEffectsSchema = z.object({
 
 export const applyLayerEffectSchema = z.object({
   pieceId: z.string(),
-  layerId: z.string().describe("Overlay id, base scene id, or audio clip id"),
+  layerId: z.string().describe("Overlay id or audio clip id"),
   phase: z.enum(["in", "out", "loop"]),
-  effectId: z.string().describe("A built-in effect id (see libi.list_effects)"),
+  effectId: z.string().describe("A built-in effect id (see libi.effect action list)"),
   durationMs: z.number().positive().optional().describe("in/out window length; omit → effect default"),
   params: z.record(z.union([z.number(), z.string()])).optional(),
 });
@@ -96,7 +104,7 @@ export const addEffectSchema = z.object({
   phases: z.array(z.string()).describe('Subset of "in" | "out" | "loop"'),
   supports: z
     .array(z.string())
-    .describe('Layer kinds: text | image | video | code | three | tracked | scene | audio'),
+    .describe('Layer kinds: text | image | video | code | three | tracked | audio'),
   params: z.array(customEffectParamSchema).optional(),
   defaultDurationMs: z.number().positive().optional(),
   source: z
@@ -129,22 +137,22 @@ export const listEffectPackagesSchema = z.object({});
 // ---------------------------------------------------------------------------
 
 export const getCompositionSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
+  pieceId: z.string().optional().describe("ID of the piece to operate on"),
+  pieceIds: z.array(z.string()).min(1).max(24).optional().describe("Several pieces (timeline view); lines that differ from the first are marked."),
+  folderId: z.string().optional().describe("A folder's pieces (timeline view)."),
+  view: z.enum(["full", "timeline"]).optional().describe("full (default): the manifest. timeline: one compact line per layer."),
 });
 
-export const updatePieceNameSchema = z.object({
+export const updatePieceSchema = z.object({
   pieceId: z.string().describe("ID of the piece to operate on"),
-  name: z.string().max(100).describe("Short descriptive name for the piece"),
+  name: z.string().max(100).optional().describe(
+    "Short descriptive name for the piece. Ignored when the user already named it by hand (nameSetByUser): their name is never overwritten.",
+  ),
   description: z
     .string()
     .max(500)
     .optional()
     .describe("Brief description of what this video project is about"),
-});
-
-export const updatePieceDescriptionSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
-  description: z.string().max(500).describe("Brief description of what this video project is about"),
 });
 
 export const saveAssetSchema = z.object({
@@ -157,13 +165,19 @@ export const saveAssetSchema = z.object({
   data: z.string().describe("Base64-encoded asset data"),
 });
 
+const gainDbField = z
+  .number()
+  .min(-60)
+  .max(12)
+  .describe("Static gain in dB (-60..+12, default 0), on top of `volume`: boosts past what 0..1 allows (+3.8 dB is x1.55). -60 is silent. 0 clears it.");
+
 export const audioAddClipSchema = z.object({
   pieceId: z.string().describe("ID of the piece to operate on"),
   fileId: z.string().describe(
     "ID of the source file. Audio file or video file (the audio stream is what plays).",
   ),
   kind: z.enum(["inline", "standalone"]).default("standalone").describe(
-    "'inline' = bound to a video scene (pass linkedSceneId). 'standalone' = independent.",
+    "'inline' = bound to a video overlay (pass linkedOverlayId). 'standalone' = independent.",
   ),
   startTime: z.number().min(0).describe("Composition-global start time in seconds"),
   duration: z.number().positive().optional().describe(
@@ -173,17 +187,21 @@ export const audioAddClipSchema = z.object({
     "Offset into the source file in seconds (default 0)",
   ),
   volume: z.number().min(0).max(1).default(1).describe("0..1 (default 1)"),
+  gainDb: gainDbField.optional(),
   enabled: z.boolean().default(true).describe("Speaker toggle (default true)"),
-  linkedSceneId: z.string().optional().describe("For an inline clip bound to a scene"),
+  // Legacy: video scenes are gone, so this binds nothing. Still ACCEPTED (it
+  // satisfies the inline-needs-a-link check, as it always did) but not
+  // advertised — mcp/tools/legacy-inputs.ts.
+  linkedSceneId: z.string().optional(),
   linkedOverlayId: z.string().optional().describe(
-    "For an inline clip bound to a video overlay (not a scene). At most one of linkedSceneId/linkedOverlayId.",
+    "For an inline clip: the video overlay it is bound to.",
   ),
   label: z.string().optional().describe("Display label, e.g. 'background music'"),
   lengthPolicy: z
     .enum(["extend", "trim"])
     .optional()
     .describe(
-      "Required ONLY when the clip would end past the piece's current end and no explicit `duration` is given: 'extend' keeps the asset's full length (the piece grows), 'trim' cuts the clip at the piece's current end. Ask the user which they want before choosing. Not needed on an EMPTY piece (nothing on the timeline yet): the first asset sets the piece's length and is never refused.",
+      "Required ONLY when the clip would end past the piece's end and no `duration` is given: 'extend' keeps the asset's full length (the piece grows), 'trim' cuts at the piece's end. Ask the user which. Not needed on an EMPTY piece (the first asset sets its length).",
     ),
   rights: z
     .object({
@@ -193,7 +211,7 @@ export const audioAddClipSchema = z.object({
     .strict()
     .optional()
     .describe(
-      "What this song IS, when you know it — you downloaded it, or the user named it. 'copyrighted' with its track (title + artist) stamps the file and, in the same call, matches the song on every connected platform that can attach a licensed copy (the result's `music.summary` says where it matched — relay it). 'generated' ONLY for your own generation tool's output from this turn. 'owned' is not accepted: only the user can mark a track as their own.",
+      "What this song IS, when you know it (you downloaded it, or the user named it). 'copyrighted' + track { title, artist } stamps the file and matches it on every connected platform that can attach a licensed copy (relay the result's `music.summary`). 'generated' ONLY for your own generation tool's output from this turn. 'owned' is not accepted: only the user can mark a track as their own.",
     ),
 });
 
@@ -204,6 +222,15 @@ export const audioUpdateClipSchema = z.object({
   duration: z.number().positive().optional(),
   trimStart: z.number().min(0).optional(),
   volume: z.number().min(0).max(1).optional(),
+  gainDb: gainDbField.optional(),
+  crossfadeMs: z
+    .number()
+    .min(0)
+    .max(5000)
+    .optional()
+    .describe(
+      "Crossfade (ms) over the EARLIER clip of the same file that overlaps this clip's start: this one fades in as that one fades out, over min(crossfadeMs, the overlap). Place the clips overlapping by the length you want. 0 clears it.",
+    ),
   enabled: z.boolean().optional(),
   label: z.string().optional(),
   timelineOrder: z.number().optional(),
@@ -217,7 +244,7 @@ export const audioRemoveClipSchema = z.object({
 export const audioUnlinkSchema = z.object({
   pieceId: z.string(),
   clipId: z.string().describe(
-    "Inline clip to unlink. After unlink it becomes a standalone clip — moves and edits no longer follow the scene.",
+    "Inline clip to unlink. After unlink it becomes a standalone clip — moves and edits no longer follow the overlay.",
   ),
 });
 
@@ -238,13 +265,13 @@ export const audioRelinkOverlaySchema = z.object({
 });
 
 // ── Unified timeline clip operations (cut / delete / duplicate) ──────────────
-// `targetId` is ANY timeline entity id — a scene, an overlay, or an audio clip.
-// The family is auto-detected (ids are prefix-disjoint: scene_* / <kind>-* / clip_*).
+// `targetId` is ANY timeline entity id — an overlay or an audio clip.
+// The family is auto-detected (ids are prefix-disjoint: <kind>-* / clip_*).
 
 export const splitClipSchema = z.object({
   pieceId: z.string(),
   targetId: z.string().describe(
-    "Id of the timeline clip to cut — a scene, overlay, or audio clip. The family is auto-detected.",
+    "Id of the timeline clip to cut — an overlay or audio clip. The family is auto-detected.",
   ),
   atTime: z.number().min(0).describe(
     "Composition-global time in seconds where the clip is cut (split) into two. Must lie strictly inside the clip's window.",
@@ -254,17 +281,34 @@ export const splitClipSchema = z.object({
 export const deleteClipSchema = z.object({
   pieceId: z.string(),
   targetId: z.string().describe(
-    "Id of the timeline clip to remove — a scene, overlay, or audio clip. Removes the clip from the timeline only; the SOURCE FILE is never deleted.",
+    "Id of the timeline clip to remove — an overlay or audio clip. Removes the clip from the timeline only; the SOURCE FILE is never deleted.",
   ),
   ripple: z.boolean().optional().default(false).describe(
-    "When true, also closes the hole the deleted clip left: every overlay/audio clip that starts at or after the deleted clip's END time shifts left by its duration, timeline-wide (not scoped to one lane/group). Items that start BEFORE that point are left alone even if they extend past it (e.g. a full-length background). Default false leaves the gap — correct when other layers (a background, captions in another lane) shouldn't be dragged along. No-op when deleting a SCENE: a scene delete already closes its own gap (sequential scene positions + auto-resynced linked audio), so ripple has nothing left to do there.",
+    "true also closes the gap: every overlay/audio clip starting at or after the deleted clip's end shifts left by its duration, timeline-wide; clips that started before are left alone. Default false leaves the gap (right when a background or captions in another lane should stay).",
   ),
 });
 
 export const duplicateClipSchema = z.object({
   pieceId: z.string(),
   targetId: z.string().describe(
-    "Id of the timeline clip to duplicate — a scene, overlay, or audio clip. The copy is placed immediately after the original.",
+    "Id of the timeline clip to duplicate — an overlay or audio clip. The copy is placed immediately after the original.",
+  ),
+});
+
+export const insertTimeSchema = z.object({
+  pieceId: z.string(),
+  at: z.number().min(0).describe(
+    "Composition seconds where the time goes in. Everything starting at or after it moves right by `seconds`.",
+  ),
+  seconds: z.number().gt(0).max(3600).describe("How much time to insert."),
+  stretch: z.preprocess(
+    (v) => (typeof v === "string" ? [v] : v),
+    z.array(z.string()),
+  ).optional().describe(
+    "Layers that start before `at` and run past it. Omitted: the full-length ones (to the end of the overlays, or of the audio) grow by `seconds`; a caption or narration that merely straddles it is left. [\"spanning\"]: all of them grow. [\"none\"]: none. Else the ids (overlay or audio clip) that grow, exactly those.",
+  ),
+  extendTarget: z.string().optional().describe(
+    "An overlay to lengthen by `seconds` at its end, e.g. the intro; its trim and inline audio extend too. It must start before `at` and end at `at` or later. A video needs that much footage left in its file, else the call is refused and says how much there is.",
   ),
 });
 
@@ -278,8 +322,21 @@ export const masterVolumeMuteSchema = z.object({
   muted: z.boolean(),
 });
 
+/** The most pieces one `list_files` call groups (the ceiling `upload_file` and `apply_ops` share). */
+export const LIST_FILES_MAX_PIECES = 50;
+
 export const listFilesSchema = z.object({
-  pieceId: z.string().optional().describe("ID of the piece. Required when scope is 'piece'."),
+  pieceId: z.string().optional().describe("ID of the piece. Required when scope is 'piece' (or name pieceIds / pieceFolderId instead)."),
+  pieceIds: z
+    .array(z.string())
+    .min(1)
+    .max(LIST_FILES_MAX_PIECES)
+    .optional()
+    .describe(
+      "Several pieces in this ONE call (up to 50), never one list per piece. The answer is grouped by piece with compact file rows; with `query` and exactly one match in each piece it also carries `perPiece` = { pieceId: { fileId } }, which an apply_ops op takes as its `perPiece` (the song already in every copy).",
+    ),
+  pieceFolderId: z.string().optional().describe("Same, for every piece in this piece folder (name order)."),
+  recursive: z.boolean().optional().describe("With pieceFolderId: include subfolders' pieces."),
   scope: z.enum(["piece", "global", "all"]).optional().default("piece").describe(
     "Which files to list: 'piece' (files for pieceId, default), 'global' (unassigned files), 'all' (every file across all pieces and global)",
   ),
@@ -288,7 +345,24 @@ export const listFilesSchema = z.object({
 
 export const duplicateFileSchema = z.object({
   fileId: z.string().describe("ID of the source file to duplicate"),
-  targetPieceId: z.string().nullable().describe("ID of the piece to duplicate into, or null for global"),
+  targetPieceId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("ID of the piece to duplicate into, or null for global. Exactly one of targetPieceId, targetPieceIds, targetPieceFolderId."),
+  targetPieceIds: z
+    .array(z.string())
+    .min(1)
+    .max(50)
+    .optional()
+    .describe(
+      "Copy the file into each of these pieces (up to 50) in this one call; each gets its own file with the source's rights and provenance. The result's `perPiece` is { pieceId: { fileId } }: pass it as an apply_ops op's `perPiece`. A target that is the source's own piece is not copied (it keeps the source file, which perPiece names).",
+    ),
+  targetPieceFolderId: z
+    .string()
+    .optional()
+    .describe("Same, for every piece in this piece folder (libi.piece_folder action list shows the ids)."),
+  recursive: z.boolean().optional().describe("With targetPieceFolderId: include subfolders' pieces."),
   name: z.string().optional().describe("Optional new name for the duplicate (defaults to source name)"),
 });
 
@@ -316,7 +390,7 @@ export const setAudioRightsSchema = z.object({
   class: z
     .enum(["copyrighted", "generated", "owned"])
     .optional()
-    .describe("'generated' ONLY for a file you imported from your own generation tool's output in this turn. 'owned' is refused: only the user can mark a track as their own. A class the user set themselves is refused too (user_decided) — ask them."),
+    .describe("'generated' ONLY for a file you imported from your own generation tool's output in this turn. 'owned' is refused (only the user can set it), and so is a class the user set (user_decided): ask them."),
   track: z
     .object({ title: z.string().min(1).max(200), artist: z.string().max(200).optional(), album: z.string().max(200).optional(), isrc: z.string().max(20).optional() })
     .optional()
@@ -332,20 +406,46 @@ export const updateMcpServerSchema = z.object({
     .describe("true = prompt the user before every tool this extension owns. false is refused: only the user turns a prompt off."),
 });
 
+const AI_GENERATION_DESC =
+  "Provenance of an AI-generated file (omit for plain uploads): { provider (catalog id, e.g. \"fal\"), model, prompt (the full engineered prompt), costEstimate?: { amount, currency }, startedAt, completedAt (ISO), durationMs, providerJobId? }. Fills the asset's Generation tab and the cost lookup; the ai-asset-generation skill has the recipe.";
+
 export const uploadFileSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to operate on"),
+  pieceId: z.string().optional().describe("The piece to upload into. Exactly one of pieceId, pieceIds, pieceFolderId."),
+  pieceIds: z
+    .array(z.string())
+    .min(1)
+    .max(50)
+    .optional()
+    .describe(
+      "Store the file once in each of these pieces (up to 50), in this one call; each gets its own file. The result's `perPiece` is { pieceId: { fileId } }: pass it as an apply_ops op's `perPiece`.",
+    ),
+  pieceFolderId: z
+    .string()
+    .optional()
+    .describe("Same, for every piece in this piece folder (libi.piece_folder action list shows the ids)."),
+  recursive: z.boolean().optional().describe("With pieceFolderId: include subfolders' pieces."),
   filePath: z.string().describe("Absolute path to the file on the local filesystem"),
   name: z.string().optional().describe("Display name (defaults to filename from path)"),
   description: z.string().optional().default("").describe("Brief description of the file"),
   aiGeneration: aiGenerationMetaSchema
     .optional()
-    .describe(
-      "Optional provenance metadata for AI-generated files. Set when the source of this file is a generation call (fal-ai veo, image-to-video, TTS, etc.). Populates the asset preview Generation tab and enables the Fetch-actual-cost flow. Include provider (the catalog id, e.g. \"fal\" or \"elevenlabs\"), model, the full engineered prompt, costEstimate, startedAt/completedAt ISO timestamps, durationMs, and providerJobId (the fal request_id). Omit for non-AI uploads.",
-    ),
+    .describe(AI_GENERATION_DESC),
   folderId: z.string().optional().describe(
-    "Place the uploaded file inside this asset folder (must match the file's " +
-    "scope). Omit to land at the scope root.",
+    "Place the uploaded file inside this ASSET folder of the piece (must match the file's " +
+    "scope; not with pieceIds / pieceFolderId). Omit to land at the scope root.",
   ),
+  derivedFromFileId: z.string().optional().describe(
+    "The libi file this one was made from (an ffmpeg render, a re-encode, a mix of a song). " +
+    "It inherits that file's audio rights: copyrighted stays copyrighted, generated stays generated. You can never make a file owned this way.",
+  ),
+});
+
+/**
+ * What `libi.upload_file` advertises: `aiGeneration` as a loose object (its full JSON schema is ~1.6 KB and the
+ * ai-asset-generation skill documents the shape). The handler still validates the call against `uploadFileSchema`.
+ */
+export const uploadFileAdvertisedSchema = uploadFileSchema.extend({
+  aiGeneration: z.record(z.unknown()).optional().describe(AI_GENERATION_DESC),
 });
 
 export const UploadFontSchema = z.object({
@@ -383,10 +483,7 @@ export const ExtractAudioSchema = z.object({
     .enum(["mp3", "wav", "copy"])
     .optional()
     .describe(
-      "Output audio format. DEFAULT 'mp3' — a fal-safe format: Seedance reference-to-video " +
-        "`@Audio1` accepts MP3/WAV ONLY, so the default is already correct for a voice reference. " +
-        "'wav' = lossless PCM (also fal-safe). 'copy' = stream-copy the source codec (fast, " +
-        "lossless, usually .m4a/AAC) — do NOT use 'copy' for an @Audio1 reference (fal rejects AAC).",
+      "DEFAULT 'mp3' (fal-safe: an @Audio1 voice reference takes MP3/WAV only); 'wav' = lossless PCM; 'copy' = stream-copy of the source codec (fast, usually AAC): NOT usable as an @Audio1 reference.",
     ),
   startSeconds: z
     .number()
@@ -425,8 +522,9 @@ export const DropProxiesSchema = z.object({
 });
 
 export type GetCompositionParams = z.infer<typeof getCompositionSchema>;
-export type UpdatePieceNameParams = z.infer<typeof updatePieceNameSchema>;
-export type UpdatePieceDescriptionParams = z.infer<typeof updatePieceDescriptionSchema>;
+export type UpdatePieceParams = z.infer<typeof updatePieceSchema>;
+export type UpdatePieceNameParams = UpdatePieceParams & { name: string };
+export type UpdatePieceDescriptionParams = UpdatePieceParams & { description: string };
 export type SaveAssetParams = z.infer<typeof saveAssetSchema>;
 export type AudioAddClipParams = z.infer<typeof audioAddClipSchema>;
 export type AudioUpdateClipParams = z.infer<typeof audioUpdateClipSchema>;
@@ -437,6 +535,7 @@ export type AudioRelinkOverlayParams = z.infer<typeof audioRelinkOverlaySchema>;
 export type SplitClipParams = z.infer<typeof splitClipSchema>;
 export type DeleteClipParams = z.infer<typeof deleteClipSchema>;
 export type DuplicateClipParams = z.infer<typeof duplicateClipSchema>;
+export type InsertTimeParams = z.infer<typeof insertTimeSchema>;
 export type MasterVolumeSetParams = z.infer<typeof masterVolumeSetSchema>;
 export type MasterVolumeMuteParams = z.infer<typeof masterVolumeMuteSchema>;
 export const listPiecesSchema = z.object({
@@ -474,13 +573,28 @@ export const showInChatSchema = z.object({
 export const downloadVideoSchema = z.object({
   url: z
     .string()
+    .optional()
     .describe(
-      "Video page URL. YouTube playlist/radio parameters (list, start_radio, index, pp, t) are stripped automatically — pass the URL as the user gave it.",
+      "Video page URL. YouTube playlist/radio parameters (list, start_radio, index, pp, t) are stripped automatically — pass the URL as the user gave it. Exactly one of url, search.",
     ),
+  search: z
+    .string()
+    .optional()
+    .describe(
+      "Words to find instead of a URL, e.g. \"fleetwood mac dreams official audio\": libi takes the first YouTube result and returns it as `picked` { title, url, durationSec }; check it is the right one. With `candidates: true` it downloads NOTHING and lists the top results instead.",
+    ),
+  candidates: z
+    .boolean()
+    .optional()
+    .describe(
+      "With search: list the top results [{ title, url, durationSec, uploader }] WITHOUT downloading, so you can confirm the right one with the user and then download it by its url. Use it when the wrong track would waste a download (a song with covers, live versions and remasters).",
+    ),
+  count: z.number().int().min(1).max(10).optional().describe("With candidates: how many results, default 5."),
   pieceId: z
     .string()
     .nullable()
-    .describe("Piece to import the file into, or null for the unassigned library."),
+    .optional()
+    .describe("Piece to import the file into, or null for the unassigned library. Required to download; not used by candidates."),
   audioOnly: z
     .boolean()
     .default(false)
@@ -496,13 +610,18 @@ export const showStoryboardSchema = z.object({
   pieceId: z.string().describe("ID of the piece whose storyboard should be shown"),
 });
 
+export const showExportSchema = z.object({
+  pieceId: z.string().describe("ID of the piece the export belongs to"),
+  exportId: z.string().describe("ID of the export to open in the piece's Exports tab (from libi.list_exports or libi.export_video)"),
+});
+
 export const highlightPropertySchema = z.object({
   pieceId: z.string().describe("ID of the piece the overlay belongs to"),
   overlayId: z.string().describe("ID of the overlay whose inspector field to flash"),
   property: z
     .string()
     .describe(
-      "Inspector field key to highlight (e.g. 'background.color', 'content', 'reveal.mode'). Must be a known key.",
+      "Inspector field key to highlight (e.g. 'background.color', 'content', 'fontSize'). Must be a known key; text reveal is not one (Effects panel, Reveal tab).",
     ),
   note: z
     .string()
@@ -528,7 +647,7 @@ export const setComplexityModeSchema = z.object({
   mode: z
     .enum(["transform", "style", "text", "3d", "anchors"])
     .describe(
-      "Inspector intent group (tab) to switch this overlay's inspector to: 'transform' (placement/size/2D rotate/timing), 'style' (look — color/background/stroke/shadow/reveal), 'text' (content + typography), '3d' (3D extrusion + the orbit-gizmo manual angles), or 'anchors' (tracked only — the manual re-anchor list). If the kind doesn't have that tab, the client clamps to the kind's default.",
+      "Inspector tab: 'transform' (placement/size/rotate/timing), 'style' (color/background/stroke/shadow/reveal), 'text' (content + typography), '3d' (extrusion + orbit angles) or 'anchors' (tracked only). A kind without that tab falls back to its default.",
     ),
 });
 
@@ -544,6 +663,7 @@ export type DeletePieceParams = z.infer<typeof deletePieceSchema>;
 export type ShowAssetParams = z.infer<typeof showAssetSchema>;
 export type ShowPreviewParams = z.infer<typeof showPreviewSchema>;
 export type ShowStoryboardParams = z.infer<typeof showStoryboardSchema>;
+export type ShowExportParams = z.infer<typeof showExportSchema>;
 export type HighlightPropertyParams = z.infer<typeof highlightPropertySchema>;
 export type SetComplexityModeParams = z.infer<typeof setComplexityModeSchema>;
 export type TrimVideoParams = z.infer<typeof TrimVideoSchema>;
@@ -624,7 +744,10 @@ const captionStyleFields = {
   fontSize: z.number().min(4).max(512).optional(),
   fontWeight: z
     .union([z.number().min(100).max(900), z.enum(["normal", "bold", "lighter", "bolder"])])
-    .optional(),
+    .optional()
+    .describe(
+      "A number from 100 to 900 (400 regular, 700 bold, 800 extra-bold, 900 black) or normal | bold | lighter | bolder.",
+    ),
   lineHeight: z.number().min(0.5).max(4).optional(),
   background: z
     .object({
@@ -705,6 +828,23 @@ const captionStyleUpdateFields = {
 };
 
 /**
+ * `include` on add_overlay / update_overlay: copy top-level declarations of another code overlay of the
+ * SAME piece into this body (lib/overlays/code-include.ts). Nested object, so unknown keys are refused here too.
+ */
+export const codeIncludeSchema = z
+  .object({
+    fromOverlayId: z.string().describe("Overlay of THIS piece to copy from (same body kind)."),
+    names: z
+      .array(z.string().max(80))
+      .max(60)
+      .optional()
+      .describe("Declarations to copy. Omit: what the body reads but never declares."),
+  })
+  .strict();
+const INCLUDE_DESC =
+  "code/three only: copy top-level declarations (and what they need) from another overlay of this piece into the body, under a banner. The body's own names win. Never copy a kit by hand.";
+
+/**
  * Consolidated add_overlay schema. A FLAT z.object (NOT a discriminatedUnion) so
  * the MCP SDK can extract `.shape` and advertise typed properties — a union/refine
  * serializes to empty `{properties:{}}`, which breaks the agent's ability to pass
@@ -743,6 +883,7 @@ export const addOverlaySchema = z.object({
   fit: z.enum(["cover", "contain"]).optional(),
   // code / three
   body: z.string().max(20000).optional(),
+  include: codeIncludeSchema.optional().describe(INCLUDE_DESC),
   cameraPreset: cameraPresetEnum.optional(),
   transform3d: transform3dSchema.optional(),
   // video only — `duration` is REQUIRED on this tool, so (unlike audioAddClip)
@@ -752,10 +893,24 @@ export const addOverlaySchema = z.object({
     .enum(["extend", "trim"])
     .optional()
     .describe(
-      "VIDEO overlays only. Required ONLY when startTime + duration would run past the piece's current end: 'extend' keeps the requested duration (the piece grows), 'trim' cuts the overlay at the piece's current end. Ask the user which they want before choosing. Not needed on an EMPTY piece (nothing on the timeline yet): the first asset sets the piece's length and is never refused.",
+      "VIDEO overlays only. Required ONLY when startTime + duration runs past the piece's end: 'extend' keeps the duration (the piece grows), 'trim' cuts at the piece's end. Ask the user which. Not needed on an EMPTY piece (the first asset sets its length).",
     ),
 });
 export type AddOverlayParams = z.infer<typeof addOverlaySchema>;
+
+/**
+ * The `smoothing` input of the tracked-overlay tools. `kalman` was a
+ * placeholder that always behaved as `linear`, so it is no longer advertised
+ * (the JSON schema lists linear | catmull-rom); a caller that still sends it is
+ * accepted and gets `linear`. A FIELD-level preprocess — never wrap the whole
+ * object (the SDK would emit an empty schema, see the zod-v3 rule in AGENTS.md).
+ */
+const SMOOTHING_DESC =
+  "Sub-frame INTERPOLATION, NOT a denoiser (jitter is positionMode's job). linear = default; catmull-rom = spline (can overshoot).";
+const toLinearIfKalman = (v: unknown) => (v === "kalman" ? "linear" : v);
+const SMOOTHING_MODES = z.enum(["linear", "catmull-rom"]);
+const smoothingRequired = z.preprocess(toLinearIfKalman, SMOOTHING_MODES).describe(SMOOTHING_DESC);
+const smoothingOptional = z.preprocess(toLinearIfKalman, SMOOTHING_MODES.optional()).describe(SMOOTHING_DESC);
 
 /** Follow offset for tracked overlays — FRACTIONS of the resolved tracked box.
  *  {x:0, y:-1} places the content one box-height ABOVE the tracked point
@@ -796,7 +951,16 @@ export const updateOverlaySchema = z.object({
   // (`lib/templates/materialize.ts`) — without the field zod stripped it and
   // the fill silently did nothing.
   fileId: z.string().optional().describe("Image/video overlays — point the layer at another file of this piece."),
+  include: codeIncludeSchema.optional().describe(INCLUDE_DESC + " Prepends to the existing body."),
   rect: OverlayRectSchema.optional(),
+  // What a `rect` change does to the overlay's keyframed rects: they follow (translate, and scale with a
+  // resize) unless "pin" keeps them where they were. See keyframesFollowRect in overlay-tools.ts.
+  keyframes: z
+    .enum(["follow", "pin"])
+    .optional()
+    .describe(
+      "With `rect` (or a text `position`): 'follow' (default) moves and scales the overlay's keyframed rects with it; 'pin' leaves them at the old layout.",
+    ),
   z: z.number().optional(),
   opacity: z.number().optional(),
   cameraPreset: cameraPresetEnum.optional(),
@@ -839,7 +1003,7 @@ export const updateOverlaySchema = z.object({
     .string()
     .optional()
     .describe(
-      "Attach a file's transcript word timings to THIS overlay (any kind — a text cue, or a custom code/three caption). Reads that file's words and windows them to the overlay's TIMELINE window [startTime, startTime+duration] (through where the file plays: its audio clip or video overlay), element-local, stored as caption.words. A custom caption body voice-syncs via activeWordIndex(words, time) / typewriterRevealedText(words, time). A TEXT overlay gets the words its text says, by where each word starts in [startTime, startTime+duration); a cue of a generate_captions track stays in its track and style, and a text overlay with no caption yet joins that file's track (taking its nearest cue's look) — use this to re-split cues. A code/three overlay, or a cue of another file's track, gets its own group cap-<fileId>-custom.",
+      "Attach a file's transcript word timings to THIS overlay (any kind: a text cue, or a custom code/three caption), windowed to the overlay's timeline window and stored as caption.words (a custom caption body syncs via activeWordIndex(words, time) / typewriterRevealedText(words, time)). A text overlay gets the words its text says; a cue of a generate_captions track keeps its track and style, and a text overlay with no caption yet joins that file's track (use it to re-split cues). A code/three overlay, or a cue of another file's track, gets its own group cap-<fileId>-custom.",
     ),
 });
 export type UpdateOverlayParams = z.infer<typeof updateOverlaySchema>;
@@ -961,7 +1125,7 @@ export const updateOverlayToolSchema = refuseUnknownFields(
   updateOverlaySchema,
   (key, fields) => {
     if (CODE_FIELD_ALIASES.has(key.toLowerCase())) {
-      return "update_overlay never takes code. Edit the file at the overlay's `codeFilePath` (from libi.add_overlay or libi.get_overlays) with your file tools.";
+      return "update_overlay never takes code. Edit the file at the overlay's `codeFilePath` (from libi.add_overlay or libi.get_overlays) with your file tools; to reuse another overlay's helpers pass `include`.";
     }
     return overlayGuessHint(key) ?? didYouMean(key, fields);
   },
@@ -998,6 +1162,21 @@ export const createPieceToolSchema = refuseUnknownFields(
 
 export const getOverlaysSchema = z.object({ pieceId: z.string() });
 export type GetOverlaysParams = z.infer<typeof getOverlaysSchema>;
+
+/** `libi.code_outline`: a code overlay's top-level functions, constants and fonts, parsed and never run. */
+export const codeOutlineSchema = z.object({
+  pieceId: z.string(),
+  overlayId: z.string().describe("A code, three or tracked-code overlay (ids: libi.get_overlays)"),
+  includeSource: z
+    .object({
+      from: z.number().int().min(1).describe("First line, 1-based"),
+      to: z.number().int().min(1).describe("Last line, inclusive (at most 300 lines come back)"),
+    })
+    .optional()
+    .describe("Also return these lines of the body file, so you read a range instead of the whole file"),
+  outline: z.boolean().optional().describe("false: skip the outline and return only the line counts (and includeSource)"),
+});
+export type CodeOutlineParams = z.infer<typeof codeOutlineSchema>;
 
 export const generateCaptionsSchema = z.object({
   pieceId: z.string(),
@@ -1061,12 +1240,25 @@ const keyframePropertiesSchema = z.object({
   rotation: z.number().optional(),
   rect: OverlayRectSchema.optional(),
   transform3d: transform3dSchema.optional(),
+  volumeDb: z
+    .number()
+    .min(-60)
+    .max(12)
+    .optional()
+    .describe("AUDIO clips only (clipId): the volume at `time` as a dB OFFSET on top of the clip's gainDb; 0 = unchanged, -60 = silent."),
 });
+
+// A keyframe targets an overlay (overlayId) or an audio clip (clipId): exactly one, checked in the handler
+// (the schema stays a flat object).
+const keyframeTargetShape = {
+  overlayId: z.string().optional().describe("The overlay to key. Give overlayId OR clipId."),
+  clipId: z.string().optional().describe("The AUDIO clip to key (its volume envelope). Give overlayId OR clipId."),
+};
 
 export const addKeyframeSchema = z.object({
   pieceId: z.string(),
-  overlayId: z.string(),
-  time: z.number().min(0).describe("Keyframe time in SECONDS within the overlay window."),
+  ...keyframeTargetShape,
+  time: z.number().min(0).describe("Keyframe time in SECONDS within the overlay or clip window."),
   properties: keyframePropertiesSchema.optional(),
   easing: z
     .string()
@@ -1077,14 +1269,14 @@ export type AddKeyframeParams = z.infer<typeof addKeyframeSchema>;
 
 export const deleteKeyframeSchema = z.object({
   pieceId: z.string(),
-  overlayId: z.string(),
+  ...keyframeTargetShape,
   time: z.number().min(0).describe("Keyframe time in SECONDS to remove across all tracks."),
 });
 export type DeleteKeyframeParams = z.infer<typeof deleteKeyframeSchema>;
 
 export const setKeyframeEasingSchema = z.object({
   pieceId: z.string(),
-  overlayId: z.string(),
+  ...keyframeTargetShape,
   time: z.number().min(0).describe("Keyframe time in SECONDS whose OUTGOING segment easing to set."),
   easing: z.string().describe("A preset id (e.g. \"ease-in-out\") or a cubic-bezier(a,b,c,d) literal."),
 });
@@ -1092,17 +1284,17 @@ export type SetKeyframeEasingParams = z.infer<typeof setKeyframeEasingSchema>;
 
 export const listKeyframesSchema = z.object({
   pieceId: z.string(),
-  overlayId: z.string(),
+  ...keyframeTargetShape,
 });
 export type ListKeyframesParams = z.infer<typeof listKeyframesSchema>;
 
 
 export const deleteFileSchema = z.object({
   fileId: z.string().describe(
-    "ID of the file to permanently delete. The user MUST have explicitly asked to delete the file (not just 'remove the audio' or 'take out that scene'). When in doubt, ask the user to confirm or use libi.audio_remove_clip / libi.delete_scene instead.",
+    "The file to permanently delete; only when the user explicitly asked to delete it (not 'remove the audio' or 'take out that clip'). When in doubt ask, or use libi.audio_clip (action remove) / libi.remove_overlay.",
   ),
   confirm: z.literal(true).describe(
-    "Set to true to acknowledge this is a destructive, irreversible operation that erases the source file from disk and cascades to remove every scene, audio clip, and overlay that referenced it. The schema requires this exact value as a guard against accidental invocation.",
+    "Must be true: guards the irreversible erase of the source file and every clip and overlay using it.",
   ),
 });
 
@@ -1114,11 +1306,9 @@ export const audioDuckEnableSchema = z.object({
   sidechainClipIds: z.array(z.string()).min(1).optional().describe(
     "The clips whose volume drives the duck (typically every dialogue or VO clip). Pass ALL of them — their levels are summed, so the music dips under whichever voice is speaking. There is no need to bounce several VO lines into one file first.",
   ),
-  /** @deprecated Superseded by `sidechainClipIds`; still accepted so older
-   *  agent transcripts and skills keep working. */
-  sidechainClipId: z.string().optional().describe(
-    "Deprecated — use sidechainClipIds. A single sidechain clip id, accepted as an alias for a one-element sidechainClipIds.",
-  ),
+  /** Legacy singular spelling of `sidechainClipIds`: still ACCEPTED so older
+   *  transcripts and skills keep working, not advertised (mcp/tools/legacy-inputs.ts). */
+  sidechainClipId: z.string().optional(),
   thresholdDb: z.number().min(-60).max(0).optional().describe("Sidechain threshold in dBFS, default -30"),
   ratio: z.number().min(1).max(20).optional().describe("Compression ratio, default 4"),
   attackMs: z.number().min(1).max(1000).optional().describe("Attack time in ms, default 50"),
@@ -1137,16 +1327,70 @@ export const audioDuckUpdateSchema = z.object({
   sidechainClipIds: z.array(z.string()).min(1).optional().describe(
     "Replace the full set of clips driving the duck. Their levels are summed.",
   ),
-  /** @deprecated Superseded by `sidechainClipIds`. */
-  sidechainClipId: z.string().optional().describe(
-    "Deprecated — use sidechainClipIds. Replaces the set with this single clip.",
-  ),
+  /** Legacy singular spelling — accepted, not advertised (mcp/tools/legacy-inputs.ts). */
+  sidechainClipId: z.string().optional(),
   thresholdDb: z.number().min(-60).max(0).optional(),
   ratio: z.number().min(1).max(20).optional(),
   attackMs: z.number().min(1).max(1000).optional(),
   releaseMs: z.number().min(1).max(5000).optional(),
   reductionDb: z.number().min(-60).max(0).optional(),
 });
+
+// ---------------------------------------------------------------------------
+// Audio analysis: libi.audio_analyze (measure | report | align)
+// ---------------------------------------------------------------------------
+
+/** The pieces `audio_analyze` measure / report may name at once: each is a job's worth of ffmpeg or a decode. */
+export const AUDIO_ANALYZE_MAX_PIECES = 24;
+
+/** `pieceId | pieceIds | pieceFolderId` (+ recursive), shared by measure and report; align is one piece. */
+const audioAnalyzeTargets = {
+  pieceId: z.string().optional().describe("One piece. Exactly one of pieceId, pieceIds, pieceFolderId."),
+  pieceIds: z
+    .array(z.string())
+    .min(1)
+    .max(AUDIO_ANALYZE_MAX_PIECES)
+    .optional()
+    .describe("Several pieces in this ONE call (up to 24), never one call per piece: the same question on each. The result is grouped by piece: the first in full, a piece matching it within 0.5 dB as `sameAsFirst`, a differing one in full, and a `summary` line."),
+  pieceFolderId: z.string().optional().describe("Same, for every piece in this piece folder (name order; the first is the reference)."),
+  recursive: z.boolean().optional().describe("With pieceFolderId: include subfolders' pieces."),
+};
+
+export const audioMeasureSchema = z.object({
+  ...audioAnalyzeTargets,
+  ranges: z
+    .array(z.object({ from: z.number().min(0), to: z.number().positive() }))
+    .min(1)
+    .max(8)
+    .describe(
+      "Composition seconds, [{ from, to }], 1-8 ranges (under 0.4 s has no LUFS) whose earliest start and latest end are at most 600 s apart. Measure the ranges you will act on (the bed under narration, the end card), not the whole piece.",
+    ),
+  per: z
+    .enum(["mix", "clip"])
+    .optional()
+    .describe("'mix' (default): the mix as exported. 'clip': also each clip's own contribution in each range (its gain, envelope, fades and duck included): the one that answers 'which clip is too loud'. Up to 10 clips; pass clipIds for more."),
+  clipIds: z.array(z.string()).max(50).optional().describe("With per 'clip': measure only these clips."),
+});
+export type AudioMeasureParams = z.infer<typeof audioMeasureSchema>;
+
+export const audioReportSchema = z.object({
+  ...audioAnalyzeTargets,
+  from: z.number().min(0).describe("Start of the range, composition seconds. At most 600 s from `from` to `to`."),
+  to: z.number().positive().describe("End of the range, composition seconds."),
+  step: z.number().min(0.05).max(60).optional().describe("Seconds between printed points. Default: the range / 24, within 0.25-5; widened to keep at most about 120 points per clip."),
+});
+export type AudioReportParams = z.infer<typeof audioReportSchema>;
+
+export const audioAlignSchema = z.object({
+  pieceId: z.string().describe("The piece the reference clip is on."),
+  fileId: z.string().describe("The recording to search INSIDE (the full song), any libi file."),
+  referenceClipId: z.string().describe("The audio clip whose sound to find: what it plays (its file from its trimStart for its duration; at most the first 30 s are used) is searched for in `fileId`."),
+  window: z
+    .object({ from: z.number().min(0).optional(), to: z.number().positive().optional() })
+    .optional()
+    .describe("Seconds of `fileId` to search, when you know roughly where (a chorus repeats: a window picks the one you mean). At most the first 2400 s of the file are read."),
+});
+export type AudioAlignParams = z.infer<typeof audioAlignSchema>;
 
 export type AudioDuckEnableParams = z.infer<typeof audioDuckEnableSchema>;
 export type AudioDuckDisableParams = z.infer<typeof audioDuckDisableSchema>;
@@ -1160,7 +1404,7 @@ import { videoSummarySchema, frameDescriptionSchema } from "@/lib/analysis/schem
 
 const ANALYSIS_KIND_ENUM = z.enum(["transcript", "summary", "frames"]);
 
-function decodeJsonStringIfNeeded(v: unknown): unknown {
+export function decodeJsonStringIfNeeded(v: unknown): unknown {
   if (typeof v !== "string") return v;
   try {
     return JSON.parse(v);
@@ -1175,9 +1419,7 @@ export const analysisGetSchema = z.object({
     .enum(["summary", "full"])
     .optional()
     .describe(
-      'How much keyframe data to return. "summary" (default) omits each frame\'s full ' +
-        "description to stay within the tool token budget (use libi.analysis_search_frames " +
-        'for details); "full" returns every frame\'s complete description.',
+      '"summary" (default) omits each frame\'s full description (action search_frames has details); "full" returns every complete description.',
     ),
 });
 
@@ -1207,7 +1449,7 @@ const saveFrameItemSchema = z.object({
 export const analysisSaveFramesSchema = z.object({
   fileId: z.string().describe("ID of the video file"),
   frames: z.array(saveFrameItemSchema).describe(
-    "Keyframes to save. UPSERT SEMANTICS, matched by frameIndex: a frame whose index already exists is updated; a new index is inserted; frames NOT included in this batch are left untouched (never deleted). Safe to call repeatedly — process long videos in batches of 10–20 frames. To wipe all keyframes before re-extracting at a different density, call analysis_remove_step (kind: 'frames') first.",
+    "Keyframes to save. UPSERT SEMANTICS, matched by frameIndex: a frame whose index already exists is updated; a new index is inserted; frames NOT included in this batch are left untouched (never deleted). Safe to call repeatedly — process long videos in batches of 10–20 frames. To wipe all keyframes before re-extracting at a different density, call libi.analysis_save({ action: 'remove_step' }) (kind: 'frames') first.",
   ),
 });
 
@@ -1222,7 +1464,7 @@ export const analysisTranscribeAudioSchema = z.object({
   fileId: z.string().describe("ID of the video or audio file"),
   retry: z.boolean().optional().describe("If true, re-process only chunks with status='failed' or 'not_started', plus 'ready' chunks that came back with no words. Default false."),
   chunkSeconds: z.number().int().positive().optional().describe("Chunk length in seconds. Default 600 (10 minutes)."),
-  model: z.string().optional().describe("Whisper model id (tiny|base|small|medium|large-v3). Omit it to use 'small' when installed, else the most accurate installed model; the result's `model` says which ran. Pass one only to require that model."),
+  model: z.string().optional().describe("Whisper model (tiny|base|small|medium|large-v3). Omit for 'small' when installed, else the most accurate installed one; the result's `model` says which ran."),
 });
 
 export const analysisChunkAudioSchema = z.object({
@@ -1231,7 +1473,7 @@ export const analysisChunkAudioSchema = z.object({
 });
 
 export const analysisSaveAudioChunkSchema = z.object({
-  chunkId: z.string().describe("ID returned from libi.analysis_chunk_audio"),
+  chunkId: z.string().describe("ID returned from libi.analysis_extract({ action: 'chunk_audio' })"),
   text: z.string().describe("Transcribed text for this chunk"),
   words: z.array(z.object({
     text: z.string(),
@@ -1245,7 +1487,7 @@ export const analysisSaveAudioChunkSchema = z.object({
 });
 
 export const analysisSaveAudioChunkFromFileSchema = z.object({
-  chunkId: z.string().describe("ID returned from libi.analysis_chunk_audio"),
+  chunkId: z.string().describe("ID returned from libi.analysis_extract({ action: 'chunk_audio' })"),
   jsonPath: z.string().describe("Absolute path to a JSON file containing { text, words: [...], language_code?, language_probability? } (the shape of ElevenLabs' Speech-to-Text REST API; its hosted MCP returns flat text only, which is not saved here)."),
 });
 
@@ -1336,10 +1578,17 @@ export type OverrideInstructionsParams = z.infer<typeof overrideInstructionsSche
 
 export const showExtensionSchema = z.object({
   extensionId: z.string().optional().describe("libi extension id to focus, e.g. 'libi-tracking'"),
-  mcpId: z.string().optional().describe("Deprecated alias of extensionId."),
+  // Legacy spelling of `extensionId` (resolveExtensionId reads both): accepted, not advertised.
+  mcpId: z.string().optional(),
 });
 
 export type ShowExtensionParams = z.infer<typeof showExtensionSchema>;
+
+/** `libi.show({ target: "social_settings" })`: Social → Settings, at one connected account when named. */
+export const showSocialSettingsSchema = z.object({
+  accountId: z.string().optional(),
+});
+export type ShowSocialSettingsParams = z.infer<typeof showSocialSettingsSchema>;
 
 // ---------------------------------------------------------------------------
 // Providers — what the user connects to their OWN agent (lib/providers/catalog.ts)
@@ -1347,8 +1596,8 @@ export type ShowExtensionParams = z.infer<typeof showExtensionSchema>;
 
 export const suggestProviderSchema = z.object({
   kind: z
-    .enum(["image", "video", "music", "voice", "sfx", "transcription", "social"])
-    .describe("The capability you need and do not have."),
+    .enum(["image", "video", "music", "voice", "sfx", "transcription", "social", "browser"])
+    .describe("The capability you need and do not have. `browser`: a browser you can drive (upload a file to a site, e.g. TikTok Studio)."),
   reason: z
     .string()
     .optional()
@@ -1377,9 +1626,9 @@ export type RetryMcpServerParams = z.infer<typeof retryMcpServerSchema>;
  * `kind: "extension"`, the manual says "a libi **extension** id" — guesses
  * `extensionId` and gets a validation error it cannot act on.
  *
- * Canonical is `mcpId` and not `extensionId`, because five sibling tools (`update_dep_status`, `diagnose_mcp`,
- * `recheck_mcp`, `restart_mcp_server`, `retry_mcp_server`), all four install
- * plans and `mcp/templates/instructions.md` spell it `mcpId`. (`show_extension`
+ * Canonical is `mcpId` and not `extensionId`, because five siblings (`update_dep_status` and the `diagnose`,
+ * `recheck`, `restart`, `retry` actions of `libi.extension`), all four install
+ * plans and `mcp/templates/instructions.md` spell it `mcpId`. (`libi.show` target `extension`
  * is the one exception: it is named for the extension, so `extensionId` is its
  * canonical key and `mcpId` its deprecated alias.) Renaming this ONE tool would manufacture the drift the
  * follow-up is about instead of removing it — the flow's very next call is
@@ -1398,15 +1647,11 @@ export const getInstallPlanSchema = z.object({
     .min(1)
     .optional()
     .describe(
-      "ID of the libi extension (e.g. 'whisper', 'local-music', 'libi-tracking'). Canonical spelling — use this one.",
+      "ID of the libi extension (e.g. 'whisper', 'local-music', 'libi-tracking'). Required.",
     ),
-  extensionId: z
-    .string()
-    .min(1)
-    .optional()
-    .describe(
-      "Alias for mcpId, accepted so either spelling works. Prefer mcpId: the install plans, the manual and every sibling install tool use it.",
-    ),
+  // Alias of `mcpId` (resolveExtensionId reads both): accepted so either spelling
+  // works, not advertised (mcp/tools/legacy-inputs.ts).
+  extensionId: z.string().min(1).optional(),
 });
 
 export const updateDepStatusSchema = z.object({
@@ -1667,7 +1912,7 @@ const baseTrackingFields = {
         "class (e.g. ['backpack']) auto-routes to the generalized YOLOE-VP " +
         "detector server-side — no method change needed. Identity is still " +
         "from anchors[] + the normal repair loop. " +
-        "Applies to compute_object_track (local engine).",
+        "Applies to libi.track compute (local engine).",
     ),
   anchors: z
     .array(anchorSchema)
@@ -1751,25 +1996,22 @@ export const AddTrackedOverlaySchema = z.object({
   content: TrackedContentSchema,
   fit: z.enum(["tight", "head", "rect"]),
   scale: z.number().positive().max(5),
-  smoothing: z.enum(["linear", "catmull-rom", "kalman"]).describe(
-    "Sub-frame INTERPOLATION between (already position-stabilized) samples — NOT a denoiser; it cannot remove tracker jitter (that is positionMode's job). linear = recommended default; catmull-rom = spline (can overshoot at direction changes); kalman = deprecated, behaves as linear.",
-  ),
+  smoothing: smoothingRequired,
   offset: TrackedOffsetSchema.optional(),
   sizeMode: z.enum(["stabilized", "raw"]).optional().describe(
-    "stabilized (default) damps box-size jitter: clamps outlier boxes AND median-smooths width/height over time (~7 frames) so the overlay neither balloons nor pulses as the detector flaps between tighter/looser boxes; the box edge implied by the offset direction (e.g. the TOP edge when the overlay sits above the subject) is held fixed while resizing, which also removes the vertical bounce the size flap would otherwise inject. raw uses tracker sizes verbatim.",
+    "stabilized (default) damps box-size jitter (clamps outliers, median-smooths width/height) and holds the edge the offset points away from fixed while resizing; raw uses tracker sizes verbatim.",
   ),
   maxBoxScale: z.number().min(1).max(4).optional().describe(
-    "Max factor a single frame's box may exceed the track's median size before it is clamped. Lower = stricter. Only used when sizeMode is stabilized. Default 1.75.",
+    "Max factor a frame's box may exceed the track's median size before it is clamped (lower = stricter; sizeMode stabilized only). Default 1.75.",
   ),
   positionMode: z.enum(["stabilized", "raw"]).optional().describe(
-    "stabilized (default) applies render-time One-Euro smoothing to the tracked box CENTER so the overlay does not bounce with per-frame tracker jitter (steady when the subject is still, no lag on fast motion); raw follows sample positions verbatim (deliberate-bounce escape hatch).",
+    "stabilized (default) smooths the tracked box CENTER against tracker jitter; raw follows samples verbatim (deliberately bouncy).",
   ),
   acknowledgeQualityIssues: z
     .boolean()
     .optional()
     .describe(
-      "Set true ONLY after you have inspected summary.issues and decided to attach anyway " +
-      "(e.g. the lost range was skip_segment'd). Without it, attaching to a flagged track is refused.",
+      "Set true ONLY after inspecting summary.issues and deciding to attach anyway; without it a flagged track is refused.",
     ),
 });
 
@@ -1785,18 +2027,16 @@ export const UpdateTrackedOverlaySchema = z.object({
   content: TrackedContentSchema.optional(),
   fit: z.enum(["tight", "head", "rect"]).optional(),
   scale: z.number().positive().max(5).optional(),
-  smoothing: z.enum(["linear", "catmull-rom", "kalman"]).optional().describe(
-    "Sub-frame INTERPOLATION between (already position-stabilized) samples — NOT a denoiser; it cannot remove tracker jitter (that is positionMode's job). linear = recommended default; catmull-rom = spline (can overshoot at direction changes); kalman = deprecated, behaves as linear.",
-  ),
+  smoothing: smoothingOptional,
   offset: TrackedOffsetSchema.optional(),
   sizeMode: z.enum(["stabilized", "raw"]).optional().describe(
-    "stabilized (default) damps box-size jitter: clamps outlier boxes AND median-smooths width/height over time (~7 frames) so the overlay neither balloons nor pulses as the detector flaps between tighter/looser boxes; the box edge implied by the offset direction (e.g. the TOP edge when the overlay sits above the subject) is held fixed while resizing, which also removes the vertical bounce the size flap would otherwise inject. raw uses tracker sizes verbatim.",
+    "stabilized (default) damps box-size jitter (clamps outliers, median-smooths width/height) and holds the edge the offset points away from fixed while resizing; raw uses tracker sizes verbatim.",
   ),
   maxBoxScale: z.number().min(1).max(4).optional().describe(
-    "Max factor a single frame's box may exceed the track's median size before it is clamped. Lower = stricter. Only used when sizeMode is stabilized. Default 1.75.",
+    "Max factor a frame's box may exceed the track's median size before it is clamped (lower = stricter; sizeMode stabilized only). Default 1.75.",
   ),
   positionMode: z.enum(["stabilized", "raw"]).optional().describe(
-    "stabilized (default) applies render-time One-Euro smoothing to the tracked box CENTER so the overlay does not bounce with per-frame tracker jitter (steady when the subject is still, no lag on fast motion); raw follows sample positions verbatim (deliberate-bounce escape hatch).",
+    "stabilized (default) smooths the tracked box CENTER against tracker jitter; raw follows samples verbatim (deliberately bouncy).",
   ),
 });
 
@@ -1826,7 +2066,7 @@ export const UpdateTrackResultSchema = z.object({
     visible: z.boolean(),
     subjectId: z.string().nullable().optional(),
   })).min(1).describe(
-    "Per-frame samples in pixel coordinates. The samples array shape mirrors libi's internal TrackSample type so it's identical to what compute_object_track produces.",
+    "Per-frame samples in pixel coordinates. The samples array shape mirrors libi's internal TrackSample type so it's identical to what libi.track compute produces.",
   ),
   anchors: z.array(anchorSchema).optional().describe(
     "Optional anchor reference list — what the external tracker used as input.",
@@ -1938,7 +2178,7 @@ export const RemoveBackgroundSchema = z.object({
       box: z
         .tuple([z.number(), z.number(), z.number(), z.number()])
         .optional()
-        .describe("[x, y, w, h] in frame pixels — take it from a libi.ground_target candidate, never hand-guess"),
+        .describe("[x, y, w, h] in frame pixels — take it from a libi.track({ action: 'ground_target' }) candidate, never hand-guess"),
     })
     .optional()
     .describe("Subject seed. Omit for auto (single obvious person)"),
@@ -1981,7 +2221,8 @@ export const VerifyInstallSchema = z.object({
     .describe(
       "Optional, and only ever 'libi-tracking' — this tool verifies the tracking engine and nothing else. Any other extension id is refused with a pointer to the right tool. Omit it.",
     ),
-  extensionId: z.string().min(1).optional().describe("Alias for mcpId. Same rule: omit it."),
+  // Alias of `mcpId` — accepted, not advertised (mcp/tools/legacy-inputs.ts).
+  extensionId: z.string().min(1).optional(),
 });
 export type VerifyInstallParams = z.infer<typeof VerifyInstallSchema>;
 
@@ -1990,7 +2231,7 @@ export const installTrackingEngineSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Re-run the installer even though the engine already looks installed. Normally unnecessary — every artifact is sha-pinned and the installer is idempotent, so a plain re-call resumes/repairs a partial install on its own. If an install is ALREADY running this attaches to it and reports its progress instead of restarting; cancel that job first (libi.cancel_job) if you genuinely mean to start over.",
+      "Re-run even though the engine looks installed; almost never needed (artifacts are sha-pinned, a plain re-call resumes). A running install is attached to, not restarted: cancel it with libi.job({ action: \"cancel\" }) first to start over.",
     ),
 });
 export type InstallTrackingEngineParams = z.infer<
@@ -2036,7 +2277,8 @@ export type ListJobsParams = z.infer<typeof ListJobsSchema>;
 // ===== Snapshot / Draft tools =====
 
 export const getPieceStateSchema = z.object({
-  pieceId: z.string().describe("ID of the piece to query"),
+  pieceId: z.string().optional().describe("ID of the piece to query"),
+  pieceIds: z.array(z.string()).min(1).max(24).optional().describe("A sweep: name, hasDraft, duration and renderDiagnostics of each."),
 });
 export type GetPieceStateParams = z.infer<typeof getPieceStateSchema>;
 
@@ -2047,21 +2289,35 @@ export const commitDraftSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Override the validation gate. Commit refuses by default when AI-generated video clips on the timeline have no completed analysis (extract frames → vision-read → save_frames → save_summary). Set true ONLY when the user has explicitly accepted committing un-validated generated clips.",
+      "Override the validation gate: true ONLY when the user explicitly accepted committing un-validated generated clips.",
     ),
 });
 export type CommitDraftParams = z.infer<typeof commitDraftSchema>;
 
+/**
+ * `confirm` on discard / restore is the USER's yes, not a formality (Codex sent it unprompted on "Undo my last
+ * change"). There is no approval card behind it in the auto modes, so the wording is the whole guard: the
+ * property text and the refusal both tell the agent to ask first. Owner decision: no new gate on top.
+ */
+const USER_CONFIRM_TEXT =
+  "Set true ONLY after the user said yes to this exact action in this conversation. Never set it on your own, never to try the call: ask the user first, say what will be lost, and wait for their answer.";
+const userConfirmLiteral = (what: string) =>
+  z.literal(true, {
+    errorMap: () => ({
+      message: `ask the user before ${what}: tell them what will be lost, and send confirm: true only after they said yes in this conversation (never set it yourself)`,
+    }),
+  });
+
 export const discardDraftSchema = z.object({
   pieceId: z.string().describe("ID of the piece whose draft should be discarded"),
-  confirm: z.literal(true).describe("Must be true to confirm the destructive action"),
+  confirm: userConfirmLiteral("discarding the draft").describe(USER_CONFIRM_TEXT),
 });
 export type DiscardDraftParams = z.infer<typeof discardDraftSchema>;
 
 export const restoreSnapshotSchema = z.object({
   pieceId: z.string().describe("ID of the piece"),
-  snapshotId: z.string().describe("ID of the snapshot to restore (from getPieceState.recentSnapshots)"),
-  confirm: z.literal(true).describe("Must be true to confirm the destructive action"),
+  snapshotId: z.string().describe("ID of the snapshot to restore (from libi.get_piece_state recentSnapshots, or a `rec-` id from compare's `recoverable`)"),
+  confirm: userConfirmLiteral("restoring a snapshot").describe(USER_CONFIRM_TEXT),
 });
 export type RestoreSnapshotParams = z.infer<typeof restoreSnapshotSchema>;
 
@@ -2104,17 +2360,15 @@ export const VerifyTrackedOverlayShape = {
   content: VerifyContentSchema.optional(),
   fit: z.enum(["tight", "head", "rect"]).optional(),
   scale: z.number().positive().optional(),
-  smoothing: z.enum(["linear", "catmull-rom", "kalman"]).optional().describe(
-    "Sub-frame INTERPOLATION between (already position-stabilized) samples — NOT a denoiser; it cannot remove tracker jitter (that is positionMode's job). linear = recommended default; catmull-rom = spline (can overshoot at direction changes); kalman = deprecated, behaves as linear.",
-  ),
+  smoothing: smoothingOptional,
   // Pre-attach follow-offset spot-check — the SAME shape/bounds as the
   // persisted overlay `offset` (fractions of the resolved box, ±10), so the
   // agent can vision-verify an offset placement BEFORE committing it via
-  // add_tracked_overlay. Post-attach: the overlay's own offset wins.
+  // libi.tracked_overlay add. Post-attach: the overlay's own offset wins.
   offset: TrackedOffsetSchema.optional(),
   // Pre-attach box-size-policy spot-check — PRE-ATTACH ONLY: post-attach the
   // overlay's own sizeMode/maxBoxScale win (the verify-render route overrides
-  // with the persisted overlay's values). Defaults match add_tracked_overlay
+  // with the persisted overlay's values). Defaults match libi.tracked_overlay add
   // ("stabilized", 1.75).
   sizeMode: z.enum(["stabilized", "raw"]).optional(),
   maxBoxScale: z.number().positive().optional(),
@@ -2164,7 +2418,7 @@ export const whisperDownloadModelSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Force a fresh download job, bypassing paramsHash dedup. Use after asking the user whether to start over instead of attaching to a running download or reusing a cached install-already-done result.",
+      "Start a fresh download job instead of attaching to a running one or reusing a cached result; ask the user first.",
     ),
 });
 export type WhisperDownloadModelParams = z.infer<
@@ -2179,7 +2433,7 @@ export const ttsDownloadModelSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Force a fresh download job, bypassing paramsHash dedup. Use after asking the user whether to start over instead of attaching to a running download or reusing a cached install-already-done result.",
+      "Start a fresh download job instead of attaching to a running one or reusing a cached result; ask the user first.",
     ),
 });
 export type TtsDownloadModelParams = z.infer<typeof ttsDownloadModelSchema>;
@@ -2224,15 +2478,13 @@ export const musicDownloadModelSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Discard whatever is on disk and re-download from scratch (~8.3 GB) — for corrupt/partial recovery or a version bump. Ask the user first. If a download is ALREADY running this attaches to it and reports its progress instead of restarting; cancel that job first if you really mean to start over.",
+      "Discard what is on disk and re-download (~8.3 GB), for corrupt/partial files or a version bump; ask the user first. A running download is attached to, not restarted: cancel its job first to start over.",
     ),
-  /** @deprecated Alias of `force`. Two knobs for one action is how a retry
-   *  ended up creating a second job over the same directory; kept only so an
-   *  agent that learned the old name still works. */
-  forceNew: z
-    .boolean()
-    .optional()
-    .describe("Deprecated alias of `force`."),
+  /** Alias of `force`. Two knobs for one action is how a retry ended up
+   *  creating a second job over the same directory; kept only so an agent that
+   *  learned the old name still works — accepted, not advertised
+   *  (mcp/tools/legacy-inputs.ts). */
+  forceNew: z.boolean().optional(),
 });
 export type MusicDownloadModelParams = z.infer<typeof musicDownloadModelSchema>;
 
@@ -2277,10 +2529,7 @@ export const generateMusicSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "If true, bypass the server's paramsHash dedup and always start a fresh " +
-        "generation job. Default false — the server may attach to a still-running " +
-        "match (returns attachedToRunning:true) or surface a cached terminal row " +
-        "(returns matchedExisting:true) instead of doing the work again.",
+      "true bypasses the dedup and always starts a fresh job (default: an identical running or finished request is reported in the result's `note`).",
     ),
 });
 export type GenerateMusicParams = z.infer<typeof generateMusicSchema>;
@@ -2357,8 +2606,9 @@ export const createFolderSchema = {
   name: z.string().min(1).describe("Display name for the new folder."),
   parentFolderId: z
     .string()
+    .nullable()
     .optional()
-    .describe("Parent folder id. Omit for a top-level folder."),
+    .describe("Parent folder id. Omit (or null) for a top-level folder."),
 };
 
 export const renameFolderSchema = {
@@ -2435,13 +2685,13 @@ export const sleepSchema = z.object({
     .min(1)
     .max(1800)
     .describe(
-      "Duration to sleep, in seconds. Range 1-1800 (max 30 minutes). Use to wait between polls of long-running external operations (e.g. between fal-ai check_job calls, between elevenlabs job status checks, between any provider-side queue polling). Prefer this over Terminal 'sleep' or self-scheduling wakeups — this tool is AbortSignal-aware (the agent can cancel mid-sleep), emits progress notifications every 5 s, and won't hit Terminal-shell tool-call timeouts.",
+      "Seconds to sleep, 1-1800 (30 min max).",
     ),
   reason: z
     .string()
     .optional()
     .describe(
-      "Optional — short reason for the wait, surfaced in progress notifications + logs. Example: 'waiting for the video extend job to finish', 'polling elevenlabs voice clone'. Helps the user understand what the agent is waiting on.",
+      "Optional short reason, shown in progress notifications and logs.",
     ),
 });
 
@@ -2482,14 +2732,13 @@ export const exportVideoSchema = {
     .describe("Resolution text, code and 3D overlays render at. Default '4k' (sharpest). The output file takes the larger of the two when the piece has text/code/3D."),
   customWidth: z.number().int().positive().optional().describe("Custom output width in pixels (only when quality='custom')."),
   customHeight: z.number().int().positive().optional().describe("Custom output height (only when quality='custom')."),
-  destFolder: z
-    .string()
-    .optional()
-    .describe("REMOVED — never pass it. Exports are saved inside the piece (its Exports tab); a destFolder is refused. Find files with libi.list_exports."),
+  // Removed. Stays in the schema so zod does not strip it before the handler
+  // can REFUSE it (DEST_FOLDER_REFUSAL); not advertised (mcp/tools/legacy-inputs.ts).
+  destFolder: z.string().optional(),
   purpose: z
     .enum(["social", "personal"])
     .optional()
-    .describe("What the export is for. REQUIRED when the piece has copyrighted music (the tool refuses without it — ask the user). 'social' leaves copyrighted songs out by default; 'personal' keeps them. To post, prefer libi.post_piece, which exports per platform."),
+    .describe("REQUIRED when the piece has copyrighted music (refused without it: ask the user). 'social' leaves copyrighted songs out by default and, with no size named, fits the file to 1080×1920; 'personal' keeps them. To post prefer libi.post_piece, which exports per platform."),
   copyrightedAudio: z.enum(["exclude", "include"]).optional().describe("Override the purpose's default for copyrighted audio."),
   includeFileIds: z.array(z.string()).optional().describe("Copyrighted files to keep in on top of 'exclude'."),
   variants: z
@@ -2512,7 +2761,7 @@ export const exportVideoSchema = {
     .max(10)
     .optional()
     .describe(
-      "Several exports of this piece in ONE call (1–10), e.g. a 9:16 and a 16:9 cut (quality 'custom' + customWidth/customHeight), or MP4 + WebM. Each entry is its own export; the top-level format/quality/graphicsQuality/purpose/copyrightedAudio/includeFileIds apply to an entry that doesn't set them. With variants the call returns at once with what was queued — { queued: [{ exportId, name, format, width, height }], note } — and the exports render in parallel as the machine allows; check them with libi.list_exports. (A with-song and a without-song cut are two variants that differ in copyrightedAudio.)",
+      "1–10 exports in ONE call, e.g. 9:16 and 16:9 cuts (quality 'custom' + customWidth/customHeight) or MP4 + WebM; an entry inherits the top-level format/quality/graphicsQuality/purpose/copyrightedAudio/includeFileIds it does not set. Returns at once with { queued: [{ exportId, name, format, width, height }], note }; check libi.list_exports. (A with-song and a without-song cut differ in copyrightedAudio.)",
     ),
 };
 
@@ -2625,7 +2874,7 @@ export const approveStoryboardStageSchema = {
   pieceId: z.string(),
   cardId: z.string(),
   stage: z.enum(["schematic", "keyframe", "clip"]).describe(
-    "Which tier to approve. Keyframe/clip generation is agent-driven (the agent calls fal via ai-asset-generation/ai-video-models, then attaches the file); approving keyframe/clip only advances the stage (clip approval places the scene on the timeline). Both require the previous tier approved.",
+    "Tier to approve. Keyframe/clip generation is agent-driven (generate, then attach the file); approving only advances the stage (clip approval places the scene on the timeline) and needs the previous tier approved.",
   ),
 };
 
@@ -2666,10 +2915,13 @@ export const getModelSchemaCacheSchema = {
   model: z.string().describe("Model id."),
 };
 
+const GEN_FIELDS_DESC =
+  "GenFieldDef[] for this endpoint: { key, type (text|number|boolean|url|enum|image|video|audio|svg|pdf), required?, options?, min?, max?, step?, multiple?, label?, description?, default? } (the provider reference shows how to normalize).";
+
 export const saveModelSchemaCacheSchema = {
   apiUrl: z.string().describe("Full endpoint URL / fal endpoint id (cache key)."),
   model: z.string().describe("Model id (cache key)."),
-  fields: z.array(genFieldDefSchema).describe("Normalized parameter field defs for this endpoint."),
+  fields: z.array(genFieldDefSchema).describe(GEN_FIELDS_DESC),
   source: z.string().optional().describe("Provider/MCP that produced the schema (informational)."),
 };
 
@@ -2718,18 +2970,18 @@ export const editStoryboardCardSchema = {
       label: z.string().optional().describe("Reference label, e.g. \"hand close-up\"."),
     })
     .optional()
-    .describe("Append a role-tagged sketch slot; scaffolds a default render unit you then refine by editing the returned unit file."),
+    .describe("Append a role-tagged sketch slot (scaffolds a default render unit to refine in its unit file)."),
   removeSketch: z.object({ slotId: z.string() }).optional().describe("Remove a sketch slot (leaves the bound clip-gen param untouched)."),
   reorderSketches: z.object({ order: z.array(z.string()) }).optional().describe("Reorder sketch slots by id."),
   editSketch: z
     .object({
       slotId: z.string(),
-      paramKey: z.string().optional().describe("Re-key the slot to the model's REAL clip-gen param it conditions (e.g. image_url / end_image_url from the cached schema). The card's sketch→image pairing joins on this exact key, so it MUST match the param you set in clipGen via set_storyboard_generation."),
+      paramKey: z.string().optional().describe("Re-key the slot to the model's REAL clip-gen param (e.g. image_url / end_image_url from the cached schema); it MUST equal the key you set in clipGen via set_storyboard_generation."),
       role: z.enum(["start", "end", "reference"]).optional(),
       label: z.string().optional(),
     })
     .optional()
-    .describe("Edit an existing sketch slot in place (re-key its paramKey to a real model param, or change role/label). Use to align the default start slot's paramKey with the chosen model's actual keyframe param."),
+    .describe("Edit a sketch slot in place (re-key paramKey to a real model param, or change role/label), e.g. align the default start slot with the chosen model's keyframe param."),
   fields: z
     .object({
       title: z.string().optional(),
@@ -2750,13 +3002,19 @@ export const editStoryboardCardSchema = {
 };
 
 export const renderOverlayFramesSchema = z.object({
-  pieceId: z.string().min(1).describe("The piece whose composition to render."),
+  pieceId: z.string().min(1).optional().describe("The piece whose composition to render (or pieceIds)."),
+  pieceIds: z
+    .array(z.string().min(1))
+    .min(2)
+    .max(8)
+    .optional()
+    .describe("2–8 pieces rendered at the SAME atTimes into ONE labelled sheet (needs atTimes; at most 24 frames); `pieces` in the result maps each label to its piece."),
   atTimes: z
     .array(z.number().min(0))
     .min(1)
     .max(8)
     .optional()
-    .describe("Composition timestamps (seconds) to rasterize. 1–8 times, each before the end of the piece (a time at or past the end is refused with an error naming the duration and the last valid time). A time within 1 ms of a frame's time renders exactly that frame, so a renderDiagnostics `time` passed back as given renders the frame that failed; each result names the `frame` it drew. If omitted, provide overlayId and the tool renders that overlay's start / middle / end."),
+    .describe("1–8 composition seconds, each before the piece's end (a later time is refused naming the duration and last valid time). A renderDiagnostics `time` passed back as given renders the frame that failed; each result names its `frame`. Omit to pass overlayId (renders its start / middle / end)."),
   overlayId: z
     .string()
     .min(1)
@@ -2770,8 +3028,19 @@ export const renderOverlayFramesSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "When true, ALSO compose the rendered frames into one labelled JPEG grid and return its path as `contactSheet` — one image to look at instead of N. Prefer this: it is the cheap way to make looking a habit.",
+      "Also return ONE labelled JPEG grid of all the frames (`contactSheet` path); prefer it over opening N PNGs.",
     ),
+  maxEdge: z
+    .number()
+    .int()
+    .min(64)
+    .max(4096)
+    .optional()
+    .describe("Longest edge in pixels of the sheet (default 1024) and of each returned PNG when set."),
+  region: z
+    .object({ x: z.number().min(0), y: z.number().min(0), width: z.number().positive(), height: z.number().positive() })
+    .optional()
+    .describe("Crop each frame to this rectangle, composition pixels (to read small text); a PNG per frame is returned as `path`."),
 });
 export type RenderOverlayFramesParams = z.infer<typeof renderOverlayFramesSchema>;
 
@@ -2871,13 +3140,24 @@ export type SearchTemplatesParams = z.infer<typeof searchTemplatesSchema>;
 export const getTemplateSchema = z.object({ templateId: z.string() });
 export type GetTemplateParams = z.infer<typeof getTemplateSchema>;
 
+/**
+ * One layer's overrides on a template apply: the fields `update_overlay` takes, minus the ids, the fields
+ * another tool owns (a file is `slotValues`; `trim` and fonts are `update_overlay` afterwards) and the
+ * tracked-only ones. Strict: an unknown field is refused, not dropped. The kind gate (a text-only field
+ * on an image layer) is in lib/templates/layer-overrides.ts.
+ */
+export const layerOverrideSchema = updateOverlaySchema
+  .omit({ pieceId: true, overlayId: true, fileId: true, fontFileId: true, trim: true, offset: true, scale: true, captionFromFileId: true, keyframes: true, include: true })
+  .strict();
+export const layerOverridesSchema = z.record(layerOverrideSchema);
+
 export const applyTemplateSchema = z.object({
   templateId: z.string().optional(),
   cloudId: z
     .string()
     .optional()
     .describe(
-      "A public catalog template's id (from list/search_templates, scope 'public'). libi installs it first — downloaded and checked, or updated to the catalog's newer version — then applies it. Pass templateId OR cloudId, never both.",
+      "A public catalog template's id (libi.template list/search, scope 'public'); installed first, then applied. Pass templateId OR cloudId, never both.",
     ),
   pieceId: z.string().optional().describe("Apply into this piece. Omit with newPiece to create one."),
   newPiece: z
@@ -2897,8 +3177,23 @@ export const applyTemplateSchema = z.object({
     .max(99)
     .optional()
     .describe(
-      "Which copy of this apply this is (default 1). An identical call within 5 minutes of one that succeeded is answered from memory, so a retry never doubles anything; to apply the same template with the same values again ON PURPOSE — a second copy appended into the same piece, or another new piece — pass copy: 2, then 3, ….",
+      "Which copy of this apply this is (default 1). An identical call within 5 minutes of a success is answered from memory (replayed: true), so a retry never doubles anything; to apply again ON PURPOSE pass a different newPiece.name, or copy: 2, then 3, … (a mode 'replace' into an existing piece always applies).",
     ),
+  fit: z
+    .enum(["reflow", "none"])
+    .optional()
+    .describe(
+      "Layers vs. a piece whose frame is not the template's. Default: 'reflow' when the frames differ (re-anchors each layer to its edge or centre, scales type and keyframed rects with it, keeps it in the safe area), nothing when they match. 'none' places layers at their authored pixels. A new piece takes the template's canvas, so there is nothing to reflow.",
+    ),
+  layerOverrides: layerOverridesSchema
+    .optional()
+    .describe("Per-layer overlay fields (update_overlay's), by the template's layer key, applied as the layer is placed after fit; null clears a field; wins over slotValues."),
+  omitLayers: z.array(z.string()).max(100).optional().describe("Layer keys not to create."),
+  startAt: z.number().min(0).optional().describe("Seconds to shift every layer and clip later by (default 0)."),
+  navigate: z
+    .boolean()
+    .optional()
+    .describe("Open the piece in the user's editor. Default: only when this call created the piece."),
 });
 export type ApplyTemplateParams = z.infer<typeof applyTemplateSchema>;
 
@@ -2909,7 +3204,7 @@ export const fetchTemplateMusicSchema = z.object({
 export type FetchTemplateMusicParams = z.infer<typeof fetchTemplateMusicSchema>;
 
 export const publishTemplateSchema = z.object({
-  templateId: z.string().min(1).describe("The local template to prepare for publishing (from list_templates / create_template_from_piece)."),
+  templateId: z.string().min(1).describe("The local template to prepare for publishing (from libi.template list / create_template_from_piece)."),
   exampleVideo: z
     .union([
       // Strict: exactly one source. A second key is refused, not silently dropped.
@@ -2917,12 +3212,13 @@ export const publishTemplateSchema = z.object({
       z.object({ path: z.string().min(1) }).strict().describe("An absolute path to an mp4/mov on this machine."),
       z.object({ exportPieceId: z.string().min(1) }).strict().describe("Export this piece first and use the result (runs for tens of seconds to minutes)."),
     ])
-    .describe("Required: the short example the catalog shows on the template's card. Made now — exported first for exportPieceId, then trimmed to 15 s and scaled to ≤ 1280 px, with a poster frame — and the user reviews exactly that."),
-  nickname: z.string().min(2).max(32).optional().describe("Optional — only when the user names one. Every creator already has a public nickname (a random default like \"Brave Otter 4821\" until they rename it); this one replaces it on every template this install published, once the user publishes."),
-  // Accepted and ignored: older copies of the templates skill (still on users'
-  // machines) send it. It no longer means anything — this tool never
-  // publishes; the user does, on the Templates page.
-  confirm: z.boolean().optional().describe("Ignored. Only the user can publish, on libi's Templates page."),
+    .describe("The short example the catalog shows on the card, made NOW (exported first for exportPieceId, trimmed to 15 s, scaled to ≤ 1280 px, with a poster); the user reviews exactly that."),
+  nickname: z.string().min(2).max(32).optional().describe("Optional, only when the user names one: replaces the creator's public nickname (a random default like \"Brave Otter 4821\") on every template this install published, once the user publishes."),
+  // Accepted and ignored, never advertised (mcp/tools/legacy-inputs.ts): older
+  // copies of the templates skill (still on users' machines) send it. It no
+  // longer means anything — this tool never publishes; the user does, on the
+  // Templates page.
+  confirm: z.boolean().optional(),
 });
 export type PublishTemplateParams = z.infer<typeof publishTemplateSchema>;
 
@@ -2935,7 +3231,7 @@ export type ShowTemplatesParams = z.infer<typeof showTemplatesSchema>;
 // ── Caption styles (agent-authored static looks) ─────────────────────────────
 // A caption STYLE is a static look (color + optional stroke/shadow/background +
 // font) the user picks from the Style tab. The agent can mint new ones from a
-// user's example via `create_caption_style`; they persist and show in the list.
+// user's example via `libi.caption_style` (create); they persist and show in the list.
 export const createCaptionStyleSchema = z.object({
   name: z
     .string()
@@ -2964,7 +3260,9 @@ export const createCaptionStyleSchema = z.object({
   fontWeight: z
     .number()
     .optional()
-    .describe("400 | 500 | 600 | 700 | 900."),
+    .describe(
+      "CSS weight, 100-900 in steps of 100: 400 regular, 500, 600, 700 bold, 800 extra-bold, 900 black. Any of them is accepted (800 too); a font without that weight draws its nearest one.",
+    ),
   stroke: z
     .object({ color: z.string(), width: z.number() })
     .optional()
@@ -3009,7 +3307,7 @@ export const readManualSchema = z.object({
     .string()
     .optional()
     .describe(
-      `Section key from the index, e.g. ${PROSE_EXAMPLE_SECTION_KEYS.map((k) => `"${k}"`).join(" or ")} (case- and punctuation-insensitive). Omit to get the index plus the sections you need before a first edit. Pass "all" for the whole ~87 KB manual.`,
+      `Section key from the index, e.g. ${PROSE_EXAMPLE_SECTION_KEYS.map((k) => `"${k}"`).join(" or ")} . Several keys in one call: "a, b" (up to 5). Omit for the index plus the essentials before a first edit; "all" is the whole ~87 KB manual.`,
     ),
 });
 export type ReadManualParams = z.infer<typeof readManualSchema>;
@@ -3036,7 +3334,7 @@ export const devSlowJobSchema = {
     .max(600)
     .optional()
     .describe(
-      "Stop reporting progress after N ticks while continuing to work — reproduces a job whose remaining work sits inside one opaque unit (a multi-GB single file). Use to inspect the decaying/withdrawn ETA and the 'no progress for Xm' line.",
+      "Stop reporting progress after N ticks while still working (reproduces one opaque long unit, to inspect the ETA decay).",
     ),
 };
 
@@ -3078,7 +3376,7 @@ export const postPieceSchema = z.object({
     )
     .optional()
     .describe(
-      "Where to post. Omit = every connected Instagram and TikTok account, Instagram as the user's default type. accountId is required only when a platform has several accounts. This tool builds Instagram and TikTok posts only — for a Facebook, X or YouTube account, use the provider's own MCP tools directly.",
+      "Omit = every connected Instagram and TikTok account (Instagram as the default type); accountId only when a platform has several accounts. Instagram and TikTok only: for Facebook, X or YouTube use the provider's own MCP tools.",
     ),
   caption: z
     .string()
@@ -3124,3 +3422,45 @@ export const socialLinkAdSchema = z.object({
     .describe("The ad network's own ad id (Meta's ad id), when you know it."),
 });
 export type SocialLinkAdParams = z.infer<typeof socialLinkAdSchema>;
+
+/** The ops `libi.apply_ops` runs, named exactly as the allow-list (lib/agents/apply-ops-allowlist.ts) has them. */
+const applyOpsOpNames = Object.entries(APPLY_OPS_ALLOWED)
+  .map(([tool, a]) => `${tool.slice("libi.".length)}${a.actions ? ` (${a.actions.join("|")})` : ""}`)
+  .join(", ");
+
+export const applyOpsSchema = z.object({
+  targets: z
+    .object({
+      pieceId: z.string().optional().describe("One piece."),
+      pieceIds: z.array(z.string()).optional().describe("Several pieces, up to 50."),
+      folderId: z.string().optional().describe("Every piece in this folder (libi.piece_folder action list shows the ids)."),
+      recursive: z.boolean().optional().describe("With folderId: include subfolders' pieces too."),
+    })
+    .describe("Which pieces to edit: exactly one of pieceId, pieceIds, folderId."),
+  ops: z
+    .array(
+      z
+        .object({
+          op: z.string().describe(`The tool to run, without \`libi.\`: ${applyOpsOpNames}. Anything else is refused.`),
+          action: z.string().optional().describe("For a tool with actions: which one. Required for those, refused for the others."),
+          as: z
+            .string()
+            .optional()
+            .describe(
+              "Name the id this op creates (a new overlay, clip, split tail or duplicate). Later ops give it as \"$name\" in any id field (clipId, overlayId, sidechainClipIds, …), resolved per piece.",
+            ),
+          perPiece: z
+            .record(z.string(), z.record(z.string(), z.unknown()))
+            .optional()
+            .describe("{ pieceId: { field: value } }: arguments that replace this op's own for that piece (e.g. its own fileId)."),
+        })
+        .passthrough(),
+    )
+    .min(1)
+    .max(100)
+    .describe(
+      "Run in order, per piece. Each op takes its tool's own arguments except pieceId, which targets sets. Every op is checked before anything is written. If an op fails for a piece, that piece is left untouched and the others carry on.",
+    ),
+  dryRun: z.boolean().optional().describe("Check and report what would change per piece; write nothing."),
+});
+export type ApplyOpsParams = z.infer<typeof applyOpsSchema>;

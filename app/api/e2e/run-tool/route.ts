@@ -27,19 +27,20 @@ import {
 import {
   createTemplateFromPiece,
   applyTemplate,
-  deleteTemplateTool,
-  listTemplatesTool,
 } from "@/mcp/tools/template-tools";
 import { publishTemplate } from "@/mcp/tools/template-cloud-tools";
 import { audioAddClip } from "@/mcp/tools/audio-clip-tools";
 import { uploadFont } from "@/mcp/tools/font-tools";
 import { getPieceStateTool } from "@/mcp/tools/snapshot-tools";
-import { addEffectTool, removeEffectTool } from "@/mcp/tools/effect-package-tools";
-import { applyLayerEffect } from "@/mcp/tools/effect-tools";
 import { notify } from "@/mcp/notify";
 import { testRoutesEnabled } from "@/lib/security/test-routes";
 import { serverLogger as logger } from "@/lib/logger";
-import { validateToolInput, type RunToolName } from "@/lib/e2e/run-tool-input";
+import {
+  validateToolInput,
+  runActionTool,
+  isRunActionTool,
+  type RunToolName,
+} from "@/lib/e2e/run-tool-input";
 
 interface DispatchEntry {
   handler: (args: Record<string, unknown>) => Promise<unknown>;
@@ -130,30 +131,6 @@ const DISPATCH: Record<RunToolName, DispatchEntry> = {
       return pieceId ? { queryKey: "composition", pieceId } : null;
     },
   },
-  // The custom-effect tools e2e/overlay-sandbox.spec.ts drives: a custom
-  // effect body runs only in the effect sampler's sandbox. Each `refresh`
-  // mirrors the agent path: `mcp/server.ts` sends `effects-custom` (which
-  // re-fetches `/api/effects`, the page's source of custom effect bodies)
-  // after add/remove, while `applyLayerEffect` sends its own `composition`
-  // refresh from inside the tool (mcp/tools/effect-tools.ts), so the route
-  // adds none — the spec's repaint then rides on the tool's own notify.
-  "libi.add_effect": {
-    handler: async (args) =>
-      addEffectTool(args as unknown as Parameters<typeof addEffectTool>[0]),
-    refresh: (_args, result) =>
-      (result as { success?: boolean }).success ? { queryKey: "effects-custom" } : null,
-  },
-  "libi.remove_effect": {
-    handler: async (args) =>
-      removeEffectTool(args as unknown as Parameters<typeof removeEffectTool>[0]),
-    refresh: (_args, result) =>
-      (result as { success?: boolean }).success ? { queryKey: "effects-custom" } : null,
-  },
-  "libi.apply_layer_effect": {
-    handler: async (args) =>
-      applyLayerEffect(args as unknown as Parameters<typeof applyLayerEffect>[0]),
-    refresh: () => null,
-  },
   // The template tools the templates e2e specs drive. Each `refresh`
   // mirrors what `mcp/server.ts` emits for the same tool — the point of this
   // route is that a spec walks the agent's path, so a query the agent's call
@@ -181,17 +158,6 @@ const DISPATCH: Record<RunToolName, DispatchEntry> = {
       if (pieceId) notify.refreshQuery({ queryKey: "files", pieceId });
       return pieceId ? { queryKey: "composition", pieceId } : null;
     },
-  },
-  "libi.delete_template": {
-    handler: async (args) =>
-      deleteTemplateTool(args as unknown as Parameters<typeof deleteTemplateTool>[0]),
-    refresh: (_args, result) =>
-      (result as { success?: boolean }).success ? { queryKey: "templates" } : null,
-  },
-  "libi.list_templates": {
-    handler: async (args) =>
-      listTemplatesTool(args as unknown as Parameters<typeof listTemplatesTool>[0]),
-    refresh: () => null,
   },
   // Prepares a publish request (e2e/templates-publish-review.spec.ts): the
   // review panel appears over the same `templates` refresh the tool emits.
@@ -237,6 +203,24 @@ export async function POST(req: Request): Promise<Response> {
   const rawArgs = parsed.args ?? {};
   if (!tool || typeof tool !== "string") {
     return NextResponse.json({ error: "Missing tool name" }, { status: 400 });
+  }
+
+  // A merged tool (`libi.template` + `action`): run the family's own action, which also emits its refresh.
+  if (isRunActionTool(tool)) {
+    try {
+      const run = await runActionTool(tool, rawArgs);
+      if (!run.ok) {
+        const text = run.refusal.content[0].text;
+        logger.warn({ tag: "e2e", op: "run_tool_refused", tool }, "e2e.run-tool refused its arguments");
+        return NextResponse.json({ ...run.refusal, success: false, error: text }, { status: 400 });
+      }
+      const result = run.result;
+      return NextResponse.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn({ tag: "e2e", op: "run_tool_failed", tool, err: message }, "e2e.run-tool failed");
+      return NextResponse.json({ success: false, error: message }, { status: 500 });
+    }
   }
 
   if (!Object.hasOwn(DISPATCH, tool)) {

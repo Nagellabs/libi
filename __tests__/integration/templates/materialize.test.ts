@@ -653,6 +653,82 @@ describe("applyScaffold", () => {
     // The source's save counter did not travel.
     expect(headline.version ?? 0).toBeLessThan(7);
   });
+  // A clip's loudness shape (gain, volume envelope, crossfade) is part of the
+  // piece: a template that dropped it applied the music at plain volume.
+  describe("a clip's gain, volume envelope and crossfade", () => {
+    const ENV = { keyframes: [{ t: 0, value: 0 }, { t: 1, value: -18, easing: "ease-in" }, { t: 3, value: 3 }] };
+
+    async function shapeSource() {
+      const m = await loadManifest(srcPieceId);
+      Object.assign(m.audioClips!.find((c) => c.id === ids.clipB)!, { gainDb: -6, volumeKeyframes: ENV });
+      m.audioClips!.find((c) => c.id === ids.clipA)!.crossfadeMs = 500;
+      await saveManifest(srcPieceId, m);
+    }
+    const templateFrom = async (name: string, origin?: "installed", cloudId?: string, edit?: (s: TemplateScaffold) => void) => {
+      const ex = await extractScaffold(srcPieceId);
+      edit?.(ex.scaffold);
+      return (await createTemplate({ name, description: "", tags: [], scaffold: ex.scaffold, instructions: "", copies: ex.copies, writes: ex.writes, ...(origin ? { origin, cloudId } : {}) })).id;
+    };
+
+    it("survive extract, the schema and apply on a created clip", async () => {
+      await shapeSource();
+      const tid = await templateFrom("Shaped");
+      const dst = seedPiece(testDb, { id: "dst-shaped" });
+      const r = await applyScaffold({ templateId: tid, pieceId: dst, fetchUrls: noUrls });
+      const out = await loadManifest(dst);
+      const music = out.audioClips!.find((c) => c.id === r.clips.music)!;
+      expect(music.gainDb).toBe(-6);
+      expect(music.volumeKeyframes).toEqual(ENV);
+      expect(out.audioClips!.find((c) => c.id === r.clips["background-audio"])!.crossfadeMs).toBe(500);
+      // The whole clip, not just the three: nothing else moved.
+      expect(normalizeClips(out.audioClips!)).toEqual(normalizeClips((await loadManifest(srcPieceId)).audioClips!));
+    });
+
+    it("the envelope is clip-local: placing the template later moves the clip and leaves its keys alone", async () => {
+      await shapeSource();
+      const tid = await templateFrom("Shaped later");
+      const dst = seedPiece(testDb, { id: "dst-shaped-later" });
+      const r = await applyScaffold({ templateId: tid, pieceId: dst, fetchUrls: noUrls, startAt: 5 });
+      const music = (await loadManifest(dst)).audioClips!.find((c) => c.id === r.clips.music)!;
+      expect(music.startTime).toBe(5);
+      expect(music.volumeKeyframes).toEqual(ENV);
+    });
+
+    it("pass through the app's own clamp: a file's unsorted keys land sorted, and a stranger's easing is narrowed", async () => {
+      await shapeSource();
+      const tid = await templateFrom("Strange", "installed", "defghijklmnopqrstuv4", (sc) => {
+        // The way a published template.json could arrive: unsorted keys, an easing that is words.
+        sc.audioClips.find((c) => c.key === "music")!.volumeKeyframes = { keyframes: [{ t: 2, value: -3, easing: "evil words" }, { t: 0, value: 0, easing: "ease-in" }] };
+      });
+      const dst = seedPiece(testDb, { id: "dst-strange-shape" });
+      const r = await applyScaffold({ templateId: tid, pieceId: dst, fetchUrls: noUrls });
+      const placed = (await loadManifest(dst)).audioClips!.find((c) => c.id === r.clips.music)!;
+      expect(placed.volumeKeyframes).toEqual({ keyframes: [{ t: 0, value: 0, easing: "ease-in" }, { t: 2, value: -3 }] });
+      expect(JSON.stringify(await loadManifest(dst))).not.toContain("evil words");
+      expect(r.leftOut.some((l) => /easing/.test(l))).toBe(true);
+    });
+
+    it("a template.json that carries none still applies, and the clips have none", async () => {
+      const dst = seedPiece(testDb, { id: "dst-unshaped" });
+      await applyScaffold({ templateId: fullId, pieceId: dst, fetchUrls: noUrls });
+      for (const c of (await loadManifest(dst)).audioClips!) {
+        expect(c.gainDb).toBeUndefined();
+        expect(c.volumeKeyframes).toBeUndefined();
+        expect(c.crossfadeMs).toBeUndefined();
+      }
+    });
+
+    it("a template whose values are out of range is refused, not clamped", async () => {
+      const { validateScaffold } = await import("@/lib/templates/scaffold");
+      const ex = await extractScaffold(srcPieceId);
+      const bad = (patch: Record<string, unknown>) => validateScaffold({ ...ex.scaffold, audioClips: ex.scaffold.audioClips.map((c, i) => (i === 0 ? { ...c, ...patch } : c)) });
+      expect(bad({ gainDb: 40 }).ok).toBe(false);
+      expect(bad({ volumeKeyframes: { keyframes: [{ t: 0, value: -90 }] } }).ok).toBe(false);
+      expect(bad({ crossfadeMs: 9000 }).ok).toBe(false);
+      expect(bad({ gainDb: -6, crossfadeMs: 200, volumeKeyframes: { keyframes: [{ t: 0, value: -3 }] } }).ok).toBe(true);
+    });
+  });
+
   // Final re-review 1, New breakage 2: an audio clip on a VIDEO file (detach
   // and duplicate keep the clip's `fileId`) made extract throw
   // `asset_type_unsupported`, because the audio kind allowed no video
@@ -794,6 +870,32 @@ describe("applyScaffold", () => {
       expect((await loadManifest(pieceId)).pendingMusic).toEqual(r.pendingMusic);
     });
 
+    it("a pending clip keeps the template's gain, volume envelope and crossfade; a stranger's easing is narrowed", async () => {
+      const ENV = { keyframes: [{ t: 0, value: 0 }, { t: 1, value: -18, easing: "ease-in" }] };
+      const scaffold = musicScaffold([ESPRESSO]);
+      Object.assign(scaffold.audioClips[0], { gainDb: -6, volumeKeyframes: ENV, crossfadeMs: 300 });
+      const own = await createFrom(scaffold);
+      const pieceId = seedPiece(testDb as never, { id: "dst-music-shape" });
+      const r = await applyScaffold({ templateId: own, pieceId, fetchUrls: noUrls });
+      expect(r.pendingMusic[0].clips).toEqual([
+        { startTime: 0, duration: 3, trimStart: 12, volume: 0.8, enabled: true, gainDb: -6, volumeKeyframes: ENV, crossfadeMs: 300 },
+        { startTime: 4, duration: 2, trimStart: 30, volume: 0.8, enabled: true },
+      ]);
+      expect((await loadManifest(pieceId)).pendingMusic).toEqual(r.pendingMusic);
+      // Later start: the envelope is clip-local.
+      const later = seedPiece(testDb as never, { id: "dst-music-shape-later" });
+      const r2 = await applyScaffold({ templateId: own, pieceId: later, fetchUrls: noUrls, startAt: 2 });
+      expect(r2.pendingMusic[0].clips[0]).toMatchObject({ startTime: 2, volumeKeyframes: ENV });
+
+      const strange = structuredClone(scaffold);
+      strange.audioClips[0].volumeKeyframes = { keyframes: [{ t: 0, value: 0, easing: "zzwords" }, { t: 1, value: -3, easing: "ease-out" }] };
+      const sid = await createFrom(strange, { origin: "installed", cloudId: "efghijklmnopqrstuvw5" });
+      const dst = seedPiece(testDb as never, { id: "dst-music-shape-strange" });
+      const r3 = await applyScaffold({ templateId: sid, pieceId: dst, fetchUrls: noUrls });
+      expect(r3.pendingMusic[0].clips[0].volumeKeyframes).toEqual({ keyframes: [{ t: 0, value: 0 }, { t: 1, value: -3, easing: "ease-out" }] });
+      expect(JSON.stringify(await loadManifest(dst))).not.toContain("zzwords");
+    });
+
     it("a stranger's link is named by its position, and a source link that is not a public https url is dropped", async () => {
       const templateId = await createFrom(
         musicScaffold([{ ...ESPRESSO, sourceUrl: "https://127.0.0.1/espresso.mp3" }]),
@@ -915,6 +1017,7 @@ describe("applyScaffold", () => {
       s.audioClips.push({
         key: `${Z}-marked-clip`, kind: "standalone", startTime: 0, duration: 4, trimStart: 0, volume: 1, enabled: true, source: { assetRef: `${Z}-song` },
         effects: { in: { effectId: Z }, out: { effectId: Z }, loop: { effectId: "audio-fade-in", params: { [Z]: 1 } } },
+        volumeKeyframes: { keyframes: [{ t: 0, value: 0, easing: Z }] },
       } as TemplateScaffold["audioClips"][number]);
       s.captionStyles.push({ id: `${Z}-style2`, fields: { highlightColor: Z, shadow: { color: Z, blur: 1 }, background: { color: Z }, reveal: { mode: Z } } } as TemplateScaffold["captionStyles"][number]);
       s.musicLinks = [{ ref: `${Z}-tune`, track: { title: `${Z} tune`, artist: `${Z} band` }, sourceUrl: `https://cdn.example.com/${Z}-tune` }];

@@ -31,7 +31,7 @@ vi.mock("@/hooks/sessions/use-session-list", () => ({
   useSessionList: () => sessionListMock.current,
 }));
 // A STABLE router mock: the navigate_agents describe below asserts on the
-// pushes libi.show_extension / libi.start_onboarding make, so every
+// pushes libi.show({ target: "extension" }) / libi.start_onboarding make, so every
 // useRouter() call has to hand back the same spy.
 const routerMock = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }));
@@ -363,7 +363,7 @@ describe("onboarding demo offer — armed by an observed connection, not by agen
 });
 
 /**
- * `libi.show_extension` / `libi.start_onboarding` → `navigate_agents` → the
+ * `libi.show({ target: "extension" })` / `libi.start_onboarding` → `navigate_agents` → the
  * Agents page on the tab the event names — for libi MCP, scrolled to a card.
  *
  * The tab is the whole point: `Tabs.Panel` defaults to keepMounted:false and
@@ -452,6 +452,16 @@ describe("an agent's show navigation is decided by this tab's active chat", () =
     captureCtx();
     act(() => broadcast.emit({ type: "navigate_templates", fromSessionId: "chat-1", navId: "m1-a" }));
     expect(routerMock.push).toHaveBeenCalledWith("/templates?tab=mine");
+  });
+
+  it("navigate_social opens Social → Settings, at the account when one is named", () => {
+    window.history.replaceState({}, "", "/editor");
+    sessionListMock.current.activeSessionId = "chat-1";
+    captureCtx();
+    act(() => broadcast.emit({ type: "navigate_social", fromSessionId: "chat-1", navId: "s1" }));
+    expect(routerMock.push).toHaveBeenLastCalledWith("/social?tab=settings");
+    act(() => broadcast.emit({ type: "navigate_social", accountId: "acc-ig", fromSessionId: "chat-1", navId: "s2" }));
+    expect(routerMock.push).toHaveBeenLastCalledWith("/social?tab=settings&account=acc-ig");
   });
 
   it("one from another chat waits for that chat's tab to claim it, and is obeyed only if none does", async () => {

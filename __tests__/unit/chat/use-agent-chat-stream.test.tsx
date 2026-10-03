@@ -119,9 +119,9 @@ function driveTurn() {
     emit({
       type: "agent-tool-call",
       toolCallId: "tc-2",
-      toolId: "libi:diagnose_mcp",
-      rawTitle: "mcp__libi__libi_diagnose_mcp",
-      args: {},
+      toolId: "libi:libi.extension",
+      rawTitle: "mcp__libi__libi_extension",
+      args: { action: "diagnose", mcpId: "youtube-downloader" },
     }),
   );
   act(() =>
@@ -137,8 +137,8 @@ function driveTurn() {
     emit({
       type: "agent-tool-result",
       toolCallId: "tc-2",
-      toolId: "libi:diagnose_mcp",
-      rawTitle: "mcp__libi__libi_diagnose_mcp",
+      toolId: "libi:libi.extension",
+      rawTitle: "mcp__libi__libi_extension",
       result: "ok",
       success: true,
     }),

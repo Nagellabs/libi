@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "name": "Closing card",
+  "description": "A 4-second landscape closing card: wordmark, headline, subline and a call to action over a dark backdrop",
+  "tags": ["promo", "end-card"],
+  "canvas": { "width": 1920, "height": 1080, "fps": 30 },
+  "duration": 4,
+  "slots": [
+    { "key": "headline", "kind": "text", "label": "Headline", "hint": "2-4 words", "required": true },
+    { "key": "subline", "kind": "text", "label": "Subline", "hint": "One short line under the headline", "required": true },
+    { "key": "cta", "kind": "text", "label": "Call to action", "hint": "Where to watch or listen", "required": true }
+  ],
+  "overlays": [
+    { "key": "backdrop", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 0, "y": 0, "width": 1920, "height": 1080 }, "z": 0, "opacity": 1, "displayName": "Closing · Backdrop", "source": { "assetRef": "backdrop" } },
+    { "key": "logo", "kind": "image", "startTime": 0, "duration": 4, "rect": { "x": 1500, "y": 60, "width": 300, "height": 300 }, "z": 2, "opacity": 1, "displayName": "Closing · Logo", "source": { "assetRef": "logo" } },
+    {
+      "key": "wordmark", "kind": "text", "startTime": 0, "duration": 4, "rect": { "x": 160, "y": 170, "width": 900, "height": 90 }, "z": 3, "opacity": 1,
+      "displayName": "Closing · Wordmark", "font": "700 64px Inter", "color": "#E63946", "align": "left", "text": { "fixed": "TIDEWATER" },
+      "keyframes": { "rect": { "keyframes": [
+        { "t": 0, "value": { "x": 160, "y": 170, "width": 900, "height": 90 } },
+        { "t": 0.25, "value": { "x": 160, "y": 120, "width": 900, "height": 90 } }
+      ] } }
+    },
+    { "key": "headline", "kind": "text", "startTime": 0, "duration": 4, "rect": { "x": 160, "y": 380, "width": 1600, "height": 200 }, "z": 3, "opacity": 1, "displayName": "Closing · Headline", "font": "800 140px Inter", "color": "#E63946", "align": "left", "text": { "slot": "headline" } },
+    { "key": "subline", "kind": "text", "startTime": 0.3, "duration": 3.7, "rect": { "x": 160, "y": 620, "width": 1600, "height": 120 }, "z": 3, "opacity": 1, "displayName": "Closing · Subline", "font": "400 56px Inter", "color": "#E63946", "align": "left", "text": { "slot": "subline" } },
+    { "key": "cta", "kind": "text", "startTime": 0.6, "duration": 3.4, "rect": { "x": 160, "y": 800, "width": 1200, "height": 100 }, "z": 3, "opacity": 1, "displayName": "Closing · Call to action", "font": "700 48px Inter", "color": "#E63946", "align": "left", "text": { "slot": "cta" } }
+  ],
+  "audioClips": [],
+  "assets": [
+    { "ref": "backdrop", "kind": "image", "file": "assets/backdrop.png" },
+    { "ref": "logo", "kind": "image", "file": "assets/logo.png" }
+  ],
+  "fonts": [],
+  "captionStyles": []
+}

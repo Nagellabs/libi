@@ -10,21 +10,52 @@ import { makeMcpToolId, fromAnyToolName } from "@/lib/agents/mcp-tool-id";
 
 describe("formatToolId", () => {
   it("formats libi tools by stripping prefix + title-casing", () => {
-    expect(formatToolId(makeMcpToolId("libi", "libi.compute_object_track")))
-      .toBe("Libi Compute object track");
+    expect(formatToolId(makeMcpToolId("libi", "libi.remove_background")))
+      .toBe("Libi Remove background");
     expect(formatToolId(makeMcpToolId("libi", "libi.analysis_describe_frame")))
       .toBe("Libi Analysis describe frame");
-    expect(formatToolId(makeMcpToolId("libi", "libi.analysis_get")))
-      .toBe("Libi Analysis get");
+    expect(formatToolId(makeMcpToolId("libi", "libi.analysis_transcribe_audio")))
+      .toBe("Libi Analysis transcribe audio");
     expect(formatToolId(makeMcpToolId("libi", "libi.create_piece")))
       .toBe("Libi Create piece");
     expect(formatToolId(makeMcpToolId("libi", "libi.list_pieces")))
       .toBe("Libi List pieces");
   });
 
+  // codex-acp's rawInput for an MCP call is `{ server, tool, arguments }`: the action is one level down.
+  it("names the action of a merged libi tool from codex's { server, tool, arguments } envelope too", () => {
+    const snapshot = makeMcpToolId("libi", "libi.snapshot");
+    const env = (args: unknown) => ({ server: "libi", tool: "libi.snapshot", arguments: args });
+    expect(formatToolId(snapshot, env({ action: "discard", pieceId: "p", confirm: true }))).toBe("Libi Snapshot · discard");
+    expect(formatToolId(makeMcpToolId("libi", "libi.show"), { server: "libi", tool: "libi.show", arguments: { target: "templates" } })).toBe("Libi Show · templates");
+    expect(formatToolId(snapshot, env({ pieceId: "p" }))).toBe("Libi Snapshot");
+    expect(formatToolId(snapshot, { server: "libi", tool: "libi.snapshot" })).toBe("Libi Snapshot");
+    // a tool whose OWN arguments happen to be named server/tool/arguments with no object inside is not unwrapped
+    expect(formatToolId(snapshot, { server: "x", tool: "y", arguments: "z", action: "discard" })).toBe("Libi Snapshot · discard");
+    // an unmerged tool never names an action, wrapped or not
+    expect(formatToolId(makeMcpToolId("libi", "libi.list_pieces"), { server: "libi", tool: "libi.list_pieces", arguments: { action: "x" } })).toBe("Libi List pieces");
+  });
+
+  it("names the action of a merged libi tool when the call's args are given", () => {
+    const keyframe = makeMcpToolId("libi", "libi.keyframe");
+    expect(formatToolId(keyframe)).toBe("Libi Keyframe");
+    expect(formatToolId(keyframe, { action: "set_easing", pieceId: "p" })).toBe("Libi Keyframe · set easing");
+    // `libi.show` discriminates on `target`, not `action`
+    expect(formatToolId(makeMcpToolId("libi", "libi.show"), { target: "export", pieceId: "p" })).toBe("Libi Show · export");
+    // a call that has not streamed its args yet, or sent junk, keeps the plain label
+    expect(formatToolId(keyframe, {})).toBe("Libi Keyframe");
+    expect(formatToolId(keyframe, { action: "Not A Shape!" })).toBe("Libi Keyframe");
+    // an ordinary tool ignores an `action` arg it happens to carry
+    expect(formatToolId(makeMcpToolId("libi", "libi.create_piece"), { action: "list" })).toBe("Libi Create piece");
+  });
+
   it("treats libi-tracking the same as libi (shared 'Libi' brand)", () => {
-    expect(formatToolId(makeMcpToolId("libi-tracking", "libi.compute_object_track")))
-      .toBe("Libi Compute object track");
+    expect(formatToolId(makeMcpToolId("libi-tracking", "libi.track")))
+      .toBe("Libi Track");
+    expect(formatToolId(makeMcpToolId("libi-tracking", "libi.track"), { action: "compute_segment" }))
+      .toBe("Libi Track · compute segment");
+    expect(formatToolId(makeMcpToolId("libi", "libi.analysis_save"), { action: "audio_chunk_from_file" }))
+      .toBe("Libi Analysis save · audio chunk from file");
   });
 
   it("formats non-libi tools as <serverLabel> <Action>", () => {

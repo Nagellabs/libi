@@ -35,7 +35,7 @@ describe("summarizeTrack — appearance-based identity_switch_suspected", () => 
     expect(iss).toBeDefined();
     expect(iss!.range.start).toBeGreaterThanOrEqual(0.9);
     expect(iss!.range.end).toBeLessThanOrEqual(2.0);
-    expect(iss!.detail).toContain("Do NOT skip_segment");
+    expect(iss!.detail).toContain("Do NOT libi.track skip_segment");
   });
 
   it("does NOT flag a fast geometric move when targetSim stays high", () => {

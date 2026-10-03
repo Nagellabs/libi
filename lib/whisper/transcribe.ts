@@ -32,10 +32,19 @@ export const WHISPER_PYTHON_VERSION = "3.12";
  *  resolves cleanly then crashes at first `from faster_whisper import
  *  WhisperModel` with `No module named 'requests'`. Upstream issue:
  *  https://github.com/SYSTRAN/faster-whisper/issues — keep the pin
- *  until a faster-whisper release declares it directly. */
+ *  until a faster-whisper release declares it directly.
+ *
+ *  `av` is bounded because faster-whisper 1.1.1 declares only `av>=11` and
+ *  calls `av.open(..., metadata_errors="ignore")`, a keyword PyAV 19.0.0
+ *  removed: an unbounded env resolves the newest av and every transcription
+ *  fails with "open() got an unexpected keyword argument 'metadata_errors'"
+ *  (packaged 0.1.18, 2026-10-02). av 15 through 18 were measured to decode and
+ *  transcribe on Python 3.12; 14.x has no 3.12 wheel. Raise the ceiling only
+ *  after a real transcription on the new av. */
 export const WHISPER_WITH_SPECS = [
   `faster-whisper==${FASTER_WHISPER_VERSION}`,
   "requests",
+  "av>=15,<19",
 ] as const;
 
 export class WhisperTranscribeError extends Error {

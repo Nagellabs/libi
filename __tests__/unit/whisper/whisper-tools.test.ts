@@ -91,6 +91,7 @@ type DownloadData = {
   attachedToRunning?: boolean;
   matchedExisting?: boolean;
   hint?: string;
+  note?: string;
   existingJob?: { jobId: string; status?: string };
 };
 
@@ -114,6 +115,7 @@ describe("whisperDownloadModel RunJobResult shapes", () => {
     expect(d.status).toBe("installed");
     expect(d.jobId).toBe("job-forced");
     expect(d.forced).toBe(true);
+    expect(d.note).toBeUndefined();
     expect(d.attachedToRunning).toBeUndefined();
     expect(d.matchedExisting).toBeUndefined();
     expect(runJobViaServer).toHaveBeenCalledWith(
@@ -142,6 +144,8 @@ describe("whisperDownloadModel RunJobResult shapes", () => {
     expect(d.status).toBe("installed");
     expect(d.attachedToRunning).toBe(true);
     expect(d.matchedExisting).toBeUndefined();
+    expect(d.note).toMatch(/Attached to a download of this model/);
+    expect(d.note).toMatch(/forceNew:true/);
     expect(d.existingJob).toEqual({
       jobId: "job-orig",
       pieceId: null,
@@ -172,6 +176,7 @@ describe("whisperDownloadModel RunJobResult shapes", () => {
     expect(d.model).toBe("medium");
     expect(d.matchedExisting).toBe(true);
     expect(d.hint).toMatch(/forceNew/);
+    expect(d.note).toMatch(/earlier identical job matched/);
     expect(d.existingJob!.status).toBe("cancelled");
   });
 });

@@ -119,7 +119,7 @@ export function ProviderPicker({ catalog }: { catalog: SocialStatusResponse["cat
 }
 
 export function SocialPage() {
-  const { tab, setTab, post, setPost } = useSocialPageParams();
+  const { tab, setTab, post, setPost, account } = useSocialPageParams();
   const status = useSocialStatus();
   const st = status.data;
   const providers = useProviders({ enabled: !!st?.providerId, refetchInterval: false });
@@ -168,7 +168,7 @@ export function SocialPage() {
             </TabsList>
           </div>
           {tab === "settings" ? (
-            <SettingsTab />
+            <SettingsTab focusAccountId={account} />
           ) : gate === "loading" ? (
             <PostListSkeleton />
           ) : gate !== "ok" ? (

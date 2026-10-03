@@ -6,7 +6,7 @@ import {
 } from "@/lib/mcp-scroll-intent";
 
 /**
- * The parking lot that makes `libi.show_extension` work from the Skills
+ * The parking lot that makes `libi.show({ target: "extension" })` work from the Skills
  * tab. `McpServersView` is unmounted whenever the Skills tab is showing
  * (base-ui `Tabs.Panel` keepMounted:false), so the CustomEvent alone reaches
  * nobody — the id has to survive until the view mounts and claims it.

@@ -46,7 +46,7 @@ describe("normalizeTrack", () => {
 /**
  * `TrackMethod` is `… | (string & {})` — deliberately open, so a
  * third-party tracker registering results through
- * `libi.update_track_result` can name itself. The segments layer is where
+ * `libi.track` update_result can name itself. The segments layer is where
  * that openness has to survive: it copies `track.method` onto the wrapped
  * segment and stitches by time and provenance ONLY. Nothing here may
  * recognise, normalise, or filter by a method it does not know, and until

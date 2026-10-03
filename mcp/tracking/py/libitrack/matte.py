@@ -1,7 +1,7 @@
 """MatAnyone mask-guided video matting (sidecar method "matte").
 
 Given a video path, a time range, and a subject seed (a pixel box from
-libi.ground_target, or None = "auto" -> largest person instance), runs
+libi.track({ action: "ground_target" }), or None = "auto" -> largest person instance), runs
 MatAnyone consistent-memory alpha propagation and writes ONE 8-bit
 grayscale alpha PNG per source frame into ``job["outputDir"]``.
 

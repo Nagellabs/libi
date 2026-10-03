@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { and, eq, notInArray } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { mcpServers, skills as skillsTable } from "@/lib/db/schema/sqlite";
 import { BUNDLED_MCP_SERVERS } from "@/mcp/registry/bundled";
@@ -7,13 +8,18 @@ import { BUNDLED_SKILLS } from "@/mcp/skills/registry";
 import { getBundledSkillsDir } from "@/lib/libi-home";
 import { parseSkillBody } from "@/mcp/skills/frontmatter";
 
-function readBundledSkillTags(name: string): string {
+/**
+ * A bundled skill's description and tags, read from its SKILL.md frontmatter — the single source for both
+ * (the registry lists folders only). A folder whose SKILL.md cannot be read yields a null description: it is
+ * seeded under its id and never overwrites a description already stored.
+ */
+export function readBundledSkillMeta(name: string): { description: string | null; tags: string } {
   try {
     const raw = fs.readFileSync(path.join(getBundledSkillsDir(), name, "SKILL.md"), "utf-8");
     const { frontmatter } = parseSkillBody(raw);
-    return JSON.stringify(frontmatter.tags ?? []);
+    return { description: frontmatter.description, tags: JSON.stringify(frontmatter.tags ?? []) };
   } catch {
-    return "[]";
+    return { description: null, tags: "[]" };
   }
 }
 
@@ -65,23 +71,33 @@ export function seedDatabase(db: BetterSQLite3Database<Record<string, unknown>>)
       .run();
   }
 
+  // A bundled skill that left the registry (merged into another, or folded into the manual) must leave the DB
+  // too: its folder is gone from the bundle, so a surviving row would still be listed by `libi.skill({ action: "list" })` and the
+  // Skills page, and `loadEnabledSkills` would warn about it on every sync. Only `source = "bundled"` rows go; a
+  // user's own skill, or a fork of the removed one, is theirs and stays. The agent roots lose the folder through the
+  // normal sync: the loader no longer returns the skill, so the writer treats its manifest-listed dir as an orphan.
+  db.delete(skillsTable)
+    .where(and(eq(skillsTable.source, "bundled"), notInArray(skillsTable.id, BUNDLED_SKILLS.map((d) => d.id))))
+    .run();
+
   for (const def of BUNDLED_SKILLS) {
+    const meta = readBundledSkillMeta(def.name);
     db.insert(skillsTable)
       .values({
         id: def.id,
         name: def.name,
-        description: def.description,
+        description: meta.description ?? def.name,
         source: "bundled",
         enabled: true,
         body: null,
         frontmatter: "{}",
-        tags: readBundledSkillTags(def.name),
+        tags: meta.tags,
       })
       .onConflictDoUpdate({
         target: skillsTable.id,
         set: {
           name: def.name,
-          description: def.description,
+          ...(meta.description === null ? {} : { description: meta.description }),
           source: "bundled",
           updatedAt: new Date(),
         },

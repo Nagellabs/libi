@@ -10,7 +10,7 @@
 # Policy can refuse script files. In its own process, the script's `exit`
 # never closes your terminal.
 #
-#   provider  fal, higgsfield, zernio or elevenlabs
+#   provider  fal, higgsfield, zernio, elevenlabs or playwright
 #   agent     claude or codex
 #   cli       the full path of that agent's command-line tool
 #   -CliScript  optional, Windows npm installs: the JS file the agent's `.cmd`
@@ -50,6 +50,7 @@ switch -CaseSensitive ($Provider) {
   'higgsfield' { $name = 'Higgsfield'; $auth = 'oauth'; $codexKeyEnv = '' }
   'zernio'     { $name = 'Zernio'; $auth = 'oauth'; $codexKeyEnv = '' }
   'elevenlabs' { $name = 'ElevenLabs'; $auth = 'oauth'; $codexKeyEnv = '' }
+  'playwright' { $name = 'Playwright'; $auth = 'none'; $codexKeyEnv = '' }
   default      { [Console]::Error.WriteLine("remove-provider.ps1: unknown provider '$Provider'"); exit 2 }
 }
 switch -CaseSensitive ($Agent) {

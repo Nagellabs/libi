@@ -7,7 +7,6 @@ import {
   type HighlightEffectEvent,
 } from "@/lib/navigation-events";
 import { invalidateMcpConfig } from "@/lib/mcp-config";
-import { regenerateAndRestart } from "@/mcp/workspace";
 import { serverLogger } from "@/lib/logger";
 import { clearRenderDiagnostics } from "@/lib/render/render-diagnostics-store";
 import { getSessionManager } from "@/lib/sessions/session-manager";
@@ -71,15 +70,18 @@ export async function POST(request: Request): Promise<Response> {
       break;
 
     case "instructions_changed": {
-      // Server-side: regenerate workspace files + terminate every session.
-      // The UI banner fires via SessionManager.resetAll()'s system event
-      // (`instructions_updated`), not from here.
-      regenerateAndRestart().catch((err) => {
-        serverLogger.error(
-          { err, tag: "instructions", op: "regenerate_failed" },
-          "regenerateAndRestart failed after instructions_changed notify",
-        );
-      });
+      // The MCP child that served the agent's `libi.update_memories` /
+      // `libi.override_instructions` call has already written the file, and
+      // `libi.read_manual` renders memories and the override fresh on every
+      // call, so the studio has nothing to apply. It must NOT terminate
+      // sessions: the one that made the save is mid-turn, and killing it ended
+      // the chat with "ACP connection closed" (2026-10-02). The change reaches
+      // a chat on its next `read_manual`, so a new chat. A user's Settings save
+      // is a separate route that does restart (`regenerateAndRestart`).
+      serverLogger.info(
+        { tag: "instructions", op: "changed_no_restart" },
+        "instructions or memories saved; running sessions left alone",
+      );
       break;
     }
 
@@ -111,6 +113,13 @@ export async function POST(request: Request): Promise<Response> {
     case "navigate_templates":
       navigationEmitter.emit("navigate_templates", {
         ...(typeof body.templateId === "string" ? { templateId: body.templateId } : {}),
+        ...navigationOriginStamp(body.origin),
+      });
+      break;
+
+    case "navigate_social":
+      navigationEmitter.emit("navigate_social", {
+        ...(typeof body.accountId === "string" && body.accountId ? { accountId: body.accountId.slice(0, 200) } : {}),
         ...navigationOriginStamp(body.origin),
       });
       break;

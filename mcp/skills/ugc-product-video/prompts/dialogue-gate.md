@@ -1,27 +1,11 @@
 <!-- Adapted from krusemediallc/arcads-claude-code (MIT, © Caleb Kruse / Kruse Media LLC).
-     Reworked for libi tooling (ai-asset-generation flow, provider model ids, libi.upload_file). -->
+     Reworked for libi tooling. -->
 
 # Dialogue confirmation gate
 
-A **MANDATORY hard gate**, separate from the cost-approval gate. Before
-generating **any** speaking clip, you must show the user the exact spoken
-dialogue and get an explicit `yes`. This catches rushed scripts, wrong wording,
-and over-long lines *before* spending money on a generation.
+A hard gate, separate from cost approval. Before generating any clip that speaks, show the exact words and get an explicit yes: it catches rushed scripts, wrong wording and over-long lines before money is spent. A user who approved the cost, the tone or the template has not approved the words. Run it every time, including a re-roll whose dialogue changed. On a storyboard the words are the card's `voiceover.line`; show the same text.
 
-**Never assume approval from an earlier gate.** Tone approval, template
-approval, and cost approval do NOT cover the dialogue. A user who approved the
-cost has not approved the words. Run this gate every time, even on a re-roll if
-the dialogue changed.
-
-## What to show
-
-Extract the dialogue from the planned beats as a **numbered block with beat
-labels**. Use `[HOOK]` / `[SHOW]` / `[DEMO]` / `[VERDICT]` for spoken beats and
-`(silent beat — …)` for non-spoken beats. Then a totals line with the word count
-and the natural-pace check from [script-craft.md](script-craft.md), and the
-approval prompt.
-
-## Exact display format
+Show the dialogue as a numbered block with beat labels (`[HOOK]`, `[SHOW]`, `[DEMO]`, `[VERDICT]`, and `(silent beat — …)` for non-spoken beats), then a totals line with the spoken word count, the target duration and the fit check from the word-count method in [craft](../references/craft.md):
 
 ```
 Here's the dialogue for this clip — confirm before I generate:
@@ -31,32 +15,9 @@ Here's the dialogue for this clip — confirm before I generate:
   3. [DEMO]    "Two weeks in and my skin is actually calmer."
   4. [VERDICT] "Link's in my bio, you're welcome."
 
-  Spoken words: 19  ·  Target duration: 12s  ·  Fits at natural pace ✅
+  Spoken words: 19  ·  Target duration: 12 s  ·  Fits at natural pace
 
 Reply "yes" to generate, or tell me what to change.
 ```
 
-### The fits-check
-
-Compute spoken words and compare to the target duration using the
-[script-craft.md](script-craft.md) read-aloud table (~2.5 words/sec):
-
-- **✅** — the word count fits the target duration comfortably with pauses.
-- **⚠️** — it's tight or over. Say so explicitly and offer to shorten the lines,
-  cut filler, or lengthen the clip. Do **not** quietly proceed on a ⚠️.
-
-Example warning line:
-```
-  Spoken words: 31  ·  Target duration: 10s  ·  ⚠️ too long for 10s —
-  I'd cut to ~20 words or bump to 13s. Which do you want?
-```
-
-## Accepted responses
-
-- **`yes`** → proceed to generation (then the cost gate if not already cleared).
-- **edit** ("change line 3 to…") → apply, re-display the full block, ask again.
-- **rewrite** → go back to [script-craft.md](script-craft.md) /
-  [copywriting-angles.md](copywriting-angles.md), then re-run this gate.
-
-Silent-only beats with zero spoken words still pass through the gate — show the
-block (all `(silent beat — …)`), note "no spoken dialogue", and confirm.
+When the count is tight or over for the duration, say so explicitly and offer to shorten, cut filler or lengthen the clip ("31 words is too long for 10 s; I'd cut to about 20 or take 13 s. Which?"); never quietly proceed. A "yes" proceeds (to the cost gate if it is not already cleared); an edit is applied, the whole block re-shown and asked again; a rewrite goes back to [script-craft](script-craft.md) and [copywriting-angles](copywriting-angles.md). A clip with no spoken words still passes through: show the block as all silent beats, say "no spoken dialogue", and confirm.

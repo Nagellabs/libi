@@ -184,7 +184,7 @@ export async function buildOnboardingPiece(
     //
     // Left unchecked this is a dead end a user cannot escape: delete the demo
     // piece, press "Show me how it works" again, and the tool hands the agent a
-    // pieceId that resolves to nothing. `show_piece` navigates nowhere, no error
+    // pieceId that resolves to nothing. `libi.show` (target piece) navigates nowhere, no error
     // is raised, and it stays broken for every future press. Observed exactly
     // that way on 2026-08-20 after the demo piece was deleted.
     //

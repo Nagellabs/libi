@@ -6,7 +6,7 @@ own spike proved the hole empirically: a run produced 181 alpha PNGs and passed
 every count-based check while EVERY PIXEL was zero (a mask-convention bug). The
 matte looked green and rendered nothing.
 
-Tracking has `summarizeTrack` flags + an `add_tracked_overlay` refusal for this
+Tracking has `summarizeTrack` flags + a `libi.tracked_overlay({ action: "add" })` refusal for this
 class of silent failure; matting had no analogue. `classify_coverage` is that
 analogue: it turns "how much of the frame did the matte actually keep" into an
 honest, blocking signal. Pure and torch-free so it is testable without the

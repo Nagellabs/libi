@@ -4,7 +4,7 @@
 import { getAccountMusicFacts, setAccountMusicFacts } from "@/lib/db/settings";
 import { isComposablePlatform, type KnownPlatform } from "./catalog";
 import type { SocialAdapter } from "./adapter";
-import type { AccountMusicFacts } from "./music-policy";
+import type { AccountMusicFacts, MusicCatalogResult } from "./music-policy";
 import { serverLogger as logger } from "@/lib/logger";
 
 export const factsKey = (providerId: string, accountId: string) => `${providerId}:${accountId}`;
@@ -19,7 +19,8 @@ export function mergeDetected(stored: AccountMusicFacts, detected: AccountMusicF
 
 /** A detected "no music here" (a personal-lane TikTok, an Instagram-Login
  *  account) is re-checked after this long: the fix is a reconnect in Zernio,
- *  which libi never sees. */
+ *  which libi never sees. A catalog read that succeeds (`recordCatalogOutcome`)
+ *  does not wait for this. */
 export const NEGATIVE_FACT_MAX_AGE_MS = 60 * 60 * 1000;
 
 /** The stored fact for this platform, when it was DETECTED as "no music" (never the user's own choice). */
@@ -57,6 +58,11 @@ export async function resolveAccountFacts(
   const stored = getAccountMusicFacts(key);
   if (!isComposablePlatform(account.platform) || !needsProbe(account.platform, stored, opts)) return stored;
   const detected = await adapter.musicAccountFacts(account.id, account.platform);
+  return storeDetected(key, account, stored, detected);
+}
+
+/** Merges a detected answer into the stored facts and persists it when it differs. */
+function storeDetected(key: string, account: { id: string; platform: KnownPlatform }, stored: AccountMusicFacts, detected: AccountMusicFacts): AccountMusicFacts {
   const merged = mergeDetected(stored, detected);
   if (JSON.stringify(merged) !== JSON.stringify(stored)) {
     setAccountMusicFacts(key, merged);
@@ -76,6 +82,34 @@ export async function resolveAccountFacts(
     }
   }
   return merged;
+}
+
+/** A catalog read the user or agent just made is as good a probe as `musicAccountFacts`
+ *  (which is itself one catalog read): a list of tracks proves the account can attach
+ *  licensed music, so a cached "no" — the Instagram-Login note a reconnect never cleared —
+ *  is replaced at once; a refusal that names the cause records it. Any other failure says
+ *  nothing about the account and leaves the fact alone. A user-set TikTok kind is kept. */
+export function recordCatalogOutcome(
+  providerId: string,
+  account: { id: string; platform: KnownPlatform },
+  result: MusicCatalogResult,
+  now: Date = new Date(),
+): void {
+  if (!isComposablePlatform(account.platform)) return;
+  const checkedAt = now.toISOString();
+  let detected: AccountMusicFacts = {};
+  if ("tracks" in result) {
+    detected =
+      account.platform === "tiktok"
+        ? { tiktokKind: { value: "business", source: "detected", checkedAt } }
+        : { instagramFacebookLogin: { value: true, source: "detected", checkedAt } };
+  } else if (account.platform === "instagram" && result.unavailable.reason === "needs_facebook_login") {
+    detected = { instagramFacebookLogin: { value: false, source: "detected", checkedAt } };
+  } else if (account.platform === "tiktok" && result.unavailable.reason === "not_business") {
+    detected = { tiktokKind: { value: "personal", source: "detected", checkedAt } };
+  } else return;
+  const key = factsKey(providerId, account.id);
+  storeDetected(key, account, getAccountMusicFacts(key), detected);
 }
 
 export function setUserTikTokKind(providerId: string, accountId: string, value: "business" | "personal"): AccountMusicFacts {

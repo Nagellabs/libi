@@ -1,7 +1,7 @@
 ---
 id: meta-provider-card-third-party
 title: In the app, suggest_provider answers a video request with a card payload
-skills: [generic-video, ai-asset-generation, ai-video-models, using-storyboard, realistic-image-generation]
+skills: [generic-video, ai-asset-generation, video-generation-craft, using-storyboard]
 mcps: []
 agent: claude-code
 runs: 1

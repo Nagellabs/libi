@@ -78,7 +78,7 @@ function ToolCallRow({ entry }: { entry: ToolCallEntry }) {
   const runningAt = entry.call.runningAt;
   const completedAt = entry.result?.completedAt;
   const name = entry.call.toolId
-    ? formatToolId(entry.call.toolId)
+    ? formatToolId(entry.call.toolId, entry.call.args)
     : formatBuiltinTitle(entry.call.rawTitle);
   // For tool-detail extraction we use the rawTitle so the "descriptive
   // tools" regex (`Read /path`, `grep -i '…'`, etc.) keeps working.

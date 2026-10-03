@@ -107,7 +107,7 @@ export async function diagnoseMcp(
   }
   if (row.serverStatus === "down") {
     hints.push(
-      `Last probe reported the server as down: ${row.serverError ?? "no error captured"}. Try libi.restart_mcp_server.`,
+      `Last probe reported the server as down: ${row.serverError ?? "no error captured"}. Try libi.extension({ action: "restart" }).`,
     );
   }
   if (hints.length === 0 && inCurrentSession && row.serverStatus !== "down") {

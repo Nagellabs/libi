@@ -7,7 +7,7 @@ social: disconnected
 agent: claude-code
 runs: 1
 timeoutSec: 900
-covers: [social-posting, two-connections, full-shaped-tools, no-lossy-tools, snake-case-body, metadata-stamp, social_link_post, draft-only]
+covers: [social-posting, two-connections, full-shaped-tools, no-lossy-tools, snake-case-body, metadata-stamp, social-link, draft-only]
 ---
 
 > **What this catches.** Three regressions at once, each of which costs the user
@@ -56,7 +56,7 @@ assertions:
   - { provider: zernio, tool: posts_cross_post, expect: absent }
   - { provider: zernio, tool: posts_get, expect: absent }
   # …and it linked the post back to the piece.
-  - { transcript_contains: "[tool-call mcp__libi__libi_social_link_post]", expect: present }
+  - { transcript_matches: '\[tool-call mcp__libi__libi_social_link\][^\n]*"kind":\s*"post"', expect: present }
   # Nothing was published or scheduled.
   - { provider: zernio, tool: posts_publish_now, expect: absent }
   - { provider: zernio, tool: posts_update_post, expect: absent }
@@ -68,5 +68,5 @@ assertions:
   broken connection or asking for a key.
 - Reached `posts_create_post` through `call_tool` (optionally after `search_tools`), sent
   `tags: ["libi"]` and `metadata.libi`, and did NOT send a `headers` argument.
-- Called `libi.social_link_post` with the returned post id.
+- Called `libi.social_link` kind `post` with the returned post id.
 - Did not publish, schedule, or describe the draft as live.

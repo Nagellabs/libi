@@ -47,6 +47,8 @@ vi.mock("mediabunny", () => {
 });
 
 import { exportVideo } from "@/lib/engine/export";
+import { renderFrame, collectLayerRequests } from "@/lib/engine/renderer";
+import type { LayerRequest, LayerSource } from "@/lib/engine/layer-source";
 
 const W = 200;
 const H = 200;
@@ -276,5 +278,69 @@ describe("exportVideo — a frame list renders only those frames", () => {
     expect(result.duration).toBeCloseTo(2 / FPS, 10); // the encoded file holds 2 frames
     // The frames it drew cleanly are the ones it rendered, not a range.
     expect(source.cleanFrames.get("stamp")).toEqual([[30, 31], [120, 121]]);
+  });
+});
+
+/**
+ * A body that reads the piece clock (`compositionTime`, `overlayStart`, `pieceDuration`) draws the
+ * same in the preview and in the export (the duck bug was this class: a primitive that worked in
+ * one path only). Both paths plan a body's request through `planLayer`, from different callers
+ * (`renderFrame` → `drawOverlay` in the preview, `collectLayerRequests` in the export), so the
+ * request is compared, then the pixels the export draws from it are read back.
+ */
+describe("a body that reads the piece clock renders identically in the preview and the export", () => {
+  /** Paints its box rgb(compositionTime × 100, overlayStart × 100, pieceDuration × 10). */
+  const CLOCK = `const { ctx, width, height, compositionTime, overlayStart, pieceDuration } = context;
+ctx.fillStyle = "rgb(" + Math.round(compositionTime * 100) + "," + Math.round(overlayStart * 100) + "," + Math.round(pieceDuration * 10) + ")";
+ctx.fillRect(0, 0, width, height);`;
+  const clockOverlays = [
+    // Starts at 0.4 s, so its OWN clock (time) is 0.4 s behind the piece's.
+    { id: "clock", kind: "code", startTime: 0.4, duration: 1.2, z: 1, opacity: 1, rect: { x: 0, y: 0, width: 80, height: 80 }, drawFunction: CLOCK },
+    // The piece's last thing: it ends at 2.0 s, so the piece is 20 frames at 10 fps.
+    { id: "tail", kind: "code", startTime: 1.5, duration: 0.5, z: 0, opacity: 1, rect: { x: 100, y: 100, width: 80, height: 80 }, drawFunction: "context.ctx.fillStyle = '#00ff00'; context.ctx.fillRect(0, 0, context.width, context.height);" },
+  ] as unknown as Overlay[];
+  const clockPiece = { id: "c", name: "c", width: W, height: H, fps: FPS, overlays: clockOverlays } as Composition;
+  const FRAMES = [5, 9, 14];
+
+  /** The requests the PREVIEW makes: `renderFrame` asks its layer source for each body, one draw at a time. */
+  function previewRequests(frame: number): LayerRequest[] {
+    const asked: LayerRequest[] = [];
+    const source: LayerSource = { get: () => null, request: (req) => void asked.push(req) };
+    const canvas = createCanvas(W, H) as unknown as HTMLCanvasElement;
+    renderFrame(canvas, clockPiece, frame, {}, undefined, undefined, source);
+    return asked;
+  }
+
+  it("the preview and the export plan the SAME request, piece clock included, at every frame", () => {
+    for (const frame of FRAMES) {
+      const exportSide = collectLayerRequests(clockPiece, frame, 1).filter((r) => r.overlayId === "clock");
+      const previewSide = previewRequests(frame).filter((r) => r.overlayId === "clock");
+      expect(previewSide).toEqual(exportSide);
+      expect(exportSide).toHaveLength(1);
+      const t = exportSide[0]!.time;
+      // overlayStart + the overlay's own clock IS the piece clock, and the piece is 2 s.
+      expect(t.compositionTime).toBeCloseTo(frame / FPS, 9);
+      expect(t.overlayStart).toBe(0.4);
+      expect(t.pieceDuration).toBe(2);
+      expect(t.overlayStart! + t.time).toBeCloseTo(t.compositionTime!, 9);
+    }
+  });
+
+  it("the export draws the clock the request carries: a body reading compositionTime paints the piece's second, not its own", async () => {
+    captured.frames = [];
+    const holder: { source?: ExportLayerSource } = {};
+    const sandbox = inMemorySandbox(() => holder.source!);
+    const source = new ExportLayerSource((input) => sandbox.render(input));
+    holder.source = source;
+    for (const o of clockOverlays) {
+      const src = (o as unknown as { drawFunction: string }).drawFunction;
+      await sandbox.load({ id: o.id, kind: "code", source: src, sourceHash: await sha256Hex(src), width: o.rect.width, height: o.rect.height });
+    }
+    await exportVideo(clockPiece, { format: "mp4", codec: "avc", bitrate: 1, width: W * 2, height: H * 2, fps: FPS }, undefined, undefined, undefined, source, undefined, undefined, undefined, { frames: FRAMES });
+    expect(captured.frames).toHaveLength(FRAMES.length);
+    for (const [i, frame] of FRAMES.entries()) {
+      // rgb(compositionTime × 100, overlayStart × 100, pieceDuration × 10) = (frame × 10, 40, 20)
+      expect(await pixel(captured.frames[i]!, 40, 40), `frame ${frame}`).toEqual([frame * 10, 40, 20, 255]);
+    }
   });
 });

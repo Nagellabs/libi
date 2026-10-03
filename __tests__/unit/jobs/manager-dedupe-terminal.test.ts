@@ -59,7 +59,7 @@ describe("JobManager dedupe ignores terminal rows", () => {
     const a = await mgr.enqueue("k", { v: 2 });
     const aId = jobIdOf(a);
     const pa = mgr.runToCompletion(aId);
-    await new Promise((r) => setTimeout(r, 20));
+    await vi.waitFor(() => expect(release).toHaveLength(1)); // the runner is running
 
     const b = await mgr.enqueue("k", { v: 2 });
     expect(b.status).toBe("attached_running");

@@ -1,114 +1,48 @@
 ---
 name: video-planning
-description: "Think like a senior video editor BEFORE generating — reverse-engineer a target video into its building blocks and build algorithm, turn it into an explicit reviewable plan, then direct the build through the Storyboard, loading the right craft specialist per block. Resolves three entry modes (extract a plan from a demo video · reuse a saved recipe skill · create a fresh plan) and offers to capture a liked plan as a reusable skill. Loaded BY mimic-video and every creation skill (generic-video, ugc-product-video, music-video-creation) — the planning/director layer ABOVE the Storyboard. Not a standalone entry point."
-when_to_use: Before building or recreating ANY multi-block video — invoked by mimic-video (extract a plan from the source) and by the creation skills (plan the brief into blocks) before the Storyboard is built. Triggers indirectly whenever a video is about to be planned or recreated.
+description: "Break a source video or a brief into building blocks (source vs AI, combine vs split, style inheritance) and a reviewable plan before anything is generated. Loaded by mimic-video and the creation skills; also use when the user asks for a plan or breakdown of a video before it is built. Generates nothing."
 tags: [planning, generation, recreate]
 ---
 
 # Video Planning (the director)
 
-You are a **senior video editor**, not a clip vending machine. Before any money is spent, you
-understand what the target video *is* — its scenes, structure, and the underlying **build
-algorithm** — and you turn that into an explicit, reviewable **plan of building blocks**. Then you
-**direct** the build of those blocks through the Storyboard, loading the right specialist per block.
+Think like a senior video editor, not a clip vending machine. Done looks like: the user has seen and approved an ordered plan of building blocks, each with its source and its continuity, before any money is spent, and that plan is written into the storyboard overview so the build follows it.
 
-This is the **planning / director layer ABOVE the Storyboard**. The Storyboard is the *execution*
-mechanism (one card per block, takes, live references); this skill decides the *decomposition and
-sequencing*. The craft skills (`realistic-image-generation`, `physical-action-video`,
-`ai-video-models`, `voiceover-production`, …) are your **specialist team**; you are the director who
-sequences them. You generate NOTHING directly — you plan, then hand each block to the board.
+This is the planning layer above the Storyboard. The Storyboard (`using-storyboard`) executes: one card per block, takes, live references. This skill decides the decomposition and the order, and generates nothing. The failure it prevents is going straight from a one-line brief, or a raw `video-analysis`, to generating clips: the user then guides every clip by hand and the result has no structure. A real editor first answers what the pieces are, where each comes from and how they fit.
 
-The detailed decision table + a fully worked example + the block→card mapping live in
-[`prompts/build-breakdown.md`](prompts/build-breakdown.md) — read it before authoring a plan.
+[`prompts/build-breakdown.md`](prompts/build-breakdown.md) has the decision table and a worked example; read it before writing a plan.
 
-## Why this exists
+## Resolve the entry mode
 
-The failure mode this prevents: jumping from a one-line brief (or a raw `video-analysis`) straight
-to generating clips, with no editorial decomposition — so the user has to hand-guide every clip and
-the result has no coherent structure. A real editor first answers "what are the pieces, where does
-each come from, and how do they fit together," then builds. So do you.
+Produce one artifact in any mode: an ordered block breakdown.
 
-## Step 1 — Resolve the entry mode
+- **Extract** (a demo or source video exists). Run `video-analysis` on it, and `audio-analysis` if it has meaningful speech. Then reverse-engineer the build algorithm: not a shot-by-shot transcription but the recipe a creator would follow to make a video like it. `mimic-video` hands you this case.
+- **Reuse** (a saved recipe exists). Check the user's skills for a recipe captured from an earlier build of this kind of video; if one matches, adopt its block template, model choices and continuity pattern instead of deriving them again.
+- **Create** (neither). Author a fresh plan from the brief.
 
-Decide which of three modes you are in, then produce ONE artifact: an ordered **block breakdown**.
+## Decompose into blocks
 
-- **Extract (a demo / source video exists).** Run `video-analysis` on the source (and
-  `audio-analysis` only if it has meaningful speech). Then **reverse-engineer the build algorithm**:
-  not a shot-by-shot transcription — the *recipe* a creator would follow to make a video like this.
-  (This is the step `mimic-video` hands you.)
-- **Reuse (a saved recipe exists).** Look for an existing **recipe skill** — a "how to make this
-  kind of video" skill captured from a past build (see Step 5). If one matches the request, adopt
-  its block template, model choices, and style-inheritance pattern instead of re-deriving. Skills
-  are auto-discovered by description; actively check for a genre/recipe match before deriving fresh.
-- **Create (no demo, no recipe).** Author a fresh plan from the user's brief.
+A block is the smallest unit of footage that composes the whole. For each one, record:
 
-## Step 2 — Decompose into building blocks (think like an editor)
+1. **Content**: what happens or is said.
+2. **Source**: footage we already have, footage to source, or AI generation, and if generated, what kind (talking head, b-roll, VFX, physical action, graphic).
+3. **Combine vs. split**: default to the fewest clips, each as long as the model's own per-clip max allows with its beats as jump cuts inside the prompt. A faithful 30-second recreation is about two clips, never one per source shot. Split only when the generation itself has to change (a different subject, an angle the model cannot cut to, VFX, a physical action needing its own craft). `ugc-product-video` owns the reasoning.
+4. **Style inheritance** (when split): what the block takes from the previous one (character, palette, location, lighting) and how: a live `reference_video` link to the previous card's take plus the carried character reference image.
+5. **Deferred to post**: captions, lower-thirds, titles and music are overlays and audio clips added afterwards, never generated into a clip.
 
-Break the video into **building blocks** — the smallest set of footage units that compose the whole.
-For EACH block, decide and record (full table + example in `prompts/build-breakdown.md`):
+## Present the plan, get approval
 
-1. **Content** — what happens / what is said in this block.
-2. **Source** — do we already have footage · must we source it · or generate it with AI? If
-   generate: which kind (talking-head, b-roll, VFX, physical action, …).
-3. **Combine vs. split** — one generation covering several beats, or separate clips? **Default to the
-   FEWEST model-max multi-beat clips** (the `ugc-craft` clip-duration rule): a ~30s video ≈ 2 clips,
-   never one-clip-per-source-shot. Split only when beats genuinely need different generations.
-4. **Style inheritance** — if split, what this block inherits from the previous one (character,
-   palette, location, lighting) and *how*: a live `reference_video` link to the prior card's take +
-   the carried character reference image. This is how a downstream VFX/angle block keeps the look of
-   the block before it.
-5. **Defer to post** — captions, lower-thirds, music: these are overlays / audio clips added AFTER,
-   never generated into the clip.
+Show a short numbered plan: for each block, its content, source decision and inheritance. This is the free review gate before any spend. Revise on feedback, then record the approved editorial intent in the storyboard overview.
 
-The canonical worked example (talking-head → VFX insert → second angle → captioned outro), with the
-exact source/combine/inherit calls, is in `prompts/build-breakdown.md`.
+## Hand it to the Storyboard
 
-## Step 3 — Present the plan, get approval (free, pre-spend)
+Give the approved plan to `using-storyboard`:
 
-Present the block breakdown to the user as a short numbered plan: for each block, its content, its
-source/generation decision, and what it inherits. This is the cheap review gate BEFORE any spend.
-Revise on feedback. Record the approved editorial intent in the Storyboard **overview**.
+- **One block, one card.** A combined multi-beat block is one card; a split-with-inheritance pair is two cards joined by `libi.set_storyboard_reference` (`reference_video`).
+- **Carry the target aspect onto every card.** In extract mode the target is the source's actual aspect, read from the analysis (a 1920x1080 source is landscape whatever platform it came from); a recreation that flips orientation is unfaithful.
+- **Work in plan order.** Blocks that inherit from each other must run in sequence so each link's take exists before the next references it. Blocks with no dependency (three unrelated b-roll inserts) may be worked in parallel when your surface can run subagents; the plan executes the same either way.
+- Load the right specialist for each block as it comes up: the engine and physical-action references in `video-generation-craft`, `ai-asset-generation` for the call, `stitching-multi-clip` when source footage is reused.
 
-## Step 4 — Map blocks to the Storyboard and direct the build
+## Offer to keep a plan that worked
 
-Hand the approved plan to **`using-storyboard`** — the backbone is unchanged. Map it:
-
-- **1 block → 1 card.** A combined multi-beat block is ONE card (beats are in-prompt jump cuts). A
-  split-with-inheritance pair is two cards joined by `set_storyboard_reference` (`reference_video`).
-- **Carry the target aspect onto every card.** Record the plan's target orientation/aspect once and
-  set each card's clip (and keyframe) `aspect_ratio` to it. In *extract* mode that target is the
-  **source's actual aspect** (read it from the analysis — a 1920×1080 source is landscape; don't
-  assume a platform's typical orientation). A recreation that flips the source's orientation is a
-  faithfulness failure.
-- **Direct sequentially by default.** Work cards in plan order; for each, load the right specialist
-  (the `using-storyboard` layer-map lists them) and run the board's
-  schematic → generation-spec → generate → validate → `select_storyboard_take` loop.
-- **Independent-block fan-out (optional, opportunistic).** When ≥2 blocks share NO style/continuity
-  dependency (e.g. three unrelated b-roll inserts), you MAY work them as parallel subagent tasks and
-  then synthesize. If parallel dispatch is unavailable in this surface, fall back to sequential —
-  the plan executes identically either way. **Never fan out blocks that inherit from each other**
-  (a style chain must run in order so each link's take exists before the next references it).
-
-## Step 5 — Offer to capture the plan as a reusable skill (consent-first, once)
-
-After a successful build, if the plan represents a **meaningfully repeatable recipe** (a genre +
-block template the user is likely to want again), OFFER — at most once, only with consent — to save
-it as a **user skill** via `libi.add_skill`. The captured recipe must contain:
-
-- **Genre triggers** — when a future agent should reach for this recipe.
-- **The block template** — the ordered blocks with their source/combine/inherit decisions.
-- **Model choices** — which models per block kind, and why.
-- **The style-inheritance pattern** — how continuity is carried (reference links + character ref).
-
-This is the read-side payoff of Step 1's "reuse" mode: a liked plan becomes a recipe future agents
-auto-discover, so the user never re-guides this kind of video by hand. Do not capture trivial or
-one-off plans. Follow the self-improvement consent rules in the agent instructions.
-
-## Cross-skill references
-
-- `video-analysis` / `audio-analysis` — source understanding for the *extract* mode.
-- `using-storyboard` — the execution backbone the plan maps onto (this skill is the layer above it).
-- `ugc-craft` — the clip-duration / combine-vs-split methodology (the fewest model-max clips rule).
-- `mimic-video` — the recreate dispatcher that calls this skill to extract a plan.
-- The specialist team: `realistic-image-generation`, `physical-action-video`, `ai-video-models`,
-  `ai-asset-generation`, `voiceover-production`, `stitching-multi-clip`.
+After a successful build, if the plan is a repeatable recipe the user is likely to want again, offer once, and only with their consent, to save it as a user skill with `libi.skill` action `add`. The recipe holds the genre triggers (when to reach for it), the ordered block template with its decisions, the model choice per block kind and why, and the continuity pattern. This is what makes Reuse mode work next time. Do not offer it for a trivial or one-off plan.

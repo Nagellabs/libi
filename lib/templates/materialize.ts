@@ -33,7 +33,8 @@ import { validateDrawFunction, validateThreeFunction } from "@/lib/ai/scene-vali
 import { unfilledSlotDisplayName, unfilledSlotFileId } from "./unfilled-slot";
 import { extensionOf, mediaTypeFor } from "@/lib/http/media-types";
 import { CLIP_KEYS, OVERLAY_KEYS_BY_KIND, captionStyleFields, pickKeys } from "@/lib/templates/fields";
-import { leftOutList, neutraliseClip, neutraliseLook, neutraliseOverlay, neutralSlotName, newNeutraliseContext } from "@/lib/templates/author-text";
+import { leftOutList, neutraliseClip, neutraliseLook, neutraliseOverlay, neutraliseVolumeEnvelope, neutralSlotName, newNeutraliseContext } from "@/lib/templates/author-text";
+import { sanitizeClipGain } from "@/lib/audio/clip-gain";
 import {
   TEMPLATE_LIMITS,
   type TemplateScaffold,
@@ -43,6 +44,10 @@ import {
 import { TEMPLATES_LOG_TAG, getTemplate, readScaffold, readTemplateFile, recordUse } from "@/lib/templates/store";
 import type { PendingMusic, PendingMusicClip } from "@/lib/templates/pending-music";
 import { hostedUrlProblem } from "@/lib/templates/cloud/preflight";
+import { framesDiffer, mapPointBetweenRects, reflowLayer, reflowScale, type ReflowFrame } from "@/lib/templates/reflow";
+import { applyOverrideFields, overrideKindProblem } from "@/lib/templates/layer-overrides";
+import { followRectKeyframes } from "@/lib/overlays/keyframe-follow";
+import type { OverlayKeyframes, OverlayRect } from "@/lib/engine/types";
 
 /** Downloads hosted assets / slot urls into the piece and answers per url.
  *  The MCP tool passes a `remote_fetch` job runner with `mediaOnly: true`, so
@@ -67,8 +72,32 @@ export interface ApplyScaffoldInput {
   pieceId: string;
   slotValues?: Record<string, string>;
   mode?: "append" | "replace";
+  /**
+   * How the layers meet a piece whose frame is not the template's. Unset: `reflow` when the frames
+   * differ (a different aspect or size), nothing to do when they match. `none` places every layer at the
+   * pixels it was authored at. An explicit `reflow` into an existing piece keeps THAT piece's frame even
+   * when it is empty (it would otherwise take the template's canvas).
+   */
+  fit?: "reflow" | "none";
+  /** Overlay fields to set on a layer as it is placed, by the template's layer key (validated by the caller; the kind gate is here). Applied after `fit` and `startAt`. */
+  layerOverrides?: Record<string, Record<string, unknown>>;
+  /** Layer keys not to create. A slot only they use is not reported unfilled. */
+  omitLayers?: string[];
+  /** Seconds added to every layer's and clip's start time. */
+  startAt?: number;
   /** Called AT MOST ONCE, with every url the apply needs. */
   fetchUrls: UrlFetcher;
+}
+
+/** One layer as it was placed: what the agent needs to see without reading the piece back. */
+export interface PlacedLayer {
+  /** The template's layer key. */
+  layer: string;
+  overlayId: string;
+  kind: string;
+  rect: { x: number; y: number; width: number; height: number };
+  start: number;
+  end: number;
 }
 
 export interface ApplyScaffoldResult {
@@ -86,6 +115,10 @@ export interface ApplyScaffoldResult {
   leftOut: string[];
   /** Songs left out (the template names them; the agent fetches on the user's yes). */
   pendingMusic: PendingMusic[];
+  /** Every layer created, where it sits and when it plays (its rect read back after the save). */
+  placed: PlacedLayer[];
+  /** How the layers were fitted to the piece's frame; absent when they were placed as authored. */
+  fit?: { mode: "reflow"; from: string; to: string; scale: number };
 }
 
 /** The description a template's stored asset carries in the piece: libi's words
@@ -229,6 +262,35 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
   }
   const bodies = await readBodies(input.templateId, scaffold);
 
+  // The layer names an agent passes are checked before the first write, like a slot key.
+  const layerKeys = new Set(scaffold.overlays.map((o) => o.key));
+  const layerList = `layers: ${[...layerKeys].join(", ")}`;
+  const omitted = new Set(input.omitLayers ?? []);
+  for (const key of omitted) if (!layerKeys.has(key)) throw new Error(`layer_unknown: ${key} (${layerList})`);
+  for (const [key, override] of Object.entries(input.layerOverrides ?? {})) {
+    if (!layerKeys.has(key)) throw new Error(`layer_unknown: ${key} (${layerList})`);
+    if (omitted.has(key)) throw new Error(`layer_override_omitted: ${key} is in omitLayers, so there is no layer to override`);
+    const problem = overrideKindProblem(scaffold.overlays.find((o) => o.key === key)!.kind, override);
+    if (problem) throw new Error(`layer_override_invalid: ${key}: ${problem}`);
+  }
+  const startAt = input.startAt ?? 0;
+
+  /** Slots only an omitted layer uses: nothing to fill, so nothing to report or download. */
+  const omittedOnlySlots = new Set<string>();
+  if (omitted.size > 0) {
+    const slotOf = (src: { slot?: string } | undefined, text?: { slot?: string }): string[] =>
+      [src?.slot, text?.slot].filter((v): v is string => typeof v === "string");
+    const kept = new Set<string>();
+    const dropped = new Set<string>();
+    for (const t of scaffold.overlays) {
+      for (const k of slotOf(t.source as { slot?: string } | undefined, t.text as { slot?: string } | undefined)) (omitted.has(t.key) ? dropped : kept).add(k);
+    }
+    for (const c of scaffold.audioClips) {
+      for (const k of slotOf(c.source as { slot?: string })) (c.linkedOverlayId && omitted.has(c.linkedOverlayId) ? dropped : kept).add(k);
+    }
+    for (const k of dropped) if (!kept.has(k)) omittedOnlySlots.add(k);
+  }
+
   const warnings: string[] = [];
   const unfilled = new Map<string, TemplateSlot>();
 
@@ -327,6 +389,10 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
   const slotText = new Map<string, string>();
   for (const slot of scaffold.slots) {
     const value = input.slotValues?.[slot.key];
+    if (omittedOnlySlots.has(slot.key)) {
+      if (value !== undefined && value !== "") warnings.push(`slot "${slot.key}" was given, but the only layer using it is in omitLayers`);
+      continue;
+    }
     if (value === undefined || value === "") {
       unfilled.set(slot.key, slot);
       continue;
@@ -431,6 +497,15 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
   }
   const existing = manifest.overlays ?? [];
   const existingClips = manifest.audioClips ?? [];
+  // The template's canvas wins on a piece with nothing in it (and on a replace, which empties it). A
+  // piece the user has already built in keeps its own — resizing it would rescale work the template
+  // knows nothing about — and so does an empty one the caller asked to fit the template into.
+  const pieceWasEmpty = existing.length === 0 && existingClips.length === 0;
+  const adoptCanvas = (pieceWasEmpty || input.mode === "replace") && input.fit !== "reflow";
+  const frame: ReflowFrame = adoptCanvas ? scaffold.canvas : { width: manifest.width, height: manifest.height };
+  const reflow = input.fit !== "none" && framesDiffer(scaffold.canvas, frame);
+  /** What a layer is called in a warning: its key for the user's own template, its position for a stranger's. */
+  const layerLabel = (key: string, kind: string, index: number): string => (authored ? `layer ${index + 1} (${kind})` : `layer "${key}"`);
   const zOffset = existing.length === 0 ? 0 : Math.max(...existing.map((o) => o.z)) + 1;
   const overlayIdByKey: Record<string, string> = {};
   const outOverlays: PersistedOverlay[] = [];
@@ -457,8 +532,10 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     return { unfilledSlot: slot };
   };
 
+  const placedKeys: Array<{ key: string; overlay: PersistedOverlay }> = [];
   for (const [overlayIndex, t] of scaffold.overlays.entries()) {
     const key = t.key;
+    if (omitted.has(key)) continue;
     const id = newTemplateOverlayId(t.kind);
     // Only this kind's allowlisted fields — the scaffold schema already
     // stripped the rest; this keeps a future caller that hands in an
@@ -505,8 +582,30 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
       if (t.kind === "code") base.drawFunction = bodies.get(key)!;
       else base.sceneFunction = bodies.get(key)!;
     }
+    if (startAt !== 0) base.startTime = (base.startTime as number) + startAt;
+    if (reflow) {
+      const fitted = reflowLayer(base as Parameters<typeof reflowLayer>[0], scaffold.canvas, frame, layerLabel(key, t.kind, overlayIndex));
+      Object.assign(base, fitted.layer);
+      warnings.push(...fitted.warnings);
+    }
+    const override = input.layerOverrides?.[key];
+    if (override) {
+      const before = base.rect as OverlayRect;
+      applyOverrideFields(base, override);
+      const next = override.rect as OverlayRect | undefined;
+      if (next) {
+        const kf = followRectKeyframes(base.keyframes as OverlayKeyframes | undefined, before, next);
+        if (kf) base.keyframes = kf;
+        if (t.kind === "text" && override.position === undefined && base.position) {
+          base.position = mapPointBetweenRects(base.position as { x: number; y: number }, before, next);
+        }
+        base.rect = next;
+      }
+    }
     overlayIdByKey[key] = id;
-    outOverlays.push(base as unknown as PersistedOverlay);
+    const overlay = base as unknown as PersistedOverlay;
+    outOverlays.push(overlay);
+    placedKeys.push({ key, overlay });
   }
 
   // A clip on a music link names a copyrighted song the template never carries
@@ -536,7 +635,12 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
         ...(link.sourceUrl && hostedUrlProblem(link.sourceUrl) === null ? { sourceUrl: link.sourceUrl } : {}),
         clips: [],
       };
-      const pendingClip: PendingMusicClip = { startTime: c.startTime, duration: c.duration, trimStart: c.trimStart, volume: c.volume, enabled: c.enabled };
+      const pendingClip: PendingMusicClip = { startTime: c.startTime + startAt, duration: c.duration, trimStart: c.trimStart, volume: c.volume, enabled: c.enabled };
+      // The clip's loudness shape rides with its timing; the envelope is clip-local, so `startAt` moves nothing in it.
+      const shape: Record<string, unknown> = pickKeys(c as unknown as Record<string, unknown>, ["gainDb", "volumeKeyframes", "crossfadeMs"]);
+      if (authored) neutraliseVolumeEnvelope(shape, neutral, clipIndex + 1);
+      sanitizeClipGain(shape);
+      Object.assign(pendingClip, shape);
       if (c.duck) {
         pendingClip.duck = { ...c.duck, sidechainClipIds: [] };
         pendingDucks.push({ clip: pendingClip, sidechainKeys: c.duck.sidechainClipIds ?? [] });
@@ -562,7 +666,14 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     clipIdByKey[c.key] = id;
     const clip = omit(pickKeys(c as unknown as Record<string, unknown>, CLIP_KEYS), ["key", "source", "duck", "linkedOverlayId"]) as unknown as PersistedAudioClip;
     clip.id = id;
+    if (startAt !== 0) clip.startTime = c.startTime + startAt;
+    // An inline clip is its video layer's sound: it plays where an overridden layer now plays.
+    const linkedOverride = c.linkedOverlayId ? input.layerOverrides?.[c.linkedOverlayId] : undefined;
+    if (typeof linkedOverride?.startTime === "number") clip.startTime = linkedOverride.startTime;
+    if (typeof linkedOverride?.duration === "number") clip.duration = linkedOverride.duration;
     if (authored) neutraliseClip(clip as unknown as Record<string, unknown>, neutral, clipIndex + 1);
+    // Whatever the file says, the clip's gain, envelope and crossfade go through the app's own clamp (what a load does).
+    sanitizeClipGain(clip);
     clip.fileId = resolved.fileId;
     if (c.duck) clip.duck = { ...c.duck, sidechainClipIds: [] };
     staged.push({ clip, sidechainKeys: c.duck?.sidechainClipIds ?? [], linkedKey: c.linkedOverlayId });
@@ -576,15 +687,11 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
     clip.duck!.sidechainClipIds = sidechainKeys.map((k) => clipIdByKey[k]).filter((v): v is string => !!v);
   }
 
-  // The template's canvas wins on a piece with nothing in it (and on a replace,
-  // which empties it). A piece the user has already built in keeps its own —
-  // resizing it would rescale work the template knows nothing about.
-  const pieceWasEmpty = existing.length === 0 && existingClips.length === 0;
-  if (pieceWasEmpty || input.mode === "replace") {
+  if (adoptCanvas) {
     manifest.width = scaffold.canvas.width;
     manifest.height = scaffold.canvas.height;
     manifest.fps = scaffold.canvas.fps;
-  } else if (manifest.width !== scaffold.canvas.width || manifest.height !== scaffold.canvas.height) {
+  } else if (!reflow && framesDiffer(scaffold.canvas, frame)) {
     warnings.push(
       `the template was authored for ${scaffold.canvas.width}×${scaffold.canvas.height}; ` +
         `this piece is ${manifest.width}×${manifest.height}, so its layers may need repositioning`,
@@ -622,5 +729,36 @@ async function applyInto(input: ApplyScaffoldInput, state: { wrote: boolean }): 
       "template music left out, pending",
     );
   }
-  return { pieceId: input.pieceId, overlays: overlayIdByKey, clips: clipIdByKey, unfilledSlots, warnings, leftOut, pendingMusic: [...pending.values()] };
+  const placed: PlacedLayer[] = placedKeys.map(({ key, overlay }) => {
+    const o = overlay as unknown as { id: string; kind: string; rect: OverlayRect; startTime: number; duration: number };
+    const r = (n: number) => Math.round(n * 100) / 100;
+    return {
+      layer: key,
+      overlayId: o.id,
+      kind: o.kind,
+      rect: { x: r(o.rect.x), y: r(o.rect.y), width: r(o.rect.width), height: r(o.rect.height) },
+      start: r(o.startTime),
+      end: r(o.startTime + o.duration),
+    };
+  });
+  return {
+    pieceId: input.pieceId,
+    overlays: overlayIdByKey,
+    clips: clipIdByKey,
+    unfilledSlots,
+    warnings,
+    leftOut,
+    pendingMusic: [...pending.values()],
+    placed,
+    ...(reflow
+      ? {
+          fit: {
+            mode: "reflow" as const,
+            from: `${scaffold.canvas.width}×${scaffold.canvas.height}`,
+            to: `${frame.width}×${frame.height}`,
+            scale: Math.round(reflowScale(scaffold.canvas, frame) * 1000) / 1000,
+          },
+        }
+      : {}),
+  };
 }

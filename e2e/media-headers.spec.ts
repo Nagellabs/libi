@@ -67,7 +67,7 @@ test.describe("media responses from libi's origin", () => {
   });
 
   test.afterAll(async ({ request }) => {
-    await request.post("/api/e2e/run-tool", { data: { tool: "libi.delete_template", args: { templateId } } });
+    await request.post("/api/e2e/run-tool", { data: { tool: "libi.template", args: { action: "delete", templateId } } });
   });
 
   test("template media: an SVG gets the sandbox CSP and nosniff, a PNG the media CSP", async ({ request }) => {
@@ -236,7 +236,7 @@ test.describe("a stored PDF in the asset viewer's <embed>", () => {
       expect(refusals).toEqual([]);
     } finally {
       await browser.close();
-      await request.post("/api/e2e/run-tool", { data: { tool: "libi.delete_template", args: { templateId } } });
+      await request.post("/api/e2e/run-tool", { data: { tool: "libi.template", args: { action: "delete", templateId } } });
     }
   });
 });

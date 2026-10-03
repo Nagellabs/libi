@@ -84,7 +84,7 @@ export async function audioDuckUpdate(
   if (!target.duck) {
     return {
       success: false,
-      error: `Ducking is not enabled on clip ${params.clipId}; call audio_duck_enable first`,
+      error: `Ducking is not enabled on clip ${params.clipId}; call libi.audio_duck({ action: "enable" }) first`,
     };
   }
   // A sidechain patch REPLACES the set; `sanitizeDuck` also normalizes a

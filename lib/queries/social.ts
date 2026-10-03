@@ -372,6 +372,20 @@ export function useRetrySocialPost() {
   );
 }
 
+/**
+ * Send a draft to the platform's own inbox (`POST /api/social/posts/:id/inbox`).
+ * User-only on the server; a draft that cannot go answers 422 with the reason
+ * in `body.message`, which the button shows.
+ */
+export function useSendToInbox() {
+  return useSocialMutation(({ id, requestId }: { id: string; requestId: string }) =>
+    api<{ post: SocialPost; deduped: boolean }>(`/api/social/posts/${encodeURIComponent(id)}/inbox`, {
+      method: "POST",
+      body: JSON.stringify({ requestId }),
+    }),
+  );
+}
+
 export interface SocialFitResponse {
   probe: FitProbe;
   verdicts: FitVerdict[];

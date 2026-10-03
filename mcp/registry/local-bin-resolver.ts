@@ -76,7 +76,7 @@ export function resolveBundledSpawn(def: BundledMcpDef): ResolvedSpawn {
     // cwd is libi's package root only in the Next.js SERVER process (a dev
     // checkout, `lib/cli/studio.ts`'s production chdir, `electron/main.ts`'s
     // chdir to the runtime root). But two of this function's three call sites
-    // run in the libi MCP CHILD: `libi.diagnose_mcp`
+    // run in the libi MCP CHILD: `libi.extension({ action: "diagnose" })`
     // (`mcp/bundled-mcps/diagnose.ts`) and the install/probe path
     // (`mcp/registry/server-prober.ts`, reached from
     // `mcp/bundled-mcps/install-tools.ts`). The ACP adapter spawns that child
@@ -112,7 +112,7 @@ export function resolveBundledSpawn(def: BundledMcpDef): ResolvedSpawn {
     // / package.json), so a missing entry point/tsx CLI here means a broken
     // build — fail loudly with a diagnostic instead of reaching for that
     // fallback. This function is called from the settings/ACP spawn path AND
-    // from `libi.diagnose_mcp` (mcp/bundled-mcps/diagnose.ts) and the
+    // from `libi.extension({ action: "diagnose" })` (mcp/bundled-mcps/diagnose.ts) and the
     // install/probe path (mcp/registry/server-prober.ts), so closing the gap
     // here closes it everywhere.
     throw new Error(

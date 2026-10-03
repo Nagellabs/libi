@@ -51,7 +51,10 @@ export function PermissionRequestCard({
   const rawTitle =
     (toolCall as { title?: string }).title ?? "Permission required";
   const toolId = fromAnyToolName(rawTitle);
-  const title = toolId ? formatToolId(toolId) : formatBuiltinTitle(rawTitle);
+  // A Claude request carries the call's arguments, so a merged libi tool names its action
+  // ("Libi Snapshot · discard"). A Codex MCP request is nameless and shows the generic title.
+  const rawInput = (toolCall as { rawInput?: unknown }).rawInput;
+  const title = toolId ? formatToolId(toolId, rawInput) : formatBuiltinTitle(rawTitle);
   const headline = reason === "extension" ? "Approve extension tool" : "Approve tool call";
   const hint = reason === "extension" ? "This libi extension is marked \"requires approval\" in Settings." : null;
 

@@ -55,7 +55,8 @@ describe("bundled def kinds", () => {
   it("routes a tool name to the extension that owns its prefix", () => {
     expect(extensionForToolName("libi.generate_music")?.id).toBe("local-music");
     expect(extensionForToolName("libi.music_download_model")?.id).toBe("local-music");
-    expect(extensionForToolName("libi.compute_object_track")?.id).toBe("libi-tracking");
+    expect(extensionForToolName("libi.track")?.id).toBe("libi-tracking");
+    expect(extensionForToolName("libi.tracked_overlay")?.id).toBe("libi-tracking");
     expect(extensionForToolName("libi.whisper_list_models")?.id).toBe("whisper");
     expect(extensionForToolName("libi.export_video")?.id).toBe("libi-export");
     expect(extensionForToolName("libi.list_pieces")).toBeNull();
@@ -131,5 +132,18 @@ describe("bundled def kinds", () => {
       expect(name.startsWith("libi.")).toBe(true);
       expect(extensionForToolName(name)?.id, name).toBe("libi-tracking");
     }
+  });
+
+  it("claims for libi-tracking exactly the tracking tools, no more (the merged names did not widen the gate)", () => {
+    const owned = registeredToolNames(createLibiMcpServer())
+      .filter((name) => extensionForToolName(name)?.id === "libi-tracking")
+      .sort();
+    expect(owned).toEqual([
+      "libi.install_tracking_engine",
+      "libi.remove_background",
+      "libi.track",
+      "libi.tracked_overlay",
+      "libi.verify_install",
+    ]);
   });
 });

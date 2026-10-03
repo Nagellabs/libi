@@ -1,7 +1,7 @@
 ---
 id: meta-no-provider
 title: With no video provider connected, the agent suggests one and stops
-skills: [generic-video, ai-asset-generation, ai-video-models, using-storyboard, realistic-image-generation]
+skills: [generic-video, ai-asset-generation, video-generation-craft, using-storyboard]
 mcps: []
 agent: claude-code
 runs: 1

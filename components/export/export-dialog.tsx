@@ -30,6 +30,9 @@ import {
   resolveOutputDimensions,
   DEFAULT_GRAPHICS_QUALITY,
   GRAPHICS_SHARPNESS_WARNING,
+  SOCIAL_FIT,
+  SOCIAL_DEFAULT_QUALITY,
+  SOCIAL_DEFAULT_GRAPHICS_QUALITY,
   graphicsLosesSharpness,
 } from "@/lib/export/quality";
 import { ExportAudioSection } from "@/components/export/export-audio-section";
@@ -168,6 +171,11 @@ export function ExportDialog(props: ExportDialogProps) {
 
   const [purpose, setPurposeState] = useState<ExportPurpose>(initialPurpose ?? "social");
   const [overrides, setOverrides] = useState<IncludeOverrides>({});
+  // Whether the user picked a size. A social export they did not size is fitted by libi to at most
+  // 1080×1920 (what Instagram and TikTok take) — the same default the agent path has — instead of
+  // the saved export defaults, which may say 4K (221 MB / 144 s for one post). Picking any size ends it.
+  const [sizeTouched, setSizeTouched] = useState(false);
+  const socialFit = purpose === "social" && !sizeTouched;
   const choosePurpose = useCallback(
     (p: ExportPurpose) => {
       // Re-clicking the already-selected purpose is a no-op: it must not
@@ -190,25 +198,22 @@ export function ExportDialog(props: ExportDialogProps) {
   // `prevPieceName` / `prevDefaults` above — never while the dialog stays
   // open, so a purpose the user is actively choosing isn't clobbered
   // mid-session.
-  const [presetUndo, setPresetUndo] = useState<{ quality: DialogQuality; graphicsQuality: GraphicsQuality; format: ExportFormat } | null>(null);
+  const [presetUndo, setPresetUndo] = useState<{ format: ExportFormat } | null>(null);
   const [prevOpenForPurpose, setPrevOpenForPurpose] = useState(open);
   if (open !== prevOpenForPurpose) {
     setPrevOpenForPurpose(open);
     if (open) {
       setPurposeState(initialPurpose ?? "social");
       setOverrides({});
+      setSizeTouched(false);
       if (returnToPost) {
-        // From the post composer: Instagram and TikTok gain nothing from a 4K
-        // upload, and it is 4x the bytes to send, and they want MP4. Preset
-        // 1080p MP4 (the user can still change it; the saved export defaults
-        // are never written), remembering what was there for the next plain open.
-        if (!presetUndo) setPresetUndo({ quality, graphicsQuality, format });
-        setQuality("1080p");
-        setGraphicsQuality("1080p");
+        // From the post composer: Instagram and TikTok want MP4, and a social export is already
+        // fitted to 1080×1920 (the size is not preset: `socialFit`). The user can still change
+        // both; the saved export defaults are never written, and the format is put back for the
+        // next plain open.
+        if (!presetUndo) setPresetUndo({ format });
         setFormat("mp4");
       } else if (presetUndo) {
-        setQuality(presetUndo.quality);
-        setGraphicsQuality(presetUndo.graphicsQuality);
         setFormat(presetUndo.format);
         setPresetUndo(null);
       }
@@ -243,10 +248,14 @@ export function ExportDialog(props: ExportDialogProps) {
   // Derived from the SAME short-edge logic the server uses, rather than a
   // second hardcoded table — a stale copy here is what showed "1920×1080"
   // (and a false upscaling warning) for a portrait export.
+  // What the dialog shows and sends: the user's tiers, or — for a social export they did not size —
+  // the social default (the piece's own media size, 1080p graphics) fitted into SOCIAL_FIT.
+  const effQuality: DialogQuality = socialFit ? SOCIAL_DEFAULT_QUALITY : quality;
+  const effGraphicsQuality: GraphicsQuality = socialFit ? SOCIAL_DEFAULT_GRAPHICS_QUALITY : graphicsQuality;
   const mediaDims = useMemo(() => {
-    if (quality === "source") return { width: compositionWidth, height: compositionHeight };
-    return presetDimensions(quality, compositionWidth, compositionHeight);
-  }, [quality, compositionWidth, compositionHeight]);
+    if (effQuality === "source") return { width: compositionWidth, height: compositionHeight };
+    return presetDimensions(effQuality, compositionWidth, compositionHeight);
+  }, [effQuality, compositionWidth, compositionHeight]);
 
   const mediaIsUpscaling = computeIsUpscaling(mediaDims, compositionWidth, compositionHeight);
 
@@ -256,19 +265,21 @@ export function ExportDialog(props: ExportDialogProps) {
   const outputDims = useMemo(
     () =>
       resolveOutputDimensions({
-        quality,
-        graphicsQuality,
+        quality: effQuality,
+        graphicsQuality: effGraphicsQuality,
         hasGraphics,
         sourceWidth: compositionWidth,
         sourceHeight: compositionHeight,
+        ...(socialFit ? { fitWithin: SOCIAL_FIT } : {}),
       }),
-    [quality, graphicsQuality, hasGraphics, compositionWidth, compositionHeight],
+    [effQuality, effGraphicsQuality, hasGraphics, compositionWidth, compositionHeight, socialFit],
   );
 
   // Only warn when the text really comes out below 4K: media at 4K already
   // raises the frame there, whatever the graphics choice says.
   const fullGraphics = presetDimensions(DEFAULT_GRAPHICS_QUALITY, compositionWidth, compositionHeight);
   const graphicsWarning =
+    !socialFit &&
     graphicsLosesSharpness(graphicsQuality) &&
     outputDims.width * outputDims.height < fullGraphics.width * fullGraphics.height;
 
@@ -282,11 +293,15 @@ export function ExportDialog(props: ExportDialogProps) {
       source,
       filename: stem,
       format,
-      quality,
-      // Sent even when hasGraphics is false — the server ignores it for a
-      // graphics-free piece, and keeping it always-present means it never
-      // silently drops out of the payload if graphics get added later.
-      graphicsQuality,
+      // A social export with no size picked names none: the server fits it to 1080×1920
+      // (`usesSocialFit`), which is exactly the size shown above.
+      ...(socialFit ? {} : {
+        quality,
+        // Sent even when hasGraphics is false — the server ignores it for a
+        // graphics-free piece, and keeping it always-present means it never
+        // silently drops out of the payload if graphics get added later.
+        graphicsQuality,
+      }),
       // `audioRequest` always carries a `purpose` ("social" by default), so
       // this dialog's own submissions can never draw the API's 422
       // `purpose_required` — that refusal (`flow.purposeRequired`) still
@@ -305,7 +320,7 @@ export function ExportDialog(props: ExportDialogProps) {
       });
       setOpen(false);
     }
-  }, [pieceId, filename, pieceName, flow, source, format, quality, graphicsQuality, audioTracks, purpose, overrides, returnToPost, returnDraftPostId, setOpen]);
+  }, [pieceId, filename, pieceName, flow, source, format, quality, graphicsQuality, socialFit, audioTracks, purpose, overrides, returnToPost, returnDraftPostId, setOpen]);
 
   const handleClose = useCallback(() => {
     // setOpen handles the reset for us.
@@ -382,8 +397,14 @@ export function ExportDialog(props: ExportDialogProps) {
 
             <Field label="Videos & images" hint={`Output ${outputDims.width}×${outputDims.height}`}>
               <Segmented
-                value={quality}
-                onChange={(v) => setQuality(v as DialogQuality)}
+                value={effQuality}
+                onChange={(v) => {
+                  setSizeTouched(true);
+                  // Leaving the social default keeps the other tier where it was shown, so choosing one
+                  // size does not silently swap the other for a saved default.
+                  if (socialFit) setGraphicsQuality(effGraphicsQuality);
+                  setQuality(v as DialogQuality);
+                }}
                 options={[
                   { value: "source", label: "Original" },
                   { value: "1080p", label: "1080p" },
@@ -391,6 +412,12 @@ export function ExportDialog(props: ExportDialogProps) {
                   { value: "4k", label: "4K" },
                 ]}
               />
+              {socialFit && (
+                <p data-testid="export-social-fit" className="mt-2 text-xs text-muted-foreground">
+                  Fitted for social: at most {SOCIAL_FIT.shortEdge}×{SOCIAL_FIT.longEdge}, the most Instagram and TikTok take.
+                  Pick a size to override.
+                </p>
+              )}
               {mediaIsUpscaling && (
                 <p className="mt-2 rounded bg-amber-500/10 px-2 py-1.5 text-xs text-amber-600 dark:text-amber-400">
                   {`Videos and images are upscaled from ${compositionWidth}×${compositionHeight}: no added detail, larger file.`}
@@ -401,8 +428,12 @@ export function ExportDialog(props: ExportDialogProps) {
             {hasGraphics && (
               <Field label="Text, code & 3D">
                 <Segmented
-                  value={graphicsQuality}
-                  onChange={(v) => setGraphicsQuality(v as GraphicsQuality)}
+                  value={effGraphicsQuality}
+                  onChange={(v) => {
+                    setSizeTouched(true);
+                    if (socialFit) setQuality(effQuality);
+                    setGraphicsQuality(v as GraphicsQuality);
+                  }}
                   options={[
                     { value: "1080p", label: "1080p" },
                     { value: "1440p", label: "1440p" },
@@ -465,7 +496,7 @@ export function ExportDialog(props: ExportDialogProps) {
             <Skeleton data-testid="export-summary-loading" className="h-3 w-40 sm:mr-auto sm:self-center" />
           ) : (
             <span data-testid="export-summary" className="text-xs text-muted-foreground sm:mr-auto sm:self-center">
-              {audioTracksError ? "Couldn't load this piece's audio" : exportSummary(format, QUALITY_LABEL[quality], audioTracks, purpose, overrides)}
+              {audioTracksError ? "Couldn't load this piece's audio" : exportSummary(format, socialFit ? `${outputDims.width}×${outputDims.height}` : QUALITY_LABEL[quality], audioTracks, purpose, overrides)}
             </span>
           )}
           <Button variant="ghost" onClick={handleClose} className="cursor-pointer">

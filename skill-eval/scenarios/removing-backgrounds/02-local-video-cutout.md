@@ -1,7 +1,10 @@
 ---
 id: local-video-cutout
 title: Video background removal routes LOCAL-first and never routes a video to the photo endpoint
-skills: [removing-and-replacing-backgrounds, ai-asset-generation]
+# video-generation-craft is mounted because the prompt asks for a GENERATED source clip, and
+# ai-asset-generation hands model choice for a photoreal person to it. Without it the agent said
+# "no craft skill exists for photoreal people" and named a fal id from memory (unknown_endpoint).
+skills: [removing-and-replacing-backgrounds, ai-asset-generation, video-generation-craft]
 mcps: [fal-ai]
 agent: claude-code
 runs: 1

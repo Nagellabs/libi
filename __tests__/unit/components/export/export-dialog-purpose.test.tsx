@@ -46,7 +46,7 @@ describe("ExportDialog — two columns, Social by default", () => {
     expect(screen.getByTestId("export-audio-include-song")).not.toBeChecked();
     expect(screen.getByTestId("export-audio-include-clip")).toBeChecked();
     expect(screen.getByTestId("export-audio-platforms-song")).toHaveTextContent("TikTok attaches it at posting · Instagram: left out");
-    expect(screen.getByTestId("export-summary")).toHaveTextContent("MP4 · Original · 2 of 3 audio tracks");
+    expect(screen.getByTestId("export-summary")).toHaveTextContent("MP4 · 1080×1920 · 2 of 3 audio tracks");
   });
 
   it("including the song in a Social export warns; the request names it and leaves an unticked track out", () => {
@@ -79,7 +79,7 @@ describe("ExportDialog — two columns, Social by default", () => {
   it("an empty piece says it has no audio", () => {
     renderIt({ tracks: [] });
     expect(screen.getByTestId("export-audio-empty")).toHaveTextContent("This piece has no audio.");
-    expect(screen.getByTestId("export-summary")).toHaveTextContent("MP4 · Original · no audio");
+    expect(screen.getByTestId("export-summary")).toHaveTextContent("MP4 · 1080×1920 · no audio");
   });
 
   it("re-clicking the already-selected purpose is a no-op — a copyrighted toggle survives", () => {

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { AccountsStripSkeleton } from "@/components/social/social-skeletons";
 import { AGENT_ONLY_BLURB } from "@/components/social/platform-support";
 import { useSocialAccounts, useSocialStatus } from "@/lib/queries/social";
@@ -18,11 +19,19 @@ import type { AccountMusicFacts } from "@/lib/social/music-policy";
  * synthesized in `normalize.ts#accountHealthFromRow` from that exact field),
  * never derived from how close `tokenExpiresAt` is.
  */
-export function AccountsStrip() {
+export function AccountsStrip({ focusAccountId = null }: { focusAccountId?: string | null } = {}) {
   const accounts = useSocialAccounts();
   const status = useSocialStatus();
   const musicFacts = useSocialMusicFacts();
   const setKind = useSetTikTokKind();
+
+  // The account an agent pointed the user at (`libi.show({ target: "social_settings", accountId })`):
+  // scrolled into view and ringed, once the cards are there.
+  const focusRef = useRef<HTMLDivElement | null>(null);
+  const focusReady = !!focusAccountId && !accounts.isLoading && (accounts.data ?? []).some((a) => a.id === focusAccountId);
+  useEffect(() => {
+    if (focusReady) focusRef.current?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+  }, [focusReady, focusAccountId]);
 
   if (accounts.isLoading) return <AccountsStripSkeleton />;
 
@@ -32,7 +41,13 @@ export function AccountsStrip() {
   return (
     <div data-testid="accounts-strip" className="flex flex-wrap gap-3">
       {list.map((a) => (
-        <div key={a.id} data-testid="account-card" className="flex items-center gap-2.5 rounded-lg border border-border bg-card p-3 text-sm">
+        <div
+          key={a.id}
+          ref={a.id === focusAccountId ? focusRef : undefined}
+          data-testid="account-card"
+          data-focused={a.id === focusAccountId ? "true" : undefined}
+          className={`flex items-center gap-2.5 rounded-lg border bg-card p-3 text-sm ${a.id === focusAccountId ? "border-primary ring-2 ring-primary/40" : "border-border"}`}
+        >
           <PlatformBadge platform={a.platform} />
           <div>
             <p className="font-medium leading-tight">@{a.username}</p>

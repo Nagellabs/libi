@@ -57,7 +57,7 @@ export interface ManualAnchor {
 }
 
 /** Agent-authored corrective anchor. Structurally mirrors ManualAnchor but is
- *  a SEPARATE channel: written ONLY by compute_track_segment when correcting
+ *  a SEPARATE channel: written ONLY by libi.track compute_segment when correcting
  *  an EXISTING track; never written/cleared by the UI; never surfaced as a
  *  user-removable list. Manual anchors outrank these (manual > agent >
  *  engine). See docs-local/superpowers/specs/2026-05-18-agent-anchor-override-design.md. */
@@ -94,7 +94,7 @@ export interface Track {
    *  docs-local/superpowers/specs/2026-05-17-manual-overlay-reanchoring-design.md. */
   manualAnchors?: ManualAnchor[];
   /** Agent-authored corrections. Transparent: written only by
-   *  compute_track_segment correcting an existing track; never UI-surfaced.
+   *  libi.track compute_segment correcting an existing track; never UI-surfaced.
    *  Manual anchors outrank these at render and as engine seed. */
   agentAnchors?: AgentAnchor[];
 }

@@ -4,6 +4,7 @@ import { runFfmpeg } from "@/lib/ffmpeg/exec";
 import { duckGainCurve } from "@/lib/audio/duck-law";
 import type { DuckSettings } from "@/lib/engine/types";
 import { onFileTimeline } from "@/lib/export/export-base";
+import { gainGrid, gridAt } from "@/lib/audio/clip-gain";
 
 /**
  * Renders each ducked clip's gain curve to a WAV that the export graph
@@ -38,6 +39,13 @@ export interface PlacedSidechain {
    * different level than the editor showed.
    */
   volume: number;
+  /**
+   * The sidechain clip's level over composition time, when it is more than its
+   * constant `volume` (a gain, a volume envelope, a crossfade, fades): the
+   * ONE law in `lib/audio/clip-gain.ts` (`clipGainAt`), which is what the
+   * preview's post-gain tap hears. Absent = the constant `volume`.
+   */
+  gainAt?: (compSeconds: number) => number;
   /** ffprobe index of the audio stream the preview plays from this file
    *  (probeMedia's primaryAudioStreamIndex). Unknown → ffmpeg's own pick. */
   audioStream?: number;
@@ -88,7 +96,7 @@ async function decodeMono(
 }
 
 /** Minimal mono 32-bit-float WAV — self-describing, so ffmpeg needs no input flags. */
-function encodeWavF32Mono(samples: Float32Array, sampleRate: number): Buffer {
+export function encodeWavF32Mono(samples: Float32Array, sampleRate: number): Buffer {
   const dataBytes = samples.length * 4;
   const buf = Buffer.alloc(44 + dataBytes);
   buf.write("RIFF", 0);
@@ -129,7 +137,16 @@ export function placeOnTimeline(
   const count = Math.max(0, Math.round(sidechain.duration * sampleRate));
   const at = Math.max(0, Math.round(sidechain.startTime * sampleRate));
   const n = Math.min(count, decoded.length - from, timelineSamples - at);
-  for (let i = 0; i < n; i++) timeline[at + i] += decoded[from + i] * sidechain.volume;
+  if (!sidechain.gainAt) {
+    for (let i = 0; i < n; i++) timeline[at + i] += decoded[from + i] * sidechain.volume;
+    return timeline;
+  }
+  // A level that moves: evaluated every millisecond and interpolated between,
+  // the same grid the clip's own export envelope uses (gain-envelopes.ts).
+  const grid = gainGrid(sidechain.gainAt, sidechain.startTime, sidechain.duration);
+  for (let i = 0; i < n; i++) {
+    timeline[at + i] += decoded[from + i] * gridAt(grid, i / sampleRate);
+  }
   return timeline;
 }
 

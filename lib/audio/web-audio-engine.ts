@@ -11,8 +11,10 @@ import { duckSidechainIds } from "@/lib/audio/duck-params";
 import {
   compToCtxTime,
   clipSourceRange,
+  crossfadeGain,
   AUDIO_CROSSFADE_S,
 } from "@/lib/audio/schedule-math";
+import { clipGainAt, crossfadePlan, dbToGain, hasGainShape, sampleCurve } from "@/lib/audio/clip-gain";
 import { SCHEDULE_AHEAD_S } from "@/lib/preview/tuning";
 import { recordPreviewEvent } from "@/lib/preview/telemetry";
 import { audioFadeSeconds } from "@/lib/effects/audio-envelope";
@@ -171,6 +173,14 @@ interface EngineClip {
   /** Signature of the duck graph currently built, so reconcile rebuilds
    *  only on a real change (params or sidechain node identity). */
   duckSig: string | null;
+  /** Bumped by every rebuildDuck that tears down + (maybe) rebuilds, so a
+   *  rebuild suspended on the worklet-module load can tell it was superseded
+   *  and must not build a second graph behind the newer one. */
+  duckEpoch: number;
+  /** Signature of a duck whose worklet reported `processorerror`. Such a
+   *  worklet outputs nothing from then on — a muted clip — so the duck is
+   *  torn down (full level) and that exact duck is not rebuilt. */
+  duckBrokenSig: string | null;
 }
 
 /**
@@ -280,7 +290,7 @@ export class WebAudioEngine {
       sink: null, opus: null, ogg: null, vorbis: null, grid: null, gridTiming: null, input: null, origin: 0, audioLead: 0, seqShift: 0, skipsPreSkip: true, opusTrims: [], fallback: 0, codec: null,
       timingAnswered: false, gain,
       nodes: new Set(), pumpAbort: null, ready: Promise.resolve(),
-      duckGain: null, duckWorklet: null, duckSidechainGains: [], duckSig: null,
+      duckGain: null, duckWorklet: null, duckSidechainGains: [], duckSig: null, duckEpoch: 0, duckBrokenSig: null,
     };
     this.openSource(ec, url);
     return ec;
@@ -620,6 +630,41 @@ export class WebAudioEngine {
     }
   }
 
+  /**
+   * The clip's level as ONE sampled curve (`setValueCurveAtTime`): static gain,
+   * volume envelope, crossfades and the in/out fades, from the same evaluator
+   * the export renders (`clipGainAt`), times the preview's own 20 ms edge ramp.
+   * Sampled every 10 ms of COMPOSITION time (coarser only on a clip so long the
+   * array would pass 20k values), so it stays right at any playback rate: the
+   * curve's duration is the span's length in context time. Scheduled from the
+   * playhead, so a seek, a rate change, a resume and a manifest change all
+   * simply call it again (`rescheduleAll`).
+   */
+  private scheduleGainCurve(
+    g: AudioParam,
+    clip: AudioClip,
+    plan: ReturnType<typeof crossfadePlan>,
+    fromComp: number,
+    nowCtx: number,
+    startCtx: number,
+  ): void {
+    const end = clip.startTime + clip.duration;
+    const level = (t: number) =>
+      clipGainAt(clip, plan, t) * crossfadeGain(Math.min(Math.max(t - clip.startTime, 0), clip.duration), clip.duration);
+    const playing = startCtx <= nowCtx;
+    // Before the clip starts it is silent (its source is scheduled ahead of it).
+    g.setValueAtTime(playing ? level(fromComp) : 0, nowCtx);
+    const from = Math.max(fromComp, clip.startTime);
+    const span = end - from;
+    if (!(span > 0)) return;
+    const step = Math.max(0.01, span / 20000);
+    const count = Math.max(2, Math.ceil(span / step) + 1);
+    const exactStep = span / (count - 1);
+    const values = sampleCurve(level, from, exactStep, count);
+    const curveStartCtx = Math.max(nowCtx, startCtx);
+    g.setValueCurveAtTime(values, curveStartCtx, span / this.speed);
+  }
+
   /** Schedule clip gain envelope + a decode-ahead pump of audio chunks. */
   private scheduleClip(ec: EngineClip, fromComp: number): void {
     const { clip } = ec;
@@ -648,7 +693,8 @@ export class WebAudioEngine {
     if (!range) return;
 
     // Gain envelope: clip volume with a short crossfade ramp at each edge.
-    const vol = effectiveVolume(clip, { masterVolume: 1, masterMuted: false });
+    // `gainDb` is part of the level: a boost past the 0..1 `volume`.
+    const vol = effectiveVolume(clip, { masterVolume: 1, masterMuted: false }) * dbToGain(clip.gainDb ?? 0);
     const startCtx = compToCtxTime(clip.startTime, this.anchorComp, this.anchorCtx, this.speed);
     const endCtx = compToCtxTime(clip.startTime + clip.duration, this.anchorComp, this.anchorCtx, this.speed);
     const ramp = Math.min(AUDIO_CROSSFADE_S, clip.duration / 2);
@@ -657,11 +703,19 @@ export class WebAudioEngine {
     const t0 = Math.max(nowCtx, startCtx);
     // Compute fade lengths up-front so the crossfade block can defer to them.
     const fade = audioFadeSeconds(clip);
+    // A volume envelope or a crossfade: the level is a CURVE, sampled from the
+    // one law (lib/audio/clip-gain.ts) that the export renders too. Anything
+    // else keeps the ramps below, byte for byte.
+    const plan = crossfadePlan([...this.clips.values()].map((e) => e.clip));
+    const shaped = hasGainShape(clip, plan);
     // From NOW: the clip's volume if it is already playing, else 0 until it
     // starts. Scheduling from t0 left the span before it at whatever the gain
     // was, which is the GainNode's intrinsic 1 on a first schedule
     // (Re-review R5).
     g.cancelScheduledValues(nowCtx);
+    if (shaped) {
+      this.scheduleGainCurve(g, clip, plan, fromComp, nowCtx, startCtx);
+    } else {
     g.setValueAtTime(startCtx <= nowCtx ? vol : 0, nowCtx);
     if (startCtx > nowCtx) g.setValueAtTime(0, startCtx);
     // Skip the opening crossfade ramp when an explicit fade-in owns that boundary.
@@ -682,6 +736,7 @@ export class WebAudioEngine {
       const outStartCtx = endCtx - fade.outSec;
       g.setValueAtTime(vol, Math.max(t0, outStartCtx));
       g.linearRampToValueAtTime(0, endCtx);
+    }
     }
 
     const ac = new AbortController();
@@ -882,8 +937,17 @@ export class WebAudioEngine {
 
   /** Re-evaluate every clip's duck graph; rebuild only those that changed. */
   private async reconcileDucks(): Promise<void> {
-    for (const ec of this.clips.values()) {
-      await this.rebuildDuck(ec);
+    // One clip's failed rebuild must not strand the clips after it: they would
+    // never get their duck, which for the last of several ducked clips is the
+    // "last one" of the user's report.
+    for (const ec of [...this.clips.values()]) {
+      try {
+        await this.rebuildDuck(ec);
+      } catch (err) {
+        if (!this.disposed) {
+          console.warn("[WebAudioEngine] duck rebuild failed", (err as Error)?.message);
+        }
+      }
     }
   }
 
@@ -917,7 +981,11 @@ export class WebAudioEngine {
       && ec.duckSidechainGains.length === sources.length
       && sources.every((s, i) => ec.duckSidechainGains[i] === s.gain);
     if (same) return;
+    // This exact duck's worklet died: leave the clip at full level.
+    if (desired !== ec.duckBrokenSig) ec.duckBrokenSig = null;
+    if (desired !== null && desired === ec.duckBrokenSig) return;
 
+    const epoch = ++ec.duckEpoch;
     this.teardownDuck(ec);
     if (desired === null || !ec.clip.duck) return;
 
@@ -938,6 +1006,10 @@ export class WebAudioEngine {
     if (this.disposed) return;
     // The clip set may have changed while the worklet loaded — re-validate.
     if (this.clips.get(ec.clip.id) !== ec) return;
+    // A newer rebuild started while this one waited (setClips fires often, and
+    // each call reconciles). Two builds would leave the first one's worklet
+    // tapping the sidechains forever, unreachable by any teardown.
+    if (ec.duckEpoch !== epoch) return;
     const live = this.duckSources(ec);
     if (live.length === 0) return;
 
@@ -952,14 +1024,27 @@ export class WebAudioEngine {
     });
     applyDuckParams(worklet, ec.clip.duck, this.ctx.sampleRate);
     worklet.connect(duckGain.gain);
+    // A processor that throws goes silent for good, and its duckGain is at an
+    // intrinsic 0 — a muted clip. Un-duck instead: a missing duck is a loud
+    // music bed, a dead one is silence the user cannot explain.
+    worklet.onprocessorerror = () => {
+      if (ec.duckWorklet !== worklet) return;
+      console.warn("[WebAudioEngine] duck worklet failed — playing", ec.clip.id, "un-ducked");
+      const sig = ec.duckSig;
+      this.teardownDuck(ec);
+      ec.duckBrokenSig = sig;
+    };
     // Every sidechain feeds the worklet's ONE input — Web Audio sums fan-in, so
     // the follower sees the same summed signal the export builds by adding the
     // placed clips into one buffer. The tap stays POST-volume (`.gain`): a
     // pre-volume tap would duck against a level the listener never hears.
     for (const sc of live) sc.gain.connect(worklet);
 
-    // Reroute the clip's audio through the duck stage.
-    try { ec.gain.disconnect(); } catch { /* */ }
+    // Reroute the clip's audio through the duck stage. Sever ONLY the direct
+    // route to the master: a bare `disconnect()` also cuts every tap this gain
+    // node feeds into ANOTHER clip's worklet (when this clip is itself a
+    // sidechain), leaving that clip's duck listening to silence.
+    try { ec.gain.disconnect(this.master); } catch { /* not routed there */ }
     ec.gain.connect(duckGain);
     duckGain.connect(this.master);
 

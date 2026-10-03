@@ -24,7 +24,9 @@ import {
 import { JobManager } from "@/lib/jobs/manager";
 
 describe("4-shape enqueue response", () => {
+  const started = new Set<string>();
   beforeEach(() => {
+    started.clear();
     __resetRunnerRegistryForTests();
     vi.mocked(getDb).mockReturnValue(createTestDb() as never);
     vi.clearAllMocks();
@@ -34,6 +36,7 @@ describe("4-shape enqueue response", () => {
       resumable: false,
       paramsSchema: z.object({ p: z.string() }),
       async run(ctx) {
+        started.add(ctx.jobId);
         // Slow runner so the running test can observe in-flight state.
         await new Promise((r) => setTimeout(r, 200));
         ctx.reportProgress(1, 1, "x");
@@ -57,8 +60,8 @@ describe("4-shape enqueue response", () => {
     const first = await mgr.enqueue("k4", { p: "running" });
     if (first.status !== "new") throw new Error("expected new");
     void mgr.runToCompletion(first.jobId);
-    // Give it a moment to flip status to running.
-    await new Promise((r) => setTimeout(r, 50));
+    // The row is running once its runner has been called (markRunning comes first).
+    await vi.waitFor(() => expect(started.has(first.jobId)).toBe(true));
 
     const second = await mgr.enqueue("k4", { p: "running" });
     expect(second.status).toBe("attached_running");

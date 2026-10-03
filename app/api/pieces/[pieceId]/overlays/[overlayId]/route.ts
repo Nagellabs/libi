@@ -12,6 +12,8 @@ interface RouteParams {
 const UpdateOverlayBodySchema = updateOverlaySchema.omit({
   pieceId: true,
   overlayId: true,
+  // A code include is an agent tool's; the editor never sends one.
+  include: true,
 });
 
 /**

@@ -58,7 +58,7 @@ const AUTHOR_FIELDS_RULE =
  * A summary as the agent sees it. A local template's text is the user's own
  * and stays flat; a public or installed one's name, description, tags,
  * nickname and slot labels move under `author`, labelled — the same treatment
- * `get_template` gives index.md, so a stranger's words never sit bare beside
+ * `libi.template` action `get` gives index.md, so a stranger's words never sit bare beside
  * libi's own data.
  */
 function forAgent(t: TemplateSummary) {
@@ -96,7 +96,7 @@ function scaffoldForAgent<T extends object>(origin: TemplateSummary["origin"], s
 /** What an apply's result quotes from an installed template's author: its slot labels and hints, and warnings naming them. */
 const APPLY_AUTHOR_FIELDS = {
   source: AUTHOR_SOURCE,
-  fields: ["unfilledSlots[].label", "unfilledSlots[].hint", "warnings", "pendingMusic[].track", "pendingMusic[].sourceUrl"],
+  fields: ["unfilledSlots[].label", "unfilledSlots[].hint", "warnings", "placed[].layer", "pendingMusic[].track", "pendingMusic[].sourceUrl"],
   rule: AUTHOR_FIELDS_RULE,
   // What the apply copied INTO the piece and a later read hands back without
   // this label: the fixed text the layers display, font family names, and the
@@ -296,7 +296,7 @@ export async function updateTemplateTool(params: UpdateTemplateParams): Promise<
 const LIST_PUBLIC_CAP = 50;
 const MORE_PUBLIC_NOTE =
   `Only the top ${LIST_PUBLIC_CAP} public templates in this order are listed. ` +
-  "Use search_templates with a query or tags to find the rest.";
+  "Use libi.template({ action: \"search\" }) with a query or tags to find the rest.";
 
 /** When a public set is part of the answer, say when it was last confirmed and why the last refresh failed — so offline is not read as "the catalog is empty". */
 function catalogNote(scope: ListTemplatesParams["scope"]): { catalog?: ReturnType<typeof catalogStatus> } {
@@ -412,7 +412,9 @@ export function resetRecentAppliesForTests(): void {
 function applyCallKey(params: ApplyTemplateParams): string {
   const slotValues = Object.entries(params.slotValues ?? {}).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
   const target = params.pieceId ? { pieceId: params.pieceId } : { newPiece: params.newPiece?.name ?? null };
-  const body = JSON.stringify([params.templateId ?? null, params.cloudId ?? null, target, params.mode ?? "append", slotValues, params.copy ?? 1]);
+  // What shapes the result is part of the key: the same template with another fit, override or start is another apply.
+  const shape = [params.fit ?? null, params.layerOverrides ?? null, params.omitLayers ? [...params.omitLayers].sort() : null, params.startAt ?? 0];
+  const body = JSON.stringify([params.templateId ?? null, params.cloudId ?? null, target, params.mode ?? "append", slotValues, params.copy ?? 1, shape]);
   return crypto.createHash("sha256").update(body).digest("hex");
 }
 
@@ -680,12 +682,23 @@ async function applyOnce(
       pieceId,
       slotValues: params.slotValues,
       mode: params.mode,
+      // A new piece takes the template's canvas, so there is nothing to fit it into.
+      fit: target === "new-piece" ? undefined : params.fit,
+      layerOverrides: params.layerOverrides,
+      omitLayers: params.omitLayers,
+      startAt: params.startAt,
       fetchUrls,
     });
+    if (target === "new-piece" && params.fit === "reflow") {
+      result.warnings.push("fit: 'reflow' needs an existing piece; the new piece took the template's canvas, so the layers sit as authored");
+    }
     trackMcpEvent("template_applied", { origin, hasCode: row.hasCode, target });
     // Observed, not assumed: the studio may not be running, and the result
-    // tells the agent the piece is on screen.
-    const navigated = await notify.navigateAwaited({ target: "piece", pieceId });
+    // tells the agent whether the piece is on screen. An agent that applies into
+    // a piece it is already editing (six times in one session) must not move the
+    // user's editor each time, so only a piece this call made is opened unless
+    // `navigate` says otherwise.
+    const navigated = (params.navigate ?? target === "new-piece") ? await notify.navigateAwaited({ target: "piece", pieceId }) : false;
     logger.info(
       { tag: TEMPLATES_LOG_TAG, op: "tool_apply", templateId, pieceId, target, origin, unfilled: result.unfilledSlots.length, navigated },
       "template applied",
@@ -717,6 +730,10 @@ async function applyOnce(
       };
     }
     if (msg.startsWith("slot_unknown")) return { success: false, error: "slot_unknown", data: { hint: msg } };
+    // Refused before anything was written: the agent named a layer the template has, or a field its kind lacks.
+    for (const code of ["layer_unknown", "layer_override_omitted", "layer_override_invalid"]) {
+      if (msg.startsWith(code)) return { success: false, error: code, data: { hint: msg.replace(`${code}: `, "") } };
+    }
     if (msg === "template_not_found" || msg === "piece_not_found") return { success: false, error: msg };
     // Only `applyScaffold` knows whether writing had begun; anything else that
     // reaches here (including a non-ApplyError) wrote nothing.

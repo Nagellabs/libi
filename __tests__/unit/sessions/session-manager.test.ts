@@ -1560,7 +1560,7 @@ describe("SessionManager", () => {
   describe("findInProgressToolCall", () => {
     // Access via cast — private method tested through internal state for
     // precision; the public surface (attachJobProgressBridge) is too noisy.
-    const COMPUTE_TRACK_ID = makeMcpToolId("libi-tracking", "libi.compute_object_track");
+    const COMPUTE_TRACK_ID = makeMcpToolId("libi-tracking", "libi.track");
 
     function findById(
       instance: SessionManager,
@@ -1578,7 +1578,7 @@ describe("SessionManager", () => {
       entry.messageCache.push({
         id: "msg-1",
         role: "agent",
-        parts: [{ type: "tool-call", toolCallId: "tc-1", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} }],
+        parts: [{ type: "tool-call", toolCallId: "tc-1", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} }],
         timestamp: Date.now(),
       });
 
@@ -1608,8 +1608,8 @@ describe("SessionManager", () => {
         id: "msg-1",
         role: "agent",
         parts: [
-          { type: "tool-call", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} },
-          { type: "tool-result", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", result: {}, success: true },
+          { type: "tool-call", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} },
+          { type: "tool-result", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", result: {}, success: true },
         ],
         timestamp: Date.now(),
       });
@@ -1629,8 +1629,8 @@ describe("SessionManager", () => {
         id: "msg-1",
         role: "agent",
         parts: [
-          { type: "tool-call", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} },
-          { type: "tool-result", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", result: {}, success: true },
+          { type: "tool-call", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} },
+          { type: "tool-result", toolCallId: "tc-done", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", result: {}, success: true },
         ],
         timestamp: Date.now() - 5000,
       });
@@ -1639,7 +1639,7 @@ describe("SessionManager", () => {
         id: "msg-2",
         role: "agent",
         parts: [
-          { type: "tool-call", toolCallId: "tc-open", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} },
+          { type: "tool-call", toolCallId: "tc-open", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} },
         ],
         timestamp: Date.now(),
       });
@@ -1667,13 +1667,13 @@ describe("SessionManager", () => {
       older.messageCache.push({
         id: "msg-old",
         role: "agent",
-        parts: [{ type: "tool-call", toolCallId: "tc-old", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} }],
+        parts: [{ type: "tool-call", toolCallId: "tc-old", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} }],
         timestamp: Date.now() - 10000,
       });
       newer.messageCache.push({
         id: "msg-new",
         role: "agent",
-        parts: [{ type: "tool-call", toolCallId: "tc-new", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.compute_object_track", args: {} }],
+        parts: [{ type: "tool-call", toolCallId: "tc-new", toolId: COMPUTE_TRACK_ID, rawTitle: "libi.track", args: {} }],
         timestamp: Date.now(),
       });
 

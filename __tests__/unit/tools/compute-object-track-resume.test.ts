@@ -5,7 +5,7 @@ import { files, mcpServers } from "@/lib/db/schema/sqlite";
 import { seedDatabase } from "@/lib/db/init";
 import { createTrackingMcpServer } from "@/mcp/tracking-mcp/server";
 import { createLibiMcpServer } from "@/mcp/server";
-import { registeredToolNames, TRACKING_TOOL_NAMES } from "@/__tests__/helpers/mcp-tools";
+import { registeredToolNames, TRACKING_TOOL_NAMES, expectTrackingAction } from "@/__tests__/helpers/mcp-tools";
 
 /**
  * Verifies the resume semantics of computeObjectTrack's shot-fan-out.
@@ -93,15 +93,15 @@ afterEach(async () => {
 });
 
 describe("compute_object_track MCP surface (resume tests file)", () => {
-  it("libi.compute_object_track is registered on the libi-tracking MCP", () => {
+  it("libi.track compute is registered on the libi-tracking MCP", () => {
     const names = registeredToolNames(createTrackingMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 
-  it("libi.compute_object_track IS registered on the core libi MCP (always-on)", () => {
+  it("libi.track compute IS registered on the core libi MCP (always-on)", () => {
     const names = registeredToolNames(createLibiMcpServer());
-    expect(names).toContain("libi.compute_object_track");
+    expectTrackingAction(names, "libi.track", "compute");
     for (const t of TRACKING_TOOL_NAMES) expect(names).toContain(t);
   });
 });

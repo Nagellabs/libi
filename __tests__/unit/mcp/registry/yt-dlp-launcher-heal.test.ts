@@ -99,7 +99,10 @@ async function load() {
   return { DependencyManager, dep, installers, launcher };
 }
 
-describe.skipIf(realPlatform === "win32")("yt-dlp launcher — canonical target, self-heal", () => {
+// Every test re-imports the dependency manager after vi.resetModules() and runs the fake uv
+// installer: real module loading and child processes, which a loaded machine stretches past
+// vitest's 5 s default. Nothing here asserts on time.
+describe.skipIf(realPlatform === "win32")("yt-dlp launcher — canonical target, self-heal", { timeout: 30_000 }, () => {
   it("a worktree-symlinked home writes the CANONICAL entry path, which survives deleting the worktree", async () => {
     // The worktree layout: its own home whose bin/ and uv/ are links to the
     // canonical ones.

@@ -17,7 +17,7 @@ import { resolveManualSection, splitManual } from "@/mcp/manual-sections";
  * They are registered on BOTH surfaces on purpose: a user's own Claude Code or
  * Codex posts from its own project, so none of them is in `IN_APP_ONLY_TOOLS`.
  */
-const NAMES = ["libi.social_status", "libi.post_piece", "libi.social_link_post", "libi.social_music_search"] as const;
+const NAMES = ["libi.social_status", "libi.post_piece", "libi.social_link", "libi.social_music_search"] as const;
 
 async function listTools(surface?: AgentSurface) {
   const server = createLibiMcpServer(surface !== undefined ? { surface } : undefined);
@@ -65,15 +65,19 @@ describe("the social tools are reachable over MCP", () => {
     }
   });
 
-  it("social_link_post's schema takes the two ids it links, and social_status takes nothing", async () => {
+  it("social_link takes a `kind` (post | ad) and the ids it links, and social_status takes nothing", async () => {
     const { tools } = await listTools();
-    const link = tools.find((t) => t.name === "libi.social_link_post")!;
+    const link = tools.find((t) => t.name === "libi.social_link")!;
     expect(Object.keys((link.inputSchema.properties ?? {}) as Record<string, unknown>).sort()).toEqual([
       "exportPath",
+      "kind",
       "pieceId",
+      "platformAdId",
+      "providerAdId",
       "providerPostId",
     ]);
-    expect(link.inputSchema.required).toEqual(["pieceId", "providerPostId"]);
+    expect((link.inputSchema.properties as Record<string, { enum?: string[] }>).kind.enum).toEqual(["post", "ad"]);
+    expect(link.inputSchema.required).toEqual(["kind"]);
     const status = tools.find((t) => t.name === "libi.social_status")!;
     expect(status.inputSchema.properties ?? {}).toEqual({});
   });
@@ -118,7 +122,7 @@ describe("the manual teaches social posting", () => {
     for (const fact of [
       "libi.social_status",
       "libi.post_piece",
-      "libi.social_link_post",
+      "libi.social_link",
       "Drafts only",
       "cannot publish or schedule",
       // The provider truths that were measured live and cost real time.

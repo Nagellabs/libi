@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { frameDroppedOverlaysInResult } from "@/mcp/tools/job-tools";
 import { DIAGNOSTIC_MESSAGE_SOURCE, LIBI_MESSAGE_SOURCE } from "@/mcp/tools/body-message";
 
-describe("libi.get_job_status — an export result's droppedOverlays are framed as body text (Task 10 f)", () => {
+describe("libi.job({ action: 'status' }) — an export result's droppedOverlays are framed as body text (Task 10 f)", () => {
   it("marks each message and leaves the rest of the result alone", () => {
     const out = frameDroppedOverlaysInResult(JSON.stringify({ filePath: "/x.mp4", droppedOverlays: [{ id: "o", message: "render: boom" }] }));
     expect(JSON.parse(out!)).toEqual({

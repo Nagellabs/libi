@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * A hand-off from somewhere else in the UI (the agent's `libi.show_piece`-style
+ * A hand-off from somewhere else in the UI (the agent's `libi.show({ target: "piece" })`-style
  * navigate with `target: "posting"`, the Social page's links) into the
  * editor's Posting tab. This is UI-LOCAL state — nothing here persists or
  * leaves the page, and it never substitutes for the server's own notion of a

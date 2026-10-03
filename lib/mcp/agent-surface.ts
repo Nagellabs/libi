@@ -267,6 +267,34 @@ export const CODEX_ACP_DISABLE_MCP_FILTER_ENV = "DISABLE_MCP_CONFIG_FILTERING";
  */
 export const IN_APP_ONLY_TOOLS: readonly string[] = ["libi.show_in_chat"];
 
+/**
+ * Tools every client loads up front instead of leaving behind tool search.
+ *
+ * Claude Code and the Claude Agent SDK defer MCP tools: only their NAMES are in
+ * context until the model searches. A tool whose `_meta` carries
+ * `"anthropic/alwaysLoad": true` is the exception — its full schema is in
+ * context from the first turn (sdk.d.ts documents the key per tool). That costs
+ * its bytes on every request, so keep the list to the 3-6 most-used SMALL tools,
+ * the ones an agent needs before it can search for anything else: the manual (the
+ * first call of a session), the piece list and the two state reads (what is here,
+ * what is on it), and `show` (what the user is told to look at after every change).
+ * Together they are ~5 KB of the list; the drift test caps each at 2.5 KB and the set
+ * at 6 KB, so a trim that bloats one fails there rather than in every session.
+ * `mcp/tools-list-shape.ts` stamps the key onto exactly these names in
+ * `tools/list`, on every transport; a drift test checks each name is a
+ * registered tool. Codex ignores the key (it defers on its own).
+ */
+export const ALWAYS_LOAD_TOOLS: readonly string[] = [
+  "libi.read_manual",
+  "libi.list_pieces",
+  "libi.get_piece_state",
+  "libi.get_composition",
+  "libi.show",
+];
+
+/** `_meta` key Claude Code / the Agent SDK read to skip tool search for a tool. */
+export const ALWAYS_LOAD_META_KEY = "anthropic/alwaysLoad";
+
 /** Whether `name` is a tool that exists only on the in-app surface. */
 export function isInAppOnlyTool(name: string): boolean {
   return IN_APP_ONLY_TOOLS.includes(name);

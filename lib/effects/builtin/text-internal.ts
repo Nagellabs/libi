@@ -2,8 +2,8 @@
 // Text-internal reveal effects. Consumed by the SP5 glyph renderer (via the
 // overlay's `reveal` field), NOT the transform compositor — so `animate` returns
 // identity and `textInternal: true` makes composeEffects skip them. They exist in
-// the registry for DISCOVERY (list_effects / picker / skill) and so
-// apply_layer_effect accepts them; the apply layer mirrors them into `reveal`.
+// the registry for DISCOVERY (libi.effect list / picker / skill) and so
+// libi.layer_effect apply accepts them; the apply layer mirrors them into `reveal`.
 import type { EffectDef } from "../types";
 
 function textInternal(id: string, name: string): EffectDef {

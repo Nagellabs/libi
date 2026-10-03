@@ -30,7 +30,13 @@ these and did NOT run the relevant scenario, the behavioral change is unverified
    builds into its own Next dir, so it may run beside a dev app from the same checkout —
    but not beside another eval: two at once fight over that one dir and the second fails
    fast, naming the first's PID/Dir.
-3. **Read the verdict.** The CLI prints per-run `HARD-PASS` / `NO-ASSERTIONS` /
+3. **Speed numbers, every run.** The harness copies the inner agent's Claude Code session log
+   into `<reportDir>/agent-jsonl/` and writes `metrics.json` (API turns, tool calls by tool,
+   input / cache-read / cache-write / output tokens deduplicated by message id, per-turn wall
+   time); the verdict block prints an `agent:` line. `npx tsx scripts/skill-eval/bench-metrics.ts
+   <runsDir>` tables any set of runs with medians. The speed benchmark is
+   `_bench/dreams-six-pieces` (baselines in `docs-local/research/2026-10-03-speed-benchmark.md`).
+4. **Read the verdict.** The CLI prints per-run `HARD-PASS` / `NO-ASSERTIONS` /
    `FAIL` / `TIMEOUT`, the run's wall time and (when the adapter reports it) the
    agent's session cost, and a `JSON_SUMMARY` line. Hard invariants are mechanical —
    already decided. **`NO-ASSERTIONS` is not a pass you can report as one:** that
@@ -39,10 +45,10 @@ these and did NOT run the relevant scenario, the behavioral change is unverified
    state (the `invariants` column in `INDEX.md` says which). For those, step 4 is
    the ONLY evidence there is — never write "N scenarios passed" over a set that
    includes them without saying how many asserted nothing.
-4. **Judge behavior YOURSELF.** Open `<reportDir>/transcript.md` and check each
+5. **Judge behavior YOURSELF.** Open `<reportDir>/transcript.md` and check each
    `## Behavioral expectations` bullet in the scenario. A failed hard invariant is
    an automatic fail regardless of behavior.
-5. **Report.** Summarize pass/fail per scenario. For a hard failure, cite the
+6. **Report.** Summarize pass/fail per scenario. For a hard failure, cite the
    offending JSONL line from `<reportDir>/trace.jsonl`. For a behavioral failure,
    **the skill is the bug, not the agent** — propose the SKILL.md edit, then re-run
    the same scenario to confirm.
@@ -82,6 +88,16 @@ These optional frontmatter keys change what the run itself can do:
   prompt as `{{template:<basename>}}`. Same repo-relative rule as `fixtures`, and the
   same copy-not-link guarantee. The committed fixtures live under
   `__tests__/helpers/fixtures/templates/`.
+- **`hooks: <repo-relative .ts>`** — a module exporting `seed(ctx)` and/or `verify(ctx)`
+  (`ScenarioHooks`, `scripts/skill-eval/types.ts`). `seed` runs after the harness's piece
+  exists and before the prompt, building state no other key expresses (several pieces in a
+  folder, rights stamps) over the studio's HTTP routes and `/api/e2e/run-tool`; what it returns
+  as `placeholders` fills `{{seed:<key>}}` in the prompt and replies. `verify` runs after the
+  last turn of a completed run and returns OUTCOME checks on the studio's state; they print as
+  `state:` lines, land in `state-checks.json` and count toward HARD-PASS. HTTP only — a hooks
+  module may not import `@/lib`. Worked example: `_bench/dreams-six-pieces`.
+- **`skills: ["*"]`** — every bundled skill enabled, as on a real install (otherwise only the
+  listed ones are). Use it where the agent's starting context should match production.
 - **`preauthorize: false`** — see the preamble note below. Use it when the
   behaviour under test is that the agent does NOT spend.
 - **`catalogCreator: none | pending | approved | rejected`** — the test-mode catalog's
@@ -200,6 +216,16 @@ trips it (a test enforces this for `left-out-fixture`).
 Real AI quality (placeholders prove the pipeline, not model output), production
 performance, cost/rate-limit behavior, and approval-pausing (auto-approved — see
 above; a scenario can script the user's answers with `## Replies`, and a declared
-`approve:` card is raised and answered, but nothing tests a card left for a human). Codex as the inner agent is not wired yet (claude-code only) — the
-abstraction exists; a `--agent codex` run reports `unsupported_agent` until libi
-wires it.
+`approve:` card is raised and answered, but nothing tests a card left for a human).
+
+## Running on Codex
+
+`--agent codex` (or `agent: codex` in the frontmatter) runs the scenario through libi's in-app
+Codex session, the path a user's in-app Codex chat takes. It needs Codex signed in on this
+machine: test mode's own Codex home has no sign-in, so the harness points the run at the user's
+`CODEX_HOME` (default `~/.codex`) and only READS it (the run's rollouts are copied into the
+report's `agent-jsonl/codex/`). Seed/verify hooks, scripted replies and assertions are unchanged.
+The user's own Codex config still loads, so a Codex run sees the machine's `~/.agents/skills`,
+`~/.codex/AGENTS.md` and `config.toml` servers beside the run's: compare Codex runs only with
+other Codex runs on the same machine, and the speed benchmark's metrics with `bench-metrics.ts`
+(`docs-local/research/2026-10-03-speed-benchmark.md`).

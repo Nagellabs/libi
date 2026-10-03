@@ -72,7 +72,17 @@ export function shouldOpenBrowser({
   const ci = env.CI?.trim().toLowerCase();
   if (ci && !FALSY.has(ci)) return false;
 
+  // A test run is not a person at a desk: `startStudio` under vitest used to
+  // hand `http://localhost:3456` to the developer's real browser. Opt in with
+  // an explicit flag or LIBI_OPEN (above) when a test means to, and mock the opener.
+  if (isTestRun(env)) return false;
+
   return !isDevCheckout;
+}
+
+/** Vitest sets `VITEST`, and `NODE_ENV=test`; either marks a test run. */
+function isTestRun(env: Record<string, string | undefined>): boolean {
+  return Boolean(env.VITEST?.trim()) || env.NODE_ENV === "test";
 }
 
 /** `http://localhost:3456`, `http://127.0.0.1:3456/api/runtime` — and nothing
@@ -139,6 +149,11 @@ export function openStudioUrl(
   const cmd = browserOpenCommand(platform, url);
   if (!cmd) {
     return Promise.resolve({ opened: false, reason: `refused to open ${url}` });
+  }
+  // Backstop for `shouldOpenBrowser`: a test that opts in (`open: true`) but forgot to mock the
+  // opener must not reach the OS. A test injects `spawnImpl` to exercise the launch itself.
+  if (!opts.spawnImpl && isTestRun(process.env)) {
+    return Promise.resolve({ opened: false, reason: "a test run never launches a real browser" });
   }
 
   return new Promise<OpenResult>((resolve) => {

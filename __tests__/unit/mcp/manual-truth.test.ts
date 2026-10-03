@@ -1,8 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { PROVIDER_KINDS } from "@/lib/providers/catalog";
 import fs from "fs";
 import path from "path";
 import { renderAgentInstructions } from "@/mcp/workspace";
 import { LIBI_SKILL_VERSION } from "@/mcp/version";
+import { MERGED_TOOL_DISCRIMINATORS } from "@/lib/agents/merged-tools";
 import { DEFAULT_ASPECT_RATIO_ID, dimensionsFor } from "@/lib/composition/aspect-ratio";
 import {
   ALL_SECTIONS_KEY,
@@ -51,7 +53,7 @@ const REMOVED_TOOLS: readonly string[] = [
   "libi.add_audio_track",
   "libi.update_audio_track",
   "libi.remove_audio_track",
-  // Renamed to `libi.show_extension` with the Agents page.
+  // Renamed to `libi.show({ target: "extension" })` with the Agents page.
   "libi.show_mcp_settings",
 ];
 
@@ -98,6 +100,8 @@ function registeredToolNames(): Set<string> {
       names.add(m[1]);
     }
   }
+  // Merged tools (`registerActionTool`, mcp/tools/families/*): one table names them all.
+  for (const merged of Object.keys(MERGED_TOOL_DISCRIMINATORS)) names.add(merged);
   return names;
 }
 
@@ -164,12 +168,12 @@ describe("the rendered manual tells the truth about libi", () => {
     expect(keys).not.toContain("bundled-mcps-live-by-default");
   });
 
-  it("teaches the provider model: suggest_provider, no key handling, the seven kinds", () => {
+  it("teaches the provider model: suggest_provider, no key handling, every kind", () => {
     const manual = renderAgentInstructions("claude");
     expect(manual).toContain("libi.suggest_provider");
     expect(manual).toContain("libi.list_providers");
     // The catalog's ProviderKind union, verbatim.
-    for (const kind of ["image", "video", "music", "voice", "sfx", "transcription", "social"]) {
+    for (const kind of PROVIDER_KINDS) {
       expect(manual, `the manual never names the provider kind "${kind}"`).toContain(
         `\`${kind}\``,
       );
